@@ -11,10 +11,10 @@ use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
 use crate::language::Language;
 use crate::model::{
-    CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType,
-    Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType,
-    RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft,
-    Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Facing, Floor,
+    FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Model, NOTE_SIZE, Note,
+    Opening, OpeningType, RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH,
+    Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
 use crate::units::Units;
@@ -150,10 +150,26 @@ pub static ALL: &[Command] = &[
         "roof",
         "Roof",
         &[],
-        "{level?, boundary?: [[x,y],…], slope?, overhang?, gable?, type?} a roof on `level` (by default the one above the \
-         lowest), over `boundary` or else the walls of the level below, `overhang` mm (500) past their faces; flat at `slope` 0, \
-         else pitched at `slope` degrees (30) over a rectangle: hipped, or with `gable` its ends left open",
+        "{level?, boundary?: [[x,y],…], slope?, overhang?, gables?: [edge, …], gable?, offset?, extrusion?, openings?: \
+         [[[x,y],…],…], join?, type?} a roof on `level` (by default the one above the lowest), its base `offset` mm above it. \
+         Over `boundary` or else the walls of the level below, `overhang` mm (500) past their faces: flat at `slope` 0, else \
+         every edge sloping up at `slope` degrees (30), hips, valleys and ridges where the slopes meet, but the edges in \
+         `gables` (edge i runs from point i to the next) left upright, gable ends; `gable` leaves a rectangle's short ends \
+         upright. Or with `extrusion` {line: [[x,y],[x,y]], profile: [[along, up],…], from?, to}: its underside's profile in \
+         the upright plane through `line`, along it from its start and up from the base, swept square to it from `from` (0) \
+         to `to` mm to its left. `openings` are holes through it in plan; with `join`, a roof it runs into, it ends where \
+         it meets that one's top",
         roof,
+    ),
+    edit(
+        "dormer",
+        "Dormer",
+        &[],
+        "{host, at: [x, y], width?, height?, slope?, window?, type?} a dormer on roof `host`, its front wall across the \
+         slope through `at`: walls of `type` `width` mm (1600) apart, standing on the roof and `height` mm (1200) tall at \
+         the front, under a gable roof of its own sloping `slope` degrees (30) that runs back into the host; the host open \
+         under it, and with `window` (a window type) a window in its front. Replies with its roof, walls and window",
+        dormer,
     ),
     edit(
         "dimension",
@@ -650,10 +666,12 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("height".into(), json!(m.types.railing.get(&rl.type_name).map(|t| t.height)));
         }
         Element::Roof(r) => {
-            let ridge =
-                m.roof_pieces(r).map_or(m.elevation(r.level), |(pieces, _)| pieces.iter().flatten().map(|p| p[2]).fold(f64::MIN, f64::max));
+            let faces = m.roof_faces(r).unwrap_or_default();
+            let ridge = faces.iter().flat_map(|(ring, p)| ring.iter().map(|q| p.at(*q))).fold(m.elevation(r.level) + r.offset, f64::max);
+            let outline = m.roof_outline(r);
             extra.insert("ridge".into(), json!(hundredth(ridge)));
-            extra.insert("area_m2".into(), json!(m2(geom::area(&r.boundary).abs())));
+            extra.insert("area_m2".into(), json!(m2(geom::area(&outline).abs())));
+            extra.insert("outline".into(), json!(outline.into_iter().map(micron).collect::<Vec<_>>()));
         }
         Element::Sheet(sh) => {
             extra.insert("paper".into(), json!(paper(&sh.size)));
@@ -1513,15 +1531,130 @@ fn roof(s: &mut Session, p: &Value) -> R {
         level_param(c, m, p, "level")?
     };
     let type_name = type_param(c, p, m, "roof")?;
+    let extrusion: Option<Extrusion> = shaped(c, p, "extrusion", "{line: [[x,y],[x,y]], profile: [[along, up],…], from?, to}")?;
     let given = !absent(p.get("boundary"));
-    let overhang = num(c, p, "overhang")?.unwrap_or(if given { 0.0 } else { 500.0 });
-    let mut boundary = if given { points(c, p, "boundary")? } else { roof_footprint(m, level, overhang).map_err(|e| bad(c, e))? };
-    if geom::area(&boundary) < 0.0 {
-        boundary.reverse();
-    }
-    let r = Roof { type_name, level, boundary, slope: num(c, p, "slope")?.unwrap_or(30.0), overhang, gable: flag(c, p, "gable")? };
+    let overhang = num(c, p, "overhang")?.unwrap_or(if given || extrusion.is_some() { 0.0 } else { 500.0 });
+    let boundary = match (given, &extrusion) {
+        (true, _) => points(c, p, "boundary")?,
+        (false, Some(_)) => Vec::new(),
+        (false, None) => roof_footprint(m, level, overhang).map_err(|e| bad(c, e))?,
+    };
+    let r = Roof {
+        type_name,
+        level,
+        boundary,
+        slope: if extrusion.is_some() { 0.0 } else { num(c, p, "slope")?.unwrap_or(30.0) },
+        overhang,
+        gable: flag(c, p, "gable")?,
+        gables: shaped(c, p, "gables", "a list of edge numbers")?.unwrap_or_default(),
+        offset: num(c, p, "offset")?.unwrap_or(0.0),
+        openings: shaped(c, p, "openings", "a list of outlines [[[x,y],…],…]")?.unwrap_or_default(),
+        join: id_opt(c, p, "join")?,
+        extrusion,
+    };
     let id = s.model_mut().insert(Element::Roof(r));
     Ok(json!({"id": id}))
+}
+
+/// A dormer on a roof's slope: its front wall across the slope through `at`, its cheek walls back
+/// up the slope until the roof rises to their tops, all standing on the roof; a gable roof over
+/// them, running back into the host's and ending where it meets it; the host open inside its walls.
+fn dormer(s: &mut Session, p: &Value) -> R {
+    let c = "dormer";
+    let m = &s.model;
+    let host = id_opt(c, p, "host")?.ok_or_else(|| bad(c, "`host`, the roof it stands on, is required"))?;
+    let hr = match m.elements.get(&host) {
+        Some(Element::Roof(r)) if r.join.is_none() => r.clone(),
+        _ => return Err(bad(c, format!("{host} isn't a roof that joins none"))),
+    };
+    let at = point_req(c, p, "at")?;
+    let (w, height, slope) =
+        (num(c, p, "width")?.unwrap_or(1600.0), num(c, p, "height")?.unwrap_or(1200.0), num(c, p, "slope")?.unwrap_or(30.0));
+    let type_name = type_param(c, p, m, "wall")?;
+    let t = m.types.wall.get(&type_name).map_or(0.0, |wt| wt.thickness);
+    if !(w > t + TOL && height > TOL && slope > 0.0 && slope <= MAX_SLOPE) {
+        return Err(bad(
+            c,
+            format!("it needs `width` wider than its walls ({t} mm), some `height`, and `slope` from 0 to {MAX_SLOPE} degrees"),
+        ));
+    }
+    let faces = m.roof_faces(&hr).map_err(|e| bad(c, e))?;
+    let (ring, under) = faces
+        .into_iter()
+        .find(|(ring, _)| geom::contains(ring, at))
+        .ok_or_else(|| bad(c, format!("[{}, {}] isn't over roof {host}", at.0, at.1)))?;
+    let tan_h = under.g.length();
+    if tan_h < 1e-6 {
+        return Err(bad(c, format!("roof {host} is level at [{}, {}]: a dormer stands on a slope", at.0, at.1)));
+    }
+    // Up the slope, and across it to the left; the host's top at the front, where the walls stand.
+    let (u, n) = (under.g.unit(), under.g.unit().perp());
+    let front = under.at(at) + m.roof_rise(&hr, &under);
+    let (tan, rise) = (slope.to_radians().tan(), m.types.roof.get(&hr.type_name).map_or(0.0, |rt| rt.thickness) / slope.to_radians().cos());
+    let (eave, ridge) = (front + height, front + height + w / 2.0 * tan);
+    // How far up the slope the host rises to its walls' tops, and to its roof's ridge, top and underside.
+    let (cheek, back) = (height / tan_h, (ridge + rise - front) / tan_h);
+    if !geom::contains(&ring, at + u * back) {
+        return Err(bad(c, format!("it runs back over roof {host}'s ridge; set it lower down the slope, or make it lower or narrower")));
+    }
+    let level = hr.level;
+    let base_offset = front - m.elevation(level);
+    let (h, f) = (w / 2.0 + t / 2.0, t / 2.0);
+    let boundary = [at - u * f + n * h, at - u * f - n * h, at + u * back - n * h, at + u * back + n * h].map(micron).to_vec();
+    let model = s.model_mut();
+    let roof = model.insert(Element::Roof(Roof {
+        type_name: hr.type_name.clone(),
+        level,
+        boundary,
+        slope,
+        overhang: f,
+        gable: false,
+        gables: vec![0, 2],
+        offset: eave - model.elevation(level),
+        openings: Vec::new(),
+        join: Some(host),
+        extrusion: None,
+    }));
+    let wall = |start: P2, end: P2| {
+        Element::Wall(Wall {
+            type_name: type_name.clone(),
+            level,
+            start,
+            end,
+            top_level: None,
+            height: ridge - front,
+            base_offset,
+            arc: 0.0,
+            location: Location::Centre,
+            attach_top: Some(roof),
+            attach_base: Some(host),
+        })
+    };
+    let (l, r) = (micron(at + n * (w / 2.0)), micron(at - n * (w / 2.0)));
+    let walls = [wall(r, l), wall(l, micron(l + u * cheek)), wall(micron(r + u * cheek), r)].map(|e| model.insert(e));
+    // The host open inside its walls, up to where its top meets the dormer's underside.
+    let (a, inner) = (w / 2.0 - f, |x: f64| (height + (w / 2.0 - x.abs()) * tan) / tan_h);
+    let hole = [(a, f), (a, inner(a)), (0.0, inner(0.0)), (-a, inner(a)), (-a, f)].map(|(x, y)| micron(at + n * x + u * y)).to_vec();
+    if let Some(Element::Roof(r)) = model.elements.get_mut(&host) {
+        r.openings.push(hole);
+    }
+    let window = match string(c, p, "window")? {
+        Some(ty) => Some(opening(s, &json!({"wall": walls[0], "type": ty, "sill": 100}), false)?["id"].clone()),
+        None => None,
+    };
+    Ok(json!({"roof": roof, "walls": walls, "window": window}))
+}
+
+/// `key` as JSON shaped like `T` (a list of at most `MAX_POINTS`), or none.
+fn shaped<T: serde::de::DeserializeOwned>(c: &str, p: &Value, key: &str, shape: &str) -> Result<Option<T>, String> {
+    match p.get(key) {
+        v if absent(v) => Ok(None),
+        Some(v) if v.as_array().is_none_or(|a| a.len() <= MAX_POINTS) => {
+            serde_json::from_value(v.clone()).map(Some).map_err(|e| bad(c, format!("`{key}` is {shape}: {e}")))
+        }
+        Some(_) => Err(bad(c, format!("`{key}` lists more than {MAX_POINTS}"))),
+        None => Ok(None),
+    }
 }
 
 /// The footprint `roof` gives a roof on `level` by default: the outline of the walls of the level
@@ -2007,10 +2140,14 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
             Some(_) => return Err(bad(c, format!("railing {id} goes only with its stair or ramp; select that too"))),
             None => rl.path.iter_mut().for_each(|q| *q = f(*q)),
         },
+        // Its edges keep their numbers, its gables with them; a mirror image sweeps the other way.
         Element::Roof(r) => {
-            r.boundary.iter_mut().for_each(|q| *q = f(*q));
-            if mo.mirror {
-                r.boundary.reverse();
+            r.boundary.iter_mut().chain(r.openings.iter_mut().flatten()).for_each(|q| *q = f(*q));
+            if let Some(x) = &mut r.extrusion {
+                x.line = x.line.map(&f);
+                if mo.mirror {
+                    (x.from, x.to) = (-x.to, -x.from);
+                }
             }
         }
         // A mirror image runs back the other way, so its exterior side is the mirror image of the old one.
@@ -2509,13 +2646,16 @@ fn delete(s: &mut Session, p: &Value) -> R {
     for (id, d) in kept {
         m.elements.insert(id, Element::Dimension(d));
     }
-    // Walls attached to a roof or a floor that goes come loose.
+    // Walls attached to a roof or a floor that goes come loose, and roofs running into one end nowhere.
     for e in m.elements.values_mut() {
-        if let Element::Wall(w) = e {
-            for at in [&mut w.attach_top, &mut w.attach_base] {
-                if at.is_some_and(|a| gone.contains(&a)) {
-                    *at = None;
-                }
+        let ties = match e {
+            Element::Wall(w) => vec![&mut w.attach_top, &mut w.attach_base],
+            Element::Roof(r) => vec![&mut r.join],
+            _ => Vec::new(),
+        };
+        for at in ties {
+            if at.is_some_and(|a| gone.contains(&a)) {
+                *at = None;
             }
         }
     }

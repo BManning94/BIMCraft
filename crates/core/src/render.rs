@@ -390,7 +390,7 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
                 }
             }
             Element::Railing(rl) if m.level_of(e) == Some(level) => extent.extend(stairs::railing(m, rl).into_iter().map(|(p, _)| p)),
-            Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(&r.boundary),
+            Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(m.roof_outline(r)),
             Element::Text(n) if n.view == level => extent.extend([Some(n.at), n.leader].into_iter().flatten()),
             Element::Spot(sp) if sp.view == level => extent.push(sp.at),
             _ => {}
@@ -755,10 +755,13 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             // Overhead, from below: its edge, dashed, while its eaves are under the view range's top.
             Element::Roof(r) => {
                 let eave = m
-                    .roof_pieces(r)
-                    .map_or(f64::INFINITY, |(pieces, _)| pieces.iter().flatten().map(|p| p[2]).fold(f64::INFINITY, f64::min));
+                    .roof_faces(r)
+                    .into_iter()
+                    .flatten()
+                    .flat_map(|(ring, p)| ring.into_iter().map(move |q| p.at(q)))
+                    .fold(f64::INFINITY, f64::min);
                 if range.cut < eave && eave <= range.top {
-                    let pts = r.boundary.iter().map(|p| d.view.px(*p)).collect();
+                    let pts = m.roof_outline(r).iter().map(|p| d.view.px(*p)).collect();
                     d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
                 }
             }
@@ -1090,14 +1093,13 @@ fn arrow(d: &mut Drawing, a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     (x, y)
 }
 
-/// A roof in the plan of its level: its outline, and where its slopes meet, its ridge and hips.
+/// A roof in the plan of its level: its outline, and where its slopes meet, its ridges, hips and
+/// valleys.
+// ponytail: openings aren't drawn; a dormer's roof covers its own. Draw them for skylights.
 fn roof(d: &mut Drawing, m: &Model, r: &Roof) {
-    let pieces = m.roof_pieces(r).map_or_else(
-        |_| vec![r.boundary.clone()],
-        |(pieces, _)| pieces.iter().map(|p| p.iter().map(|q| P2(q[0], q[1])).collect()).collect(),
-    );
-    for p in pieces {
-        d.line(&p, 1.0, INK, true);
+    let faces = m.roof_faces(r).map_or_else(|_| vec![m.roof_outline(r)], |f| f.into_iter().map(|(ring, _)| ring).collect());
+    for f in faces {
+        d.line(&f, 1.0, INK, true);
     }
 }
 

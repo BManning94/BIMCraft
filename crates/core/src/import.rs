@@ -14,8 +14,8 @@ use std::f64::consts::PI;
 use crate::commands::{micron, next_number};
 use crate::geom::{self, P2};
 use crate::model::{
-    Ceiling, CeilingType, Column, ColumnType, Element, Floor, FloorType, Grid, Id, Landing, Level, MAX_TEXT, Model, Opening, OpeningType,
-    Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
+    Ceiling, CeilingType, Column, ColumnType, Element, Extrusion, Floor, FloorType, Grid, Id, Landing, Level, MAX_TEXT, Model, Opening,
+    OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
 };
 use crate::stairs;
 use crate::step::{self, Entity, File, V};
@@ -169,43 +169,64 @@ fn open(mut pts: Vec<P2>) -> Vec<P2> {
     pts
 }
 
-/// The outline of the faces facing up, or down, whose points all lie within half a millimetre of
-/// `on`, a level or sloped plane: the edges of theirs no two share, chained into loops. The largest
-/// loop, its corners counter-clockwise.
-fn outline(faces: &[Vec<P3>], on: Plane, up: bool) -> Option<Vec<P2>> {
+/// The loops the edges of `faces` no two share make, each face turned counter-clockwise in plan: a
+/// region's outline counter-clockwise, its holes clockwise. An edge with another face's corner on it
+/// is two edges, there.
+fn loops<'a>(faces: impl Iterator<Item = &'a Vec<P3>>) -> Vec<Vec<P2>> {
     type K = (i64, i64);
     let key = |p: P2| -> K { ((p.0 * 10.0).round() as i64, (p.1 * 10.0).round() as i64) };
+    let rings: Vec<Vec<P2>> = faces
+        .map(|f| {
+            let ring: Vec<P2> = f.iter().map(|p| P2(p[0], p[1])).collect();
+            if geom::area(&ring) < 0.0 { ring.into_iter().rev().collect() } else { ring }
+        })
+        .collect();
+    // ponytail: every corner against every edge, fine for a roof's or a slab's faces.
+    let corners: Vec<P2> = rings.iter().flatten().copied().collect();
     let mut edges: HashMap<(K, K), P2> = HashMap::new();
-    for f in faces.iter().filter(|f| f.len() >= 3 && f.iter().all(|p| (p[2] - on.at(P2(p[0], p[1]))).abs() <= 0.5)) {
-        let n = normal(f);
-        if n[2].abs() < 0.2 || (n[2] > 0.0) != up {
-            continue;
-        }
-        let mut ring: Vec<P2> = f.iter().map(|p| P2(p[0], p[1])).collect();
-        if geom::area(&ring) < 0.0 {
-            ring.reverse();
-        }
-        for (a, b) in geom::ring_edges(&ring) {
-            let (ka, kb) = (key(a), key(b));
-            // An edge two faces share runs both ways, and lies inside the outline.
-            if ka != kb && edges.remove(&(kb, ka)).is_none() {
-                edges.insert((ka, kb), a);
+    for ring in &rings {
+        for (a, b) in geom::ring_edges(ring) {
+            let mut on: Vec<(f64, P2)> = corners
+                .iter()
+                .filter(|p| geom::dist_to_segment(**p, a, b) < 0.05 && p.dist(a) > 0.05 && p.dist(b) > 0.05)
+                .map(|p| (geom::param_on_segment(*p, a, b), *p))
+                .collect();
+            on.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let pts: Vec<P2> = std::iter::once(a).chain(on.into_iter().map(|(_, p)| p)).chain(std::iter::once(b)).collect();
+            for w in pts.windows(2) {
+                let &[a, b] = w else { continue };
+                let (ka, kb) = (key(a), key(b));
+                // An edge two faces share runs both ways, and lies inside the outline.
+                if ka != kb && edges.remove(&(kb, ka)).is_none() {
+                    edges.insert((ka, kb), a);
+                }
             }
         }
     }
     let mut next: HashMap<K, (K, P2)> = edges.into_iter().map(|((ka, kb), a)| (ka, (kb, a))).collect();
-    let mut best: Option<Vec<P2>> = None;
+    let mut out = Vec::new();
     while let Some(&start) = next.keys().next() {
         let (mut ring, mut k) = (Vec::new(), start);
         while let Some((kb, a)) = next.remove(&k) {
             ring.push(a);
             k = kb;
         }
-        if ring.len() >= 3 && best.as_ref().is_none_or(|b| geom::area(&ring).abs() > geom::area(b).abs()) {
-            best = Some(ring);
+        if ring.len() >= 3 {
+            out.push(ring);
         }
     }
-    let mut ring = geom::corners(&best?);
+    out
+}
+
+/// The outline of the faces facing up, or down, whose points all lie within half a millimetre of
+/// `on`, a level or sloped plane: the largest of their loops, its corners counter-clockwise.
+fn outline(faces: &[Vec<P3>], on: Plane, up: bool) -> Option<Vec<P2>> {
+    let picked = faces.iter().filter(|f| {
+        let n = normal(f);
+        f.len() >= 3 && f.iter().all(|p| (p[2] - on.at(P2(p[0], p[1]))).abs() <= 0.5) && n[2].abs() >= 0.2 && (n[2] > 0.0) == up
+    });
+    let best = loops(picked).into_iter().max_by(|a, b| geom::area(a).abs().total_cmp(&geom::area(b).abs()))?;
+    let mut ring = geom::corners(&best);
     if geom::area(&ring) < 0.0 {
         ring.reverse();
     }
@@ -1114,20 +1135,36 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         }
         seen.insert(id);
         match roof_from(&r, &faces) {
-            Ok((boundary, slope, gable, t, eaves)) => {
-                let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-                let type_name = kind(&mut m.types.roof, &base, |k| (k.thickness - t).abs() < 0.05, RoofType { thickness: t });
-                let level = if slope == 0.0 { level_near(eaves).unwrap_or_else(|| level_for(id, eaves)) } else { level_for(id, eaves) };
-                let overhang = if slope == 0.0 { 0.0 } else { (elevation(level) - eaves) / slope.to_radians().tan() };
-                let rid = m.insert(Element::Roof(Roof {
+            Ok(rd) => {
+                let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(rd.t)));
+                let type_name = kind(&mut m.types.roof, &base, |k| (k.thickness - rd.t).abs() < 0.05, RoofType { thickness: rd.t });
+                let pitched = rd.slope > 0.0;
+                let level = if pitched { level_for(id, rd.z) } else { level_near(rd.z).unwrap_or_else(|| level_for(id, rd.z)) };
+                // A pitched one reaches its level `overhang` in from its eaves, or its eaves stand
+                // `offset` over it; any other sits on it.
+                let below = elevation(level) - rd.z;
+                let overhang = if pitched && below > 0.0 { below / rd.slope.to_radians().tan() } else { 0.0 };
+                let offset = if pitched && below > 0.0 { 0.0 } else { -below };
+                let roof = Roof {
                     type_name,
                     level,
-                    boundary,
-                    slope,
+                    boundary: rd.boundary,
+                    slope: rd.slope,
                     overhang: (overhang * 1000.0).round() / 1000.0,
-                    gable,
-                }));
-                from.insert(rid, who(id));
+                    gable: false,
+                    gables: rd.gables,
+                    offset: (offset * 100.0).round() / 100.0 + 0.0,
+                    openings: rd.openings,
+                    join: None,
+                    extrusion: rd.extrusion,
+                };
+                match m.roof_faces(&roof) {
+                    Ok(_) => {
+                        let rid = m.insert(Element::Roof(roof));
+                        from.insert(rid, who(id));
+                    }
+                    Err(why) => leave(&mut skipped, &mut seen, id, &why),
+                }
             }
             Err(why) => leave(&mut skipped, &mut seen, id, &why),
         }
@@ -1549,52 +1586,64 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     Ok(Imported { model: m, schema: file.schema.clone(), skipped, moved })
 }
 
-/// A roof's footprint, slope, whether its ends are gables, its thickness, and the height of its
-/// underside at the eaves.
-type RoofShape = (Vec<P2>, f64, bool, f64, f64);
+/// A roof as `roof_from` reads it: over its footprint, less its openings, flat or each edge but its
+/// gables sloping at `slope`; or a profile swept across, its heights up from `z`. Its thickness,
+/// and `z`: how high its underside is at its eaves, or its profile's 0.
+struct RoofRead {
+    boundary: Vec<P2>,
+    openings: Vec<Vec<P2>>,
+    slope: f64,
+    gables: Vec<usize>,
+    extrusion: Option<Extrusion>,
+    t: f64,
+    z: f64,
+}
 
-fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofShape, String> {
-    let pts: Vec<P3> = faces.iter().flatten().copied().collect();
-    let Some((z0, z1)) = span(pts.iter().map(|p| p[2])) else {
+fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
+    let round = |x: f64| (x * 100.0).round() / 100.0;
+    let faces: Vec<Vec<P3>> = faces
+        .iter()
+        .map(|f| {
+            f.iter()
+                .map(|p| {
+                    let q = r.flat(*p);
+                    [q.0, q.1, p[2]]
+                })
+                .collect()
+        })
+        .collect();
+    let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else {
         return Err("it has no body BIMCraft can read".into());
     };
-    // Faces turned up, and of them those sloping.
-    let up: Vec<(&Vec<P3>, P3)> = faces.iter().map(|f| (f, normal(f))).filter(|(_, n)| n[2] > 0.01).collect();
-    let sloped: Vec<&(&Vec<P3>, P3)> = up.iter().filter(|(_, n)| n[2] < 0.9998).collect();
-    let Some((main, n)) = sloped.iter().max_by(|a, b| area3(a.0).total_cmp(&area3(b.0))).map(|x| (x.0, x.1)) else {
-        let ring = outline(faces, Plane::flat(z1), true).ok_or("its top isn't level")?;
-        return Ok((
-            ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect(),
-            0.0,
-            false,
-            ((z1 - z0) * 100.0).round() / 100.0,
-            z0,
-        ));
-    };
-    let slope = (n[2].clamp(-1.0, 1.0).acos().to_degrees() * 100.0).round() / 100.0;
-    // Down the slope, and along the eaves.
-    let down = P2(n[0], n[1]).unit();
-    let eaves = down.perp();
-    let plan: Vec<P2> = pts.iter().map(|p| r.flat(*p)).collect();
-    let (Some((e0, e1)), Some((d0, d1))) = (span(plan.iter().map(|p| p.dot(eaves))), span(plan.iter().map(|p| p.dot(down)))) else {
-        return Err("it has no body BIMCraft can read".into());
-    };
-    let rect = [(e0, d0), (e1, d0), (e1, d1), (e0, d1)].map(|(a, b)| micron(eaves * a + down * b));
-    let mut boundary = rect.to_vec();
+    // Its faces turned up, each with its plane (none for a sliver of a mesh's): their loops its
+    // outline and its openings.
+    let up: Vec<(&Vec<P3>, Plane)> =
+        faces.iter().filter(|f| f.len() >= 3 && normal(f)[2] > 0.01 && area3(f) > 1.0).filter_map(|f| Some((f, Plane::of(f)?))).collect();
+    let mut rings: Vec<Vec<P2>> =
+        loops(up.iter().map(|(f, _)| *f)).into_iter().map(|l| geom::corners(&l)).filter(|l| l.len() >= 3).collect();
+    rings.sort_by(|a, b| geom::area(b).abs().total_cmp(&geom::area(a).abs()));
+    // Each from its south-west corner, the outline counter-clockwise, the openings in order: as
+    // the same file reads the same.
+    let mut rings = rings.into_iter().map(|l| {
+        let mut l: Vec<P2> = l.into_iter().map(micron).collect();
+        let first = l.iter().enumerate().min_by(|(_, a), (_, b)| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
+        let first = first.map_or(0, |(i, _)| i);
+        l.rotate_left(first);
+        l
+    });
+    let mut boundary = rings.next().ok_or("its top has no outline")?;
     if geom::area(&boundary) < 0.0 {
         boundary.reverse();
+        boundary.rotate_right(1);
     }
-    // Its slopes cover the rectangle, or it isn't one.
-    let covered: f64 = up.iter().map(|(f, _)| geom::area(&f.iter().map(|p| P2(p[0], p[1])).collect::<Vec<_>>()).abs()).sum();
-    let whole = (e1 - e0) * (d1 - d0);
-    if (covered - whole).abs() > 0.02 * whole {
-        return Err("BIMCraft pitches roofs over rectangles only".into());
-    }
-    let hipped = sloped.iter().any(|(_, m)| P2(m[0], m[1]).unit().dot(eaves).abs() > 0.9);
-    if !hipped && e1 - e0 < d1 - d0 - 1.0 {
-        return Err("BIMCraft's gable roofs slope down to their long sides".into());
-    }
-    // Its thickness: from its top to the underside parallel to it.
+    let mut openings: Vec<Vec<P2>> = rings.collect();
+    openings.sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
+    let sloped: Vec<&(&Vec<P3>, Plane)> = up.iter().filter(|(_, p)| p.g.length() > 0.02).collect();
+    let Some(&&(main, along)) = sloped.iter().max_by(|a, b| area3(a.0).total_cmp(&area3(b.0))) else {
+        return Ok(RoofRead { boundary, openings, slope: 0.0, gables: Vec::new(), extrusion: None, t: round(z1 - z0), z: z0 });
+    };
+    // Its thickness: from its largest slope's top to the underside parallel to it.
+    let n = normal(main);
     let top = dot(n, main.first().copied().unwrap_or_default());
     let t = faces
         .iter()
@@ -1605,7 +1654,95 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofShape, String> {
     if !t.is_finite() {
         return Err("its underside isn't parallel to its top".into());
     }
-    Ok((boundary, slope, !hipped, (t * 100.0).round() / 100.0, z0))
+    let t = round(t);
+    let rise = |p: &Plane| t * p.g.length().hypot(1.0);
+    // One slope all round: each slope rising from an edge of its footprint at its eaves, where the
+    // top is lowest; an edge whose middle is higher stands upright.
+    let tan = along.g.length();
+    let slope = round(tan.atan().to_degrees());
+    let lowest = up.iter().flat_map(|(f, _)| f.iter().map(|p| p[2])).fold(f64::INFINITY, f64::min);
+    let touches = |f: &Vec<P3>, q: P2| {
+        let ring: Vec<P2> = f.iter().map(|p| P2(p[0], p[1])).collect();
+        geom::contains(&ring, q) || geom::ring_edges(&ring).any(|(a, b)| geom::dist_to_segment(q, a, b) < 1.0)
+    };
+    let edges: Vec<(P2, P2)> = geom::ring_edges(&boundary).collect();
+    let top_at = |q: P2| up.iter().filter(|(f, _)| touches(f, q)).map(|(_, p)| p.at(q)).fold(f64::INFINITY, f64::min);
+    let gables: Vec<usize> =
+        (0..edges.len()).filter(|i| edges.get(*i).is_some_and(|(a, b)| top_at((*a + *b) * 0.5) > lowest + 1.0)).collect();
+    let eave = |(a, b): &(P2, P2)| {
+        let inward = (*b - *a).unit().perp();
+        Plane { z: lowest - tan * a.dot(inward), g: inward * tan }
+    };
+    let eaves: Vec<Plane> = edges.iter().enumerate().filter(|(i, _)| !gables.contains(i)).map(|(_, e)| eave(e)).collect();
+    let fits = |(f, p): &&(&Vec<P3>, Plane)| {
+        let q = f.first().map_or(P2(0.0, 0.0), |q| P2(q[0], q[1]));
+        eaves.iter().any(|e| e.g.dist(p.g) < 1e-4 && (e.at(q) - p.at(q)).abs() < 1.0)
+    };
+    let speeds: Vec<f64> = (0..edges.len()).map(|i| if gables.contains(&i) { 0.0 } else { 1.0 }).collect();
+    let ridge = crate::skeleton::faces(&boundary, &speeds)
+        .map(|f| f.into_iter().flatten().flatten().map(|(_, k)| lowest + k * tan).fold(lowest, f64::max))
+        .unwrap_or(f64::NAN);
+    if sloped.iter().all(|(_, p)| (p.g.length() - tan).abs() < 1e-4) && sloped.iter().all(fits) && (ridge - z1).abs() < 1.0 {
+        return Ok(RoofRead { boundary, openings, slope, gables, extrusion: None, t, z: lowest - rise(&along) });
+    }
+    // Else one profile swept across: its slopes all one way, its underside's heights along it.
+    let u = along.g.unit();
+    let u = if u.0 > 1e-9 || (u.0.abs() <= 1e-9 && u.1 > 0.0) { u } else { u * -1.0 };
+    if up.iter().any(|(_, p)| p.g.cross(u).abs() > 1e-4) {
+        return Err("its slopes don't make a roof BIMCraft draws: one slope all round, or one profile swept across".into());
+    }
+    let unders: Vec<(f64, f64, Plane)> = up
+        .iter()
+        .filter_map(|(f, p)| {
+            let (s0, s1) = span(f.iter().map(|q| P2(q[0], q[1]).dot(u)))?;
+            Some((s0, s1, Plane { z: p.z - rise(p), ..*p }))
+        })
+        .collect();
+    let mut cuts: Vec<f64> = unders.iter().flat_map(|(s0, s1, _)| [*s0, *s1]).collect();
+    cuts.sort_by(f64::total_cmp);
+    cuts.dedup_by(|a, b| (*a - *b).abs() < 1.0);
+    let at = |s: f64, p: &Plane| p.z + p.g.dot(u) * s;
+    let mut profile: Vec<P2> = Vec::new();
+    for w in cuts.windows(2) {
+        let &[a, b] = w else { continue };
+        let p = unders
+            .iter()
+            .find(|(s0, s1, _)| *s0 <= (a + b) / 2.0 && (a + b) / 2.0 <= *s1)
+            .map(|(.., p)| *p)
+            .ok_or("its slopes leave a gap")?;
+        match profile.last() {
+            Some(last) if (last.1 - at(a, &p)).abs() > 1.0 => return Err("its underside steps up or down".into()),
+            Some(_) => {}
+            None => profile.push(P2(a, at(a, &p))),
+        }
+        // Straight on from the stretch before, one stretch.
+        if let [.., x, y] = profile.as_slice()
+            && ((y.1 - x.1) / (y.0 - x.0) - p.g.dot(u)).abs() < 1e-6
+        {
+            profile.pop();
+        }
+        profile.push(P2(b, at(b, &p)));
+    }
+    let across: Vec<f64> = up.iter().flat_map(|(f, _)| f.iter().map(|q| P2(q[0], q[1]).dot(u.perp()))).collect();
+    let (Some((c0, c1)), Some(first), Some(last)) = (span(across.into_iter()), profile.first().copied(), profile.last().copied()) else {
+        return Err("it has no body BIMCraft can read".into());
+    };
+    if ((last.0 - first.0) * (c1 - c0) - geom::area(&boundary)).abs() > 0.01 * geom::area(&boundary) || !openings.is_empty() {
+        return Err("its outline isn't the rectangle its profile sweeps".into());
+    }
+    let z = profile.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+    let o = u * first.0 + u.perp() * c0;
+    let line = [micron(o), micron(o + u * (last.0 - first.0))];
+    let profile = profile.into_iter().map(|p| P2(round(p.0 - first.0), round(p.1 - z))).collect();
+    Ok(RoofRead {
+        boundary: Vec::new(),
+        openings,
+        slope: 0.0,
+        gables: Vec::new(),
+        extrusion: Some(Extrusion { line, profile, from: 0.0, to: round(c1 - c0) }),
+        t,
+        z,
+    })
 }
 
 /// A straight flight: where its first riser's middle is, the way it climbs (degrees), its width,

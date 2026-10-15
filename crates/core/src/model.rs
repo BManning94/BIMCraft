@@ -547,26 +547,53 @@ pub struct Railing {
     pub side: Option<Side>,
 }
 
-/// A roof by its footprint, on `level`: its eaves along `boundary`, reaching the level `overhang`
-/// mm in from them. Flat at `slope` 0; else pitched at `slope` degrees over a rectangle, hipped,
-/// or with `gable` its ends left upright and open.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A roof on `level`, its base `offset` mm above it. By its footprint: its eaves along `boundary`,
+/// reaching its base `overhang` mm in from them; flat at `slope` 0, else each edge sloping up at
+/// `slope` degrees, hips and valleys where slopes meet, but the edges in `gables` (edge i from point i
+/// to the next), left upright; `gable` leaves a rectangle's two short ends upright. Or by its
+/// `extrusion`. Holed through by `openings` in plan, and where it runs into the roof it `join`s,
+/// it ends at that one's top.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Roof {
     #[serde(rename = "type")]
     pub type_name: String,
     pub level: Id,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub boundary: Vec<P2>,
     #[serde(default)]
     pub slope: f64,
     #[serde(default)]
     pub overhang: f64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub gable: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gables: Vec<usize>,
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openings: Vec<Vec<P2>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extrusion: Option<Extrusion>,
 }
 
-/// Flat polygons in space, each a list of points `[x, y, z]` in mm.
-pub type Faces = Vec<Vec<[f64; 3]>>;
+/// An extrusion roof's shape: its underside's profile in the upright plane through `line`, points
+/// `[along, up]` mm along it from its start and up from the roof's base, swept square to it from
+/// `from` to `to` mm to its left.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Extrusion {
+    pub line: [P2; 2],
+    pub profile: Vec<P2>,
+    #[serde(default)]
+    pub from: f64,
+    pub to: f64,
+}
+
+/// The most points a pitched roof's footprint has: where its slopes meet takes time to find.
+pub const MAX_ROOF_POINTS: usize = 256;
 
 /// The way `angle` degrees (counter-clockwise from east) points.
 pub fn heading(angle: f64) -> P2 {
@@ -1068,51 +1095,173 @@ impl Model {
         (n, each, f64::from(n.saturating_sub(runs)) * st.tread)
     }
 
-    /// A roof's pieces: each slope's underside (a flat polygon, x, y, z), and the roof's thickness
-    /// measured upright, how far each rises. A flat roof is its outline at its level; a pitched one
-    /// needs a rectangle: its two long slopes, and hipped, its two ends.
-    pub fn roof_pieces(&self, r: &Roof) -> Result<(Faces, f64), String> {
-        let t = self.types.roof.get(&r.type_name).map_or(0.0, |t| t.thickness);
-        let base = self.elevation(r.level);
-        let at = |p: P2, z: f64| [p.0, p.1, z];
-        let mut ring: Vec<P2> = r.boundary.clone();
-        if geom::area(&ring) < 0.0 {
-            ring.reverse();
+    /// A roof's outline in plan: its footprint, or the rectangle its extrusion sweeps, counter-clockwise.
+    pub fn roof_outline(&self, r: &Roof) -> Vec<P2> {
+        match &r.extrusion {
+            Some(x) => {
+                let (o, u) = (x.line[0], (x.line[1] - x.line[0]).unit());
+                let (a0, a1) = (x.profile.first().map_or(0.0, |p| p.0), x.profile.last().map_or(0.0, |p| p.0));
+                ccw(&[(a0, x.from), (a1, x.from), (a1, x.to), (a0, x.to)].map(|(a, c)| o + u * a + u.perp() * c))
+            }
+            None => ccw(&r.boundary),
         }
-        if r.slope == 0.0 {
-            return Ok((vec![ring.iter().map(|p| at(*p, base)).collect()], t));
-        }
-        // The corners, counter-clockwise, without the points on straight edges.
-        let corners = geom::corners(&ring);
-        let square = |a: P2, b: P2, c: P2| (b - a).unit().dot((c - b).unit()).abs() < 1e-6;
-        let (a, b, c, d) = match corners.as_slice() {
-            &[a, b, c, d] if square(a, b, c) && square(b, c, d) && square(c, d, a) => (a, b, c, d),
-            _ => return Err("a pitched roof needs a rectangular footprint, four corners square; give `slope: 0` for a flat one".into()),
+    }
+
+    /// How far a roof's top lies over its underside where that's in `plane`: its type's thickness, plumb.
+    pub fn roof_rise(&self, r: &Roof, plane: &walls::Plane) -> f64 {
+        self.types.roof.get(&r.type_name).map_or(0.0, |t| t.thickness) * plane.g.dot(plane.g).sqrt().hypot(1.0)
+    }
+
+    /// A roof's slopes: each its outline in plan, counter-clockwise, and the plane its underside lies
+    /// in. Over its footprint, flat at its base, or each edge but its gables sloping up from its eaves
+    /// until the slopes meet (the footprint's straight skeleton); or its extrusion's profile, each
+    /// stretch swept across. Where it runs into the roof it joins, it ends at that one's top.
+    pub fn roof_faces(&self, r: &Roof) -> Result<Vec<(Vec<P2>, walls::Plane)>, String> {
+        let base = self.elevation(r.level) + r.offset;
+        let faces = match &r.extrusion {
+            Some(x) => {
+                let (o, u) = (x.line[0], (x.line[1] - x.line[0]).unit());
+                x.profile
+                    .windows(2)
+                    .filter_map(|w| match *w {
+                        [a, b] if b.0 > a.0 => {
+                            let k = (b.1 - a.1) / (b.0 - a.0);
+                            let plane = walls::Plane { z: base + a.1 - k * (a.0 + o.dot(u)), g: u * k };
+                            let ring = [(a.0, x.from), (b.0, x.from), (b.0, x.to), (a.0, x.to)].map(|(s, c)| o + u * s + u.perp() * c);
+                            Some((ring.to_vec(), plane))
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            }
+            None if r.slope == 0.0 => vec![(ccw(&r.boundary), walls::Plane::flat(base))],
+            None => {
+                let ring = ccw(&r.boundary);
+                let n = ring.len();
+                if !(3..=MAX_ROOF_POINTS).contains(&n) {
+                    return Err(format!("a pitched roof's footprint has 3 to {MAX_ROOF_POINTS} points, not {n}"));
+                }
+                // Its edges left upright, counted the other way round on a clockwise footprint.
+                let (up, reversed) = (self.roof_uprights(r)?, geom::area(&r.boundary) < 0.0);
+                let speeds: Vec<f64> =
+                    (0..n).map(|i| if up.get(if reversed { (2 * n - 2 - i) % n } else { i }) == Some(&true) { 0.0 } else { 1.0 }).collect();
+                let tan = r.slope.to_radians().tan();
+                let eave = base - r.overhang * tan;
+                let skeleton = crate::skeleton::faces(&ring, &speeds)?;
+                geom::ring_edges(&ring)
+                    .zip(skeleton)
+                    .filter_map(|((a, b), face)| {
+                        let inward = (b - a).unit().perp();
+                        let plane = walls::Plane { z: eave - tan * a.dot(inward), g: inward * tan };
+                        Some((face?.into_iter().map(|(p, _)| p).collect::<Vec<P2>>(), plane)).filter(|(f, _)| f.len() >= 3)
+                    })
+                    .collect()
+            }
         };
-        // The long sides first.
-        let (a, b, c, d) = if a.dist(b) >= b.dist(c) { (a, b, c, d) } else { (b, c, d, a) };
-        let (long, short) = (a.dist(b), b.dist(c));
-        let (u, inward) = ((b - a).unit(), (b - a).unit().perp());
-        let tan = r.slope.to_radians().tan();
-        let (eave, ridge) = (base - r.overhang * tan, base + (short / 2.0 - r.overhang) * tan);
-        let mut pieces = if r.gable {
-            let (g1, g2) = (a + inward * (short / 2.0), b + inward * (short / 2.0));
-            vec![vec![at(a, eave), at(b, eave), at(g2, ridge), at(g1, ridge)], vec![at(c, eave), at(d, eave), at(g1, ridge), at(g2, ridge)]]
-        } else {
-            let half = short / 2.0;
-            let (r1, r2) = (a + u * half + inward * half, a + u * (long - half) + inward * half);
-            vec![
-                vec![at(a, eave), at(b, eave), at(r2, ridge), at(r1, ridge)],
-                vec![at(c, eave), at(d, eave), at(r1, ridge), at(r2, ridge)],
-                vec![at(b, eave), at(c, eave), at(r2, ridge)],
-                vec![at(d, eave), at(a, eave), at(r1, ridge)],
-            ]
+        let Some(h) = r.join else { return Ok(faces) };
+        let host = match self.elements.get(&h) {
+            Some(Element::Roof(host)) if host.join.is_none() => host,
+            _ => return Err(format!("it joins element {h}, which isn't a roof that joins none")),
         };
-        // Over a square, the ridge is a point: each long slope a triangle.
-        for piece in &mut pieces {
-            piece.dedup_by(|p, q| P2(p[0], p[1]).dist(P2(q[0], q[1])) < TOL);
+        // Over the roof it joins, only where its top is over that one's.
+        let tops: Vec<(Vec<P2>, walls::Plane)> = self
+            .roof_pieces(host)?
+            .into_iter()
+            .flat_map(|(ring, p)| {
+                let top = walls::Plane { z: p.z + self.roof_rise(host, &p), ..p };
+                walls::convex_pieces(&ring).into_iter().map(move |c| (c, top))
+            })
+            .collect();
+        Ok(faces
+            .into_iter()
+            .flat_map(|(ring, plane)| {
+                let mine = walls::Plane { z: plane.z + self.roof_rise(r, &plane), ..plane };
+                let mut kept = Vec::new();
+                let mut rest = vec![ring];
+                for (piece, top) in &tops {
+                    let mut out = Vec::new();
+                    for part in rest {
+                        let (inside, outside) = walls::split(part, piece);
+                        kept.extend(
+                            inside.map(|p| geom::clip(&p, |q| mine.at(q) - top.at(q))).filter(|p| p.len() >= 3 && geom::area(p) > 1.0),
+                        );
+                        out.extend(outside);
+                    }
+                    rest = out;
+                }
+                kept.extend(rest);
+                kept.into_iter().map(move |k| (k, plane))
+            })
+            .collect())
+    }
+
+    /// Which edges of a roof's footprint stand upright, gable ends, in its boundary's order: those
+    /// in `gables`, and with `gable`, a rectangle's two short ends.
+    pub fn roof_uprights(&self, r: &Roof) -> Result<Vec<bool>, String> {
+        let n = r.boundary.len();
+        let mut up = vec![false; n];
+        for &g in &r.gables {
+            *up.get_mut(g).ok_or_else(|| format!("gable edge {g} isn't one of its {n} edges (0 to {})", n.saturating_sub(1)))? = true;
         }
-        Ok((pieces, t / r.slope.to_radians().cos()))
+        if r.gable {
+            let square = |a: P2, b: P2, c: P2| (b - a).unit().dot((c - b).unit()).abs() < 1e-6;
+            let ends = match geom::corners(&ccw(&r.boundary)).as_slice() {
+                &[a, b, c, d] if square(a, b, c) && square(b, c, d) && square(c, d, a) => {
+                    if a.dist(b) >= b.dist(c) {
+                        [(b, c), (d, a)]
+                    } else {
+                        [(a, b), (c, d)]
+                    }
+                }
+                _ => return Err("`gable` leaves a rectangle's ends upright; over any other footprint, name the edges in `gables`".into()),
+            };
+            for (u, (p, q)) in up.iter_mut().zip(geom::ring_edges(&r.boundary)) {
+                *u |= ends.iter().any(|(a, b)| geom::dist_to_segment(p, *a, *b) < TOL && geom::dist_to_segment(q, *a, *b) < TOL);
+            }
+        }
+        Ok(up)
+    }
+
+    /// The roof a plan of `level` shows over `p`, on it or on the level above: of two, the higher.
+    pub fn roof_at(&self, level: Id, p: P2) -> Option<Id> {
+        let shown = |id: &Id| matches!(self.elements.get(id), Some(Element::Roof(r)) if r.level == level || self.level_above(level) == Some(r.level));
+        crate::view3d::tops_at(self, p).into_iter().filter(|(id, _)| shown(id)).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
+    }
+
+    /// The footprint edge nearest `p`, within `within` mm, of the roofs a plan of `level` shows:
+    /// the roof's and the edge's numbers.
+    pub fn roof_edge(&self, level: Id, p: P2, within: f64) -> Option<(Id, usize)> {
+        self.elements
+            .iter()
+            .filter_map(|(&id, e)| match e {
+                Element::Roof(r) if r.extrusion.is_none() && (r.level == level || self.level_above(level) == Some(r.level)) => {
+                    Some((id, r))
+                }
+                _ => None,
+            })
+            .flat_map(|(id, r)| geom::ring_edges(&r.boundary).enumerate().map(move |(i, (a, b))| (geom::dist_to_segment(p, a, b), id, i)))
+            .filter(|(d, ..)| *d <= within)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, id, i)| (id, i))
+    }
+
+    /// A roof's slabs: each piece's underside in space, and how far its top lies over it.
+    pub fn roof_slabs(&self, r: &Roof) -> Vec<(Vec<[f64; 3]>, f64)> {
+        self.roof_pieces(r).unwrap_or_default().into_iter().map(|(ring, p)| (p.lift(&ring), self.roof_rise(r, &p))).collect()
+    }
+
+    /// A roof's slopes less its openings, in convex pieces where an opening cuts one.
+    pub fn roof_pieces(&self, r: &Roof) -> Result<Vec<(Vec<P2>, walls::Plane)>, String> {
+        let faces = self.roof_faces(r)?;
+        if r.openings.is_empty() {
+            return Ok(faces);
+        }
+        Ok(faces
+            .into_iter()
+            .flat_map(|(ring, plane)| {
+                r.openings.iter().fold(vec![ring], |parts, hole| walls::minus(&parts, hole)).into_iter().map(move |p| (p, plane))
+            })
+            .collect())
     }
 
     /// A floor's top: level, at its level and offset; or through there at its slope arrow's tail,
@@ -1900,18 +2049,38 @@ impl Model {
                 Element::Roof(r) => {
                     known(&who, &r.type_name, &self.types.roof)?;
                     level_ok(r.level)?;
-                    if r.boundary.len() < 3 || r.boundary.len() > MAX_POINTS {
-                        return Err(format!("{who}: a footprint needs 3 to {MAX_POINTS} points"));
-                    }
-                    for p in &r.boundary {
-                        point(&who, *p)?;
-                    }
-                    if geom::area(&r.boundary).abs() <= TOL * TOL {
-                        return Err(format!("{who}: its footprint encloses no area"));
-                    }
                     coord(&format!("{who} overhang"), r.overhang)?;
-                    if !(0.0..=MAX_SLOPE).contains(&r.slope) {
-                        return Err(format!("{who}: slope {}° isn't from 0° (flat) to {MAX_SLOPE}°", r.slope));
+                    coord(&format!("{who} offset"), r.offset)?;
+                    match &r.extrusion {
+                        Some(x) => {
+                            line(&who, x.line[0], x.line[1])?;
+                            if !(2..=MAX_POINTS).contains(&x.profile.len()) {
+                                return Err(format!("{who}: an extrusion's profile needs 2 to {MAX_POINTS} points"));
+                            }
+                            for p in &x.profile {
+                                point(&who, *p)?;
+                            }
+                            if x.profile.windows(2).any(|w| w.first().zip(w.get(1)).is_none_or(|(a, b)| b.0 - a.0 <= TOL)) {
+                                return Err(format!("{who}: its profile runs along its line one way, each point past the one before"));
+                            }
+                            coord(&format!("{who} from"), x.from)?;
+                            coord(&format!("{who} to"), x.to)?;
+                            if x.to - x.from <= TOL {
+                                return Err(format!("{who}: it's swept across its line from `from` to `to`, further to the left"));
+                            }
+                        }
+                        None => {
+                            boundary(&who, &r.boundary)?;
+                            if !(0.0..=MAX_SLOPE).contains(&r.slope) {
+                                return Err(format!("{who}: slope {}° isn't from 0° (flat) to {MAX_SLOPE}°", r.slope));
+                            }
+                        }
+                    }
+                    if r.openings.len() > MAX_ROOF_POINTS {
+                        return Err(format!("{who}: {} openings, more than {MAX_ROOF_POINTS}", r.openings.len()));
+                    }
+                    for o in &r.openings {
+                        boundary(&format!("{who} opening"), o)?;
                     }
                     self.roof_pieces(r).map_err(|e| format!("{who}: {e}"))?;
                 }

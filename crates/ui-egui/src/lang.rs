@@ -903,6 +903,61 @@ const WORDS: &[[&str; 3]] = &[
     ["Host", "Hospedeiro", "Anfitrión"],
     ["Side", "Lado", "Lado"],
     ["Baluster Spacing", "Espaçamento dos balaústres", "Separación de balaustres"],
+    // Roofs by extrusion, dormers and gable edges.
+    ["Roof by Extrusion", "Telhado por extrusão", "Cubierta por extrusión"],
+    [
+        "Roof by Extrusion: click a line's start and end, then how far across it's swept; its profile rises from the line",
+        "Telhado por extrusão: clique no início e no fim de uma linha e depois até onde ele se estende; o perfil sobe a partir da linha",
+        "Cubierta por extrusión: haz clic en el inicio y el final de una línea y luego hasta dónde se extiende; su perfil sube desde la línea",
+    ],
+    ["Dormer", "Água-furtada", "Buhardilla"],
+    [
+        "Dormer: click a roof's slope where its front wall goes; the roof opens under it",
+        "Água-furtada: clique na água do telhado onde vai a parede da frente; o telhado se abre embaixo dela",
+        "Buhardilla: haz clic en el faldón donde va su muro frontal; la cubierta se abre debajo",
+    ],
+    ["Gable Edge", "Borda de empena", "Borde de hastial"],
+    [
+        "Gable Edge: click an edge of a roof's footprint to stand it upright, a gable end; click again to slope it",
+        "Borda de empena: clique numa borda do perímetro de um telhado para deixá-la em pé, uma empena; clique de novo para inclinar",
+        "Borde de hastial: haz clic en un borde del perímetro de una cubierta para dejarlo vertical, un hastial; otra vez para inclinarlo",
+    ],
+    ["Shed", "Meia-água", "A un agua"],
+    ["Create Extrusion Roof", "Criar telhado por extrusão", "Crear cubierta por extrusión"],
+    [
+        "Click the start of the line the roof's profile runs along.",
+        "Clique no início da linha ao longo da qual corre o perfil do telhado.",
+        "Haz clic en el inicio de la línea a lo largo de la cual va el perfil de la cubierta.",
+    ],
+    [
+        "Click the line's end: the profile rises from it at the Options Bar's slope.",
+        "Clique no fim da linha: o perfil sobe a partir dela com a inclinação da barra de opções.",
+        "Haz clic en el final de la línea: el perfil sube desde ella con la pendiente de la barra de opciones.",
+    ],
+    [
+        "Click how far across the roof is swept, to either side of the line. Esc cancels.",
+        "Clique até onde o telhado se estende, de qualquer lado da linha. Esc cancela.",
+        "Haz clic hasta dónde se extiende la cubierta, a cualquier lado de la línea. Esc cancela.",
+    ],
+    [
+        "Click a roof's slope where the dormer's front wall goes, across the slope.",
+        "Clique na água do telhado onde vai a parede da frente da água-furtada, atravessando a inclinação.",
+        "Haz clic en el faldón donde va el muro frontal de la buhardilla, a lo ancho de la pendiente.",
+    ],
+    [
+        "Click an edge of a roof's footprint: it stands upright, a gable end; click it again to slope it.",
+        "Clique numa borda do perímetro de um telhado: ela fica em pé, uma empena; clique de novo para incliná-la.",
+        "Haz clic en un borde del perímetro de una cubierta: queda vertical, un hastial; haz clic otra vez para inclinarlo.",
+    ],
+    ["click its line's end", "clique no fim da linha", "haz clic en el final de la línea"],
+    ["roof: `{}` is not a slope", "telhado: `{}` não é uma inclinação", "cubierta: `{}` no es una pendiente"],
+    [
+        "dormer: the width `{}`, the height `{}` and the slope `{}` must be numbers",
+        "água-furtada: a largura `{}`, a altura `{}` e a inclinação `{}` precisam ser números",
+        "buhardilla: el ancho `{}`, la altura `{}` y la pendiente `{}` tienen que ser números",
+    ],
+    ["Extrusion Start", "Início da extrusão", "Inicio de extrusión"],
+    ["Extrusion End", "Fim da extrusão", "Fin de extrusión"],
 ];
 
 #[cfg(test)]

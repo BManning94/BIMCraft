@@ -317,10 +317,8 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 curve: None,
             })),
             Element::Roof(r) => {
-                if let Ok((pieces, rise)) = m.roof_pieces(r) {
-                    for face in pieces {
-                        slabs(&mut out, m, id, ROOF, face, rise);
-                    }
+                for (face, rise) in m.roof_slabs(r) {
+                    slabs(&mut out, m, id, ROOF, face, rise);
                 }
             }
             // A door's leaf or a window's glass: a 50 mm panel in the middle of the wall, square to it.

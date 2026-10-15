@@ -8,8 +8,8 @@ use std::f64::consts::PI;
 
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
-    Column, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note, RISER, Ramp,
-    Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag,
+    Column, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note, RISER,
+    Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::walls::{self, Axis};
@@ -555,6 +555,8 @@ impl BimApp {
             (Tool::Attach, Some(q)) => {
                 d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Roof(_) | Element::Floor(_))))
             }
+            (Tool::Dormer, Some(q)) => model.roof_at(level, view.mm(q)),
+            (Tool::GableEdge, Some(q)) => model.roof_edge(level, view.mm(q), f64::from(PICK) / view.scale).map(|(id, _)| id),
             (Tool::Railing(path), Some(q)) if path.is_empty() => {
                 d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Stair(_) | Element::Ramp(_))))
             }
@@ -935,6 +937,73 @@ impl BimApp {
                     self.status = Status { text, error: true };
                 }
             },
+            // Its line's start and end, then how far across it's swept; once made, selected.
+            Tool::ExtrusionRoof(pts) => {
+                let mut pts = pts.clone();
+                let p = snap(m, level, v, at, &pts, mods.shift);
+                if pts.last().is_some_and(|l| l.dist(p) <= TOL) {
+                    return;
+                }
+                pts.push(p);
+                if pts.len() < 3 {
+                    self.tool = Tool::ExtrusionRoof(pts);
+                    return;
+                }
+                match self.extrusion_roof(m, level, &pts) {
+                    Ok(r) => {
+                        let p = typed(self, "roof", json!({"level": r.level, "extrusion": r.extrusion}));
+                        if let Some(made) = self.run("roof", p) {
+                            self.selection = made["id"].as_u64().into_iter().collect();
+                            self.tool = Tool::Modify;
+                        }
+                    }
+                    Err(e) => {
+                        self.status = Status { text: e, error: true };
+                        self.tool = Tool::ExtrusionRoof(Vec::new());
+                    }
+                }
+            }
+            // On the roof's slope under the cursor, as the Options Bar says.
+            Tool::Dormer => {
+                match (hovered, m.units.parse(&self.dormer_width), m.units.parse(&self.dormer_height), number(&self.roof_slope)) {
+                    (None, ..) => {}
+                    (Some(host), Some(width), Some(height), Some(slope)) => {
+                        let at = point(round(v.mm(at)));
+                        let mut p = typed(self, "wall", json!({"host": host, "at": at, "width": width, "height": height, "slope": slope}));
+                        // The window type picked last, else the smallest: a dormer's front is short.
+                        if self.dormer_window {
+                            let smallest =
+                                m.types.window.iter().min_by(|a, b| (a.1.width * a.1.height).total_cmp(&(b.1.width * b.1.height)));
+                            p["window"] = json!(self.types.get("window").cloned().or_else(|| smallest.map(|(n, _)| n.clone())));
+                        }
+                        self.run("dormer", p);
+                    }
+                    _ => {
+                        let what = [self.dormer_width.as_str(), &self.dormer_height, &self.roof_slope];
+                        self.status = Status {
+                            text: tf("dormer: the width `{}`, the height `{}` and the slope `{}` must be numbers", &what),
+                            error: true,
+                        };
+                    }
+                }
+            }
+            // The roof edge picked stands upright, or slopes again.
+            Tool::GableEdge => {
+                if let Some((id, i)) = m.roof_edge(level, v.mm(at), f64::from(PICK) / v.scale)
+                    && let Some(Element::Roof(r)) = m.elements.get(&id)
+                {
+                    match m.roof_uprights(r) {
+                        Ok(mut up) => {
+                            if let Some(u) = up.get_mut(i) {
+                                *u = !*u;
+                            }
+                            let gables: Vec<usize> = up.iter().enumerate().filter(|(_, u)| **u).map(|(i, _)| i).collect();
+                            self.run("modify", json!({"id": id, "gables": gables, "gable": false}));
+                        }
+                        Err(e) => self.status = Status { text: e, error: true },
+                    }
+                }
+            }
             // Under the walls of this plan's level; once made, selected, as a finished sketch is.
             Tool::Floor => {
                 let p = typed(self, "floor", json!({"level": level}));
@@ -988,6 +1057,28 @@ impl BimApp {
                 }
             }
         }
+    }
+
+    /// The roof by extrusion the points clicked make, on the level above: its profile along the line
+    /// from the first to the second, rising from it at the Options Bar's slope to a ridge over its
+    /// middle (or a shed's, to its end), swept across to the third.
+    pub(crate) fn extrusion_roof(&self, m: &Model, level: Id, pts: &[P2]) -> Result<Roof, String> {
+        let (Some(&a), Some(&b), Some(&c)) = (pts.first(), pts.get(1), pts.get(2)) else { return Err(t("click its line's end").into()) };
+        let slope = number(&self.roof_slope).filter(|s| *s > 0.0).ok_or_else(|| tf("roof: `{}` is not a slope", &[&self.roof_slope]))?;
+        let (len, tan) = (a.dist(b), slope.to_radians().tan());
+        let profile = if self.roof_shed {
+            vec![P2(0.0, 0.0), P2(len, len * tan)]
+        } else {
+            vec![P2(0.0, 0.0), P2(len / 2.0, len / 2.0 * tan), P2(len, 0.0)]
+        };
+        let across = (c - a).dot((b - a).unit().perp());
+        let type_name = self.types.get("roof").cloned().or_else(|| m.default_type("roof").map(String::from)).unwrap_or_default();
+        Ok(Roof {
+            type_name,
+            level: m.level_above(level).unwrap_or(level),
+            extrusion: Some(Extrusion { line: [a, b], profile, from: across.min(0.0), to: across.max(0.0) }),
+            ..Roof::default()
+        })
     }
 
     /// The stair or the ramp the points clicked make (its start, where its first run ends, and a
@@ -1346,6 +1437,26 @@ impl BimApp {
         let ghost = |f: &dyn Fn(Pos2) -> Pos2| ghost(p, origin, sc.d, &self.selection, f);
         let chain = match &self.tool {
             Tool::Wall(chain) | Tool::Railing(chain) => chain.as_slice(),
+            Tool::ExtrusionRoof(pts) if pts.len() < 2 => pts.as_slice(),
+            // The roof a click would make, swept across to the cursor.
+            Tool::ExtrusionRoof(pts) => {
+                let mut with = pts.clone();
+                with.push(snap(m, level, v, q, pts, false));
+                if let Ok(r) = self.extrusion_roof(m, level, &with) {
+                    sketched(&Element::Roof(r));
+                }
+                return;
+            }
+            // The edge a click would stand up, or slope.
+            Tool::GableEdge => {
+                if let Some((id, i)) = m.roof_edge(level, v.mm(q), f64::from(PICK) / v.scale)
+                    && let Some(Element::Roof(r)) = m.elements.get(&id)
+                    && let (Some(a), Some(b)) = (r.boundary.get(i), r.boundary.get((i + 1) % r.boundary.len()))
+                {
+                    p.line_segment([sc.screen(*a), sc.screen(*b)], Stroke::new(4.0, pal().accent));
+                }
+                return;
+            }
             Tool::Stair(pts) | Tool::Ramp(pts) if pts.is_empty() => &[],
             // The stair or the ramp a click would make, and how far up its first run goes.
             Tool::Stair(pts) | Tool::Ramp(pts) => {
@@ -1545,7 +1656,15 @@ impl BimApp {
                 {
                     let type_name =
                         self.types.get("roof").cloned().or_else(|| m.default_type("roof").map(String::from)).unwrap_or_default();
-                    sketched(&Element::Roof(Roof { type_name, level: on, boundary, slope, overhang, gable: self.roof_gable }));
+                    sketched(&Element::Roof(Roof {
+                        type_name,
+                        level: on,
+                        boundary,
+                        slope,
+                        overhang,
+                        gable: self.roof_gable,
+                        ..Roof::default()
+                    }));
                 }
                 return;
             }

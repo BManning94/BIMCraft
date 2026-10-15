@@ -198,6 +198,9 @@ pub enum Icon {
     SlopeArrow,
     Ramp,
     Railing,
+    ExtrusionRoof,
+    Dormer,
+    GableEdge,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -503,6 +506,22 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(2.0, 18.0), (22.0, 9.0), (22.0, 12.0), (2.0, 21.0)]),
             line(&[(5.0, 12.5), (18.0, 6.5)]),
             line(&[(14.2, 5.6), (18.0, 6.5), (16.0, 9.8)]),
+        ],
+        // A gable's profile, swept back.
+        Icon::ExtrusionRoof => {
+            vec![line(&[(2.0, 16.0), (8.0, 9.0), (14.0, 16.0)]), line(&[(8.0, 9.0), (16.0, 4.0), (22.0, 11.0), (14.0, 16.0)])]
+        }
+        // A little gabled front, window and all, standing out of a roof's slope.
+        Icon::Dormer => vec![
+            line(&[(2.0, 21.0), (22.0, 7.0)]),
+            line(&[(8.0, 16.8), (8.0, 11.0), (11.5, 7.5), (15.0, 11.0), (15.0, 11.9)]),
+            ring(&[(10.0, 11.5), (13.0, 11.5), (13.0, 14.6), (10.0, 14.6)]),
+        ],
+        // A roof in plan: hipped at its left end, a gable at its right.
+        Icon::GableEdge => vec![
+            ring(&[(2.0, 6.0), (22.0, 6.0), (22.0, 18.0), (2.0, 18.0)]),
+            line(&[(2.0, 6.0), (8.0, 12.0), (2.0, 18.0)]),
+            line(&[(8.0, 12.0), (22.0, 12.0)]),
         ],
         // A wedge climbing to the right, an arrow up it.
         Icon::Ramp => vec![

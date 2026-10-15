@@ -1225,7 +1225,7 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             .filter_map(|n| n.accesskit_node().label())
             .collect()
     };
-    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}"));
     // The probe finds what it looks for: in English, the same labels are all English.
     assert!(english(&h, Language::Spanish).contains(&"Architecture".to_string()));
     for l in [Language::Portuguese, Language::Spanish] {
@@ -1237,9 +1237,10 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             press(&mut h, tr(tab));
             missed.extend(english(&h, l));
         }
-        // A wall's Properties and its contextual tab; a door's; the tools' Options Bars.
-        let tools = ["Wall", "Roof", "Floor", "Ceiling", "Shaft", "Stair", "Ramp", "Railing"].map(|t| (P2(0.0, 0.0), Some(t)));
-        for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None)].into_iter().chain(tools) {
+        // A wall's Properties and its contextual tab; a door's; a roof's; the tools' Options Bars.
+        let tools = ["Wall", "Roof", "Roof by Extrusion", "Floor", "Ceiling", "Shaft", "Dormer", "Stair", "Ramp", "Railing"]
+            .map(|t| (P2(0.0, 0.0), Some(t)));
+        for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(-600.0, 3000.0), None)].into_iter().chain(tools) {
             key(&mut h, Key::Escape);
             if let Some(tool) = tool {
                 press(&mut h, tr("Architecture"));
@@ -1397,4 +1398,64 @@ fn shaft_openings_take_two_corners_and_cut_the_floors_they_pass_through() {
     click(&mut h, P2(3500.0, 3000.0));
     assert_eq!(h.state().selection, shaft);
     assert!(h.query_by_label("Modify | Shaft Openings").is_some() && h.query_by_label("Top Constraint").is_some());
+}
+
+#[test]
+fn roofs_by_extrusion_take_a_line_then_how_far_across() {
+    let mut h = app(BOX);
+    tool(&mut h, "Roof by Extrusion");
+    assert!(h.query_by_label("Modify | Create Extrusion Roof").is_some());
+    // Along the south wall, then across to the north one: a gable rising 30° to a ridge over the middle.
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(8000.0, 0.0));
+    assert!(ids(&h, "roof").is_empty(), "two clicks are its line");
+    click(&mut h, P2(4000.0, 6000.0));
+    let roof = ids(&h, "roof");
+    assert_eq!(roof.len(), 1);
+    let x = field(&h, roof[0], "extrusion");
+    assert_eq!((&x["line"], &x["from"], &x["to"]), (&json!([[0.0, 0.0], [8000.0, 0.0]]), &json!(0.0), &json!(6000.0)));
+    let ridge = field(&h, roof[0], "ridge").as_f64().unwrap();
+    assert!((ridge - (3000.0 + 4000.0 * 30f64.to_radians().tan())).abs() < 0.01, "on Level 2: {ridge}");
+    assert_eq!(h.state().selection, roof, "finished, the roof is selected");
+    assert!(h.query_by_label("Extrusion End").is_some());
+    // A shed rises along the whole line; swept the other way, it lies to the line's right.
+    tool(&mut h, "Roof by Extrusion");
+    press(&mut h, "Shed");
+    for p in [P2(0.0, 6000.0), P2(8000.0, 6000.0), P2(4000.0, 0.0)] {
+        click(&mut h, p);
+    }
+    let shed = ids(&h, "roof")[1];
+    let x = field(&h, shed, "extrusion");
+    assert_eq!((x["profile"].as_array().map(Vec::len), &x["from"], &x["to"]), (Some(2), &json!(-6000.0), &json!(0.0)));
+}
+
+#[test]
+fn dormers_go_where_a_roof_slope_is_clicked() {
+    let mut h = app(&format!("{BOX}\nroof {{\"slope\": 45}}"));
+    tool(&mut h, "Dormer");
+    assert!(h.query_by_label("Modify | Dormer").is_some());
+    type_into(&mut h, "Height:", "1000");
+    click(&mut h, P2(4000.0, 800.0));
+    let roofs = ids(&h, "roof");
+    assert_eq!(roofs.len(), 2, "{}", h.state().status.text);
+    assert_eq!(field(&h, roofs[1], "join"), json!(roofs[0]), "its roof runs into the one it stands on");
+    assert_eq!((ids(&h, "wall").len(), ids(&h, "window").len()), (7, 1), "its front and sides, a window in its front");
+    assert_eq!(h.state().tool, Tool::Dormer, "ready for the next one");
+}
+
+#[test]
+fn gable_edge_stands_a_roof_edge_upright_and_slopes_it_again() {
+    let mut h = app(&format!("{BOX}\nroof {{}}"));
+    // The roof, by its edge overhead in Level 1's plan, then Shape Editing's Gable Edge.
+    click(&mut h, P2(-600.0, 3000.0));
+    let roof = ids(&h, "roof")[0];
+    assert_eq!(h.state().selection, vec![roof]);
+    press(&mut h, "Gable Edge");
+    // Its east end and its west end, upright; the east one again, sloping.
+    click(&mut h, P2(8600.0, 3000.0));
+    click(&mut h, P2(-600.0, 3000.0));
+    assert_eq!(field(&h, roof, "gables"), json!([1, 3]));
+    click(&mut h, P2(8600.0, 3000.0));
+    assert_eq!(field(&h, roof, "gables"), json!([3]));
+    assert_eq!((h.state().selection.as_slice(), &h.state().tool), (&[roof][..], &Tool::GableEdge), "the roof stays selected");
 }

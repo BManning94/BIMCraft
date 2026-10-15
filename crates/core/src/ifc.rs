@@ -506,13 +506,15 @@ pub fn export(m: &Model) -> String {
                 contained.entry(rl.level).or_default().push(ent);
             }
             Element::Roof(r) => {
-                let (Some(&(_, storey)), Ok((pieces, rise))) = (storeys.get(&r.level), m.roof_pieces(r)) else { continue };
+                let (Some(&(_, storey)), pieces) = (storeys.get(&r.level), m.roof_slabs(r)) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let shape = w.breps(&pieces, m.elevation(r.level), rise);
-                let kind = match (r.slope == 0.0, r.gable) {
-                    (true, _) => ".FLAT_ROOF.",
-                    (false, true) => ".GABLE_ROOF.",
-                    (false, false) => ".HIP_ROOF.",
+                let breps: Vec<u64> = pieces.iter().map(|(face, rise)| w.brep(face, m.elevation(r.level), *rise)).collect();
+                let shape = w.solid(&breps, &[]);
+                let kind = match (&r.extrusion, r.slope == 0.0, r.gable || !r.gables.is_empty()) {
+                    (Some(x), ..) => [".SHED_ROOF.", ".GABLE_ROOF."].get(x.profile.len().saturating_sub(2)).unwrap_or(&".FREEFORM."),
+                    (None, true, _) => ".FLAT_ROOF.",
+                    (None, false, true) => ".GABLE_ROOF.",
+                    (None, false, false) => ".HIP_ROOF.",
                 };
                 let ent = w.add(format!(
                     "IFCROOF({},$,{},$,{},#{at},#{shape},'{id}',{kind})",
@@ -546,9 +548,7 @@ pub fn export(m: &Model) -> String {
         let slabs = match m.elements.get(&host) {
             Some(Element::Floor(f)) => vec![m.floor_slab(f)],
             Some(Element::Ceiling(c)) => vec![m.ceiling_slab(c)],
-            Some(Element::Roof(r)) => {
-                m.roof_pieces(r).map(|(pieces, rise)| pieces.into_iter().map(|p| (p, rise)).collect()).unwrap_or_default()
-            }
+            Some(Element::Roof(r)) => m.roof_slabs(r),
             _ => Vec::new(),
         };
         let mut shafts: Vec<Id> = slabs.iter().flat_map(|(face, rise)| m.less_shafts(face, *rise).1).collect();

@@ -47,6 +47,9 @@ enum Kind {
     Shown,
     /// A length (or several), read only.
     LengthShown,
+    /// A length some elements have and others don't (an extrusion roof's start and end): typed, and
+    /// no row without one.
+    LengthIf,
     /// An area in m², read only: shown in m² or ft².
     AreaShown,
     /// A length in m, read only.
@@ -204,6 +207,9 @@ fn rows(category: &str) -> &'static [Row] {
         ],
         "roof" => &[
             ("Constraints", "level", "Base Level", Level),
+            ("Constraints", "offset", "Base Offset", Length),
+            ("Constraints", "extrusion.from", "Extrusion Start", LengthIf),
+            ("Constraints", "extrusion.to", "Extrusion End", LengthIf),
             ("Dimensions", "slope", "Slope (°)", Number),
             ("Dimensions", "ridge", "Max Ridge Height", LengthShown),
             ("Dimensions", "area_m2", "Area", AreaShown),
@@ -301,7 +307,7 @@ fn shown(kind: Kind, v: &Value, units: Units) -> String {
         v => v.as_f64().map_or_else(String::new, f),
     };
     match kind {
-        Length | Height | Limit | Point | LengthShown | Values => each(&|x| units.length(x)),
+        Length | LengthIf | Height | Limit | Point | LengthShown | Values => each(&|x| units.length(x)),
         MetresShown => each(&|x| units.length(x * 1000.0)),
         AreaShown => each(&|x| {
             let (area, unit) = units.area(x * 1e6);
@@ -316,7 +322,7 @@ fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
     let length = |typed: &str| units.parse(typed).ok_or_else(|| tf("`{}` is not a length", &[typed.trim()]));
     match kind {
         Number => number(s).map(|x| json!(x)).ok_or_else(|| tf("`{}` is not a number", &[s])),
-        Length | Height => length(s).map(|x| json!(x)),
+        Length | LengthIf | Height => length(s).map(|x| json!(x)),
         Limit if s.trim().is_empty() => Ok(Value::Null),
         Limit => length(s).map(|x| json!(x)),
         // Lengths with feet and inches hold spaces: a comma parts x from y.
@@ -487,7 +493,8 @@ impl BimApp {
             ([], Tool::Stair(_), _) => Subject::New("stair"),
             ([], Tool::Ramp(_), _) => Subject::New("ramp"),
             ([], Tool::Railing(_), _) => Subject::New("railing"),
-            ([], Tool::Roof, _) => Subject::New("roof"),
+            ([], Tool::Roof | Tool::ExtrusionRoof(_), _) => Subject::New("roof"),
+            ([], Tool::Dormer, _) => Subject::New("wall"),
             ([], Tool::Floor, _) => Subject::New("floor"),
             ([], Tool::Ceiling, _) => Subject::New("ceiling"),
             ([], Tool::Shaft(_), _) => Subject::New("shaft"),
@@ -688,7 +695,7 @@ impl BimApp {
                     for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
                         let val = &v[key];
                         // A length one element hasn't got (a straight wall's radius): no row.
-                        if ids.len() == 1 && kind == LengthShown && val.is_null() {
+                        if ids.len() == 1 && matches!(kind, LengthShown | LengthIf) && val.is_null() {
                             continue;
                         }
                         let kind = match kind {
@@ -759,7 +766,7 @@ impl BimApp {
                                 r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, false, on, label));
                                 r.labelled_by(name.id);
                             }
-                            Text | Number | Length | Point | PaperPoint | Height | Limit => {
+                            Text | Number | Length | LengthIf | Point | PaperPoint | Height | Limit => {
                                 let hint = if kind == Limit { t("Level Above") } else { "" };
                                 if let Some(typed) = self.field(ui, id, key, shown(kind, val, units), name.id, hint) {
                                     change = Some((key, parse(kind, &typed, units)));

@@ -120,6 +120,13 @@ pub enum Tool {
     /// A roof over the walls of the plan's level, on the level above: Revit's Roof by Footprint,
     /// with every wall picked at once.
     Roof,
+    /// A roof by extrusion, on the level above: its line's start and end, as clicked; the next
+    /// click, how far across it's swept.
+    ExtrusionRoof(Vec<P2>),
+    /// A dormer where a roof's slope is clicked.
+    Dormer,
+    /// The roof footprint edge clicked stands upright, a gable end, or slopes again.
+    GableEdge,
     /// Attach the selected walls' tops (or, as the Options Bar says, their bases) to the roof or
     /// floor picked.
     Attach,
@@ -218,11 +225,17 @@ pub struct BimApp {
     /// The Column tool's top, as `wall_top` and `wall_height` are the Wall tool's.
     column_top: Option<Option<Id>>,
     column_height: String,
-    /// The Stair tool's width; the Roof tool's slope, overhang and gable ends.
+    /// The Stair tool's width; the Roof tool's slope, overhang and gable ends; the Roof by
+    /// Extrusion tool's profile, a shed's rather than a gable's; the Dormer tool's width and height,
+    /// and whether its front has a window.
     stair_width: String,
     roof_slope: String,
     roof_overhang: String,
     roof_gable: bool,
+    roof_shed: bool,
+    dormer_width: String,
+    dormer_height: String,
+    dormer_window: bool,
     /// Stairs and ramps made with a railing down each side; the Ramp tool's top, width and slope.
     railings: bool,
     ramp_top: Option<Option<Id>>,
@@ -461,6 +474,10 @@ impl BimApp {
             roof_slope: "30".into(),
             roof_overhang: units.length(500.0),
             roof_gable: false,
+            roof_shed: false,
+            dormer_width: units.length(1600.0),
+            dormer_height: units.length(1200.0),
+            dormer_window: true,
             railings: true,
             ramp_top: Some(None),
             ramp_height: units.length(600.0),
@@ -545,6 +562,7 @@ impl BimApp {
             | Tool::Split
             | Tool::Offset
             | Tool::Attach
+            | Tool::GableEdge
             | Tool::SlopeArrow(_) => None,
             Tool::Wall(_) => Some("Place Wall"),
             Tool::Door => Some("Place Door"),
@@ -563,6 +581,8 @@ impl BimApp {
             Tool::Ramp(_) => Some("Create Ramp"),
             Tool::Railing(_) => Some("Create Railing Path"),
             Tool::Roof => Some("Create Roof Footprint"),
+            Tool::ExtrusionRoof(_) => Some("Create Extrusion Roof"),
+            Tool::Dormer => Some("Dormer"),
             Tool::Floor => Some("Create Floor"),
             Tool::Ceiling => Some("Place Ceiling"),
             Tool::Shaft(_) => Some("Create Shaft Opening"),
@@ -873,7 +893,7 @@ impl BimApp {
             let top = self.session.model.levels().last().map_or(0.0, |(_, l)| l.elevation);
             self.new_level = (self.session.model.units.length(top + 3000.0), String::new());
         }
-        if tool != Tool::Modify && tool != Tool::Attach && !matches!(tool, Tool::SlopeArrow(_)) && !edits {
+        if tool != Tool::Modify && tool != Tool::Attach && tool != Tool::GableEdge && !matches!(tool, Tool::SlopeArrow(_)) && !edits {
             self.selection.clear();
         }
         if tool != Tool::Modify && !picks {
@@ -887,6 +907,14 @@ impl BimApp {
     /// The walls among the selection.
     fn selected_walls(&self) -> Vec<Id> {
         self.selection.iter().copied().filter(|id| self.session.model.wall(*id).is_some()).collect()
+    }
+
+    /// The roof selected, when one roof is all that is.
+    pub(crate) fn selected_roof(&self) -> Option<Id> {
+        match self.selection.as_slice() {
+            &[id] if matches!(self.session.model.elements.get(&id), Some(Element::Roof(_))) => Some(id),
+            _ => None,
+        }
     }
 
     /// The floor selected, when one floor is all that is.
@@ -994,6 +1022,7 @@ impl BimApp {
             Tool::Railing(pts) if !pts.is_empty() => Tool::Railing(Vec::new()),
             Tool::Shaft(Some(_)) => Tool::Shaft(None),
             Tool::SlopeArrow(Some(_)) => Tool::SlopeArrow(None),
+            Tool::ExtrusionRoof(pts) if !pts.is_empty() => Tool::ExtrusionRoof(Vec::new()),
             Tool::Modify => {
                 self.selection.clear();
                 Tool::Modify
@@ -1041,8 +1070,8 @@ impl BimApp {
             Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
             Tool::Radial(r) => *r = None,
             Tool::Section(start) | Tool::Shaft(start) => *start = None,
-            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) => pts.clear(),
-            Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) => self.tool = Tool::Modify,
+            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::ExtrusionRoof(pts) => pts.clear(),
+            Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) | Tool::GableEdge => self.tool = Tool::Modify,
             _ => {}
         }
     }
@@ -1330,6 +1359,12 @@ impl BimApp {
                 (Icon::Window, "Window", "Window (WN): click a wall", Tool::Window),
                 (Icon::Column, "Column", "Column (CL): click where it stands", Tool::Column),
                 (Icon::Roof, "Roof", "Roof by Footprint: click inside the walls to roof them, on the level above", Tool::Roof),
+                (
+                    Icon::ExtrusionRoof,
+                    "Roof by Extrusion",
+                    "Roof by Extrusion: click a line's start and end, then how far across it's swept; its profile rises from the line",
+                    Tool::ExtrusionRoof(Vec::new()),
+                ),
                 (Icon::Floor, "Floor", "Floor: click inside the walls to floor them", Tool::Floor),
                 (Icon::Ceiling, "Ceiling", "Ceiling: click inside a room for a ceiling out to its walls", Tool::Ceiling),
             ],
@@ -1357,12 +1392,15 @@ impl BimApp {
         self.tools(
             ui,
             "Opening",
-            &[(
-                Icon::Shaft,
-                "Shaft",
-                "Shaft Opening: click two opposite corners; it cuts the floors, ceilings and roofs it passes through",
-                Tool::Shaft(None),
-            )],
+            &[
+                (
+                    Icon::Shaft,
+                    "Shaft",
+                    "Shaft Opening: click two opposite corners; it cuts the floors, ceilings and roofs it passes through",
+                    Tool::Shaft(None),
+                ),
+                (Icon::Dormer, "Dormer", "Dormer: click a roof's slope where its front wall goes; the roof opens under it", Tool::Dormer),
+            ],
         );
         self.tools(
             ui,
@@ -1640,6 +1678,15 @@ impl BimApp {
                 }
             });
         }
+        // A roof selected: which of its edges stand upright.
+        if self.selected_roof().is_some() && matches!(self.tool, Tool::Modify | Tool::GableEdge) {
+            panel(ui, "Shape Editing", |ui| {
+                let tip = "Gable Edge: click an edge of a roof's footprint to stand it upright, a gable end; click again to slope it";
+                if big_button(ui, Icon::GableEdge, "Gable Edge", self.tool == Tool::GableEdge, tip).clicked() {
+                    self.set_tool(Tool::GableEdge);
+                }
+            });
+        }
         // A floor selected: its slope arrow.
         if self.selected_floor().is_some() && matches!(self.tool, Tool::Modify | Tool::SlopeArrow(_)) {
             panel(ui, "Shape Editing", |ui| {
@@ -1726,6 +1773,21 @@ impl BimApp {
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.roof_overhang).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                     ui.checkbox(&mut self.roof_gable, t("Gable"));
+                }
+                Tool::ExtrusionRoof(_) => {
+                    let l = ui.label(t("Slope:"));
+                    ui.add(TextEdit::singleline(&mut self.roof_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
+                    ui.checkbox(&mut self.roof_shed, t("Shed"));
+                }
+                Tool::Dormer => {
+                    let hint = self.session.model.units.name();
+                    let l = ui.label(t("Width:"));
+                    ui.add(TextEdit::singleline(&mut self.dormer_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    let l = ui.label(t("Height:"));
+                    ui.add(TextEdit::singleline(&mut self.dormer_height).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    let l = ui.label(t("Slope:"));
+                    ui.add(TextEdit::singleline(&mut self.roof_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
+                    ui.checkbox(&mut self.dormer_window, t("Window"));
                 }
                 Tool::Level => self.level_options(ui),
                 Tool::Move(_) => {
@@ -1901,6 +1963,11 @@ impl BimApp {
             Tool::Railing(pts) if pts.is_empty() => "Click a stair or a ramp for a railing down each side, or the start of a path.",
             Tool::Railing(_) => "Click the path's next point. Enter finishes, Esc cancels.",
             Tool::Roof => "Click inside the walls to roof them, on the level above: the overhang runs past their faces.",
+            Tool::ExtrusionRoof(pts) if pts.is_empty() => "Click the start of the line the roof's profile runs along.",
+            Tool::ExtrusionRoof(pts) if pts.len() == 1 => "Click the line's end: the profile rises from it at the Options Bar's slope.",
+            Tool::ExtrusionRoof(_) => "Click how far across the roof is swept, to either side of the line. Esc cancels.",
+            Tool::Dormer => "Click a roof's slope where the dormer's front wall goes, across the slope.",
+            Tool::GableEdge => "Click an edge of a roof's footprint: it stands upright, a gable end; click it again to slope it.",
             Tool::Floor => "Click inside the walls to floor them: the slab runs under their outline, its top at the level.",
             Tool::Ceiling => "Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says.",
             Tool::Shaft(None) => "Click a corner of the shaft opening.",

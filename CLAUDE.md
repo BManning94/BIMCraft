@@ -71,8 +71,12 @@ Its exterior is to the left of start to end, as in Revit, so walls drawn clockwi
 layers from the exterior in. A curved wall turns `arc` degrees, counter-clockwise positive (`walls::Axis`). Where walls meet,
 their faces meet in mitred caps at any angle, and a wall ending on another stops at its face (`walls::cap`); plans, 3D,
 sections and IFC all draw that outline (`walls::outline`, `walls::prisms`). Room areas are measured at the walls' centre
-lines, run on or back to meet at joins (`walls::centre_line`). An attached top or base follows the lowest of the roof's or
-floor's planes where it's over the wall; a mirrored wall runs back the other way. A floor's top is at its level plus `offset`,
+lines, run on or back to meet at joins (`walls::centre_line`). An attached top or base follows the roof's or floor's plane
+over each part of the wall (a roof's slopes each over its own part of the plan); a mirrored wall runs back the other way.
+A roof by footprint is its outline's straight skeleton (`skeleton::faces`): each edge moves in at speed 1, a gable's at 0,
+and its slope rises from it, reaching the roof's base `overhang` in from its eaves; its edges keep their numbers whichever
+way round it runs, so `gables` stay put through a mirror. `Model::roof_faces` are its slopes in plan with the planes of
+their undersides, trimmed where it `join`s another; `Model::roof_pieces` are those less its `openings`, convex where cut. A floor's top is at its level plus `offset`,
 or with a slope arrow, there at the arrow's tail and rising `slope` degrees toward its head (`Model::floor_top`); it's its
 type's thickness across the slope, so plumb it's thicker. A ceiling's `offset` is its underside. A shaft cuts each floor,
 ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). A stair or a ramp

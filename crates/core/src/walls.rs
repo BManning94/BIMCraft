@@ -372,6 +372,11 @@ impl Plane {
         self.z + self.g.dot(q)
     }
 
+    /// `ring` lifted onto it: points `[x, y, z]`.
+    pub fn lift(&self, ring: &[P2]) -> Vec<[f64; 3]> {
+        ring.iter().map(|q| [q.0, q.1, self.at(*q)]).collect()
+    }
+
     /// The plane a flat polygon in space lies in, by Newell's normal; none for an upright one.
     pub fn of(face: &[[f64; 3]]) -> Option<Plane> {
         let n = face.iter().zip(face.iter().cycle().skip(1)).fold([0.0; 3], |n, (a, b)| {
@@ -385,69 +390,69 @@ impl Plane {
     }
 }
 
-/// What a wall's base stands on, or its top keeps under: a level plane at `own`, or, over the
-/// footprint of the roof or floor it's attached to (cut into convex pieces), the lowest of that
-/// one's planes there (a pitched roof's surface), and outside it still `own`.
+/// What a wall's base stands on, or its top keeps under: a level plane at `own`, or, over the roof
+/// or floor it's attached to, that one's plane there (each of a roof's slopes over its own part of
+/// the plan, in convex pieces), and outside it still `own`.
 #[derive(Clone)]
 struct Bound {
-    planes: Vec<Plane>,
-    footprint: Vec<Vec<P2>>,
+    regions: Vec<(Vec<P2>, Plane)>,
     own: f64,
 }
 
 impl Bound {
     /// The roof or floor `id` from below (with `top`, from above), or `own` without one.
     fn of(m: &Model, id: Option<Id>, top: bool, own: f64) -> Bound {
-        let (planes, outline) = match id.and_then(|id| m.elements.get(&id)) {
-            Some(Element::Roof(r)) => {
-                let lift = if top { m.roof_pieces(r).map_or(0.0, |(_, rise)| rise) } else { 0.0 };
-                let pieces = m.roof_pieces(r).map(|(pieces, _)| pieces).unwrap_or_default();
-                (pieces.iter().filter_map(|f| Plane::of(f)).map(|p| Plane { z: p.z + lift, ..p }).collect(), r.boundary.clone())
-            }
+        let regions = match id.and_then(|id| m.elements.get(&id)) {
+            Some(Element::Roof(r)) => m
+                .roof_pieces(r)
+                .unwrap_or_default()
+                .into_iter()
+                .flat_map(|(ring, p)| {
+                    let plane = Plane { z: p.z + if top { m.roof_rise(r, &p) } else { 0.0 }, ..p };
+                    convex_pieces(&ring).into_iter().map(move |c| (c, plane))
+                })
+                .collect(),
             Some(Element::Floor(f)) => {
                 let face = m.floor_top(f);
-                let below = if top { 0.0 } else { m.floor_depth(f) };
-                (vec![Plane { z: face.z - below, ..face }], f.boundary.clone())
+                let plane = Plane { z: face.z - if top { 0.0 } else { m.floor_depth(f) }, ..face };
+                convex_pieces(&f.boundary).into_iter().map(|c| (c, plane)).collect()
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => Vec::new(),
         };
-        Bound { planes, footprint: convex_pieces(&outline), own }
+        Bound { regions, own }
     }
 
-    /// Whether `q` is over its footprint, or within a millimetre of it.
-    fn covers(&self, q: P2) -> bool {
-        let on = |p: &Vec<P2>| geom::contains(p, q) || geom::ring_edges(p).any(|(a, b)| geom::dist_to_segment(q, a, b) <= TOL);
-        self.footprint.iter().any(on)
+    /// The plane over `q`: of the part over it, or within a millimetre of it; of two, the lower.
+    fn over(&self, q: P2) -> Option<Plane> {
+        let near = |p: &Vec<P2>| geom::contains(p, q) || geom::ring_edges(p).any(|(a, b)| geom::dist_to_segment(q, a, b) <= TOL);
+        self.regions.iter().filter(|(r, _)| near(r)).map(|(_, p)| *p).min_by(|a, b| a.at(q).total_cmp(&b.at(q)))
     }
 
     /// Its height over `q`.
     fn at(&self, q: P2) -> f64 {
-        if self.covers(q) { lowest(&self.planes, q) } else { self.own }
+        self.over(q).map_or(self.own, |p| p.at(q))
     }
 
     /// `ring` cut where a different plane holds, each part with its plane.
     fn parts(&self, ring: Vec<P2>) -> Vec<(Vec<P2>, Plane)> {
-        if self.planes.is_empty() {
-            return vec![(ring, Plane::flat(self.own))];
-        }
-        let mut inside = Vec::new();
-        let mut outside = vec![ring];
-        for piece in &self.footprint {
-            let mut rest = Vec::new();
-            for r in outside {
-                let (inn, out) = split(r, piece);
-                inside.extend(inn);
-                rest.extend(out);
+        let mut out = Vec::new();
+        let mut rest = vec![ring];
+        for (piece, plane) in &self.regions {
+            let mut outside = Vec::new();
+            for r in rest {
+                let (inn, out_) = split(r, piece);
+                out.extend(inn.map(|i| (i, *plane)));
+                outside.extend(out_);
             }
-            outside = rest;
+            rest = outside;
         }
-        let own = Plane::flat(self.own);
-        inside.into_iter().flat_map(|r| by_lowest(r, &self.planes)).chain(outside.into_iter().map(|r| (r, own))).collect()
+        out.extend(rest.into_iter().map(|r| (r, Plane::flat(self.own))));
+        out
     }
 }
 
 /// A polygon as convex pieces, each counter-clockwise: itself when it's convex, else its triangles.
-fn convex_pieces(ring: &[P2]) -> Vec<Vec<P2>> {
+pub(crate) fn convex_pieces(ring: &[P2]) -> Vec<Vec<P2>> {
     if ring.len() < 3 {
         return Vec::new();
     }
@@ -461,12 +466,12 @@ fn convex_pieces(ring: &[P2]) -> Vec<Vec<P2>> {
 }
 
 /// `ring` cut by the convex counter-clockwise `piece`: the part inside it (if any), and the parts
-/// outside, apart.
-fn split(ring: Vec<P2>, piece: &[P2]) -> (Option<Vec<P2>>, Vec<Vec<P2>>) {
+/// outside, apart. A repeated point of the piece's is no edge to cut by.
+pub(crate) fn split(ring: Vec<P2>, piece: &[P2]) -> (Option<Vec<P2>>, Vec<Vec<P2>>) {
     let big = |r: &Vec<P2>| r.len() >= 3 && geom::area(r).abs() > 1.0;
     let mut inside = ring;
     let mut outside = Vec::new();
-    for (a, b) in geom::ring_edges(piece) {
+    for (a, b) in geom::ring_edges(piece).filter(|(a, b)| a.dist(*b) > 1e-6) {
         let left = |q: P2| (b - a).cross(q - a);
         let out = geom::clip(&inside, |q| -left(q));
         if big(&out) {
@@ -486,14 +491,9 @@ pub(crate) fn minus(rings: &[Vec<P2>], hole: &[P2]) -> Vec<Vec<P2>> {
         .collect()
 }
 
-fn lowest(planes: &[Plane], q: P2) -> f64 {
-    planes.iter().map(|p| p.at(q)).fold(f64::INFINITY, f64::min)
-}
-
 /// The underside of roof or floor `id` over `q`, if it's over `q`.
 pub fn underside(m: &Model, id: Id, q: P2) -> Option<f64> {
-    let b = Bound::of(m, Some(id), false, f64::NAN);
-    (!b.planes.is_empty() && b.covers(q)).then(|| lowest(&b.planes, q))
+    Bound::of(m, Some(id), false, f64::NAN).over(q).map(|p| p.at(q))
 }
 
 /// A wall's base and top: what it's attached to, or a level plane.
@@ -520,31 +520,6 @@ pub fn heights(m: &Model, w: &Wall) -> (f64, f64) {
     let lo = pts.iter().map(|q| base.at(*q)).fold(f64::INFINITY, f64::min);
     let hi = pts.iter().map(|q| top.at(*q)).fold(f64::NEG_INFINITY, f64::max);
     (lo, hi)
-}
-
-/// `ring` cut where each of `planes` is the lowest, each part with its plane.
-fn by_lowest(ring: Vec<P2>, planes: &[Plane]) -> Vec<(Vec<P2>, Plane)> {
-    let mut kinds: Vec<Plane> = Vec::new();
-    for p in planes {
-        if !kinds.iter().any(|k| (k.z - p.z).abs() < 1e-6 && k.g.dist(p.g) < 1e-9) {
-            kinds.push(*p);
-        }
-    }
-    if let [one] = kinds.as_slice() {
-        return vec![(ring, *one)];
-    }
-    kinds
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| {
-            let part = kinds
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != i)
-                .fold(ring.clone(), |part, (_, q)| geom::clip(&part, |x| q.at(x) - p.at(x)));
-            (part.len() >= 3 && geom::area(&part).abs() > 1.0).then_some((part, *p))
-        })
-        .collect()
 }
 
 /// A part of a wall's solid: a ring in plan, from a bottom plane up to a top one; of a curved wall,
@@ -594,7 +569,7 @@ pub fn prisms(m: &Model, id: Id, openings: bool) -> Vec<Prism> {
         let mid = (a + b) / 2.0;
         let mut gaps: Vec<(f64, f64)> = holes.iter().filter(|((s0, s1), _)| *s0 <= mid && mid <= *s1).map(|(_, z)| *z).collect();
         gaps.sort_by(|x, y| x.0.total_cmp(&y.0));
-        let flat = |z: f64| Bound { planes: Vec::new(), footprint: Vec::new(), own: z };
+        let flat = |z: f64| Bound { regions: Vec::new(), own: z };
         let mut floors: Vec<Bound> = vec![base.clone()];
         let mut ceilings: Vec<Bound> = Vec::new();
         for (g0, g1) in gaps {

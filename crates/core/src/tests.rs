@@ -529,6 +529,14 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"path": [[0, 0], [0, 0], [0, 0]]}),
         json!({"category": "railing", "name": "R", "height": 1e300, "spacing": 1e-9}),
         json!({"id": 3, "landings": [{"at": 2, "turn": 90}]}),
+        json!({"gables": [usize::MAX], "slope": 45, "boundary": [[0, 0], [4000, 0], [0, 4000]]}),
+        json!({"extrusion": {"line": [[0, 0], [1e300, 0]], "profile": [[0, 0], [1, 1e300]], "to": 1e300}}),
+        json!({"extrusion": {"line": [[0, 0], [0, 0]], "profile": "x"}}),
+        json!({"extrusion": 5, "join": 3, "openings": [[[0, 0]]]}),
+        json!({"id": 3, "join": 3, "offset": 1e300}),
+        json!({"host": 3, "at": [4000, 3000], "width": -1, "height": 1e300, "slope": 89.9}),
+        json!({"host": u64::MAX, "at": [1e300, 0], "window": "nowhere"}),
+        json!({"id": 3, "openings": [[[0, 0], [1e9, 0], [0, 1e9]]], "gables": [0, 0, 1]}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -888,15 +896,15 @@ fn roofs_cover_the_walls_below_flat_or_pitched() {
     assert!((e["ridge"].as_f64().unwrap() - (3000.0 + 3100.0 * 30f64.to_radians().tan())).abs() < 0.01, "{e}");
     let flat = run(&mut s, "roof", json!({"slope": 0, "boundary": [[0, 0], [4000, 0], [2000, 3000]]}))["id"].as_u64().unwrap();
     assert_eq!(element(&mut s, flat)["ridge"], 3000.0);
-    let e = s.execute("roof", &json!({"boundary": [[0, 0], [4000, 0], [2000, 3000]]})).unwrap_err();
-    assert!(e.contains("rectangular"), "{e}");
+    // Over a triangle, pitched: three slopes.
+    run(&mut s, "roof", json!({"boundary": [[0, 0], [4000, 0], [2000, 3000]]}));
     // In IFC: a column, a stair and the roofs.
     run(&mut s, "column", json!({"at": [4000, 3000]}));
     run(&mut s, "stair", json!({"start": [1000, 1000], "end": [1000, 2000]}));
     let path = temp("roofed.ifc");
     run(&mut s, "save", json!({"path": path}));
     let ifc = std::fs::read_to_string(&path).unwrap();
-    assert!(ifc.contains("IFCCOLUMN(") && ifc.contains("IFCSTAIR(") && ifc.matches("IFCROOF(").count() == 2, "{ifc}");
+    assert!(ifc.contains("IFCCOLUMN(") && ifc.contains("IFCSTAIR(") && ifc.matches("IFCROOF(").count() == 3, "{ifc}");
     let _ = std::fs::remove_file(path);
 }
 
@@ -983,7 +991,7 @@ fn describe(m: &Model, id: u64) -> String {
         Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length", "landings"],
         Some("ramp") => &["level", "start", "angle", "width", "slope", "height", "length", "landings"],
         Some("railing") => &["level", "host", "side", "path", "height"],
-        Some("roof") => &["level", "slope", "gable", "ridge", "area_m2", "boundary"],
+        Some("roof") => &["level", "slope", "ridge", "area_m2", "outline", "gables", "openings"],
         Some("grid") => &["name", "start", "end"],
         _ => &[],
     };
@@ -993,10 +1001,31 @@ fn describe(m: &Model, id: u64) -> String {
         "landings" => {
             v.as_array().into_iter().flatten().map(|l| format!("{}@{}", mm(&l["turn"]), mm(&l["at"]))).collect::<Vec<_>>().join(" ")
         }
-        "boundary" => {
+        "boundary" | "outline" => {
             let mut pts: Vec<String> = v.as_array().into_iter().flatten().map(mm).collect();
             pts.sort();
             pts.join(" ")
+        }
+        "openings" => {
+            let sorted = |h: &Value| {
+                let mut pts: Vec<String> = h.as_array().into_iter().flatten().map(mm).collect();
+                pts.sort();
+                pts.join(" ")
+            };
+            let mut holes: Vec<String> = v.as_array().into_iter().flatten().map(sorted).collect();
+            holes.sort();
+            holes.join(" | ")
+        }
+        // A roof's gables, by where they are: the middle of each edge left upright.
+        "gables" => {
+            let ring: Vec<&Value> = e["boundary"].as_array().into_iter().flatten().collect();
+            let mid = |i: usize| -> Option<String> {
+                let (a, b) = (ring.get(i)?, ring.get((i + 1) % ring.len())?);
+                Some(mm(&json!([(a[0].as_f64()? + b[0].as_f64()?) / 2.0, (a[1].as_f64()? + b[1].as_f64()?) / 2.0])))
+            };
+            let mut mids: Vec<String> = v.as_array().into_iter().flatten().filter_map(|i| mid(i.as_u64()? as usize)).collect();
+            mids.sort();
+            mids.join(" ")
         }
         "area_m2" | "riser_height" | "name" | "number" | "round" | "gable" | "side" => v.to_string(),
         "slope" => format!("{:.4}", v.as_f64().unwrap_or(f64::NAN)),
@@ -1007,7 +1036,7 @@ fn describe(m: &Model, id: u64) -> String {
     // A straight wall has no arc to tell; an attached one's top follows the roof, whatever its top
     // constraint (which IFC doesn't carry).
     let untold = |k: &str| {
-        (matches!(k, "arc" | "attach_top" | "slope" | "host" | "side" | "landings") && e[k].is_null())
+        (matches!(k, "arc" | "attach_top" | "slope" | "host" | "side" | "landings" | "gables" | "openings") && e[k].is_null())
             || (k == "top_level" && !e["attach_top"].is_null())
     };
     keys.iter().filter(|k| !untold(k)).map(|k| format!("{k}={}", text(k, &e[*k]))).collect::<Vec<_>>().join(" ")
@@ -1047,6 +1076,13 @@ fn ifc_files_open_as_the_building_they_describe() {
             .clone();
     run(&mut s, "railing", json!({"host": ramp, "side": "left"}));
     run(&mut s, "railing", json!({"path": [[0, -500], [3000, -500]]}));
+    // A roof over an L, one wing's end a gable, a skylight through it; an extrusion roof, its
+    // ridge off its middle.
+    let l = json!([[30000, 0], [42000, 0], [42000, 6000], [36000, 6000], [36000, 12000], [30000, 12000]]);
+    let skylight = json!([[[33000, 1000], [35000, 1000], [35000, 2000], [33000, 2000]]]);
+    run(&mut s, "roof", json!({"level": "Level 2", "boundary": l, "slope": 25, "gables": [1], "openings": skylight}));
+    let profile = json!({"line": [[50000, 0], [58000, 0]], "profile": [[0, 0], [3000, 2000], [8000, 0]], "to": 6000});
+    run(&mut s, "roof", json!({"level": "Level 2", "extrusion": profile}));
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -1673,4 +1709,110 @@ fn railings_run_along_stairs_and_ramps_or_along_a_path() {
     assert!(
         s.execute("type", &json!({"category": "railing", "name": "Dense", "height": 1000, "spacing": 5})).unwrap_err().contains("spacing")
     );
+}
+
+#[test]
+fn hip_roofs_cover_any_footprint_with_valleys_where_wings_meet() {
+    let mut s = Session::new();
+    // An L of two 6 m wings, roofed on Level 2: 500 mm past the walls' faces, at 30°.
+    run(&mut s, "wall", json!({"points": [[0, 0], [12000, 0], [12000, 6000], [6000, 6000], [6000, 12000], [0, 12000]], "closed": true}));
+    let roof = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
+    let (tan, rise) = (30f64.to_radians().tan(), 300.0 / 30f64.to_radians().cos());
+    let eave = 3000.0 - 500.0 * tan;
+    let top = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&roof).copied();
+    let ridge = eave + 3600.0 * tan + rise;
+    // Both wings' ridges, and over the corner where they meet.
+    for (x, y) in [(9000.0, 3000.0), (3000.0, 9000.0), (3000.0, 3000.0)] {
+        assert!((top(&s, x, y).unwrap() - ridge).abs() < 1e-6, "({x}, {y}): {:?}", top(&s, x, y));
+    }
+    // Inside the corner, a valley: each slope rises from its own eaves.
+    assert!((top(&s, 9000.0, 5000.0).unwrap() - (eave + 1600.0 * tan + rise)).abs() < 1e-6);
+    assert!((top(&s, 4800.0, 4800.0).unwrap() - (eave + 1800.0 * tan + rise)).abs() < 1e-6, "on the valley");
+    // Its wings' ends left upright: gables, the ridge running out to them.
+    run(&mut s, "modify", json!({"id": roof, "gables": [1, 4]}));
+    assert!((top(&s, 12000.0, 3000.0).unwrap() - ridge).abs() < 1e-6);
+    assert!(s.execute("modify", &json!({"id": roof, "gable": true})).unwrap_err().contains("rectangle"));
+    assert!(s.execute("modify", &json!({"id": roof, "gables": [6]})).unwrap_err().contains("edge"));
+    // A triangle pitches too: three slopes meeting over its middle.
+    let tri = run(&mut s, "roof", json!({"boundary": [[20000, 0], [26000, 0], [23000, 5196.152]]}))["id"].as_u64().unwrap();
+    let e = element(&mut s, tri);
+    assert!((e["ridge"].as_f64().unwrap() - (3000.0 + 6000.0 / (2.0 * 3f64.sqrt()) * tan)).abs() < 0.01, "{e}");
+}
+
+#[test]
+fn extrusion_roofs_sweep_their_profile_across() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    // Over the 8 x 6 m box on Level 2: its underside's profile along the south side, 500 mm past each
+    // end, up 2 m to a ridge 3 m along, swept north over the walls.
+    let profile = json!({"line": [[0, 0], [8000, 0]], "profile": [[-500, 0], [3000, 2000], [8500, 0]], "from": -600, "to": 6600});
+    let roof = run(&mut s, "roof", json!({"extrusion": profile}))["id"].as_u64().unwrap();
+    let e = element(&mut s, roof);
+    assert_eq!((e["ridge"].as_f64(), e["area_m2"].as_f64()), (Some(5000.0), Some(64.8)), "{e}");
+    // Halfway up its west slope: 1 m up, 300 mm thick across the slope.
+    let top = crate::view3d::tops_at(&s.model, P2(1250.0, 3000.0))[&roof];
+    assert!((top - (4000.0 + 300.0 * 3500f64.hypot(2000.0) / 3500.0)).abs() < 1e-6, "{top}");
+    // Walls attach to it: the south wall's top follows its east slope.
+    run(&mut s, "modify", json!({"ids": ids, "attach_top": roof}));
+    let wall = crate::view3d::tops_at(&s.model, P2(4000.0, 0.0))[&ids[0]];
+    assert!((wall - (3000.0 + 2000.0 * 4500.0 / 5500.0)).abs() < 1e-6, "{wall}");
+    // A profile runs along its line one way, and it's swept across some depth.
+    let e = s.execute("modify", &json!({"id": roof, "extrusion": {"profile": [[0, 0], [0, 1000]]}})).unwrap_err();
+    assert!(e.contains("profile"), "{e}");
+    assert!(s.execute("modify", &json!({"id": roof, "extrusion": {"to": -600}})).unwrap_err().contains("across"));
+}
+
+#[test]
+fn dormers_stand_out_of_a_roof_and_open_it_under_them() {
+    let mut s = Session::new();
+    run(&mut s, "wall", json!({"points": [[0, 0], [12000, 0], [12000, 8000], [0, 8000]], "closed": true}));
+    let host = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
+    // On the south slope, its front 1.6 m up it from the eaves: walls 800 mm up from the roof, a
+    // window in its front, a gable roof of its own at 30°.
+    let d = run(&mut s, "dormer", json!({"host": host, "at": [6000, 1000], "width": 1600, "height": 800, "window": "Fixed 600 x 900"}));
+    let roof = d["roof"].as_u64().unwrap();
+    assert_eq!(d["walls"].as_array().map(Vec::len), Some(3), "{d}");
+    let (tan, rise) = (30f64.to_radians().tan(), 300.0 / 30f64.to_radians().cos());
+    let front = 3000.0 + 1100.0 * tan + rise;
+    let ridge = front + 800.0 + 800.0 * tan;
+    let top = |s: &Session, id: u64, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&id).copied();
+    assert!((top(&s, roof, 6000.0, 1300.0).unwrap() - (ridge + rise)).abs() < 1e-6, "{:?}", top(&s, roof, 6000.0, 1300.0));
+    assert_eq!(top(&s, host, 6000.0, 1300.0), None, "the roof is open under it");
+    assert!(top(&s, host, 2000.0, 1300.0).is_some(), "and whole beside it");
+    // Its roof ends where it runs into the roof it stands on.
+    assert_eq!(top(&s, roof, 6000.0, 3900.0), None);
+    assert!(top(&s, host, 6000.0, 3900.0).is_some());
+    // Its front, a gable wall up to its ridge, with the window in it.
+    let window = run(&mut s, "elements", json!({"category": "window"}));
+    assert_eq!((window["count"].as_u64(), window["elements"][0]["host"].as_u64()), (Some(1), d["walls"][0].as_u64()));
+    assert!((top(&s, d["walls"][0].as_u64().unwrap(), 6000.0, 1000.0).unwrap() - ridge).abs() < 1.0);
+    // The roof it stands on gone, its roof stays, ending nowhere now, and its walls stand on their own.
+    let mut t = Session::new();
+    t.model = s.model.clone();
+    run(&mut t, "delete", json!({"ids": [host]}));
+    assert_eq!(element(&mut t, roof)["join"], Value::Null);
+    assert_eq!(element(&mut t, d["walls"][1].as_u64().unwrap())["attach_base"], Value::Null);
+    // A level roof has no slope to stand a dormer on.
+    let flat = run(&mut s, "roof", json!({"slope": 0, "boundary": [[20000, 0], [24000, 0], [24000, 4000], [20000, 4000]]}))["id"].clone();
+    assert!(s.execute("dormer", &json!({"host": flat, "at": [22000, 2000]})).unwrap_err().contains("slope"));
+}
+
+#[test]
+fn walls_under_a_trimmed_roof_stop_at_its_underside() {
+    let mut s = Session::new();
+    run(&mut s, "wall", json!({"points": [[0, 0], [12000, 0], [12000, 8000], [0, 8000]], "closed": true, "type": "Exterior - 300mm"}));
+    let host = run(&mut s, "roof", json!({"slope": 45}))["id"].as_u64().unwrap();
+    // A dormer's walls under its roof, trimmed where it runs into the host's.
+    let d = run(&mut s, "dormer", json!({"host": host, "at": [9000, 800], "width": 1800, "height": 1000}));
+    let roof = d["roof"].as_u64().unwrap();
+    // No part of them stands over its underside.
+    for w in d["walls"].as_array().unwrap().iter().filter_map(Value::as_u64) {
+        for p in crate::walls::prisms(&s.model, w, false) {
+            for q in &p.ring {
+                if let Some(under) = crate::walls::underside(&s.model, roof, *q) {
+                    assert!(p.top.at(*q) <= under + 1e-6, "wall {w} at {q:?}: {} over {under}", p.top.at(*q));
+                }
+            }
+        }
+    }
 }

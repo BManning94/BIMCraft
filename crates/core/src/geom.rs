@@ -109,10 +109,14 @@ pub fn grow(ring: &[P2], d: f64) -> Vec<P2> {
 }
 
 /// A simple ring cut into triangles, as indices into it, each counter-clockwise: ear clipping.
-/// A ring that crosses itself gets the ears there are.
+/// A ring that crosses itself gets the ears there are; a point repeated in a row is one corner.
 pub fn triangulate(ring: &[P2]) -> Vec<[usize; 3]> {
     let pt = |i: usize| ring.get(i).copied().unwrap_or_default();
     let mut left: Vec<usize> = (0..ring.len()).collect();
+    left.dedup_by(|b, a| pt(*a).dist(pt(*b)) < 1e-6);
+    if left.len() > 1 && left.first().zip(left.last()).is_some_and(|(a, b)| pt(*a).dist(pt(*b)) < 1e-6) {
+        left.pop();
+    }
     if area(ring) < 0.0 {
         left.reverse();
     }
@@ -332,6 +336,10 @@ mod tests {
         assert!(areas.iter().all(|a| *a > 0.0), "{areas:?}");
         assert!((areas.iter().sum::<f64>() - area(&l)).abs() < 1e-6);
         assert!(triangulate(&l[..2]).is_empty(), "two points enclose nothing");
+        // A corner given twice, as a clipped outline may, is one corner.
+        let twice = [l[0], l[1], l[2], l[2], l[3], l[4], l[5], l[0]];
+        let sum: f64 = triangulate(&twice).iter().map(|t| area(&t.map(|i| twice[i]))).sum();
+        assert!((sum - area(&l)).abs() < 1e-6, "{sum}");
     }
 
     fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<(P2, P2)> {
