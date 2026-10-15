@@ -15,6 +15,7 @@ pub mod sample;
 pub mod schedule;
 pub mod sheet;
 pub mod step;
+pub mod units;
 pub mod view3d;
 
 pub use commands::{element_json, roof_footprint};

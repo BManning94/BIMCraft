@@ -489,6 +489,9 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"sheet": "A101", "view": "Room Schedule", "scale": -1}),
         json!({"sheet": "A101", "view": "{3D}", "azimuth": 1e300, "elevation": 90}),
         json!({"id": 1, "name": "{3D}"}),
+        json!({"length": 5}),
+        json!({"length": "parsecs"}),
+        json!({"length": "ft-in", "width": "10'"}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -1179,5 +1182,28 @@ fn broken_or_hostile_ifc_files_fail_cleanly() {
         std::fs::write(&path, &text).unwrap();
         let _ = s.execute("open", &json!({"path": path}));
     }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn project_units_change_what_is_shown_not_the_model() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    // Millimetres by default; feet and inches on request, an undo step like any change.
+    assert_eq!(run(&mut s, "inspect", json!({}))["project_units"], "mm");
+    assert_eq!(run(&mut s, "UN", json!({"length": "ft-in"}))["length"], "ft-in");
+    assert_eq!(run(&mut s, "inspect", json!({}))["project_units"], "ft-in");
+    // The model, and every command, keep millimetres.
+    assert_eq!(element(&mut s, ids[0])["length"], 8000.0);
+    assert!(s.execute("units", &json!({"length": "furlongs"})).unwrap_err().contains("ft-in"));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(run(&mut s, "inspect", json!({}))["project_units"], "mm");
+    // Saved with the project.
+    run(&mut s, "units", json!({"length": "m"}));
+    let path = temp("units.bimcraft");
+    run(&mut s, "save", json!({"path": path}));
+    let mut t = Session::new();
+    run(&mut t, "open", json!({"path": path}));
+    assert_eq!(run(&mut t, "inspect", json!({}))["project_units"], "m");
     let _ = std::fs::remove_file(path);
 }

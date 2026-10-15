@@ -11,6 +11,7 @@ use std::f64::consts::{PI, TAU};
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{self, P2, Region};
+use crate::units::Units;
 
 pub type Id = u64;
 
@@ -547,6 +548,9 @@ pub struct Model {
     pub name: String,
     /// Seeds the IFC GlobalIds, so every export of this model keeps them.
     pub uid: u64,
+    /// How lengths and areas are shown and typed; the model itself is in millimetres.
+    #[serde(default)]
+    pub units: Units,
     pub next_id: Id,
     pub types: Types,
     pub elements: BTreeMap<Id, Element>,
@@ -555,7 +559,14 @@ pub struct Model {
 impl Model {
     /// An empty project with two levels and a few types to start from.
     pub fn new(name: &str) -> Model {
-        let mut m = Model { name: name.into(), uid: fresh_uid(), next_id: 1, types: Types::default(), elements: BTreeMap::new() };
+        let mut m = Model {
+            name: name.into(),
+            uid: fresh_uid(),
+            units: Units::default(),
+            next_id: 1,
+            types: Types::default(),
+            elements: BTreeMap::new(),
+        };
         for (n, t) in [("Generic - 200mm", 200.0), ("Interior - 100mm", 100.0), ("Exterior - 300mm", 300.0)] {
             m.types.wall.insert(n.into(), WallType { thickness: t });
         }

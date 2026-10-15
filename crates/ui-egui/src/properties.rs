@@ -8,7 +8,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bimcraft_core::element_json;
-use bimcraft_core::model::{Id, Model};
+use bimcraft_core::model::{Element, Id, Model};
+use bimcraft_core::units::Units;
 use egui::{
     Align, Align2, Button, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText, Sense,
     Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
@@ -21,10 +22,14 @@ use crate::{BimApp, Sheet, Status, Tool, plural, title};
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Text,
-    /// A length or an elevation, in mm.
+    /// A number with no unit: an angle, a scale, a size on paper.
     Number,
-    /// `[x, y]` in mm, typed as `x, y`.
+    /// A length or an elevation, in the project's units.
+    Length,
+    /// `[x, y]`, lengths in the project's units, typed as `x, y`.
     Point,
+    /// `[x, y]` on paper, in mm.
+    PaperPoint,
     Flag,
     Level,
     /// A level, shown by name; read only.
@@ -39,6 +44,14 @@ enum Kind {
     Crop,
     /// Derived from the rest; read only.
     Shown,
+    /// A length (or several), read only.
+    LengthShown,
+    /// An area in m², read only: shown in m² or ft².
+    AreaShown,
+    /// A length in m, read only.
+    MetresShown,
+    /// A dimension's values: lengths, or an angle's degrees.
+    Values,
 }
 
 use Kind::*;
@@ -61,10 +74,10 @@ fn rows(category: &str) -> &'static [Row] {
     match category {
         "wall" => &[
             ("Constraints", "level", "Base Constraint", Level),
-            ("Constraints", "base_offset", "Base Offset", Number),
+            ("Constraints", "base_offset", "Base Offset", Length),
             ("Constraints", "top_level", "Top Constraint", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
-            ("Dimensions", "length", "Length", Shown),
+            ("Dimensions", "length", "Length", LengthShown),
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
         ],
@@ -72,35 +85,35 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "level", "Level", LevelName),
             ("Identity Data", "mark", "Mark", Text),
             ("Other", "host", "Host Wall", Shown),
-            ("Other", "offset", "Offset", Number),
+            ("Other", "offset", "Offset", Length),
             ("Other", "flip_facing", "Flip Facing", Flag),
             ("Other", "flip_hand", "Flip Hand", Flag),
         ],
         "window" => &[
             ("Constraints", "level", "Level", LevelName),
-            ("Constraints", "sill", "Sill Height", Number),
+            ("Constraints", "sill", "Sill Height", Length),
             ("Identity Data", "mark", "Mark", Text),
             ("Other", "host", "Host Wall", Shown),
-            ("Other", "offset", "Offset", Number),
+            ("Other", "offset", "Offset", Length),
             ("Other", "flip_facing", "Flip Facing", Flag),
         ],
         "room" => &[
             ("Constraints", "level", "Level", Level),
-            ("Dimensions", "area_m2", "Area (m²)", Shown),
-            ("Dimensions", "perimeter_m", "Perimeter (m)", Shown),
+            ("Dimensions", "area_m2", "Area", AreaShown),
+            ("Dimensions", "perimeter_m", "Perimeter", MetresShown),
             ("Identity Data", "number", "Number", Text),
             ("Identity Data", "name", "Name", Text),
             ("Other", "point", "Location", Point),
         ],
         "floor" => &[
             ("Constraints", "level", "Level", Level),
-            ("Dimensions", "area_m2", "Area (m²)", Shown),
-            ("Dimensions", "thickness", "Thickness", Shown),
+            ("Dimensions", "area_m2", "Area", AreaShown),
+            ("Dimensions", "thickness", "Thickness", LengthShown),
         ],
-        "level" => &[("Constraints", "elevation", "Elevation", Number), ("Identity Data", "name", "Name", Text)],
+        "level" => &[("Constraints", "elevation", "Elevation", Length), ("Identity Data", "name", "Name", Text)],
         "grid" => &[("Identity Data", "name", "Name", Text), ("Other", "start", "Start", Point), ("Other", "end", "End", Point)],
         "dimension" => {
-            &[("Dimensions", "values", "Value", Shown), ("Other", "kind", "Kind", Shown), ("Other", "at", "Line Through", Point)]
+            &[("Dimensions", "values", "Value", Values), ("Other", "kind", "Kind", Shown), ("Other", "at", "Line Through", Point)]
         }
         "text" => &[
             ("Text", "text", "Text", Text),
@@ -108,7 +121,9 @@ fn rows(category: &str) -> &'static [Row] {
             ("Other", "angle", "Rotation (°)", Number),
             ("Other", "at", "Location", Point),
         ],
-        "spot" => &[("Dimensions", "elevation", "Elevation", Shown), ("Other", "host", "Host", Shown), ("Other", "at", "Location", Point)],
+        "spot" => {
+            &[("Dimensions", "elevation", "Elevation", LengthShown), ("Other", "host", "Host", Shown), ("Other", "at", "Location", Point)]
+        }
         "schedule" => &[("Identity Data", "name", "View Name", Text), ("Other", "of", "Category", Shown)],
         "view3d" => &[
             ("Identity Data", "name", "View Name", Text),
@@ -126,11 +141,11 @@ fn rows(category: &str) -> &'static [Row] {
         "viewport" => &[
             ("Identity Data", "title", "View Name", Shown),
             ("Graphics", "scale", "View Scale (1 : n)", Number),
-            ("Other", "at", "Location", Point),
+            ("Other", "at", "Location", PaperPoint),
         ],
         "column" => &[
             ("Constraints", "level", "Base Level", Level),
-            ("Constraints", "base_offset", "Base Offset", Number),
+            ("Constraints", "base_offset", "Base Offset", Length),
             ("Constraints", "top_level", "Top Level", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
             ("Other", "at", "Location", Point),
@@ -140,24 +155,24 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "level", "Base Level", Level),
             ("Constraints", "top_level", "Top Level", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
-            ("Dimensions", "width", "Actual Run Width", Number),
-            ("Dimensions", "riser", "Maximum Riser Height", Number),
-            ("Dimensions", "tread", "Actual Tread Depth", Number),
+            ("Dimensions", "width", "Actual Run Width", Length),
+            ("Dimensions", "riser", "Maximum Riser Height", Length),
+            ("Dimensions", "tread", "Actual Tread Depth", Length),
             ("Dimensions", "risers", "Actual Number of Risers", Shown),
-            ("Dimensions", "riser_height", "Actual Riser Height", Shown),
+            ("Dimensions", "riser_height", "Actual Riser Height", LengthShown),
             ("Other", "start", "Start", Point),
         ],
         "roof" => &[
             ("Constraints", "level", "Base Level", Level),
             ("Dimensions", "slope", "Slope (°)", Number),
-            ("Dimensions", "ridge", "Max Ridge Height", Shown),
-            ("Dimensions", "area_m2", "Area (m²)", Shown),
+            ("Dimensions", "ridge", "Max Ridge Height", LengthShown),
+            ("Dimensions", "area_m2", "Area", AreaShown),
             ("Other", "gable", "Gable Ends", Flag),
         ],
         "section" | "elevation" => &[
             ("Identity Data", "name", "View Name", Text),
             ("Extents", "crop", "Crop View", Crop),
-            ("Extents", "depth", "Far Clip Offset", Number),
+            ("Extents", "depth", "Far Clip Offset", Length),
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
         ],
@@ -169,12 +184,12 @@ fn rows(category: &str) -> &'static [Row] {
 const PLAN: &[Row] = &[
     ("Identity Data", "name", "View Name", Text),
     ("Extents", "id", "Associated Level", LevelName),
-    ("Extents", "elevation", "Level Elevation", Number),
+    ("Extents", "elevation", "Level Elevation", Length),
     ("Extents", "crop", "Crop View", Crop),
     ("View Range", "view_range.top", "Top", Limit),
-    ("View Range", "view_range.cut", "Cut Plane", Number),
-    ("View Range", "view_range.bottom", "Bottom", Number),
-    ("View Range", "view_range.depth", "View Depth", Number),
+    ("View Range", "view_range.cut", "Cut Plane", Length),
+    ("View Range", "view_range.bottom", "Bottom", Length),
+    ("View Range", "view_range.depth", "View Depth", Length),
 ];
 
 /// A type's parameters, as its Type Properties list them: its field, its label.
@@ -232,13 +247,37 @@ pub(crate) fn number(s: &str) -> Option<f64> {
     s.trim().parse::<f64>().ok().filter(|x| x.is_finite())
 }
 
-/// What was typed into a field, as the value `modify` takes.
-fn parse(kind: Kind, s: &str) -> Result<Value, String> {
+/// A value of `kind` as the palette shows it, lengths and areas in `units`.
+fn shown(kind: Kind, v: &Value, units: Units) -> String {
+    let each = |f: &dyn Fn(f64) -> String| match v {
+        Value::Array(a) => a.iter().filter_map(Value::as_f64).map(f).collect::<Vec<_>>().join(", "),
+        v => v.as_f64().map_or_else(String::new, f),
+    };
     match kind {
-        Number | Height => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number")),
+        Length | Height | Limit | Point | LengthShown | Values => each(&|x| units.length(x)),
+        MetresShown => each(&|x| units.length(x * 1000.0)),
+        AreaShown => each(&|x| {
+            let (area, unit) = units.area(x * 1e6);
+            format!("{area:.2} {unit}")
+        }),
+        _ => text(v),
+    }
+}
+
+/// What was typed into a field of `kind`, as the value `modify` takes: lengths in `units`.
+fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
+    let length = |t: &str| units.parse(t).ok_or_else(|| format!("`{}` is not a length", t.trim()));
+    match kind {
+        Number => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number")),
+        Length | Height => length(s).map(|x| json!(x)),
         Limit if s.trim().is_empty() => Ok(Value::Null),
-        Limit => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number; clear it for none")),
-        Point => match s.split([',', ' ']).filter(|t| !t.trim().is_empty()).collect::<Vec<_>>()[..] {
+        Limit => length(s).map(|x| json!(x)),
+        // Lengths with feet and inches hold spaces: a comma parts x from y.
+        Point => match s.split(',').collect::<Vec<_>>()[..] {
+            [x, y] => Ok(json!([length(x)?, length(y)?])),
+            _ => Err(format!("`{s}` is not a point; type x, y")),
+        },
+        PaperPoint => match s.split([',', ' ']).filter(|t| !t.trim().is_empty()).collect::<Vec<_>>()[..] {
             [x, y] if number(x).is_some() && number(y).is_some() => Ok(json!([number(x), number(y)])),
             _ => Err(format!("`{s}` is not a point; type x, y in mm")),
         },
@@ -305,16 +344,17 @@ pub(crate) struct TypeDialog {
 }
 
 impl TypeDialog {
+    /// A type's sizes, as typed: lengths in the project's units.
     fn fields(m: &Model, category: &str, name: &str) -> Vec<(&'static str, &'static str, String)> {
         let types = serde_json::to_value(&m.types).unwrap_or_default();
-        type_rows(category).iter().map(|(k, l)| (*k, *l, text(&types[category][name][k]))).collect()
+        type_rows(category).iter().map(|(k, l)| (*k, *l, shown(Length, &types[category][name][k], m.units))).collect()
     }
 
-    /// The `type` command's parameters for the type as typed, or why they aren't numbers.
-    fn params(&self, name: &str) -> Result<Value, String> {
+    /// The `type` command's parameters for the type as typed, or why they aren't lengths.
+    fn params(&self, name: &str, units: Units) -> Result<Value, String> {
         let mut p = json!({"category": self.category, "name": name});
         for (key, label, typed) in &self.fields {
-            p[*key] = json!(number(typed).ok_or_else(|| format!("{label}: `{typed}` is not a number"))?);
+            p[*key] = json!(units.parse(typed).ok_or_else(|| format!("{label}: `{typed}` is not a length"))?);
         }
         Ok(p)
     }
@@ -527,6 +567,9 @@ impl BimApp {
         }
         let mut change: Option<(&str, Result<Value, String>)> = None;
         let mut crop = None;
+        let units = model.units;
+        // A note on a sheet sits in paper mm.
+        let paper = matches!(model.elements.get(&id), Some(Element::Text(n)) if model.sheet(n.view).is_some());
         for group in groups {
             let open = !self.collapsed.contains(group);
             if group_header(ui, group, open) && !self.collapsed.remove(group) {
@@ -539,11 +582,22 @@ impl BimApp {
                 Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(124.0).show(ui, |ui| {
                     for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
                         let val = &v[key];
-                        let kind = if kind == Height && !v["top_level"].is_null() { Shown } else { kind };
+                        let kind = match kind {
+                            Height if !v["top_level"].is_null() => LengthShown,
+                            Point if paper => PaperPoint,
+                            kind => kind,
+                        };
                         let name = ui.label(label);
                         match kind {
                             Shown => {
                                 ui.label(RichText::new(text(val)).color(pal().muted));
+                            }
+                            // An angle's degrees; else lengths.
+                            Values if v["kind"] == "angular" => {
+                                ui.label(RichText::new(format!("{}°", text(val))).color(pal().muted));
+                            }
+                            LengthShown | AreaShown | MetresShown | Values => {
+                                ui.label(RichText::new(shown(kind, val, units)).color(pal().muted));
                             }
                             LevelName => {
                                 ui.label(RichText::new(level_name(val)).color(pal().muted));
@@ -578,10 +632,10 @@ impl BimApp {
                                     change = Some((key, Ok(if l == NONE { Value::Null } else { json!(l) })));
                                 }
                             }
-                            Text | Number | Point | Height | Limit => {
+                            Text | Number | Length | Point | PaperPoint | Height | Limit => {
                                 let hint = if kind == Limit { "Level Above" } else { "" };
-                                if let Some(typed) = self.field(ui, id, key, text(val), name.id, hint) {
-                                    change = Some((key, parse(kind, &typed)));
+                                if let Some(typed) = self.field(ui, id, key, shown(kind, val, units), name.id, hint) {
+                                    change = Some((key, parse(kind, &typed, units)));
                                 }
                             }
                         }
@@ -695,7 +749,7 @@ impl BimApp {
             d.duplicate = None;
         }
         if create && let Some(new) = d.duplicate.clone() {
-            let made = match d.params(new.trim()) {
+            let made = match d.params(new.trim(), model.units) {
                 Ok(p) => self.run("type", p).is_some(),
                 Err(e) => {
                     self.status = Status { text: e, error: true };
@@ -709,7 +763,7 @@ impl BimApp {
             }
         }
         if apply || ok {
-            let applied = match d.params(&d.name) {
+            let applied = match d.params(&d.name, model.units) {
                 Ok(p) => self.run("type", p).is_some(),
                 Err(e) => {
                     self.status = Status { text: e, error: true };

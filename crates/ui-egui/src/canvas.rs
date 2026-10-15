@@ -830,20 +830,18 @@ impl BimApp {
             },
             &Tool::Stair(start) => {
                 let p = snap(m, level, v, at, start.as_slice(), mods.shift);
-                match (start, number(&self.stair_width)) {
+                match (start, m.units.parse(&self.stair_width)) {
                     (None, _) => self.tool = Tool::Stair(Some(p)),
                     (Some(a), Some(width)) if a.dist(p) > TOL => {
                         self.run("stair", json!({"start": point(a), "end": point(p), "level": level, "width": width}));
                         self.tool = Tool::Stair(None);
                     }
-                    (Some(_), None) => {
-                        self.status = Status { text: format!("stair: `{}` is not a width in mm", self.stair_width), error: true }
-                    }
+                    (Some(_), None) => self.status = Status { text: format!("stair: `{}` is not a width", self.stair_width), error: true },
                     (Some(_), Some(_)) => {}
                 }
             }
             // On the level above, over this plan's walls; once made, selected, as a finished sketch is.
-            Tool::Roof => match (number(&self.roof_slope), number(&self.roof_overhang)) {
+            Tool::Roof => match (number(&self.roof_slope), m.units.parse(&self.roof_overhang)) {
                 (Some(slope), Some(overhang)) => {
                     let on = m.level_above(level).unwrap_or(level);
                     let p = typed(self, "roof", json!({"level": on, "slope": slope, "overhang": overhang, "gable": self.roof_gable}));
@@ -916,8 +914,8 @@ impl BimApp {
     /// Bar's distance.
     fn offset_by(&mut self, m: &Model, id: Id, p: P2) -> Option<P2> {
         let w = m.wall(id)?;
-        let Some(d) = self.offset.trim().parse::<f64>().ok().filter(|d| d.is_finite() && *d > 0.0) else {
-            self.status = Status { text: format!("offset: `{}` is not a distance in mm", self.offset), error: true };
+        let Some(d) = m.units.parse(&self.offset).filter(|d| *d > 0.0) else {
+            self.status = Status { text: format!("offset: `{}` is not a distance", self.offset), error: true };
             return None;
         };
         let n = (w.end - w.start).unit().perp();
@@ -988,11 +986,9 @@ impl BimApp {
     pub(crate) fn place_typed(&mut self, level: Id) {
         let typed = std::mem::take(&mut self.typed_length);
         let (Some(base), Some(cursor)) = (self.base(), self.canvas.cursor) else { return };
-        match typed.trim().parse::<f64>() {
-            Ok(len) if len.is_finite() && len > 0.0 => {
-                self.place(level, micron(base + snap_angle(cursor - base) * len));
-            }
-            _ => self.status = Status { text: format!("`{typed}` is not a length in mm"), error: true },
+        match self.session.model.units.parse(&typed) {
+            Some(len) if len > 0.0 => self.place(level, micron(base + snap_angle(cursor - base) * len)),
+            _ => self.status = Status { text: format!("`{}` is not a length", typed.trim()), error: true },
         }
     }
 
@@ -1044,7 +1040,7 @@ impl BimApp {
             p.line_segment([e + n * (off - 10.0).max(2.0), e + n * (off + 4.0)], stroke);
             p.line_segment([e + n * off - (u + n) * 3.0, e + n * off + (u + n) * 3.0], stroke);
         }
-        let text = format!("{}", w.start.dist(w.end).round());
+        let text = m.units.length(w.start.dist(w.end));
         let font = FontId::proportional(12.0);
         let size = p.layout_no_wrap(text.clone(), font.clone(), pal().accent).size() + vec2(10.0, 4.0);
         let at = Rect::from_center_size(a + along / 2.0 + n * (off + 11.0), size);
@@ -1061,7 +1057,7 @@ impl BimApp {
             }
             _ => {
                 let r = ui.interact(at, field.with("number"), Sense::click());
-                r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Temporary dimension {text} mm")));
+                r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Temporary dimension {text}")));
                 p.rect_filled(at, 2.0, pal().surface);
                 p.text(at.center(), Align2::CENTER_CENTER, &text, font, if r.hovered() { pal().hover } else { pal().accent });
                 start = r.clicked();
@@ -1072,14 +1068,14 @@ impl BimApp {
         }
         if let Some(typed) = done {
             self.dim_edit = None;
-            match typed.map(|t| (t.trim().parse::<f64>(), t)) {
-                Some((Ok(len), _)) if len.is_finite() && len > 0.0 => {
+            match typed.map(|t| (m.units.parse(&t), t)) {
+                Some((Some(len), _)) if len > 0.0 => {
                     let by = (w.end - w.start).unit() * (len - w.start.dist(w.end));
                     if by.length() > 1e-6 {
                         self.run("move", json!({"ids": [id], "by": point(by), "end": "end"}));
                     }
                 }
-                Some((_, t)) => self.status = Status { text: format!("`{t}` is not a length in mm"), error: true },
+                Some((_, t)) => self.status = Status { text: format!("`{}` is not a length", t.trim()), error: true },
                 None => {}
             }
         }
@@ -1122,7 +1118,8 @@ impl BimApp {
             Tool::Room => {
                 if let Some(g) = geom::region_at(&m.bounding_lines(level), v.mm(q), TOL) {
                     p.add(Shape::closed_line(g.outer.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
-                    label(cursor, format!("{} m²", (g.area() / 1e4).round() / 100.0));
+                    let (area, unit) = m.units.area(g.area());
+                    label(cursor, format!("{area:.2} {unit}"));
                 }
                 return;
             }
@@ -1170,7 +1167,7 @@ impl BimApp {
                 return;
             }
             Tool::Offset => {
-                let d = self.offset.trim().parse::<f64>().ok().filter(|d| d.is_finite() && *d > 0.0);
+                let d = m.units.parse(&self.offset).filter(|d| *d > 0.0);
                 if let (Some(w), Some(d)) = (hovered.and_then(|id| m.wall(id)), d) {
                     let n = (w.end - w.start).unit().perp();
                     let by = n * if (v.mm(q) - w.start).dot(n) >= 0.0 { d } else { -d };
@@ -1236,7 +1233,7 @@ impl BimApp {
             // The stair a click would make: its risers up to the level above, toward the cursor.
             &Tool::Stair(Some(start)) => {
                 let end = snap(m, level, v, q, &[start], shift);
-                if let Some(width) = number(&self.stair_width).filter(|_| end.dist(start) > TOL) {
+                if let Some(width) = m.units.parse(&self.stair_width).filter(|_| end.dist(start) > TOL) {
                     let angle = (end.1 - start.1).atan2(end.0 - start.0).to_degrees();
                     let top_level = m.level_above(level);
                     sketched(&Element::Stair(Stair {
@@ -1255,7 +1252,7 @@ impl BimApp {
             // The roof a click would make, with its ridge and hips.
             Tool::Roof => {
                 let on = m.level_above(level).unwrap_or(level);
-                if let (Some(slope), Some(overhang)) = (number(&self.roof_slope), number(&self.roof_overhang))
+                if let (Some(slope), Some(overhang)) = (number(&self.roof_slope), m.units.parse(&self.roof_overhang))
                     && let Ok(boundary) = roof_footprint(m, on, overhang)
                 {
                     let type_name =
@@ -1278,8 +1275,8 @@ impl BimApp {
         p.rect_stroke(Rect::from_center_size(sc.screen(next), vec2(8.0, 8.0)), 0.0, stroke, StrokeKind::Middle);
         // The listening dimension: the length so far, or the one being typed.
         match (chain.last(), self.typed_length.is_empty()) {
-            (Some(_), false) => label(sc.screen(next), format!("{} mm (Enter)", self.typed_length)),
-            (Some(last), true) => label(sc.screen(next), format!("{} mm", last.dist(next).round())),
+            (Some(_), false) => label(sc.screen(next), format!("{} (Enter)", self.typed_length.trim())),
+            (Some(last), true) => label(sc.screen(next), m.units.with_unit(last.dist(next))),
             (None, _) => {}
         }
     }

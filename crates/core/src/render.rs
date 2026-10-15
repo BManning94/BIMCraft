@@ -15,9 +15,9 @@ use std::fmt::Write;
 
 use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash, Transform};
 
-use crate::commands::m2;
 use crate::geom::{self, P2};
 use crate::model::{DimKind, Dimension, Element, Id, Model, Note, Opening, PlanRange, Roof, Section, Stair, TOL, Tag, Wall, heading};
+use crate::units::Units;
 use crate::view3d::{self, Camera, Clip, Image, Scene};
 use crate::{font, sheet};
 
@@ -381,7 +381,7 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
         Element::Dimension(dm) => dimension(&mut d, m, dm),
         Element::Tag(t) => tag(&mut d, m, t),
         Element::Text(n) => note(&mut d, n),
-        Element::Spot(sp) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp)),
+        Element::Spot(sp) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp), m.units),
         Element::Section(v) => section_mark(&mut d, v),
         Element::Elevation(v) => elevation_mark(&mut d, v),
         Element::Column(col) => d.line(&m.column_outline(col), 2.0, INK, true),
@@ -445,7 +445,10 @@ pub fn section_fit(m: &Model, id: Id, width: u32, height: u32) -> View {
 pub(crate) fn section_extent(m: &Model, id: Id, scale: f64) -> Option<[P2; 2]> {
     let v = m.section(id)?;
     let ((lo, hi), len) = (shown_heights(m, v), v.start.dist(v.end));
-    let head = m.levels().iter().map(|(_, l)| font::width(&l.name, 10.0)).fold(0.0, f32::max) + 12.0;
+    // The widest level name or height.
+    let head =
+        m.levels().iter().map(|(_, l)| font::width(&l.name, 10.0).max(font::width(&m.units.length(l.elevation), 10.0))).fold(0.0, f32::max)
+            + 12.0;
     Some([P2(0.0, lo - GRID_PAST), P2(len + f64::from(head) / scale, hi + GRID_PAST)])
 }
 
@@ -515,7 +518,7 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
         d.owner = Some(level);
         let (a, b) = (d.view.px(P2(0.0, l.elevation)), d.view.px(P2(len, l.elevation)));
         d.push(Prim::Line { pts: vec![a, b], width: 1.0, color: INK, dash: Some([12.0, 4.0]), closed: false });
-        for (text, dy) in [(l.name.clone(), -8.0), (format!("{}", l.elevation), 8.0)] {
+        for (text, dy) in [(l.name.clone(), -8.0), (m.units.length(l.elevation), 8.0)] {
             d.text(&text, (b.0 + 8.0 + font::width(&text, 10.0) / 2.0, b.1 + dy), 10.0, INK);
         }
     }
@@ -539,7 +542,7 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
             Element::Text(n) if n.view == id => note(&mut d, n),
             Element::Spot(sp) if sp.view == id => {
                 let z = m.spot_value(sp).unwrap_or(sp.at.1);
-                spot_mark(&mut d, view.px(P2(sp.at.0, z)), Some(z));
+                spot_mark(&mut d, view.px(P2(sp.at.0, z)), Some(z), m.units);
             }
             _ => {}
         }
@@ -611,7 +614,13 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
                 }
             }
             Element::Room(r) if r.level == level && inside(r.point) => {
-                let area = m.room_region(r).map_or_else(|| "NOT ENCLOSED".to_string(), |g| format!("{:.2} m²", m2(g.area())));
+                let area = m.room_region(r).map_or_else(
+                    || "NOT ENCLOSED".to_string(),
+                    |g| {
+                        let (area, unit) = m.units.area(g.area());
+                        format!("{area:.2} {unit}")
+                    },
+                );
                 let (x, y) = d.view.px(r.point);
                 d.text(&r.name, (x, y - 16.0), 13.0, INK);
                 d.text(&r.number, (x, y), 10.0, INK);
@@ -639,7 +648,7 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
             Element::Dimension(dm) if dm.level == level && inside(dm.at) => dimension(&mut d, m, dm),
             Element::Tag(t) if m.level_of(e) == Some(level) && m.anchor(t.host).is_some_and(|a| inside(a + t.offset)) => tag(&mut d, m, t),
             Element::Text(n) if n.view == level && inside(n.at) => note(&mut d, n),
-            Element::Spot(sp) if sp.view == level && inside(sp.at) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp)),
+            Element::Spot(sp) if sp.view == level && inside(sp.at) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp), m.units),
             // A section's line is cropped as a line is.
             Element::Section(v) => section_mark(&mut d, v),
             Element::Elevation(v) if inside(v.start + (v.end - v.start) * 0.5) => elevation_mark(&mut d, v),
@@ -914,7 +923,7 @@ fn radial(d: &mut Drawing, m: &Model, dim: &Dimension) {
     for (dx, dy) in [(4.0, 0.0), (0.0, 4.0)] {
         d.push(Prim::Line { pts: vec![(a.0 - dx, a.1 - dy), (a.0 + dx, a.1 + dy)], width: 1.0, color: INK, dash: None, closed: false });
     }
-    let text = format!("R {}", figure(r));
+    let text = format!("R {}", m.units.length(r));
     let (x, y) = d.view.px(end);
     let w = font::width(&text, 10.0) / 2.0 + 6.0;
     d.text(&text, (x + u.0 as f32 * w, y - u.1 as f32 * w), 10.0, INK);
@@ -941,20 +950,24 @@ pub(crate) fn note(d: &mut Drawing, n: &Note) {
 }
 
 /// A spot elevation's mark at pixel `at`: a triangle standing on the point, and the height it
-/// reads over a line beside it.
-fn spot_mark(d: &mut Drawing, (x, y): (f32, f32), z: Option<f64>) {
+/// reads over a line beside it, in `units`.
+fn spot_mark(d: &mut Drawing, (x, y): (f32, f32), z: Option<f64>, units: Units) {
     d.push(Prim::Fill { rings: vec![vec![(x, y), (x + 5.0, y - 8.0), (x - 5.0, y - 8.0)]], color: INK });
-    let text = z.map_or_else(
-        || "?".into(),
-        |z| match z.round() + 0.0 {
-            0.0 => "±0".into(),
-            z if z > 0.0 => format!("+{z}"),
-            z => format!("{z}"),
-        },
-    );
+    let text = z.map_or_else(|| "?".into(), |z| height(units, z));
     let w = font::width(&text, 10.0);
     d.push(Prim::Line { pts: vec![(x - 5.0, y - 8.0), (x + 9.0 + w, y - 8.0)], width: 1.0, color: INK, dash: None, closed: false });
     d.text(&text, (x + 7.0 + w / 2.0, y - 16.0), 10.0, INK);
+}
+
+/// A height as a spot elevation reads it, signed: ±0, +3000, -600, +9'-10 1/8".
+fn height(units: Units, z: f64) -> String {
+    let shown = units.length(z);
+    match shown.strip_prefix('-') {
+        Some(_) => shown,
+        // What rounds to nothing reads as nothing, either side.
+        None if units.length(0.0) == shown => format!("±{shown}"),
+        None => format!("+{shown}"),
+    }
 }
 
 /// An aligned dimension: a witness line from each reference to the dimension line, a tick where
@@ -988,7 +1001,7 @@ fn aligned(d: &mut Drawing, m: &Model, dim: &Dimension) {
     for pair in cross.windows(2) {
         let [(s0, _), (s1, _)] = pair else { continue };
         let (x, y) = d.view.px(on((s0 + s1) / 2.0));
-        d.text_turned(&format!("{}", (s1 - s0).round()), (x + up.0 * 9.0, y + up.1 * 9.0), 10.0, angle as f32, INK);
+        d.text_turned(&m.units.length(s1 - s0), (x + up.0 * 9.0, y + up.1 * 9.0), 10.0, angle as f32, INK);
     }
 }
 
@@ -1501,6 +1514,15 @@ mod tests {
         let (x, y) = view.px(P2(3000.0, 2000.0));
         assert_eq!(d.pick((x, y - 3.0), 2.0), Some(19));
         assert!(d.owners.contains(&Some(20)));
+    }
+
+    #[test]
+    fn spot_elevations_read_signed_heights_in_the_project_units() {
+        assert_eq!(
+            [height(Units::Millimetres, 0.3), height(Units::Millimetres, 3000.0), height(Units::Millimetres, -600.0)],
+            ["±0", "+3000", "-600"]
+        );
+        assert_eq!([height(Units::Metres, 0.0), height(Units::FeetInches, 3000.0)], ["±0.00", "+9'-10 1/8\""]);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use crate::commands::{category, element_json};
 use crate::model::Model;
+use crate::units::Units;
 
 pub struct Table {
     pub columns: Vec<&'static str>,
@@ -22,13 +23,42 @@ pub const VIEWS: [(&str, &str); 6] = [
     ("level", "Level Schedule"),
 ];
 
-/// A cell as a schedule shows it: areas and lengths in metres to two places, so the column lines
-/// up; other numbers to the hundredth; text as it is.
-pub fn shown(column: &str, v: &Value) -> String {
-    match v.as_f64() {
-        Some(x) if column.ends_with("(m²)") || column.ends_with("(m)") => format!("{x:.2}"),
-        Some(x) => format!("{}", (x * 100.0).round() / 100.0 + 0.0),
-        None => cell(v),
+/// What a column measures, by its heading: a length (mm), an area (m²) or a perimeter (m).
+#[derive(PartialEq)]
+enum Measure {
+    Length,
+    Area,
+    Perimeter,
+}
+
+fn measure(column: &str) -> Option<Measure> {
+    match column {
+        "Width" | "Height" | "Sill" | "Length" | "Thickness" | "Elevation" => Some(Measure::Length),
+        "Area (m²)" => Some(Measure::Area),
+        "Perimeter (m)" => Some(Measure::Perimeter),
+        _ => None,
+    }
+}
+
+/// A column's heading as a schedule shows it in `units`: areas in m² or ft², perimeters in m or ft.
+/// (The rows themselves, as `table` gives them, keep mm, m² and m.)
+pub fn heading(units: Units, column: &str) -> String {
+    match measure(column) {
+        Some(Measure::Area) if units.imperial() => "Area (ft²)".into(),
+        Some(Measure::Perimeter) if units.imperial() => "Perimeter (ft)".into(),
+        _ => column.into(),
+    }
+}
+
+/// A cell as a schedule shows it in `units`: lengths as drawings show them; areas and perimeters
+/// to two places, so the column lines up; other numbers to the hundredth; text as it is.
+pub fn shown(units: Units, column: &str, v: &Value) -> String {
+    match (v.as_f64(), measure(column)) {
+        (Some(x), Some(Measure::Length)) => units.length(x),
+        (Some(x), Some(Measure::Area)) => format!("{:.2}", units.area(x * 1e6).0),
+        (Some(x), Some(Measure::Perimeter)) => format!("{:.2}", if units.imperial() { x * 1000.0 / 304.8 } else { x }),
+        (Some(x), _) => format!("{}", (x * 100.0).round() / 100.0 + 0.0),
+        (None, _) => cell(v),
     }
 }
 
@@ -156,6 +186,16 @@ mod tests {
     fn unknown_categories_name_the_schedules_there_are() {
         let e = table(&house().model, "stairs").err().unwrap();
         assert!(e.contains("rooms") && e.contains("doors"), "{e}");
+    }
+
+    #[test]
+    fn schedules_show_lengths_and_areas_in_the_project_units() {
+        let (ft, m) = (Units::FeetInches, Units::Metres);
+        assert_eq!((heading(ft, "Area (m²)"), shown(ft, "Area (m²)", &json!(18.0))), ("Area (ft²)".into(), "193.75".into()));
+        assert_eq!((heading(m, "Area (m²)"), shown(m, "Area (m²)", &json!(18.0))), ("Area (m²)".into(), "18.00".into()));
+        assert_eq!((heading(ft, "Perimeter (m)"), shown(ft, "Perimeter (m)", &json!(18.0))), ("Perimeter (ft)".into(), "59.06".into()));
+        assert_eq!([shown(m, "Width", &json!(900.0)), shown(ft, "Width", &json!(900.0))], ["0.90", "2'-11 7/16\""]);
+        assert_eq!([shown(ft, "Mark", &json!("D2")), shown(ft, "Wall", &json!(4))], ["D2", "4"]);
     }
 
     #[test]

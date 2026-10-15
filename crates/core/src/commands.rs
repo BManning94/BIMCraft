@@ -15,6 +15,7 @@ use crate::model::{
     Section, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
+use crate::units::Units;
 use crate::{pdf, render, schedule, sheet, view3d};
 
 type R = Result<Value, String>;
@@ -246,6 +247,15 @@ pub static ALL: &[Command] = &[
         "{ids: [id,…]} deleting a wall deletes its doors and windows, deleting those their tags; a view takes its notes and \
          spot elevations, and what a spot elevation reads takes it; dimensions lose what's deleted",
         delete,
+    ),
+    edit(
+        "units",
+        "Project Units",
+        &["UN"],
+        "{length?: mm|cm|m|in|ft|ft-in} how drawings, schedules and the desktop show lengths, and read typed ones: \
+         millimetres, centimetres, metres, fractional inches, decimal feet, or feet and fractional inches (to 1/16\"); areas \
+         in m², or ft² with inches and feet. The model, and every command, keep millimetres",
+        units,
     ),
     other("inspect", "Inspect", "{} levels, element counts, types, warnings and undo history", inspect),
     other(
@@ -1988,6 +1998,17 @@ fn delete(s: &mut Session, p: &Value) -> R {
 
 // ---------- reading ----------
 
+fn units(s: &mut Session, p: &Value) -> R {
+    let c = "units";
+    if let Some(name) = string(c, p, "length")? {
+        let u = Units::from_name(&name).ok_or_else(|| bad(c, format!("`length` is mm, cm, m, in, ft or ft-in, not `{name}`")))?;
+        if u != s.model.units {
+            s.model_mut().units = u;
+        }
+    }
+    Ok(json!({"length": s.model.units.name()}))
+}
+
 fn inspect(s: &mut Session, _: &Value) -> R {
     let m = &s.model;
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
@@ -2006,7 +2027,7 @@ fn inspect(s: &mut Session, _: &Value) -> R {
         })
         .collect();
     Ok(json!({
-        "name": m.name, "units": "mm", "path": s.path, "levels": levels, "counts": counts,
+        "name": m.name, "units": "mm", "project_units": m.units.name(), "path": s.path, "levels": levels, "counts": counts,
         "types": m.types, "warnings": warnings, "history": s.history(),
     }))
 }

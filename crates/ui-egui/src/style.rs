@@ -186,6 +186,7 @@ pub enum Icon {
     Angular,
     Radial,
     Crop,
+    Units,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -421,6 +422,14 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             Shape::circle_filled(at(12.0, 12.0), 1.5 * k, color),
             line(&[(12.0, 12.0), (17.7, 6.3)]),
             line(&[(14.5, 6.5), (17.7, 6.3), (17.5, 9.5)]),
+        ],
+        // A rule with its marks.
+        Icon::Units => vec![
+            ring(&[(2.0, 8.0), (22.0, 8.0), (22.0, 16.0), (2.0, 16.0)]),
+            line(&[(6.0, 8.0), (6.0, 12.0)]),
+            line(&[(10.0, 8.0), (10.0, 11.0)]),
+            line(&[(14.0, 8.0), (14.0, 12.0)]),
+            line(&[(18.0, 8.0), (18.0, 11.0)]),
         ],
         // Two crop marks, at opposite corners.
         Icon::Crop => vec![line(&[(6.0, 2.0), (6.0, 18.0), (22.0, 18.0)]), line(&[(2.0, 6.0), (18.0, 6.0), (18.0, 22.0)])],

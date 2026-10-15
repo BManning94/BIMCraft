@@ -125,18 +125,20 @@ fn title_block(d: &mut Drawing, project: &str, sheet: &Sheet, paper: P2, scale: 
 }
 
 /// A schedule's table: its headings, its rows' cells as shown, and each column's width, px.
-type Table = (Vec<&'static str>, Vec<Vec<String>>, Vec<f32>);
+type Table = (Vec<String>, Vec<Vec<String>>, Vec<f32>);
 
 fn table_of(m: &Model, sc: &Schedule) -> Table {
     let t = schedule::table(m, &sc.of).unwrap_or(schedule::Table { columns: Vec::new(), rows: Vec::new() });
-    let cells: Vec<Vec<String>> = t.rows.iter().map(|r| r.iter().zip(&t.columns).map(|(v, c)| schedule::shown(c, v)).collect()).collect();
-    let widths = (0..t.columns.len())
+    let cells: Vec<Vec<String>> =
+        t.rows.iter().map(|r| r.iter().zip(&t.columns).map(|(v, c)| schedule::shown(m.units, c, v)).collect()).collect();
+    let headings: Vec<String> = t.columns.iter().map(|c| schedule::heading(m.units, c)).collect();
+    let widths = (0..headings.len())
         .map(|i| {
-            let widest = t.columns.get(i).map_or(0.0, |c| font::width(c, CELL_TEXT));
+            let widest = headings.get(i).map_or(0.0, |c| font::width(c, CELL_TEXT));
             cells.iter().filter_map(|r| r.get(i)).map(|c| font::width(c, CELL_TEXT)).fold(widest, f32::max) + 2.0 * PAD
         })
         .collect();
-    (t.columns, cells, widths)
+    (headings, cells, widths)
 }
 
 fn table_size((_, rows, widths): &Table) -> (u32, u32) {
@@ -159,7 +161,7 @@ fn table(d: &mut Drawing, m: &Model, sc: &Schedule, (x, y): (f32, f32)) {
     d.text(&sc.name, (x + w / 2.0, y + TITLE_ROW / 2.0), TITLE_TEXT, INK);
     let top = y + TITLE_ROW;
     rule(d, (x, top), (x + w, top), 1.0);
-    let lines = std::iter::once(columns.iter().map(|c| c.to_string()).collect::<Vec<_>>()).chain(rows);
+    let lines = std::iter::once(columns).chain(rows);
     for (i, cells) in lines.enumerate() {
         let row = top + ROW * i as f32;
         if i > 0 {

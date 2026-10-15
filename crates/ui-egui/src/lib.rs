@@ -22,6 +22,7 @@ use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
 use bimcraft_core::model::{Element, Id, Model, Reference, STAIR_WIDTH, heading};
 use bimcraft_core::schedule;
+use bimcraft_core::units::Units;
 use egui::containers::menu::{MenuButton, SubMenuButton};
 use egui::{
     Align, Align2, Area, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, CornerRadius, Event, FontId, Frame, Grid, Id as UiId,
@@ -123,6 +124,7 @@ enum Tab {
     Architecture,
     Annotate,
     View,
+    Manage,
     Modify,
     Context,
 }
@@ -225,6 +227,8 @@ pub struct BimApp {
     tag_leader: bool,
     /// What the Text tool writes.
     note_text: String,
+    /// The project units the Options Bar's lengths were last written in.
+    units: Units,
     /// A length typed while picking points: the listening dimension.
     typed_length: String,
     /// A selected wall's temporary dimension being typed: the wall, the length so far.
@@ -277,7 +281,7 @@ fn height_options(ui: &mut Ui, m: &Model, level: Id, top: &mut Option<Option<Id>
     });
     combo.response.labelled_by(label.id);
     if now.is_none() {
-        ui.add(TextEdit::singleline(height).desired_width(64.0).hint_text("mm")).labelled_by(label.id);
+        ui.add(TextEdit::singleline(height).desired_width(64.0).hint_text(m.units.name())).labelled_by(label.id);
     }
 }
 
@@ -286,7 +290,7 @@ fn height_options(ui: &mut Ui, m: &Model, level: Id, top: &mut Option<Option<Id>
 fn top_params(m: &Model, level: Id, top: Option<Option<Id>>, height: &str) -> Result<Value, String> {
     match top.unwrap_or_else(|| m.level_above(level)) {
         Some(t) => Ok(json!({"top_level": t})),
-        None => properties::number(height).map(|h| json!({"height": h})).ok_or_else(|| format!("`{height}` is not a height in mm")),
+        None => m.units.parse(height).map(|h| json!({"height": h})).ok_or_else(|| format!("`{height}` is not a height")),
     }
 }
 
@@ -401,6 +405,7 @@ fn panel(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 impl BimApp {
     pub fn new(session: Session) -> BimApp {
         let first = Sheet::Plan(session.model.levels().first().map_or(0, |(id, _)| *id));
+        let units = session.model.units;
         BimApp {
             saved: Arc::clone(&session.model),
             session,
@@ -413,12 +418,12 @@ impl BimApp {
             back: Tab::Architecture,
             types: BTreeMap::new(),
             wall_top: None,
-            wall_height: "3000".into(),
+            wall_height: units.length(3000.0),
             column_top: None,
-            column_height: "3000".into(),
-            stair_width: format!("{STAIR_WIDTH}"),
+            column_height: units.length(3000.0),
+            stair_width: units.length(STAIR_WIDTH),
             roof_slope: "30".into(),
-            roof_overhang: "500".into(),
+            roof_overhang: units.length(500.0),
             roof_gable: false,
             chain: true,
             thin: false,
@@ -427,10 +432,11 @@ impl BimApp {
             angle: String::new(),
             rotate_copy: false,
             mirror_copy: true,
-            offset: "1000".into(),
+            offset: units.length(1000.0),
             offset_copy: true,
             tag_leader: false,
             note_text: String::new(),
+            units,
             typed_length: String::new(),
             dim_edit: None,
             tab_cycle: false,
@@ -617,6 +623,17 @@ impl BimApp {
     /// Follow what the last command removed: the selection, views of levels that are gone, and
     /// the contextual tab once its tool or selection is.
     fn tidy(&mut self) {
+        // The Options Bar's lengths, rewritten in the project's units when they change.
+        let (from, to) = (self.units, self.session.model.units);
+        if from != to {
+            for field in [&mut self.wall_height, &mut self.column_height, &mut self.stair_width, &mut self.roof_overhang, &mut self.offset]
+            {
+                if let Some(mm) = from.parse(field) {
+                    *field = to.length(mm);
+                }
+            }
+            self.units = to;
+        }
         let m = &self.session.model;
         self.selection.retain(|id| m.elements.contains_key(id));
         let exists = |s: &Sheet| match s {
@@ -687,11 +704,18 @@ impl BimApp {
                 })
                 .collect()
         });
-        // Digits make a length while a tool is picking its next point; letters are shortcuts.
-        if self.base().is_some() {
-            self.typed_length.extend(typed.chars().filter(|c| c.is_ascii_digit() || *c == '.'));
+        // A digit starts a length while a tool is picking its next point, and everything typed
+        // after it (feet, inches, fractions, a unit) is the length's until Enter; letters before
+        // one are shortcuts.
+        let mut shortcut = String::new();
+        for ch in typed.chars() {
+            if self.base().is_some() && (ch.is_ascii_digit() || ch == '.' || !self.typed_length.is_empty()) {
+                self.typed_length.push(ch);
+            } else {
+                shortcut.push(ch);
+            }
         }
-        for ch in typed.chars().filter(char::is_ascii_alphabetic) {
+        for ch in shortcut.chars().filter(char::is_ascii_alphabetic) {
             self.typed.push(ch.to_ascii_uppercase());
             if self.typed.len() > 2 {
                 self.typed.remove(0);
@@ -762,7 +786,7 @@ impl BimApp {
         }
         if tool == Tool::Level {
             let top = self.session.model.levels().last().map_or(0.0, |(_, l)| l.elevation);
-            self.new_level = (format!("{}", top + 3000.0), String::new());
+            self.new_level = (self.session.model.units.length(top + 3000.0), String::new());
         }
         if tool != Tool::Modify && !edits {
             self.selection.clear();
@@ -1061,9 +1085,13 @@ impl BimApp {
                 let file =
                     egui::Button::new(RichText::new("File").color(Color32::WHITE).strong()).fill(pal().accent).min_size(vec2(58.0, 26.0));
                 MenuButton::from_button(file).ui(ui, |ui| self.file_menu(ui, &ctx));
-                for (tab, label) in
-                    [(Tab::Architecture, "Architecture"), (Tab::Annotate, "Annotate"), (Tab::View, "View"), (Tab::Modify, "Modify")]
-                {
+                for (tab, label) in [
+                    (Tab::Architecture, "Architecture"),
+                    (Tab::Annotate, "Annotate"),
+                    (Tab::View, "View"),
+                    (Tab::Manage, "Manage"),
+                    (Tab::Modify, "Modify"),
+                ] {
                     if tab_button(ui, label, self.tab == tab, false).clicked() {
                         self.tab = tab;
                     }
@@ -1081,6 +1109,7 @@ impl BimApp {
                 Tab::Architecture => self.architecture_tab(ui),
                 Tab::Annotate => self.annotate_tab(ui),
                 Tab::View => self.view_tab(ui),
+                Tab::Manage => self.manage_tab(ui),
                 Tab::Modify | Tab::Context => self.modify_tab(ui),
             });
         });
@@ -1308,6 +1337,22 @@ impl BimApp {
         });
     }
 
+    /// Manage: the project's settings, as Revit's tab has them.
+    fn manage_tab(&mut self, ui: &mut Ui) {
+        panel(ui, "Settings", |ui| {
+            let now = self.session.model.units;
+            let tip = format!("Project Units (UN): how lengths show and read; now {}", now.label().to_lowercase());
+            let r = big_button(ui, Icon::Units, "Project Units", false, &tip);
+            Popup::menu(&r).show(|ui| {
+                for u in Units::ALL {
+                    if ui.selectable_label(u == now, u.label()).clicked() {
+                        self.run("units", json!({"length": u.name()}));
+                    }
+                }
+            });
+        });
+    }
+
     fn modify_tab(&mut self, ui: &mut Ui) {
         self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
         panel(ui, "Properties", |ui| {
@@ -1411,13 +1456,15 @@ impl BimApp {
                 }
                 Tool::Stair(_) => {
                     let l = ui.label("Width:");
-                    ui.add(TextEdit::singleline(&mut self.stair_width).desired_width(64.0).hint_text("mm")).labelled_by(l.id);
+                    let hint = self.session.model.units.name();
+                    ui.add(TextEdit::singleline(&mut self.stair_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                 }
                 Tool::Roof => {
                     let l = ui.label("Slope:");
                     ui.add(TextEdit::singleline(&mut self.roof_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
                     let l = ui.label("Overhang:");
-                    ui.add(TextEdit::singleline(&mut self.roof_overhang).desired_width(64.0).hint_text("mm")).labelled_by(l.id);
+                    let hint = self.session.model.units.name();
+                    ui.add(TextEdit::singleline(&mut self.roof_overhang).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                     ui.checkbox(&mut self.roof_gable, "Gable");
                 }
                 Tool::Level => self.level_options(ui),
@@ -1442,7 +1489,8 @@ impl BimApp {
                 }
                 Tool::Offset => {
                     let l = ui.label("Offset:");
-                    ui.add(TextEdit::singleline(&mut self.offset).desired_width(70.0).hint_text("mm")).labelled_by(l.id);
+                    let hint = self.session.model.units.name();
+                    ui.add(TextEdit::singleline(&mut self.offset).desired_width(70.0).hint_text(hint)).labelled_by(l.id);
                     ui.checkbox(&mut self.offset_copy, "Copy");
                 }
                 _ => {}
@@ -1480,8 +1528,8 @@ impl BimApp {
         let l = ui.label("Name");
         ui.add(TextEdit::singleline(&mut self.new_level.1).hint_text("the next free name").desired_width(140.0)).labelled_by(l.id);
         if ui.button("Create").clicked() {
-            match self.new_level.0.trim().parse::<f64>() {
-                Ok(elevation) if elevation.is_finite() => {
+            match self.session.model.units.parse(&self.new_level.0) {
+                Some(elevation) => {
                     let mut p = json!({"elevation": elevation});
                     if !self.new_level.1.trim().is_empty() {
                         p["name"] = json!(self.new_level.1.trim());
@@ -1490,7 +1538,7 @@ impl BimApp {
                         self.tool = Tool::Modify;
                     }
                 }
-                _ => self.status = Status { text: format!("level: `{}` is not an elevation in mm", self.new_level.0), error: true },
+                None => self.status = Status { text: format!("level: `{}` is not an elevation", self.new_level.0), error: true },
             }
         }
     }
@@ -1573,7 +1621,8 @@ impl BimApp {
                 let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                 style::paint(ui.painter(), Icon::Filter, r, pal().icon);
                 if let Some(p) = self.canvas.cursor {
-                    ui.monospace(format!("x {:.0}  y {:.0} mm", p.0, p.1));
+                    let u = self.session.model.units;
+                    ui.monospace(format!("x {}  y {}", u.with_unit(p.0), u.with_unit(p.1)));
                 }
                 if self.dirty() {
                     ui.label(RichText::new("Unsaved changes").color(pal().muted));
@@ -1710,13 +1759,14 @@ impl BimApp {
                 Ok(t) => {
                     ScrollArea::both().show(ui, |ui| {
                         Grid::new(("schedule", cat)).striped(true).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
+                            let units = self.session.model.units;
                             for c in &t.columns {
-                                ui.label(RichText::new(*c).strong());
+                                ui.label(RichText::new(schedule::heading(units, c)).strong());
                             }
                             ui.end_row();
                             for row in &t.rows {
                                 for (v, c) in row.iter().zip(&t.columns) {
-                                    let text = schedule::shown(c, v);
+                                    let text = schedule::shown(units, c, v);
                                     if v.is_number() {
                                         ui.monospace(text)
                                     } else {

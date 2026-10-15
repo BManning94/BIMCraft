@@ -53,7 +53,9 @@ cargo test --workspace
 
 ## Conventions
 
-Millimetres; x east, y north, z up. Levels have elevations, and a level is its plan: its view range (`Model::plan_range`)
+Millimetres; x east, y north, z up. A project's units (`Model::units`, `units.rs`) change only what's shown and typed:
+drawings, schedules and the desktop format lengths with `Units::length` and areas with `Units::area`, and read typed
+lengths with `Units::parse`; files, JSON and every command stay in millimetres. Levels have elevations, and a level is its plan: its view range (`Model::plan_range`)
 cuts 1200 mm above it unless set, and its crop region bounds what the plan shows. Rooms find their walls at 1200 mm whatever
 a plan cuts (`Model::bounding`). In a section or an elevation, points run along its line from its start, and up; on a sheet,
 they're paper mm from its bottom left corner; notes and spot elevations live in those terms in their view. Wall location

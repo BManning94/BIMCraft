@@ -1057,3 +1057,45 @@ fn place_view_puts_schedules_and_the_3d_view_on_sheets() {
     double_click(&mut h, P2(at[0].as_f64().unwrap(), at[1].as_f64().unwrap()));
     assert_eq!(h.state().sheet, Sheet::Schedule("room"));
 }
+
+#[test]
+fn project_units_show_and_read_lengths_in_feet_and_inches() {
+    let mut h = app(BOX);
+    press(&mut h, "Manage");
+    press(&mut h, "Project Units");
+    press(&mut h, "Feet and inches");
+    assert_eq!(h.state().session.model.units.name(), "ft-in");
+    // The bottom wall, 8000 mm long, in Properties; a base offset typed in feet and inches.
+    click(&mut h, P2(4000.0, 0.0));
+    assert!(h.query_by_label("26'-2 15/16\"").is_some());
+    type_into(&mut h, "Base Offset", "1' 6\"");
+    key(&mut h, Key::Enter);
+    let wall = h.state().selection[0];
+    assert_eq!(field(&h, wall, "base_offset"), json!(457.2));
+}
+
+#[test]
+fn lengths_typed_while_drawing_read_in_the_project_units() {
+    let mut h = app("units {\"length\": \"ft-in\"}");
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 0.0));
+    h.hover_at(h.state().screen(P2(1000.0, 20.0)));
+    h.run();
+    // Feet, inches and a fraction: everything after the first digit is the length's, not a shortcut.
+    h.event(Event::Text("10' 6 1/2\"".into()));
+    h.run();
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(0.0, 0.0)]), "no letter or mark started a tool");
+    key(&mut h, Key::Enter);
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(3213.1, 0.0))]);
+    // A metre, typed with its unit, in a project in feet and inches.
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 2000.0));
+    h.hover_at(h.state().screen(P2(1000.0, 2000.0)));
+    h.run();
+    h.event(Event::Text("1m".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h)[1], (P2(0.0, 2000.0), P2(1000.0, 2000.0)));
+}
