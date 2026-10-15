@@ -1,0 +1,929 @@
+//! The app driven the way a user drives it: clicks on the plan at model points, the ribbon and
+//! the browser by their labels, keys. Each test then reads the model the session ended up with,
+//! or what the window shows.
+
+use bimcraft_core::element_json;
+use bimcraft_core::engine::Session;
+use bimcraft_core::geom::P2;
+use bimcraft_core::model::{Element, Id};
+use bimcraft_core::sample::SAMPLE;
+use egui::accesskit::Role;
+use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, vec2};
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable;
+use serde_json::json;
+
+use crate::{BimApp, Sheet, Tool};
+
+const BOX: &str = r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}"#;
+
+fn app(script: &str) -> Harness<'static, BimApp> {
+    app_at(script, 0.25)
+}
+
+/// The app with frames `step` seconds apart. Each queued event runs a frame, so a double click
+/// (two clicks within 300 ms) needs short ones.
+fn app_at(script: &str, step: f32) -> Harness<'static, BimApp> {
+    let mut s = Session::new();
+    s.script(script).unwrap();
+    let mut h = Harness::builder()
+        .with_size([1280.0, 800.0])
+        .with_max_steps(32)
+        .with_step_dt(step)
+        .build_ui_state(|ui, app: &mut BimApp| app.show(ui), BimApp::new(s));
+    h.run();
+    h
+}
+
+fn press(h: &mut Harness<BimApp>, label: &str) {
+    h.get_by_label(label).click();
+    h.run();
+}
+
+/// A tool from the Architecture tab: a tool's contextual tab takes the ribbon, as in Revit.
+fn tool(h: &mut Harness<BimApp>, label: &str) {
+    press(h, "Architecture");
+    press(h, label);
+}
+
+/// Replace a text field's contents, as a user selecting all and typing does.
+fn type_into(h: &mut Harness<BimApp>, label: &str, text: &str) {
+    h.get_by_label(label).focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by_label(label).type_text(text);
+    h.run();
+}
+
+/// Of the widgets named `name`, the one highest up: a view tab over the browser's entry, a
+/// ribbon tab over the tool of the same name.
+fn topmost(h: &mut Harness<BimApp>, name: &str) {
+    let top = h.get_all_by_label(name).min_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).map(|n| n.rect().center());
+    let pos = top.unwrap();
+    h.hover_at(pos);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.run();
+}
+
+/// A primary click on the plan at a model point.
+fn click(h: &mut Harness<BimApp>, p: P2) {
+    click_with(h, p, Modifiers::NONE);
+}
+
+/// A click holding modifier keys (Ctrl adds to the selection, Shift takes away).
+fn click_with(h: &mut Harness<BimApp>, p: P2, modifiers: Modifiers) {
+    let pos = h.state().screen(p);
+    h.hover_at(pos);
+    h.run();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers });
+    }
+    h.run();
+}
+
+/// A primary click at a point on screen.
+fn click_at(h: &mut Harness<BimApp>, pos: Pos2) {
+    h.hover_at(pos);
+    h.run();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.run();
+}
+
+/// Two primary clicks at a model point, a frame apart: a double click, in a harness with short
+/// frames ([`app_at`]).
+fn double_click(h: &mut Harness<BimApp>, p: P2) {
+    // Let the last clicks age first: a third click within 600 ms of two others is a triple.
+    h.run_steps(15);
+    let pos = h.state().screen(p);
+    h.hover_at(pos);
+    h.run();
+    for pressed in [true, false, true, false] {
+        h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.run();
+}
+
+/// A drag with `button` between points on screen, in steps.
+fn drag_screen(h: &mut Harness<BimApp>, a: Pos2, b: Pos2, button: PointerButton) {
+    h.hover_at(a);
+    h.run();
+    h.event(Event::PointerButton { pos: a, button, pressed: true, modifiers: Modifiers::NONE });
+    h.run();
+    for t in [0.25, 0.5, 0.75, 1.0] {
+        h.hover_at(a + (b - a) * t);
+        h.run();
+    }
+    h.event(Event::PointerButton { pos: b, button, pressed: false, modifiers: Modifiers::NONE });
+    h.run();
+}
+
+/// A primary drag on the plan between model points, in steps, as a hand makes it.
+fn drag(h: &mut Harness<BimApp>, from: P2, to: P2) {
+    let (a, b) = (h.state().screen(from), h.state().screen(to));
+    h.hover_at(a);
+    h.run();
+    h.event(Event::PointerButton { pos: a, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.run();
+    for t in [0.25, 0.5, 0.75, 1.0] {
+        h.hover_at(a + (b - a) * t);
+        h.run();
+    }
+    h.event(Event::PointerButton { pos: b, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    h.run();
+}
+
+/// The id of the element `f` picks out.
+fn find(h: &Harness<BimApp>, f: impl Fn(&Element) -> bool) -> Id {
+    h.state().session.model.elements.iter().find(|(_, e)| f(e)).map(|(id, _)| *id).unwrap()
+}
+
+fn key(h: &mut Harness<BimApp>, k: Key) {
+    h.key_press(k);
+    h.run();
+}
+
+fn ids(h: &Harness<BimApp>, category: &str) -> Vec<Id> {
+    h.state().session.model.elements.iter().filter(|(_, e)| e.category() == category).map(|(id, _)| *id).collect()
+}
+
+fn walls(h: &Harness<BimApp>) -> Vec<(P2, P2)> {
+    h.state()
+        .session
+        .model
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Wall(w) => Some((w.start, w.end)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn field(h: &Harness<BimApp>, id: Id, key: &str) -> serde_json::Value {
+    element_json(&h.state().session.model, id)[key].clone()
+}
+
+#[test]
+fn clicking_the_plan_selects_the_element_drawn_nearest_the_cursor() {
+    let mut h = app(SAMPLE);
+    let door = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "1"));
+    click(&mut h, P2(2000.0, 0.0));
+    assert_eq!(h.state().selection, [door]);
+    assert!(h.query_by_label("Flip Facing").is_some(), "the palette shows the door's properties");
+    assert!(h.query_by_label("Modify | Doors").is_some(), "the selection's contextual tab");
+    click(&mut h, P2(3000.0, 1000.0));
+    assert!(h.state().selection.is_empty(), "empty floor selects nothing");
+}
+
+#[test]
+fn the_wall_tool_chains_clicks_and_enter_makes_them_one_undo_step() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    for p in [P2(-3000.0, -3000.0), P2(3000.0, -3000.0), P2(3000.0, 2000.0)] {
+        click(&mut h, p);
+    }
+    assert!(walls(&h).is_empty(), "nothing is built before Enter");
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h), [(P2(-3000.0, -3000.0), P2(3000.0, -3000.0)), (P2(3000.0, -3000.0), P2(3000.0, 2000.0))]);
+    assert_eq!(h.state().session.history(), ["Wall"]);
+    assert!(matches!(&h.state().tool, Tool::Wall(pts) if pts.is_empty()), "the tool stays on for the next chain");
+}
+
+#[test]
+fn escape_drops_the_chain_and_clicking_its_start_closes_it() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(4000.0, 0.0));
+    key(&mut h, Key::Escape);
+    assert!(walls(&h).is_empty());
+    for p in [P2(0.0, 0.0), P2(4000.0, 0.0), P2(4000.0, 3000.0), P2(0.0, 3000.0), P2(0.0, 0.0)] {
+        click(&mut h, p);
+    }
+    assert_eq!(walls(&h).len(), 4, "back on its start, the chain closes");
+    key(&mut h, Key::Escape);
+    assert!(matches!(h.state().tool, Tool::Modify), "Escape with no chain leaves the tool");
+}
+
+#[test]
+fn doors_and_windows_go_into_the_wall_clicked() {
+    let mut h = app(BOX);
+    let bottom = ids(&h, "wall")[0];
+    tool(&mut h, "Door");
+    click(&mut h, P2(2000.0, 40.0));
+    let door = ids(&h, "door");
+    assert_eq!(door.len(), 1);
+    assert_eq!((field(&h, door[0], "host"), field(&h, door[0], "offset")), (json!(bottom), json!(2000.0)));
+    tool(&mut h, "Window");
+    click(&mut h, P2(4000.0, 3000.0));
+    assert!(ids(&h, "window").is_empty());
+    assert!(h.state().status.error && h.state().status.text.contains("no wall"), "{:?}", h.state().status.text);
+    click(&mut h, P2(8000.0, 3000.0));
+    assert_eq!(ids(&h, "window").len(), 1);
+}
+
+#[test]
+fn rooms_go_where_clicked_and_their_area_follows_the_walls() {
+    let mut h = app(BOX);
+    tool(&mut h, "Room");
+    click(&mut h, P2(2000.0, 3000.0));
+    let room = ids(&h, "room")[0];
+    assert_eq!(field(&h, room, "area_m2"), json!(48.0));
+    // A partition clicked a little off the walls' centre lines: its ends snap onto them, so it
+    // meets them and splits the room.
+    tool(&mut h, "Wall");
+    click(&mut h, P2(4040.0, 30.0));
+    click(&mut h, P2(4040.0, 5970.0));
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h).last(), Some(&(P2(4040.0, 0.0), P2(4040.0, 6000.0))));
+    assert_eq!(field(&h, room, "area_m2"), json!(24.24));
+}
+
+#[test]
+fn properties_edit_through_modify_and_undo_puts_them_back() {
+    let mut h = app(SAMPLE);
+    click(&mut h, P2(3000.0, 2000.0));
+    let room = h.state().selection[0];
+    assert_eq!(field(&h, room, "name"), json!("Living"));
+    type_into(&mut h, "Name", "Lounge");
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, room, "name"), json!("Lounge"));
+    assert_eq!(h.state().session.history().last(), Some(&"Modify"));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(field(&h, room, "name"), json!("Living"));
+    press(&mut h, "Redo");
+    assert_eq!(field(&h, room, "name"), json!("Lounge"));
+}
+
+#[test]
+fn the_wheel_zooms_about_the_cursor_and_the_middle_button_pans() {
+    let mut h = app(SAMPLE);
+    let (p, q) = (P2(8000.0, 3500.0), P2(0.0, 0.0));
+    let at = h.state().screen(p);
+    let span = (h.state().screen(q) - at).length();
+    h.hover_at(at);
+    h.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(0.0, 120.0),
+        phase: TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+    assert!((h.state().screen(p) - at).length() < 1.0, "the point under the cursor stays put");
+    assert!((h.state().screen(q) - at).length() > span * 1.2, "zoomed in");
+    let to = at + vec2(100.0, 50.0);
+    h.event(Event::PointerButton { pos: at, button: PointerButton::Middle, pressed: true, modifiers: Modifiers::NONE });
+    h.run();
+    h.hover_at(to);
+    h.run();
+    h.event(Event::PointerButton { pos: to, button: PointerButton::Middle, pressed: false, modifiers: Modifiers::NONE });
+    h.run();
+    assert!((h.state().screen(p) - to).length() < 1.0, "the plan followed the drag");
+    // Hostile wheels: the view stays usable.
+    for dy in [1e30, -1e30] {
+        h.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, dy),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        h.run();
+        let s = h.state().screen(p);
+        assert!(s.x.is_finite() && s.y.is_finite());
+    }
+}
+
+#[test]
+fn the_browser_opens_level_plans_and_schedules() {
+    let mut h = app(SAMPLE);
+    for label in ["Views (all)", "Floor Plans", "Schedules/Quantities (all)"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    press(&mut h, "Level 2");
+    assert_eq!(h.state().sheet, Sheet::Plan(2));
+    // Below the browser's fold, past the elevations and sections: reached as screen readers do.
+    h.get_by_label("Room Schedule").click_accesskit();
+    h.run();
+    assert_eq!(h.state().sheet, Sheet::Schedule("rooms"));
+    assert!(h.query_by_label("Kitchen").is_some(), "a row of the room schedule");
+}
+
+#[test]
+fn typed_shortcuts_pick_tools_like_revit() {
+    let mut h = app(SAMPLE);
+    h.event(Event::Text("W".into()));
+    h.event(Event::Text("A".into()));
+    h.run();
+    assert!(matches!(h.state().tool, Tool::Wall(_)));
+    h.event(Event::Text("dr".into()));
+    h.run();
+    assert!(matches!(h.state().tool, Tool::Door));
+    h.event(Event::Text("DI".into()));
+    h.run();
+    assert!(matches!(h.state().tool, Tool::Dimension(_)));
+    h.event(Event::Text("tg".into()));
+    h.run();
+    assert!(matches!(h.state().tool, Tool::Tag));
+    key(&mut h, Key::Escape);
+    assert!(matches!(h.state().tool, Tool::Modify));
+}
+
+#[test]
+fn the_level_and_grid_tools_add_datums() {
+    let mut h = app("");
+    tool(&mut h, "Level");
+    assert_eq!(h.get_by_label("Elevation").value().as_deref(), Some("6000"), "the Options Bar proposes the next elevation");
+    press(&mut h, "Create");
+    let levels = h.state().session.model.levels().iter().map(|(_, l)| (l.name.clone(), l.elevation)).collect::<Vec<_>>();
+    assert_eq!(levels.last(), Some(&("Level 3".to_string(), 6000.0)));
+    press(&mut h, "Level 3");
+    // Undoing the level leaves its plan open on nothing: the browser falls back to the lowest.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(h.state().sheet, Sheet::Plan(1));
+    tool(&mut h, "Grid");
+    click(&mut h, P2(-3000.0, -3000.0));
+    click(&mut h, P2(-3000.0, 3000.0));
+    let grid = ids(&h, "grid");
+    assert_eq!(grid.len(), 1);
+    assert_eq!((field(&h, grid[0], "start"), field(&h, grid[0], "end")), (json!([-3000.0, -3000.0]), json!([-3000.0, 3000.0])));
+}
+
+#[test]
+fn saving_writes_the_project_and_exports_by_extension() {
+    let mut h = app(SAMPLE);
+    let dir = std::env::temp_dir().join(format!("bimcraft-ui-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    h.state_mut().session.execute("level", &json!({"elevation": 6000})).unwrap();
+    assert!(h.state().dirty());
+    let project = dir.join("house.bimcraft");
+    assert!(h.state_mut().save_to(&project));
+    assert!(!h.state().dirty() && h.state().session.path.as_deref() == Some(project.as_path()));
+    for (name, starts) in [("house.ifc", &b"ISO-10303-21"[..]), ("plan.png", b"\x89PNG"), ("plan.svg", b"<svg")] {
+        assert!(h.state_mut().save_to(&dir.join(name)), "{name}: {}", h.state().status.text);
+        assert!(std::fs::read(dir.join(name)).unwrap().starts_with(starts), "{name}");
+    }
+    assert_eq!(h.state().session.path.as_deref(), Some(project.as_path()), "exports leave the project's path alone");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn new_asks_before_dropping_unsaved_changes() {
+    let mut h = app("");
+    h.state_mut().session.execute("wall", &json!({"points": [[0, 0], [4000, 0]]})).unwrap();
+    // Menu items read out their shortcut too: "New Ctrl+N".
+    let new = |h: &mut Harness<BimApp>| {
+        press(h, "File");
+        h.get_by_label_contains("New").click();
+        h.run();
+    };
+    new(&mut h);
+    press(&mut h, "Cancel");
+    assert_eq!(walls(&h).len(), 1);
+    new(&mut h);
+    press(&mut h, "Don't Save");
+    assert!(walls(&h).is_empty());
+}
+
+#[test]
+fn the_ribbon_has_revit_tabs_and_a_contextual_tab_for_the_tool_or_selection() {
+    let mut h = app(SAMPLE);
+    for label in ["File", "Architecture", "View", "Wall"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    assert_eq!(h.query_all_by_label("Modify").count(), 2, "the Modify tab, and the Modify tool on Architecture");
+    tool(&mut h, "Wall");
+    assert!(h.query_by_label("Modify | Place Wall").is_some());
+    assert!(h.query_by_label("Wall").is_none(), "the contextual tab took the ribbon");
+    key(&mut h, Key::Escape);
+    assert!(h.query_by_label("Modify | Place Wall").is_none(), "gone with the tool");
+    assert!(h.query_by_label("Wall").is_some(), "back on Architecture");
+    let walls_before = ids(&h, "wall").len();
+    click(&mut h, P2(10000.0, 2000.0));
+    assert!(h.query_by_label("Modify | Walls").is_some());
+    press(&mut h, "Delete");
+    assert_eq!(ids(&h, "wall").len(), walls_before - 1, "the contextual tab's Delete");
+    press(&mut h, "View");
+    for label in ["Thin Lines", "Schedules", "Close Inactive", "User Interface"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+}
+
+#[test]
+fn the_type_selector_and_edit_type_change_types_as_in_revit() {
+    let mut h = app(BOX);
+    let wall = ids(&h, "wall")[0];
+    click(&mut h, P2(4000.0, 0.0));
+    assert_eq!(h.state().selection, [wall]);
+    press(&mut h, "Type Selector");
+    press(&mut h, "Exterior - 300mm");
+    assert_eq!(field(&h, wall, "type"), json!("Exterior - 300mm"));
+    // Edit Type changes the type, so every wall of it.
+    press(&mut h, "Edit Type");
+    type_into(&mut h, "Width", "350");
+    press(&mut h, "OK");
+    assert_eq!(h.state().session.model.types.wall.get("Exterior - 300mm").map(|t| t.thickness), Some(350.0));
+    // Duplicate makes a new type, and OK puts the selected wall on it.
+    press(&mut h, "Edit Type");
+    press(&mut h, "Duplicate…");
+    type_into(&mut h, "New type", "Party - 250mm");
+    press(&mut h, "Create");
+    type_into(&mut h, "Width", "250");
+    press(&mut h, "OK");
+    assert_eq!(h.state().session.model.types.wall.get("Party - 250mm").map(|t| t.thickness), Some(250.0));
+    assert_eq!(field(&h, wall, "type"), json!("Party - 250mm"));
+    // With a tool on, the Type Selector picks the type of what it places.
+    key(&mut h, Key::Escape);
+    tool(&mut h, "Door");
+    press(&mut h, "Type Selector");
+    press(&mut h, "Single 800 x 2100");
+    click(&mut h, P2(2000.0, 0.0));
+    let door = ids(&h, "door");
+    assert_eq!(field(&h, door[0], "type"), json!("Single 800 x 2100"));
+}
+
+#[test]
+fn the_options_bar_sets_the_wall_height_and_chain() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    h.get_by_role_and_label(Role::ComboBox, "Height:").click();
+    h.run();
+    press(&mut h, "Unconnected");
+    // Unconnected, a field for the height comes next to the drop-down.
+    assert_eq!(h.get_by_role_and_label(Role::TextInput, "Height:").value().as_deref(), Some("3000"));
+    h.get_by_role_and_label(Role::TextInput, "Height:").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by_role_and_label(Role::TextInput, "Height:").type_text("2500");
+    h.run();
+    press(&mut h, "Chain");
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(4000.0, 0.0));
+    let wall = ids(&h, "wall");
+    assert_eq!(wall.len(), 1, "without Chain, two clicks make a wall");
+    assert_eq!((field(&h, wall[0], "top_level"), field(&h, wall[0], "height")), (json!(null), json!(2500.0)));
+    click(&mut h, P2(0.0, 3000.0));
+    click(&mut h, P2(4000.0, 3000.0));
+    assert_eq!(ids(&h, "wall").len(), 2, "and the next two another");
+}
+
+#[test]
+fn views_open_in_tabs_that_switch_and_close() {
+    let mut h = app(SAMPLE);
+    press(&mut h, "Level 2");
+    h.get_by_label("Room Schedule").click_accesskit();
+    h.run();
+    assert_eq!(h.state().sheet, Sheet::Schedule("rooms"));
+    topmost(&mut h, "Level 1");
+    assert_eq!(h.state().sheet, Sheet::Plan(1));
+    press(&mut h, "Close Room Schedule");
+    assert!(h.query_by_label("Close Room Schedule").is_none());
+    press(&mut h, "View");
+    press(&mut h, "Close Inactive");
+    assert!(h.query_by_label("Close Level 2").is_none(), "only the active view stays open");
+    assert!(h.query_by_label("Close Level 1").is_none(), "and the last view can't close");
+    assert_eq!(h.state().sheet, Sheet::Plan(1));
+}
+
+#[test]
+fn ctrl_adds_shift_takes_away_and_tab_reaches_what_is_underneath() {
+    let mut h = app(SAMPLE);
+    let door = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "1"));
+    let window = find(&h, |e| matches!(e, Element::Window(o) if o.mark == "1"));
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0) && w.end == P2(10000.0, 0.0)));
+    click(&mut h, P2(2000.0, 0.0));
+    click_with(&mut h, P2(4300.0, 0.0), Modifiers::COMMAND);
+    assert_eq!(h.state().selection, [door, window]);
+    assert!(h.query_by_label("Modify | Multi-Select").is_some(), "a door and a window: two categories");
+    click_with(&mut h, P2(2000.0, 0.0), Modifiers::SHIFT);
+    assert_eq!(h.state().selection, [window]);
+    // Over the door, Tab moves on to the wall it's in, and a click takes that.
+    h.hover_at(h.state().screen(P2(2000.0, 0.0)));
+    h.run();
+    key(&mut h, Key::Tab);
+    click(&mut h, P2(2000.0, 0.0));
+    assert_eq!(h.state().selection, [wall]);
+}
+
+#[test]
+fn dragging_across_empty_floor_selects_by_window_or_crossing() {
+    let mut h = app(SAMPLE);
+    let window = find(&h, |e| matches!(e, Element::Window(o) if o.type_name == "Fixed 600 x 900"));
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(10000.0, 0.0)));
+    let tag = find(&h, |e| matches!(e, Element::Tag(t) if t.host == window));
+    // Left to right: what's wholly inside, the window and its tag. (From empty floor, clear of the
+    // Bedroom's tag and the dimension at x = 10900.)
+    drag(&mut h, P2(9400.0, 4200.0), P2(11400.0, 6000.0));
+    assert_eq!(h.state().selection, [window, tag]);
+    // Right to left: what it crosses too.
+    drag(&mut h, P2(11400.0, 6000.0), P2(9400.0, 4200.0));
+    let sel = &h.state().selection;
+    assert!(sel.contains(&window) && sel.contains(&wall), "{sel:?}");
+}
+
+#[test]
+fn dragging_a_wall_moves_it_and_the_walls_and_room_around_follow() {
+    let mut h = app(&format!("{BOX}\nroom {{\"point\": [2000, 3000]}}"));
+    let room = ids(&h, "room")[0];
+    drag(&mut h, P2(8000.0, 3000.0), P2(9000.0, 3000.0));
+    assert_eq!(walls(&h)[1], (P2(9000.0, 0.0), P2(9000.0, 6000.0)));
+    assert_eq!(walls(&h)[0], (P2(0.0, 0.0), P2(9000.0, 0.0)), "the corner went along");
+    assert_eq!(field(&h, room, "area_m2"), json!(54.0));
+    assert_eq!(h.state().session.history().last(), Some(&"Move"));
+}
+
+#[test]
+fn move_and_copy_take_a_base_point_and_a_destination() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
+    let door = ids(&h, "door")[0];
+    click(&mut h, P2(2000.0, 0.0));
+    press(&mut h, "Move");
+    click(&mut h, P2(2000.0, 0.0));
+    click(&mut h, P2(3000.0, 0.0));
+    assert_eq!(field(&h, door, "at"), json!([3000.0, 0.0]));
+    assert_eq!(h.state().selection, [door], "what moved stays selected");
+    press(&mut h, "Copy");
+    click(&mut h, P2(3000.0, 0.0));
+    click(&mut h, P2(6000.0, 0.0));
+    let doors = ids(&h, "door");
+    assert_eq!(doors.len(), 2);
+    assert_eq!(field(&h, doors[1], "at"), json!([6000.0, 0.0]));
+    assert_eq!(h.state().selection, [doors[1]], "the copy is selected, as in Revit");
+}
+
+#[test]
+fn typing_a_length_puts_the_next_point_that_far_toward_the_cursor() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 0.0));
+    // A cursor a degree off horizontal: the length goes along the horizontal.
+    h.hover_at(h.state().screen(P2(1000.0, 20.0)));
+    h.run();
+    h.event(Event::Text("4500".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4500.0, 0.0))]);
+}
+
+#[test]
+fn a_selected_walls_temporary_dimension_sets_its_length() {
+    let mut h = app(BOX);
+    click(&mut h, P2(4000.0, 0.0));
+    h.get_by_label_contains("Temporary dimension").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("9000".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h)[0], (P2(0.0, 0.0), P2(9000.0, 0.0)));
+    assert_eq!(walls(&h)[1].0, P2(9000.0, 0.0), "the wall joined at that end followed");
+}
+
+#[test]
+fn properties_edit_every_selected_element_in_one_step() {
+    let mut h = app(SAMPLE);
+    let one = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "1"));
+    let two = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "2"));
+    click(&mut h, P2(2000.0, 0.0));
+    click_with(&mut h, P2(4500.0, 4000.0), Modifiers::COMMAND);
+    assert!(h.query_by_label("Doors (2)").is_some());
+    let steps = h.state().session.history().len();
+    // The row is below the palette's fold in this window; screen readers click it all the same.
+    h.get_by_label("Flip Hand").click_accesskit();
+    h.run();
+    assert_eq!((field(&h, one, "flip_hand"), field(&h, two, "flip_hand")), (json!(true), json!(true)));
+    assert_eq!(h.state().session.history().len(), steps + 1);
+}
+
+#[test]
+fn rotate_turns_the_selection_about_its_middle() {
+    let mut h = app(r#"wall {"points": [[0, 0], [4000, 0]]}"#);
+    click(&mut h, P2(3000.0, 0.0));
+    press(&mut h, "Rotate");
+    // From the middle of the wall: the angle's start along it, its end a quarter turn round.
+    click(&mut h, P2(4000.0, 0.0));
+    click(&mut h, P2(2000.0, 1000.0));
+    assert_eq!(walls(&h), [(P2(2000.0, -2000.0), P2(2000.0, 2000.0))]);
+}
+
+#[test]
+fn mirror_pick_axis_copies_across_the_line_picked() {
+    let mut h = app("wall {\"points\": [[0, 0], [4000, 0]]}\ngrid {\"start\": [6000, -3000], \"end\": [6000, 3000]}");
+    click(&mut h, P2(2000.0, 0.0));
+    press(&mut h, "Mirror Pick Axis");
+    click(&mut h, P2(6000.0, 2000.0));
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4000.0, 0.0)), (P2(12000.0, 0.0), P2(8000.0, 0.0))], "Copy is on, as in Revit");
+}
+
+#[test]
+fn align_lines_a_wall_face_up_with_a_grid() {
+    let mut h = app("wall {\"points\": [[0, 500], [4000, 500]]}\ngrid {\"start\": [-1000, 0], \"end\": [5000, 0], \"name\": \"A\"}");
+    topmost(&mut h, "Modify");
+    press(&mut h, "Align");
+    click(&mut h, P2(2000.0, 0.0));
+    // The wall, picked by its lower face: that face goes onto the grid.
+    click(&mut h, P2(2000.0, 420.0));
+    assert_eq!(walls(&h), [(P2(0.0, 100.0), P2(4000.0, 100.0))]);
+}
+
+#[test]
+fn trim_extend_to_corner_takes_two_picks() {
+    let mut h = app("wall {\"points\": [[0, 0], [4000, 0]]}\nwall {\"points\": [[5000, 1000], [5000, 6000]]}");
+    topmost(&mut h, "Modify");
+    press(&mut h, "Trim/Extend to Corner");
+    click(&mut h, P2(2000.0, 0.0));
+    click(&mut h, P2(5000.0, 3000.0));
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(5000.0, 0.0)), (P2(5000.0, 0.0), P2(5000.0, 6000.0))]);
+}
+
+#[test]
+fn split_element_cuts_the_wall_clicked() {
+    let mut h = app(BOX);
+    topmost(&mut h, "Modify");
+    press(&mut h, "Split Element");
+    click(&mut h, P2(4000.0, 0.0));
+    let w = walls(&h);
+    assert_eq!((w.len(), w[0], w[4]), (5, (P2(0.0, 0.0), P2(4000.0, 0.0)), (P2(4000.0, 0.0), P2(8000.0, 0.0))));
+}
+
+#[test]
+fn offset_copies_a_wall_to_the_cursors_side() {
+    let mut h = app(r#"wall {"points": [[0, 0], [4000, 0]]}"#);
+    topmost(&mut h, "Modify");
+    press(&mut h, "Offset");
+    click(&mut h, P2(2000.0, 60.0));
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4000.0, 0.0)), (P2(0.0, 1000.0), P2(4000.0, 1000.0))]);
+}
+
+#[test]
+fn aligned_dimensions_pick_parallel_references_then_place_the_line() {
+    let mut h = app(BOX);
+    press(&mut h, "Annotate");
+    press(&mut h, "Aligned");
+    assert!(h.query_by_label("Modify | Place Dimensions").is_some());
+    // The face nearest the cursor: the left wall's inner face, then the right wall's; then where the line goes.
+    click(&mut h, P2(95.0, 3000.0));
+    click(&mut h, P2(7905.0, 3000.0));
+    click(&mut h, P2(4000.0, -1000.0));
+    let dims = ids(&h, "dimension");
+    assert_eq!((dims.len(), field(&h, dims[0], "values")), (1, json!([7800.0])));
+    assert_eq!(h.state().tool, Tool::Dimension(Vec::new()), "the tool stays on for the next one");
+    // A wall across the first isn't picked; centre lines are, where the cursor is on them.
+    click(&mut h, P2(0.0, 3000.0));
+    click(&mut h, P2(4000.0, 0.0));
+    click(&mut h, P2(8000.0, 3000.0));
+    click(&mut h, P2(4000.0, 3000.0));
+    let dims = ids(&h, "dimension");
+    assert_eq!((dims.len(), field(&h, dims[1], "values")), (2, json!([8000.0])));
+    // Esc drops the references picked, then leaves the tool.
+    click(&mut h, P2(0.0, 3000.0));
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().tool, Tool::Dimension(Vec::new()));
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().tool, Tool::Modify);
+}
+
+#[test]
+fn tag_by_category_tags_the_door_clicked_and_tag_all_the_rest() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nwindow {{\"at\": [8000, 3000]}}"));
+    press(&mut h, "Annotate");
+    press(&mut h, "Tag by Category");
+    assert!(h.query_by_label("Modify | Tag").is_some());
+    click(&mut h, P2(2000.0, 0.0));
+    let tags = ids(&h, "tag");
+    assert_eq!((tags.len(), field(&h, tags[0], "text")), (1, json!("1")));
+    // Tag All, back on the Annotate tab: the window too.
+    press(&mut h, "Annotate");
+    press(&mut h, "Tag All");
+    assert_eq!(ids(&h, "tag").len(), 2);
+    // A tag drags like anything else; it sat outside, the door swinging in.
+    key(&mut h, Key::Escape);
+    drag(&mut h, P2(2000.0, -500.0), P2(3000.0, -500.0));
+    assert_eq!(field(&h, tags[0], "at"), json!([3000.0, -500.0]));
+}
+
+#[test]
+fn the_default_3d_view_opens_from_the_toolbar_and_clicks_pick_what_it_shows() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().sheet, Sheet::View3D);
+    assert!(h.query_by_label("3D View: {3D}").is_some(), "Properties shows the view");
+    assert!(h.query_by_label("3D Views").is_some(), "the browser lists it");
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    let door = find(&h, |e| matches!(e, Element::Door(_)));
+    let at = h.state().screen3([5000.0, -100.0, 1500.0]);
+    click_at(&mut h, at);
+    assert_eq!(h.state().selection, [wall], "the south wall's face");
+    assert!(h.query_by_label("Modify | Walls").is_some());
+    let at = h.state().screen3([2000.0, -25.0, 1000.0]);
+    click_at(&mut h, at);
+    assert_eq!(h.state().selection, [door], "the door, through its opening");
+    let corner = h.state().orbit.rect.min + vec2(4.0, 4.0);
+    click_at(&mut h, corner);
+    assert!(h.state().selection.is_empty(), "the background selects nothing");
+}
+
+#[test]
+fn in_3d_a_drag_orbits_the_middle_button_pans_and_the_wheel_zooms() {
+    let mut h = app(BOX);
+    press(&mut h, "Default 3D View");
+    let cam = |h: &Harness<BimApp>| h.state().orbit.camera.unwrap();
+    let (start, mid) = (cam(&h), h.state().orbit.rect.center());
+    // 100 px to the right: the model turns 40° with it.
+    drag_screen(&mut h, mid, mid + vec2(100.0, 0.0), PointerButton::Primary);
+    let turned = cam(&h);
+    assert!((turned.azimuth - (start.azimuth - 40.0)).abs() < 0.5 && turned.elevation == start.elevation, "{turned:?}");
+    drag_screen(&mut h, mid, mid + vec2(0.0, 50.0), PointerButton::Middle);
+    let panned = cam(&h);
+    assert!(panned.target != turned.target && panned.azimuth == turned.azimuth, "{panned:?}");
+    // Shift and the middle button orbit too, as in Revit: dragging down looks from higher up.
+    h.event(Event::ModifiersChanged(Modifiers::SHIFT));
+    drag_screen(&mut h, mid, mid + vec2(0.0, 50.0), PointerButton::Middle);
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run();
+    let raised = cam(&h);
+    assert!(raised.elevation > panned.elevation + 15.0, "{raised:?}");
+    h.hover_at(mid);
+    h.event(Event::MouseWheel {
+        unit: MouseWheelUnit::Point,
+        delta: vec2(0.0, 120.0),
+        phase: TouchPhase::Move,
+        modifiers: Modifiers::NONE,
+    });
+    h.run();
+    let zoomed = cam(&h);
+    assert!(zoomed.scale > raised.scale * 1.2, "{zoomed:?}");
+    // Zoom to Fit: the whole model again, from where the camera is now.
+    press(&mut h, "Zoom to Fit");
+    assert!(cam(&h).scale < zoomed.scale && cam(&h).azimuth == zoomed.azimuth);
+}
+
+#[test]
+fn the_section_tool_draws_a_section_whose_view_opens_from_the_browser_or_a_double_click() {
+    let mut h = app_at(BOX, 0.05);
+    press(&mut h, "View");
+    press(&mut h, "Section");
+    assert!(h.query_by_label("Modify | Section").is_some());
+    // Drawn west to east across the box: it looks north.
+    click(&mut h, P2(-1000.0, 3000.0));
+    click(&mut h, P2(9000.0, 3000.0));
+    let section = ids(&h, "section");
+    assert_eq!((section.len(), field(&h, section[0], "looking")), (1, json!([0.0, 1.0])));
+    assert!(h.query_by_label("Sections (Building Section)").is_some());
+    press(&mut h, "Section 1");
+    assert_eq!(h.state().sheet, Sheet::Section(section[0]));
+    // In the section, points run along its line from its start, and up: the west wall is cut at 1000.
+    let west = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 6000.0)));
+    click(&mut h, P2(1060.0, 1500.0));
+    assert_eq!(h.state().selection, [west]);
+    // Back on the plan, a double click on the section's line opens it again.
+    topmost(&mut h, "Level 1");
+    assert_eq!(h.state().sheet, Sheet::Plan(1));
+    double_click(&mut h, P2(-500.0, 3000.0));
+    assert_eq!(h.state().sheet, Sheet::Section(section[0]));
+}
+
+#[test]
+fn the_elevation_tool_looks_at_the_building_from_where_it_is_clicked() {
+    let mut h = app(BOX);
+    press(&mut h, "View");
+    press(&mut h, "Elevation");
+    click(&mut h, P2(4000.0, 7000.0));
+    let made = ids(&h, "elevation");
+    assert_eq!((field(&h, made[0], "name"), field(&h, made[0], "looking")), (json!("North"), json!([0.0, -1.0])));
+    assert!(h.query_by_label("Elevations (Building Elevation)").is_some());
+}
+
+#[test]
+fn sheets_take_views_from_the_view_tab_and_viewports_move_and_open() {
+    let mut h = app_at(BOX, 0.05);
+    press(&mut h, "View");
+    press(&mut h, "Sheet");
+    let sheets = ids(&h, "sheet");
+    assert_eq!((sheets.len(), field(&h, sheets[0], "number")), (1, json!("A101")));
+    assert_eq!(h.state().sheet, Sheet::Paper(sheets[0]));
+    assert!(h.query_by_label("Sheets (all)").is_some());
+    assert_eq!(h.query_all_by_label("A101 - Unnamed").count(), 2, "its entry in the browser, and its tab");
+    // Place View offers the views on no sheet yet.
+    press(&mut h, "View");
+    press(&mut h, "Place View");
+    press(&mut h, "Floor Plan: Level 1");
+    let vp = ids(&h, "viewport");
+    assert_eq!((vp.len(), field(&h, vp[0], "view")), (1, json!(1)));
+    // Points on a sheet are paper mm: the viewport, picked anywhere over it, drags 40 mm right.
+    let at = field(&h, vp[0], "at");
+    let (x, y) = (at[0].as_f64().unwrap(), at[1].as_f64().unwrap());
+    drag(&mut h, P2(x, y), P2(x + 40.0, y));
+    assert_eq!(field(&h, vp[0], "at"), json!([x + 40.0, y]));
+    assert!(h.query_by_label("Modify | Viewports").is_some());
+    // A double click on it opens its view.
+    double_click(&mut h, P2(x + 40.0, y));
+    assert_eq!(h.state().sheet, Sheet::Plan(1));
+}
+
+#[test]
+fn columns_go_where_clicked_up_to_the_options_bars_height() {
+    let mut h = app(BOX);
+    tool(&mut h, "Column");
+    assert!(h.query_by_label("Modify | Place Column").is_some());
+    click(&mut h, P2(4000.0, 3000.0));
+    let col = ids(&h, "column");
+    assert_eq!((col.len(), field(&h, col[0], "at"), field(&h, col[0], "top_level")), (1, json!([4000.0, 3000.0]), json!(2)));
+    // Unconnected, at a height typed: its own Height, not the Wall tool's.
+    h.get_by_role_and_label(Role::ComboBox, "Height:").click();
+    h.run();
+    press(&mut h, "Unconnected");
+    h.get_by_role_and_label(Role::TextInput, "Height:").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by_role_and_label(Role::TextInput, "Height:").type_text("2500");
+    h.run();
+    click(&mut h, P2(2000.0, 3000.0));
+    let col = ids(&h, "column");
+    assert_eq!((field(&h, col[1], "top_level"), field(&h, col[1], "height")), (json!(null), json!(2500.0)));
+    tool(&mut h, "Wall");
+    assert!(h.query_by_role_and_label(Role::TextInput, "Height:").is_none(), "the Wall tool still goes up to the next level");
+    // Selected, its palette.
+    key(&mut h, Key::Escape);
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(4000.0, 3000.0));
+    assert_eq!(h.state().selection, [col[0]]);
+    assert!(h.query_by_label("Modify | Columns").is_some() && h.query_by_label("Top Level").is_some());
+}
+
+#[test]
+fn stairs_start_where_clicked_and_climb_toward_the_second_click() {
+    let mut h = app(BOX);
+    tool(&mut h, "Stair");
+    assert!(h.query_by_label("Modify | Create Stair").is_some());
+    type_into(&mut h, "Width:", "1200");
+    click(&mut h, P2(1000.0, 1000.0));
+    assert!(ids(&h, "stair").is_empty(), "the first click starts it");
+    click(&mut h, P2(1000.0, 2000.0));
+    let st = ids(&h, "stair");
+    assert_eq!((st.len(), field(&h, st[0], "angle"), field(&h, st[0], "width")), (1, json!(90.0), json!(1200.0)));
+    assert_eq!(
+        (field(&h, st[0], "risers"), field(&h, st[0], "top_level")),
+        (json!(17), json!(2)),
+        "up to Level 2, in risers of 180 at most"
+    );
+    assert_eq!(h.state().tool, Tool::Stair(None), "ready for the next one");
+}
+
+#[test]
+fn the_roof_tool_roofs_the_walls_of_the_plan_on_the_level_above() {
+    let mut h = app(BOX);
+    tool(&mut h, "Roof");
+    assert!(h.query_by_label("Modify | Create Roof Footprint").is_some());
+    type_into(&mut h, "Slope:", "40");
+    press(&mut h, "Gable");
+    click(&mut h, P2(4000.0, 3000.0));
+    let roof = ids(&h, "roof");
+    assert_eq!(roof.len(), 1);
+    assert_eq!(
+        (field(&h, roof[0], "level"), field(&h, roof[0], "slope"), field(&h, roof[0], "gable")),
+        (json!(2), json!(40.0), json!(true))
+    );
+    assert_eq!(field(&h, roof[0], "boundary")[0], json!([-600.0, -600.0]), "500 mm past the walls' faces");
+    assert_eq!(h.state().selection, roof, "finished, the roof is selected");
+    assert!(h.query_by_label("Modify | Roofs").is_some() && h.query_by_label("Slope (°)").is_some());
+}
+
+#[test]
+fn opening_an_ifc_file_imports_it_and_says_what_came_in() {
+    let mut h = app(SAMPLE);
+    let dir = std::env::temp_dir().join(format!("bimcraft-ui-ifc-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ifc = dir.join("house.ifc");
+    assert!(h.state_mut().save_to(&ifc));
+    assert!(h.state_mut().open_path(&ifc));
+    h.run();
+    assert_eq!(ids(&h, "wall").len(), 7);
+    assert_eq!(h.state().session.path, None, "an import is a new project: Save asks where");
+    let note = h.state().status.text.clone();
+    assert!(!h.state().status.error && note.contains("7 walls") && note.contains("house.ifc"), "{note}");
+    assert!(h.query_by_label("Note").is_some(), "shown over the view until dismissed");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dark_mode_turns_the_window_and_the_drawing_dark() {
+    use bimcraft_core::render::{PAPER, Rgb};
+    let mut h = app(BOX);
+    assert!(!crate::style::dark(), "light, as the system's theme is here");
+    press(&mut h, "View");
+    press(&mut h, "Dark Mode");
+    assert!(crate::style::dark() && h.ctx.theme() == egui::Theme::Dark);
+    // Ink light on a dark ground, the grid still blue.
+    let (ground, ink, grid) = (crate::canvas::color(PAPER), crate::canvas::color(Rgb(25, 25, 25)), crate::canvas::color(Rgb(60, 100, 150)));
+    assert!(ground.r() < 40 && ink.r() > 200 && grid.b() > grid.r() + 40, "{ground:?} {ink:?} {grid:?}");
+    assert_eq!(crate::style::pal().surface, crate::style::DARK.surface);
+    press(&mut h, "Dark Mode");
+    assert!(!crate::style::dark() && crate::canvas::color(PAPER) == egui::Color32::WHITE);
+}

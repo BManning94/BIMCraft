@@ -1,0 +1,14 @@
+[package]
+name = "bimcraft-cli"
+description = "BIMCraft from the command line: scripts, conversion, and an MCP server for agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bimcraft-core = { workspace = true }
+serde_json = { workspace = true }

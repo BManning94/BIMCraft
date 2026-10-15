@@ -1,0 +1,16 @@
+[package]
+name = "bimcraft-core"
+description = "BIMCraft building model, command engine, views, sheets and IFC export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tiny-skia = { workspace = true }
+flate2 = { workspace = true }

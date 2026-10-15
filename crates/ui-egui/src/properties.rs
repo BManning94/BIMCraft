@@ -1,0 +1,664 @@
+//! The Properties palette, laid out as Revit's: the Type Selector, the filter with Edit Type,
+//! the parameters grouped under Constraints, Dimensions, Identity Data and Other, and Apply. It
+//! shows the selected element, else what the tool places, else the view. Every edit is a
+//! command (`modify`, or `type` from the Type Properties dialog), so it is checked, rolled back
+//! when it breaks a rule, and undone like any other change.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use bimcraft_core::element_json;
+use bimcraft_core::model::{Id, Model};
+use egui::{
+    Align, Align2, Button, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText, Sense,
+    Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
+};
+use serde_json::{Value, json};
+
+use crate::style::{self, Icon, pal};
+use crate::{BimApp, Sheet, Status, Tool, plural, title};
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Text,
+    /// A length or an elevation, in mm.
+    Number,
+    /// `[x, y]` in mm, typed as `x, y`.
+    Point,
+    Flag,
+    Level,
+    /// A level, shown by name; read only.
+    LevelName,
+    /// A level, or none for a wall of unconnected height.
+    TopLevel,
+    /// A wall's height: typed when its top is unconnected, else what its levels make it.
+    Height,
+    /// Derived from the rest; read only.
+    Shown,
+}
+
+use Kind::*;
+
+/// A parameter: its group, its field as `elements` names it, its label, its editor.
+type Row = (&'static str, &'static str, &'static str, Kind);
+
+fn rows(category: &str) -> &'static [Row] {
+    match category {
+        "wall" => &[
+            ("Constraints", "level", "Base Constraint", Level),
+            ("Constraints", "base_offset", "Base Offset", Number),
+            ("Constraints", "top_level", "Top Constraint", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Dimensions", "length", "Length", Shown),
+            ("Other", "start", "Start", Point),
+            ("Other", "end", "End", Point),
+        ],
+        "door" => &[
+            ("Constraints", "level", "Level", LevelName),
+            ("Identity Data", "mark", "Mark", Text),
+            ("Other", "host", "Host Wall", Shown),
+            ("Other", "offset", "Offset", Number),
+            ("Other", "flip_facing", "Flip Facing", Flag),
+            ("Other", "flip_hand", "Flip Hand", Flag),
+        ],
+        "window" => &[
+            ("Constraints", "level", "Level", LevelName),
+            ("Constraints", "sill", "Sill Height", Number),
+            ("Identity Data", "mark", "Mark", Text),
+            ("Other", "host", "Host Wall", Shown),
+            ("Other", "offset", "Offset", Number),
+            ("Other", "flip_facing", "Flip Facing", Flag),
+        ],
+        "room" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Dimensions", "area_m2", "Area (m²)", Shown),
+            ("Dimensions", "perimeter_m", "Perimeter (m)", Shown),
+            ("Identity Data", "number", "Number", Text),
+            ("Identity Data", "name", "Name", Text),
+            ("Other", "point", "Location", Point),
+        ],
+        "floor" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Dimensions", "area_m2", "Area (m²)", Shown),
+            ("Dimensions", "thickness", "Thickness", Shown),
+        ],
+        "level" => &[("Constraints", "elevation", "Elevation", Number), ("Identity Data", "name", "Name", Text)],
+        "grid" => &[("Identity Data", "name", "Name", Text), ("Other", "start", "Start", Point), ("Other", "end", "End", Point)],
+        "dimension" => &[("Dimensions", "values", "Value", Shown), ("Other", "at", "Line Through", Point)],
+        "tag" => {
+            &[("Graphics", "leader", "Leader Line", Flag), ("Other", "host", "Tagged Element", Shown), ("Other", "offset", "Offset", Point)]
+        }
+        "sheet" => &[
+            ("Identity Data", "number", "Sheet Number", Text),
+            ("Identity Data", "name", "Sheet Name", Text),
+            ("Other", "size", "Size", Text),
+        ],
+        "viewport" => &[
+            ("Identity Data", "title", "View Name", Shown),
+            ("Graphics", "scale", "View Scale (1 : n)", Number),
+            ("Other", "at", "Location", Point),
+        ],
+        "column" => &[
+            ("Constraints", "level", "Base Level", Level),
+            ("Constraints", "base_offset", "Base Offset", Number),
+            ("Constraints", "top_level", "Top Level", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Other", "at", "Location", Point),
+            ("Other", "angle", "Rotation (°)", Number),
+        ],
+        "stair" => &[
+            ("Constraints", "level", "Base Level", Level),
+            ("Constraints", "top_level", "Top Level", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Dimensions", "width", "Actual Run Width", Number),
+            ("Dimensions", "riser", "Maximum Riser Height", Number),
+            ("Dimensions", "tread", "Actual Tread Depth", Number),
+            ("Dimensions", "risers", "Actual Number of Risers", Shown),
+            ("Dimensions", "riser_height", "Actual Riser Height", Shown),
+            ("Other", "start", "Start", Point),
+        ],
+        "roof" => &[
+            ("Constraints", "level", "Base Level", Level),
+            ("Dimensions", "slope", "Slope (°)", Number),
+            ("Dimensions", "ridge", "Max Ridge Height", Shown),
+            ("Dimensions", "area_m2", "Area (m²)", Shown),
+            ("Other", "gable", "Gable Ends", Flag),
+        ],
+        "section" | "elevation" => &[
+            ("Identity Data", "name", "View Name", Text),
+            ("Extents", "depth", "Far Clip Offset", Number),
+            ("Other", "start", "Start", Point),
+            ("Other", "end", "End", Point),
+        ],
+        _ => &[],
+    }
+}
+
+/// A floor plan's parameters, read from and written to its level.
+const PLAN: &[Row] = &[
+    ("Identity Data", "name", "View Name", Text),
+    ("Extents", "id", "Associated Level", LevelName),
+    ("Extents", "elevation", "Level Elevation", Number),
+];
+
+/// A type's parameters, as its Type Properties list them: its field, its label.
+fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
+    match category {
+        "wall" => &[("thickness", "Width")],
+        "floor" => &[("thickness", "Default Thickness")],
+        "door" => &[("width", "Width"), ("height", "Height")],
+        "window" => &[("width", "Width"), ("height", "Height"), ("sill", "Default Sill Height")],
+        "column" => &[("width", "Width"), ("depth", "Depth")],
+        "roof" => &[("thickness", "Thickness")],
+        _ => &[],
+    }
+}
+
+fn icon(category: &str) -> Icon {
+    match category {
+        "wall" => Icon::Wall,
+        "door" => Icon::Door,
+        "window" => Icon::Window,
+        "room" => Icon::Room,
+        "level" => Icon::Level,
+        "grid" => Icon::Grid,
+        "dimension" => Icon::Dimension,
+        "section" => Icon::Section,
+        "sheet" => Icon::Sheet,
+        "viewport" => Icon::PlaceView,
+        "elevation" => Icon::Elevation,
+        "tag" => Icon::Tag,
+        "schedule" => Icon::Schedule,
+        "3d view" => Icon::View3D,
+        "column" => Icon::Column,
+        "stair" => Icon::Stair,
+        "roof" => Icon::Roof,
+        _ => Icon::Plan,
+    }
+}
+
+/// A value as the palette and schedules show it: numbers to the hundredth.
+pub(crate) fn text(v: &Value) -> String {
+    match v {
+        Value::Number(n) => n.as_f64().map_or_else(String::new, |x| format!("{}", (x * 100.0).round() / 100.0 + 0.0)),
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().map(text).collect::<Vec<_>>().join(", "),
+        Value::Bool(b) => (if *b { "Yes" } else { "No" }).into(),
+        Value::Null => String::new(),
+        Value::Object(_) => v.to_string(),
+    }
+}
+
+pub(crate) fn number(s: &str) -> Option<f64> {
+    s.trim().parse::<f64>().ok().filter(|x| x.is_finite())
+}
+
+/// What was typed into a field, as the value `modify` takes.
+fn parse(kind: Kind, s: &str) -> Result<Value, String> {
+    match kind {
+        Number | Height => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number")),
+        Point => match s.split([',', ' ']).filter(|t| !t.trim().is_empty()).collect::<Vec<_>>()[..] {
+            [x, y] if number(x).is_some() && number(y).is_some() => Ok(json!([number(x), number(y)])),
+            _ => Err(format!("`{s}` is not a point; type x, y in mm")),
+        },
+        _ => Ok(json!(s)),
+    }
+}
+
+/// A drop-down of `options`; the one picked, if it changed.
+fn combo(ui: &mut Ui, salt: (Id, &str), current: &str, options: &[String]) -> Option<String> {
+    let mut picked = None;
+    ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).show_ui(ui, |ui| {
+        for o in options {
+            if ui.selectable_label(o == current, o).clicked() && o != current {
+                picked = Some(o.clone());
+            }
+        }
+    });
+    picked
+}
+
+/// A parameter group's header: a bar across the palette that folds the group, as Revit's do.
+/// Whether it was clicked.
+fn group_header(ui: &mut Ui, group: &str, open: bool) -> bool {
+    let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+    response.widget_info(|| WidgetInfo::selected(WidgetType::CollapsingHeader, true, open, group));
+    let p = ui.painter();
+    p.rect_filled(r, 0.0, if response.hovered() { pal().hover_fill } else { pal().bar });
+    p.text(r.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, group, FontId::proportional(13.0), pal().text);
+    // A chevron on the right, pointing down while the group is open.
+    let c = pos2(r.right() - 12.0, r.center().y);
+    let chevron =
+        if open { [vec2(-4.0, -2.0), vec2(0.0, 2.0), vec2(4.0, -2.0)] } else { [vec2(-2.0, -4.0), vec2(2.0, 0.0), vec2(-2.0, 4.0)] };
+    p.add(Shape::line(chevron.iter().map(|d| c + *d).collect(), Stroke::new(1.5, pal().icon)));
+    if response.has_focus() {
+        p.rect_stroke(r, 0.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+    }
+    response.clicked()
+}
+
+/// What the palette shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Subject {
+    Element(Id),
+    /// Several selected elements, all of a category.
+    Elements(&'static str),
+    /// Several selected elements of different categories: how many.
+    Mixed(usize),
+    /// The elements a tool places, of a category.
+    New(&'static str),
+    Plan(Id),
+    View3D,
+    Schedule,
+}
+
+/// The Type Properties dialog: a type of a category, and its parameters as typed.
+pub(crate) struct TypeDialog {
+    category: &'static str,
+    name: String,
+    /// The elements that were on the type when the dialog opened; OK puts them on the type shown.
+    elements: Vec<Id>,
+    fields: Vec<(&'static str, &'static str, String)>,
+    /// The name being typed for a duplicate.
+    duplicate: Option<String>,
+}
+
+impl TypeDialog {
+    fn fields(m: &Model, category: &str, name: &str) -> Vec<(&'static str, &'static str, String)> {
+        let types = serde_json::to_value(&m.types).unwrap_or_default();
+        type_rows(category).iter().map(|(k, l)| (*k, *l, text(&types[category][name][k]))).collect()
+    }
+
+    /// The `type` command's parameters for the type as typed, or why they aren't numbers.
+    fn params(&self, name: &str) -> Result<Value, String> {
+        let mut p = json!({"category": self.category, "name": name});
+        for (key, label, typed) in &self.fields {
+            p[*key] = json!(number(typed).ok_or_else(|| format!("{label}: `{typed}` is not a number"))?);
+        }
+        Ok(p)
+    }
+}
+
+impl BimApp {
+    fn subject(&self) -> Subject {
+        let m = &self.session.model;
+        match (self.selection.as_slice(), &self.tool, self.sheet) {
+            (&[id], _, _) => Subject::Element(id),
+            ([_, _, ..], _, _) => {
+                let categories: BTreeSet<&'static str> =
+                    self.selection.iter().filter_map(|id| m.elements.get(id)).map(|e| e.category()).collect();
+                match categories.first() {
+                    Some(c) if categories.len() == 1 => Subject::Elements(c),
+                    _ => Subject::Mixed(self.selection.len()),
+                }
+            }
+            ([], Tool::Wall(_), _) => Subject::New("wall"),
+            ([], Tool::Door, _) => Subject::New("door"),
+            ([], Tool::Window, _) => Subject::New("window"),
+            ([], Tool::Room, _) => Subject::New("room"),
+            ([], Tool::Level, _) => Subject::New("level"),
+            ([], Tool::Grid(_), _) => Subject::New("grid"),
+            ([], Tool::Dimension(_), _) => Subject::New("dimension"),
+            ([], Tool::Tag, _) => Subject::New("tag"),
+            ([], Tool::Section(_), _) => Subject::New("section"),
+            ([], Tool::Elevation, _) => Subject::New("elevation"),
+            ([], Tool::Column, _) => Subject::New("column"),
+            ([], Tool::Stair(_), _) => Subject::New("stair"),
+            ([], Tool::Roof, _) => Subject::New("roof"),
+            // A section's or an elevation's view shows its own parameters.
+            ([], _, Sheet::Section(id) | Sheet::Paper(id)) => Subject::Element(id),
+            // Modify, and the tools that pick walls rather than place anything: the view.
+            ([], _, Sheet::Plan(level)) => Subject::Plan(level),
+            ([], _, Sheet::View3D) => Subject::View3D,
+            ([], _, Sheet::Schedule(_)) => Subject::Schedule,
+        }
+    }
+
+    /// The type the selected elements share, if they do.
+    fn shared_type(&self, m: &Model) -> Option<String> {
+        let names: BTreeSet<String> =
+            self.selection.iter().filter_map(|id| element_json(m, *id)["type"].as_str().map(String::from)).collect();
+        if names.len() == 1 { names.into_iter().next() } else { None }
+    }
+
+    /// The type Edit Type opens: its category, its name, and the element on it.
+    /// The type Edit Type opens: its category, its name, and the selected elements on it.
+    pub(crate) fn type_subject(&self) -> Option<(&'static str, String, Vec<Id>)> {
+        let m = &self.session.model;
+        let category = match self.subject() {
+            Subject::Element(id) => m.elements.get(&id)?.category(),
+            Subject::Elements(category) | Subject::New(category) => category,
+            Subject::Mixed(_) | Subject::Plan(_) | Subject::View3D | Subject::Schedule => return None,
+        };
+        let name = match self.selection.is_empty() {
+            false => self.shared_type(m),
+            true => self.types.get(category).cloned().or_else(|| m.default_type(category).map(String::from)),
+        };
+        Some((category, name?, self.selection.clone()))
+    }
+
+    pub(crate) fn edit_type(&mut self) {
+        if let Some((category, name, elements)) = self.type_subject() {
+            let fields = TypeDialog::fields(&self.session.model, category, &name);
+            self.type_dialog = Some(TypeDialog { category, name, elements, fields, duplicate: None });
+        }
+    }
+
+    pub(crate) fn properties(&mut self, ui: &mut Ui) {
+        let model = Arc::clone(&self.session.model);
+        let subject = self.subject();
+        self.type_selector(ui, &model, subject);
+        let (filter, ids, rows) = match subject {
+            Subject::Element(id) => match model.elements.get(&id) {
+                Some(e) => (format!("{} (1)", plural(e.category())), vec![id], rows(e.category())),
+                None => return,
+            },
+            Subject::Elements(category) => {
+                (format!("{} ({})", plural(category), self.selection.len()), self.selection.clone(), rows(category))
+            }
+            Subject::Mixed(n) => (format!("Multiple Categories ({n})"), Vec::new(), &[][..]),
+            Subject::New(category) => (format!("New {}", plural(category)), Vec::new(), &[][..]),
+            Subject::Plan(level) => (self.view_title(Sheet::Plan(level)), vec![level], PLAN),
+            Subject::View3D | Subject::Schedule => (self.view_title(self.sheet), Vec::new(), &[][..]),
+        };
+        ui.horizontal(|ui| {
+            ui.label(filter);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add_enabled(self.type_subject().is_some(), Button::new("Edit Type")).clicked() {
+                    self.edit_type();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        if !ids.is_empty() {
+            self.parameters(ui, &model, &ids, rows);
+        }
+        ui.add_space(8.0);
+        // Fields commit on Enter or when they lose the keyboard, which a click here does.
+        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+            let _ = ui.button("Apply");
+        });
+    }
+
+    /// The Type Selector: the category and the type of what the palette shows, a drop-down of
+    /// the category's types.
+    fn type_selector(&mut self, ui: &mut Ui, model: &Model, subject: Subject) {
+        let (category, current) = match subject {
+            Subject::Element(id) => match model.elements.get(&id) {
+                Some(e) => (e.category(), element_json(model, id)["type"].as_str().map(String::from)),
+                None => return,
+            },
+            Subject::Elements(category) => (category, self.shared_type(model)),
+            Subject::Mixed(_) => ("multiple categories", None),
+            Subject::New(category) => {
+                (category, self.types.get(category).cloned().or_else(|| model.default_type(category).map(String::from)))
+            }
+            Subject::Plan(_) => ("floor plan", None),
+            Subject::View3D => ("3d view", None),
+            Subject::Schedule => ("schedule", None),
+        };
+        let names: Vec<String> = model.type_names(category).into_iter().map(String::from).collect();
+        let enabled = !names.is_empty();
+        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), if enabled { Sense::click() } else { Sense::hover() });
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, enabled, "Type Selector"));
+        let p = ui.painter();
+        p.rect(
+            rect,
+            3.0,
+            pal().surface,
+            Stroke::new(1.0, if r.hovered() && enabled { pal().hover } else { pal().border }),
+            StrokeKind::Inside,
+        );
+        let swatch = Rect::from_min_size(rect.min + vec2(5.0, 5.0), vec2(40.0, 40.0));
+        p.rect_filled(swatch, 2.0, pal().bar);
+        style::paint(p, icon(category), swatch.shrink(8.0), pal().icon);
+        let x = swatch.right() + 10.0;
+        let family = match subject {
+            Subject::Plan(_) => "Floor Plan".to_string(),
+            Subject::View3D => "3D View".to_string(),
+            Subject::Mixed(_) => "Multiple Categories".to_string(),
+            _ => title(category),
+        };
+        let first = if current.is_some() { rect.top() + 16.0 } else { rect.center().y };
+        p.text(egui::pos2(x, first), Align2::LEFT_CENTER, family, FontId::proportional(13.0), pal().text);
+        if let Some(t) = &current {
+            p.text(egui::pos2(x, rect.top() + 34.0), Align2::LEFT_CENTER, t, FontId::proportional(12.5), pal().muted);
+        }
+        if enabled {
+            let c = egui::pos2(rect.right() - 14.0, rect.center().y);
+            p.add(Shape::convex_polygon(vec![c + vec2(-4.0, -2.0), c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)], pal().icon, Stroke::NONE));
+        }
+        if r.has_focus() {
+            p.rect_stroke(rect, 3.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+        }
+        let mut picked = None;
+        Popup::menu(&r).width(rect.width()).show(|ui| {
+            for n in &names {
+                if ui.selectable_label(current.as_ref() == Some(n), n).clicked() {
+                    picked = Some(n.clone());
+                }
+            }
+        });
+        match (picked, subject) {
+            (Some(n), Subject::Element(_) | Subject::Elements(_)) if current.as_ref() != Some(&n) => {
+                self.run("modify", json!({"ids": self.selection, "type": n}));
+            }
+            (Some(n), Subject::New(category)) => {
+                self.types.insert(category, n);
+            }
+            _ => {}
+        }
+    }
+
+    /// The element's parameters, group by group.
+    /// The elements' parameters, group by group: what they share shows, what varies is blank.
+    /// An edit changes all of them, in one step.
+    fn parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id], rows: &[Row]) {
+        let Some(&id) = ids.first() else { return };
+        let all: Vec<Value> = ids.iter().map(|id| element_json(model, *id)).collect();
+        let first = element_json(model, id);
+        let v: serde_json::Map<String, Value> = rows
+            .iter()
+            .map(|r| r.1)
+            .chain(["top_level", "enclosed"])
+            .map(|k| (k.to_string(), if all.iter().all(|e| e[k] == first[k]) { first[k].clone() } else { Value::Null }))
+            .collect();
+        let v = Value::Object(v);
+        let levels: Vec<String> = model.levels().iter().map(|(_, l)| l.name.clone()).collect();
+        let level_name = |v: &Value| v.as_u64().and_then(|l| model.level(l)).map_or_else(String::new, |l| l.name.clone());
+        let mut groups: Vec<&'static str> = Vec::new();
+        for (g, ..) in rows {
+            if !groups.contains(g) {
+                groups.push(g);
+            }
+        }
+        let mut change: Option<(&str, Result<Value, String>)> = None;
+        for group in groups {
+            let open = !self.collapsed.contains(group);
+            if group_header(ui, group, open) && !self.collapsed.remove(group) {
+                self.collapsed.insert(group);
+            }
+            if !open {
+                continue;
+            }
+            Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
+                Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(124.0).show(ui, |ui| {
+                    for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
+                        let val = &v[key];
+                        let kind = if kind == Height && !v["top_level"].is_null() { Shown } else { kind };
+                        let name = ui.label(label);
+                        match kind {
+                            Shown => {
+                                ui.label(RichText::new(text(val)).color(pal().muted));
+                            }
+                            LevelName => {
+                                ui.label(RichText::new(level_name(val)).color(pal().muted));
+                            }
+                            Flag => {
+                                let mut on = val.as_bool().unwrap_or(false);
+                                let r = ui.checkbox(&mut on, "");
+                                // A checkbox without text names itself "" for screen readers: give it its row's name.
+                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
+                                if r.labelled_by(name.id).changed() {
+                                    change = Some((key, Ok(json!(on))));
+                                }
+                            }
+                            Level => {
+                                if let Some(l) = combo(ui, (id, key), &level_name(val), &levels) {
+                                    change = Some((key, Ok(json!(l))));
+                                }
+                            }
+                            TopLevel => {
+                                const NONE: &str = "Unconnected";
+                                let options: Vec<String> = std::iter::once(NONE.to_string()).chain(levels.iter().cloned()).collect();
+                                let current = if val.is_null() { NONE.to_string() } else { level_name(val) };
+                                if let Some(l) = combo(ui, (id, key), &current, &options) {
+                                    change = Some((key, Ok(if l == NONE { Value::Null } else { json!(l) })));
+                                }
+                            }
+                            Text | Number | Point | Height => {
+                                if let Some(typed) = self.field(ui, id, key, text(val), name.id) {
+                                    change = Some((key, parse(kind, &typed)));
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+        if ids.len() == 1 && v["enclosed"] == json!(false) {
+            ui.label(RichText::new("Not enclosed: the walls around it don't close.").color(pal().error));
+        }
+        match change {
+            Some((key, Ok(val))) => {
+                self.run("modify", json!({"ids": ids, key: val}));
+            }
+            Some((key, Err(e))) => self.status = Status { text: format!("{key}: {e}"), error: true },
+            None => {}
+        }
+    }
+
+    /// A text field that edits as the user types and commits once, when they press Enter or
+    /// click away (Escape drops the edit): the text typed, if it changed.
+    fn field(&mut self, ui: &mut Ui, id: Id, key: &'static str, current: String, label: UiId) -> Option<String> {
+        let wid = ui.make_persistent_id(("field", id, key));
+        let focused = ui.memory(|m| m.has_focus(wid));
+        let mut typed = match &self.edit {
+            Some((i, k, t)) if focused && *i == id && *k == key => t.clone(),
+            _ => current.clone(),
+        };
+        let r = ui.add(TextEdit::singleline(&mut typed).id(wid).desired_width(f32::INFINITY)).labelled_by(label);
+        if r.has_focus() {
+            self.edit = Some((id, key, typed));
+            return None;
+        }
+        if r.lost_focus() {
+            self.edit = None;
+            if typed != current && !ui.input(|i| i.key_pressed(Key::Escape)) {
+                return Some(typed);
+            }
+        }
+        None
+    }
+
+    /// The Type Properties dialog, while it's open: the type's parameters, Duplicate, and OK,
+    /// Cancel and Apply. Changing a type changes every element of it.
+    pub(crate) fn type_properties(&mut self, ctx: &Context) {
+        let Some(mut d) = self.type_dialog.take() else { return };
+        let model = Arc::clone(&self.session.model);
+        let names: Vec<String> = model.type_names(d.category).into_iter().map(String::from).collect();
+        let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
+        let r = Modal::new(UiId::new("type-properties")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.label(RichText::new("Type Properties").heading());
+            ui.add_space(6.0);
+            Grid::new("type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                ui.label("Family:");
+                ui.label(title(d.category));
+                ui.end_row();
+                let l = ui.label("Type:");
+                ui.horizontal(|ui| {
+                    let c = ComboBox::from_id_salt("type-name").selected_text(&d.name).width(200.0).show_ui(ui, |ui| {
+                        for n in &names {
+                            if ui.selectable_label(*n == d.name, n).clicked() {
+                                switch = Some(n.clone());
+                            }
+                        }
+                    });
+                    c.response.labelled_by(l.id);
+                    if d.duplicate.is_none() && ui.button("Duplicate…").clicked() {
+                        d.duplicate = Some(format!("{} 2", d.name));
+                    }
+                });
+                ui.end_row();
+                if let Some(new) = &mut d.duplicate {
+                    let l = ui.label("New type");
+                    ui.horizontal(|ui| {
+                        ui.add(TextEdit::singleline(new).desired_width(200.0)).labelled_by(l.id);
+                        create = ui.button("Create").clicked();
+                    });
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Type Parameters").strong());
+            Grid::new("type-parameters").num_columns(2).striped(true).min_col_width(150.0).show(ui, |ui| {
+                ui.label(RichText::new("Parameter").color(pal().muted));
+                ui.label(RichText::new("Value").color(pal().muted));
+                ui.end_row();
+                for (_, label, typed) in &mut d.fields {
+                    let l = ui.label(*label);
+                    ui.add(TextEdit::singleline(typed).desired_width(160.0)).labelled_by(l.id);
+                    ui.end_row();
+                }
+            });
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                apply = ui.button("Apply").clicked();
+                cancel = ui.button("Cancel").clicked();
+                ok = ui.button("OK").clicked();
+            });
+        });
+        if let Some(n) = switch {
+            d.fields = TypeDialog::fields(&model, d.category, &n);
+            d.name = n;
+            d.duplicate = None;
+        }
+        if create && let Some(new) = d.duplicate.clone() {
+            let made = match d.params(new.trim()) {
+                Ok(p) => self.run("type", p).is_some(),
+                Err(e) => {
+                    self.status = Status { text: e, error: true };
+                    false
+                }
+            };
+            if made {
+                d.name = new.trim().to_string();
+                d.fields = TypeDialog::fields(&self.session.model, d.category, &d.name);
+                d.duplicate = None;
+            }
+        }
+        if apply || ok {
+            let applied = match d.params(&d.name) {
+                Ok(p) => self.run("type", p).is_some(),
+                Err(e) => {
+                    self.status = Status { text: e, error: true };
+                    false
+                }
+            };
+            ok &= applied;
+        }
+        if ok {
+            let m = &self.session.model;
+            if d.elements.is_empty() {
+                self.types.insert(d.category, d.name.clone());
+            } else if d.elements.iter().any(|id| element_json(m, *id)["type"].as_str() != Some(d.name.as_str())) {
+                self.run("modify", json!({"ids": d.elements, "type": d.name}));
+            }
+        }
+        if !(ok || cancel || r.should_close()) {
+            self.type_dialog = Some(d);
+        }
+    }
+}

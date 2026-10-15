@@ -1,0 +1,410 @@
+//! Look and feel: a dense desktop tool, light or dark (the system's theme until one is picked on
+//! the View tab). Slate chrome around the drawing, one blue accent for the active tool, selection
+//! and focus, an 8 px rhythm, and icons drawn in code as 1.5 px strokes on a 24 px grid.
+
+use std::cell::Cell;
+use std::f32::consts::FRAC_PI_2;
+
+use egui::{Color32, Context, CornerRadius, FontId, Painter, Pos2, Rect, Shape, Stroke, TextStyle, Theme, ThemePreference, vec2};
+
+/// A theme's colours.
+pub struct Palette {
+    pub accent: Color32,
+    /// Pre-selection: what a click would pick.
+    pub hover: Color32,
+    pub select_fill: Color32,
+    pub hover_fill: Color32,
+    pub text: Color32,
+    pub muted: Color32,
+    pub icon: Color32,
+    pub panel: Color32,
+    pub bar: Color32,
+    pub border: Color32,
+    pub error: Color32,
+    /// Revit's contextual tabs (Modify | …) stand out in green.
+    pub context: Color32,
+    pub context_fill: Color32,
+    /// What the ribbon, popups and fields sit on.
+    pub surface: Color32,
+    /// Around a sheet's paper.
+    pub desk: Color32,
+}
+
+const fn rgb(c: u32) -> Color32 {
+    Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+pub const LIGHT: Palette = Palette {
+    accent: rgb(0x2563EB),
+    hover: rgb(0x60A5FA),
+    select_fill: rgb(0xBFDBFE),
+    hover_fill: rgb(0xDBEAFE),
+    text: rgb(0x0F172A),
+    muted: rgb(0x475569),
+    icon: rgb(0x334155),
+    panel: rgb(0xF8FAFC),
+    bar: rgb(0xF1F5F9),
+    border: rgb(0xE2E8F0),
+    error: rgb(0xDC2626),
+    context: rgb(0x15803D),
+    context_fill: rgb(0xDCFCE7),
+    surface: rgb(0xFFFFFF),
+    desk: rgb(0xD4D4D4),
+};
+
+pub const DARK: Palette = Palette {
+    accent: rgb(0x3B82F6),
+    hover: rgb(0x60A5FA),
+    select_fill: rgb(0x1E3A5F),
+    hover_fill: rgb(0x24334A),
+    text: rgb(0xE2E8F0),
+    muted: rgb(0x94A3B8),
+    icon: rgb(0xCBD5E1),
+    panel: rgb(0x1E2228),
+    bar: rgb(0x262B33),
+    border: rgb(0x3A414B),
+    error: rgb(0xF87171),
+    context: rgb(0x4ADE80),
+    context_fill: rgb(0x14341F),
+    surface: rgb(0x171A1F),
+    desk: rgb(0x2A2E35),
+};
+
+thread_local! {
+    /// Whether this frame is drawn dark: each window draws on its own thread.
+    static DARK_ON: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The colours of the theme this frame is drawn in.
+pub fn pal() -> &'static Palette {
+    if dark() { &DARK } else { &LIGHT }
+}
+
+pub fn dark() -> bool {
+    DARK_ON.with(Cell::get)
+}
+
+/// Draw this frame in the theme egui shows: the system's, unless the user picked one.
+pub fn follow(ctx: &Context) {
+    DARK_ON.with(|d| d.set(ctx.theme() == Theme::Dark));
+}
+
+pub fn apply(ctx: &Context) {
+    ctx.options_mut(|o| {
+        o.theme_preference = ThemePreference::System;
+        o.fallback_theme = Theme::Light;
+    });
+    for (theme, pal) in [(Theme::Light, &LIGHT), (Theme::Dark, &DARK)] {
+        ctx.style_mut_of(theme, |s| {
+            for (style, size) in [(TextStyle::Heading, 15.0), (TextStyle::Body, 13.0), (TextStyle::Button, 13.0), (TextStyle::Small, 11.0)]
+            {
+                s.text_styles.insert(style, FontId::proportional(size));
+            }
+            s.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.0));
+            s.spacing.item_spacing = vec2(8.0, 4.0);
+            s.spacing.button_padding = vec2(8.0, 3.0);
+            s.spacing.interact_size.y = 22.0;
+            let v = &mut s.visuals;
+            v.panel_fill = pal.panel;
+            v.window_fill = pal.surface;
+            v.extreme_bg_color = pal.surface;
+            v.faint_bg_color = pal.bar;
+            v.window_stroke = Stroke::new(1.0, pal.border);
+            v.hyperlink_color = pal.accent;
+            v.selection.bg_fill = pal.select_fill;
+            v.selection.stroke = Stroke::new(1.0, pal.accent);
+            let radius = CornerRadius::same(4);
+            for w in
+                [&mut v.widgets.noninteractive, &mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open]
+            {
+                w.corner_radius = radius;
+            }
+            v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, pal.border);
+            v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, pal.text);
+            v.widgets.inactive.fg_stroke = Stroke::new(1.0, pal.text);
+            v.widgets.inactive.weak_bg_fill = pal.bar;
+            v.widgets.inactive.bg_stroke = Stroke::new(1.0, pal.border);
+            v.widgets.hovered.weak_bg_fill = pal.hover_fill;
+            v.widgets.hovered.bg_stroke = Stroke::new(1.0, pal.hover);
+            v.widgets.hovered.fg_stroke = Stroke::new(1.0, pal.text);
+            v.widgets.active.weak_bg_fill = pal.select_fill;
+            v.widgets.active.bg_stroke = Stroke::new(1.0, pal.accent);
+            v.widgets.active.fg_stroke = Stroke::new(1.0, pal.text);
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Icon {
+    Modify,
+    Wall,
+    Door,
+    Window,
+    Room,
+    Level,
+    Grid,
+    Undo,
+    Redo,
+    Open,
+    Save,
+    Fit,
+    ZoomIn,
+    ZoomOut,
+    ThinLines,
+    Schedule,
+    CloseInactive,
+    Interface,
+    Properties,
+    TypeProperties,
+    Delete,
+    Filter,
+    Close,
+    Plan,
+    Move,
+    Copy,
+    Rotate,
+    MirrorPick,
+    MirrorDraw,
+    Align,
+    Offset,
+    Trim,
+    Split,
+    Dimension,
+    Tag,
+    TagAll,
+    View3D,
+    Section,
+    Elevation,
+    Sheet,
+    PlaceView,
+    Column,
+    Stair,
+    Roof,
+    Theme,
+}
+
+/// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
+fn arc(c: Pos2, r: f32, a0: f32, a1: f32) -> Vec<Pos2> {
+    (0..=12).map(|i| a0 + (a1 - a0) * i as f32 / 12.0).map(|a| c + vec2(a.cos(), a.sin()) * r).collect()
+}
+
+/// Draws `icon` into `r`, designed on a 24 x 24 grid.
+pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
+    let k = r.width() / 24.0;
+    let mirror = matches!(icon, Icon::Redo);
+    let at = |x: f32, y: f32| r.min + vec2(if mirror { 24.0 - x } else { x }, y) * k;
+    let s = Stroke::new(1.5, color);
+    let line = |pts: &[(f32, f32)]| Shape::line(pts.iter().map(|&(x, y)| at(x, y)).collect(), s);
+    let ring = |pts: &[(f32, f32)]| Shape::closed_line(pts.iter().map(|&(x, y)| at(x, y)).collect(), s);
+    let shapes = match icon {
+        Icon::Modify => vec![ring(&[(6.0, 3.0), (6.0, 19.0), (10.0, 15.0), (13.0, 21.0), (15.5, 20.0), (12.5, 14.0), (18.0, 14.0)])],
+        Icon::Wall => vec![
+            ring(&[(2.0, 8.0), (22.0, 8.0), (22.0, 16.0), (2.0, 16.0)]),
+            line(&[(5.0, 16.0), (9.0, 8.0)]),
+            line(&[(10.0, 16.0), (14.0, 8.0)]),
+            line(&[(15.0, 16.0), (19.0, 8.0)]),
+        ],
+        Icon::Door => vec![
+            line(&[(2.0, 20.0), (6.0, 20.0)]),
+            line(&[(18.0, 20.0), (22.0, 20.0)]),
+            line(&[(6.0, 20.0), (6.0, 8.0)]),
+            Shape::line(arc(at(6.0, 20.0), 12.0 * k, -FRAC_PI_2, 0.0), s),
+        ],
+        Icon::Window => vec![
+            ring(&[(2.0, 9.0), (22.0, 9.0), (22.0, 15.0), (2.0, 15.0)]),
+            line(&[(2.0, 12.0), (22.0, 12.0)]),
+            line(&[(6.0, 9.0), (6.0, 15.0)]),
+            line(&[(18.0, 9.0), (18.0, 15.0)]),
+        ],
+        Icon::Room => vec![
+            ring(&[(3.0, 3.0), (21.0, 3.0), (21.0, 21.0), (3.0, 21.0)]),
+            line(&[(8.0, 11.0), (16.0, 11.0)]),
+            line(&[(9.5, 14.5), (14.5, 14.5)]),
+        ],
+        // A level line with its head: a triangle standing on the line's end.
+        Icon::Level => vec![line(&[(2.0, 16.0), (22.0, 16.0)]), ring(&[(13.0, 8.0), (21.0, 8.0), (17.0, 16.0)])],
+        Icon::Grid => vec![Shape::circle_stroke(at(12.0, 6.0), 4.0 * k, s), line(&[(12.0, 10.0), (12.0, 22.0)])],
+        Icon::Undo | Icon::Redo => {
+            let mut curve = vec![at(7.0, 9.0), at(15.0, 9.0)];
+            curve.extend(
+                arc(at(15.0, 14.0), 5.0 * k, -FRAC_PI_2, FRAC_PI_2)
+                    .into_iter()
+                    .map(|q| if mirror { Pos2::new(2.0 * at(15.0, 14.0).x - q.x, q.y) } else { q }),
+            );
+            curve.push(at(9.0, 19.0));
+            vec![Shape::line(curve, s), line(&[(10.5, 5.5), (7.0, 9.0), (10.5, 12.5)])]
+        }
+        Icon::Open => vec![ring(&[(3.0, 6.0), (9.0, 6.0), (11.0, 8.5), (21.0, 8.5), (21.0, 19.0), (3.0, 19.0)])],
+        Icon::Save => vec![
+            line(&[(12.0, 4.0), (12.0, 15.0)]),
+            line(&[(8.0, 11.0), (12.0, 15.0), (16.0, 11.0)]),
+            line(&[(4.0, 15.0), (4.0, 20.0), (20.0, 20.0), (20.0, 15.0)]),
+        ],
+        Icon::Fit => vec![
+            line(&[(4.0, 9.0), (4.0, 4.0), (9.0, 4.0)]),
+            line(&[(15.0, 4.0), (20.0, 4.0), (20.0, 9.0)]),
+            line(&[(20.0, 15.0), (20.0, 20.0), (15.0, 20.0)]),
+            line(&[(9.0, 20.0), (4.0, 20.0), (4.0, 15.0)]),
+        ],
+        Icon::ZoomIn | Icon::ZoomOut => {
+            let mut v = vec![
+                Shape::circle_stroke(at(10.0, 10.0), 6.5 * k, s),
+                line(&[(14.8, 14.8), (20.5, 20.5)]),
+                line(&[(7.0, 10.0), (13.0, 10.0)]),
+            ];
+            if matches!(icon, Icon::ZoomIn) {
+                v.push(line(&[(10.0, 7.0), (10.0, 13.0)]));
+            }
+            v
+        }
+        Icon::ThinLines => vec![line(&[(3.0, 7.0), (21.0, 7.0)]), line(&[(3.0, 12.0), (21.0, 12.0)]), line(&[(3.0, 17.0), (21.0, 17.0)])],
+        Icon::Schedule => vec![
+            ring(&[(3.0, 4.0), (21.0, 4.0), (21.0, 20.0), (3.0, 20.0)]),
+            line(&[(3.0, 9.0), (21.0, 9.0)]),
+            line(&[(3.0, 14.5), (21.0, 14.5)]),
+            line(&[(10.0, 4.0), (10.0, 20.0)]),
+        ],
+        Icon::CloseInactive => {
+            vec![ring(&[(3.0, 4.0), (15.0, 4.0), (15.0, 14.0), (3.0, 14.0)]), ring(&[(9.0, 10.0), (21.0, 10.0), (21.0, 20.0), (9.0, 20.0)])]
+        }
+        Icon::Interface => vec![
+            ring(&[(3.0, 4.0), (21.0, 4.0), (21.0, 20.0), (3.0, 20.0)]),
+            line(&[(3.0, 8.0), (21.0, 8.0)]),
+            line(&[(9.0, 8.0), (9.0, 20.0)]),
+        ],
+        Icon::Properties => vec![
+            ring(&[(4.0, 3.0), (20.0, 3.0), (20.0, 21.0), (4.0, 21.0)]),
+            line(&[(7.0, 8.0), (17.0, 8.0)]),
+            line(&[(7.0, 12.0), (17.0, 12.0)]),
+            line(&[(7.0, 16.0), (13.0, 16.0)]),
+        ],
+        Icon::TypeProperties => vec![
+            ring(&[(4.0, 3.0), (20.0, 3.0), (20.0, 21.0), (4.0, 21.0)]),
+            line(&[(8.0, 8.0), (16.0, 8.0)]),
+            line(&[(12.0, 8.0), (12.0, 17.0)]),
+        ],
+        Icon::Delete | Icon::Close => vec![line(&[(6.0, 6.0), (18.0, 18.0)]), line(&[(18.0, 6.0), (6.0, 18.0)])],
+        Icon::Filter => vec![ring(&[(3.0, 4.0), (21.0, 4.0), (14.0, 12.0), (14.0, 19.0), (10.0, 21.0), (10.0, 12.0)])],
+        Icon::Move => vec![
+            line(&[(12.0, 3.0), (12.0, 21.0)]),
+            line(&[(3.0, 12.0), (21.0, 12.0)]),
+            line(&[(9.0, 6.0), (12.0, 3.0), (15.0, 6.0)]),
+            line(&[(9.0, 18.0), (12.0, 21.0), (15.0, 18.0)]),
+            line(&[(6.0, 9.0), (3.0, 12.0), (6.0, 15.0)]),
+            line(&[(18.0, 9.0), (21.0, 12.0), (18.0, 15.0)]),
+        ],
+        Icon::Copy => vec![
+            ring(&[(8.0, 3.0), (20.0, 3.0), (20.0, 15.0), (8.0, 15.0)]),
+            line(&[(8.0, 9.0), (4.0, 9.0), (4.0, 21.0), (16.0, 21.0), (16.0, 15.0)]),
+        ],
+        Icon::Rotate => {
+            let mut v = vec![Shape::line(arc(at(12.0, 12.0), 7.5 * k, -2.6, 2.0), s)];
+            let tip = at(12.0, 12.0) + vec2(2.0f32.cos(), 2.0f32.sin()) * 7.5 * k;
+            v.push(Shape::line(vec![tip + vec2(-4.0, -1.0) * k, tip, tip + vec2(1.0, -4.0) * k], s));
+            v
+        }
+        Icon::MirrorPick | Icon::MirrorDraw => {
+            let left = ring(&[(3.0, 18.0), (9.0, 6.0), (9.0, 18.0)]);
+            let right = ring(&[(21.0, 18.0), (15.0, 6.0), (15.0, 18.0)]);
+            let axis = if matches!(icon, Icon::MirrorPick) {
+                Shape::dashed_line(&[at(12.0, 2.0), at(12.0, 22.0)], s, 2.5 * k, 2.0 * k)
+            } else {
+                vec![line(&[(12.0, 2.0), (12.0, 22.0)]), line(&[(10.0, 2.0), (14.0, 2.0)]), line(&[(10.0, 22.0), (14.0, 22.0)])]
+            };
+            let mut v = vec![left, right];
+            v.extend(axis);
+            v
+        }
+        Icon::Align => vec![
+            line(&[(5.0, 3.0), (5.0, 21.0)]),
+            line(&[(18.0, 3.0), (18.0, 21.0)]),
+            line(&[(15.0, 12.0), (8.0, 12.0)]),
+            line(&[(11.0, 9.0), (8.0, 12.0), (11.0, 15.0)]),
+        ],
+        Icon::Offset => vec![
+            line(&[(3.0, 15.0), (13.0, 5.0)]),
+            line(&[(9.0, 21.0), (21.0, 9.0)]),
+            line(&[(9.0, 10.0), (14.0, 15.0)]),
+            line(&[(14.0, 11.5), (14.0, 15.0), (10.5, 15.0)]),
+        ],
+        Icon::Trim => vec![line(&[(6.0, 21.0), (6.0, 6.0), (21.0, 6.0)]), line(&[(6.0, 6.0), (3.0, 3.0)])],
+        Icon::Split => vec![
+            ring(&[(2.0, 9.0), (10.0, 9.0), (10.0, 15.0), (2.0, 15.0)]),
+            ring(&[(14.0, 9.0), (22.0, 9.0), (22.0, 15.0), (14.0, 15.0)]),
+            line(&[(11.0, 20.0), (13.0, 4.0)]),
+        ],
+        Icon::Dimension => vec![
+            line(&[(4.0, 7.0), (4.0, 20.0)]),
+            line(&[(20.0, 7.0), (20.0, 20.0)]),
+            line(&[(2.0, 16.0), (22.0, 16.0)]),
+            line(&[(2.5, 18.0), (5.5, 14.0)]),
+            line(&[(18.5, 18.0), (21.5, 14.0)]),
+            line(&[(9.0, 11.0), (15.0, 11.0)]),
+        ],
+        Icon::Tag => vec![
+            ring(&[(9.0, 4.0), (21.0, 4.0), (21.0, 12.0), (9.0, 12.0)]),
+            line(&[(13.0, 8.0), (17.0, 8.0)]),
+            line(&[(9.0, 12.0), (3.0, 20.0)]),
+        ],
+        Icon::TagAll => vec![
+            ring(&[(2.0, 3.0), (11.0, 3.0), (11.0, 9.0), (2.0, 9.0)]),
+            ring(&[(8.0, 10.0), (17.0, 10.0), (17.0, 16.0), (8.0, 16.0)]),
+            ring(&[(13.0, 17.0), (22.0, 17.0), (22.0, 23.0), (13.0, 23.0)]),
+        ],
+        Icon::View3D => vec![
+            ring(&[(12.0, 2.5), (20.5, 7.25), (20.5, 16.75), (12.0, 21.5), (3.5, 16.75), (3.5, 7.25)]),
+            line(&[(3.5, 7.25), (12.0, 12.0), (20.5, 7.25)]),
+            line(&[(12.0, 12.0), (12.0, 21.5)]),
+        ],
+        Icon::Section => vec![
+            ring(&[(3.0, 14.0), (9.0, 14.0), (3.0, 7.0)]),
+            line(&[(9.0, 14.0), (13.0, 14.0)]),
+            line(&[(15.0, 14.0), (19.0, 14.0)]),
+            line(&[(21.0, 11.0), (21.0, 17.0)]),
+        ],
+        Icon::Elevation => vec![Shape::circle_stroke(at(12.0, 15.0), 5.0 * k, s), ring(&[(8.0, 10.5), (16.0, 10.5), (12.0, 4.0)])],
+        Icon::Sheet => vec![
+            ring(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0)]),
+            ring(&[(13.0, 15.0), (21.0, 15.0), (21.0, 19.0), (13.0, 19.0)]),
+        ],
+        Icon::PlaceView => vec![
+            ring(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0)]),
+            ring(&[(6.0, 8.0), (13.0, 8.0), (13.0, 14.0), (6.0, 14.0)]),
+            line(&[(17.0, 9.0), (17.0, 15.0)]),
+            line(&[(14.0, 12.0), (20.0, 12.0)]),
+        ],
+        // A column in elevation: its shaft between a base and a capital.
+        Icon::Column => vec![
+            ring(&[(9.0, 5.0), (15.0, 5.0), (15.0, 19.0), (9.0, 19.0)]),
+            line(&[(6.0, 4.0), (18.0, 4.0)]),
+            line(&[(6.0, 20.0), (18.0, 20.0)]),
+        ],
+        Icon::Stair => vec![ring(&[
+            (3.0, 20.0),
+            (3.0, 16.0),
+            (8.0, 16.0),
+            (8.0, 12.0),
+            (13.0, 12.0),
+            (13.0, 8.0),
+            (18.0, 8.0),
+            (18.0, 4.0),
+            (21.0, 4.0),
+            (21.0, 20.0),
+        ])],
+        Icon::Roof => vec![
+            ring(&[(2.0, 14.0), (12.0, 5.0), (22.0, 14.0), (19.0, 14.0), (12.0, 8.5), (5.0, 14.0)]),
+            line(&[(6.0, 14.0), (6.0, 20.0), (18.0, 20.0), (18.0, 14.0)]),
+        ],
+        // Half light, half dark.
+        Icon::Theme => {
+            let half: Vec<Pos2> = arc(at(12.0, 12.0), 8.0 * k, FRAC_PI_2, 3.0 * FRAC_PI_2);
+            vec![Shape::circle_stroke(at(12.0, 12.0), 8.0 * k, s), Shape::convex_polygon(half, color, Stroke::NONE)]
+        }
+        Icon::Plan => vec![
+            ring(&[(3.0, 3.0), (21.0, 3.0), (21.0, 21.0), (3.0, 21.0)]),
+            line(&[(3.0, 12.0), (12.0, 12.0), (12.0, 21.0)]),
+            line(&[(15.0, 3.0), (15.0, 8.0)]),
+        ],
+    };
+    p.extend(shapes);
+}

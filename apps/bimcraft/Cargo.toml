@@ -1,0 +1,17 @@
+[package]
+name = "bimcraft"
+description = "BIMCraft desktop app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version = "1.95"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bimcraft-core = { workspace = true }
+bimcraft-ui-egui = { workspace = true }
+eframe = { workspace = true }
+serde_json = { workspace = true }
