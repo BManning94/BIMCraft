@@ -40,6 +40,7 @@
   <a href="#commands">Commands</a> ·
   <a href="#architecture">Architecture</a> ·
   <a href="#roadmap">Roadmap</a> ·
+  <a href="#downloads">Downloads</a> ·
   <a href="#license-and-credits">License and credits</a>
 </p>
 
@@ -309,6 +310,23 @@ joins at angles other than 90°; room separation lines; areas at the wall finish
 curtain walls, sloped floors, stairs of several flights and other roof shapes. Revit's own `.rvt` format is closed and
 undocumented, so BIMCraft won't read it itself; IFC is the way in and out, and `.rvt` files will come in through Autodesk's
 own converter.
+
+## Downloads
+
+### Windows
+
+| Build | Installer |
+|---|---|
+| x64 (64-bit Intel/AMD) | `bimcraft-<ver>-windows-x64.msi` |
+
+The installer puts BIMCraft and `bimcraft-cli` in Program Files for every user, adds BIMCraft to the Start menu, and opens
+`.bimcraft` projects in it; a newer version upgrades an older one. For a silent install with a desktop shortcut too:
+`msiexec /i bimcraft-<ver>-windows-x64.msi /qn DESKTOPSHORTCUT=1`. It isn't code-signed yet, so Windows SmartScreen asks
+before it runs: More info, then Run anyway.
+
+Versions are published on the [releases page](https://github.com/IPedrax/bimcraft/releases) as they're tagged. Between
+releases, the Release workflow (Actions > Release > Run workflow) builds the installer for any commit, as that run's
+artifact. On Linux and macOS, build from source: see [Quick start](#quick-start).
 
 ## License and credits
 
