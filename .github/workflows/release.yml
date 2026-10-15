@@ -1,0 +1,48 @@
+# Windows installer: on a version tag (v0.1.0) it tests, builds bimcraft-<version>-windows-x64.msi
+# and publishes it as that tag's release; run by hand, it leaves the MSI as the run's artifact.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build
+        run: cargo build --release -p bimcraft -p bimcraft-cli
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          dotnet tool install --global wix --version 5.0.2
+          $msi = "bimcraft-$version-windows-x64.msi"
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" build packaging/windows/bimcraft.wxs -arch x64 -d Version=$version -o $msi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "MSI=$msi"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bimcraft-windows-x64
+          path: ${{ env.MSI }}
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" "${{ env.MSI }}" --title "BIMCraft ${{ github.ref_name }}" --generate-notes

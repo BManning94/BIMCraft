@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  BIMCraft's Windows installer, for the WiX Toolset 5. From the repository root, after a release
+  build of bimcraft and bimcraft-cli:
+
+    wix build packaging\windows\bimcraft.wxs -arch x64 -d Version=0.1.0 -o bimcraft-0.1.0-windows-x64.msi
+
+  It installs for every user into Program Files\BIMCraft: the app, the CLI and the licences, a
+  Start menu shortcut, and .bimcraft projects opening in BIMCraft. `DESKTOPSHORTCUT=1` adds a
+  desktop shortcut: msiexec /i bimcraft-0.1.0-windows-x64.msi DESKTOPSHORTCUT=1
+  A newer version upgrades an older one in place.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="BIMCraft" Manufacturer="IPedrax" Version="$(var.Version)" UpgradeCode="5D7C2E8B-3F4A-4C1E-9B6D-2A8F0E1C7B34" Scope="perMachine" Compressed="yes">
+    <SummaryInformation Description="BIMCraft: building information modeling in pure Rust" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of BIMCraft is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="BIMCraftIcon" SourceFile="assets\app-icon\bimcraft.ico" />
+    <Property Id="ARPPRODUCTICON" Value="BIMCraftIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/IPedrax/bimcraft" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/IPedrax/bimcraft/issues" />
+    <Property Id="DESKTOPSHORTCUT" Secure="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="BIMCraft" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="BIMCraft" Level="1">
+      <Component Id="App" Directory="INSTALLFOLDER">
+        <File Id="BimcraftExe" Source="target\release\bimcraft.exe" KeyPath="yes">
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="BIMCraft" Description="Building information modeling" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" Advertise="yes" />
+        </File>
+        <ProgId Id="BIMCraft.Project" Description="BIMCraft project" Icon="BIMCraftIcon" Advertise="yes">
+          <Extension Id="bimcraft" ContentType="application/x-bimcraft">
+            <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+      </Component>
+      <Component Id="Cli" Directory="INSTALLFOLDER">
+        <File Id="BimcraftCliExe" Source="target\release\bimcraft-cli.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="Licences" Directory="INSTALLFOLDER">
+        <File Id="LicenseMit" Source="LICENSE-MIT" KeyPath="yes" />
+        <File Id="LicenseApache" Source="LICENSE-APACHE" />
+      </Component>
+      <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = 1">
+        <Shortcut Id="DesktopShortcut" Name="BIMCraft" Target="[INSTALLFOLDER]bimcraft.exe" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" />
+        <RegistryValue Root="HKLM" Key="Software\BIMCraft" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

@@ -1,5 +1,8 @@
 //! `bimcraft`: the BIMCraft desktop app.
 
+// A release build on Windows is a window, not a console program: no console opens behind it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use std::process::ExitCode;
 
 use bimcraft_core::engine::Session;
@@ -36,13 +39,15 @@ fn main() -> ExitCode {
     if let Some(text) = problem {
         app.status = Status { text, error: true };
     }
-    let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("BIMCraft")
-            .with_inner_size([1440.0, 900.0])
-            .with_min_inner_size([900.0, 560.0]),
-        ..Default::default()
-    };
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("BIMCraft")
+        .with_inner_size([1440.0, 900.0])
+        .with_min_inner_size([900.0, 560.0]);
+    // The logo, for the title bar and the taskbar.
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/app-icon/bimcraft-256.png")) {
+        viewport = viewport.with_icon(icon);
+    }
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     match eframe::run_native("BIMCraft", options, Box::new(|_| Ok(Box::new(app)))) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
