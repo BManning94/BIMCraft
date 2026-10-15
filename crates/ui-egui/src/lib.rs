@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{Element, Id, Location, Model, Reference, STAIR_WIDTH, heading};
+use bimcraft_core::model::{CEILING_HEIGHT, Element, Id, Location, Model, Reference, STAIR_WIDTH, heading};
 use bimcraft_core::schedule;
 use bimcraft_core::units::Units;
 use egui::containers::menu::{MenuButton, SubMenuButton};
@@ -41,6 +41,8 @@ use style::{Icon, pal};
 pub enum Sheet {
     /// A level's floor plan.
     Plan(Id),
+    /// A level's reflected ceiling plan.
+    Ceiling(Id),
     /// The default 3D view, `{3D}`.
     View3D,
     /// A section's or an elevation's view.
@@ -115,6 +117,14 @@ pub enum Tool {
     /// Attach the selected walls' tops (or, as the Options Bar says, their bases) to the roof or
     /// floor picked.
     Attach,
+    /// A floor under the walls of the plan's level.
+    Floor,
+    /// A ceiling in the room clicked, out to its walls' faces.
+    Ceiling,
+    /// A shaft opening: its first corner, once clicked.
+    Shaft(Option<P2>),
+    /// The selected floor's slope arrow: its tail, once clicked.
+    SlopeArrow(Option<P2>),
 }
 
 /// Why the last command failed, shown in a box over the view.
@@ -207,6 +217,11 @@ pub struct BimApp {
     roof_slope: String,
     roof_overhang: String,
     roof_gable: bool,
+    /// How high the Ceiling tool's ceilings are; the Slope Arrow's slope; the Shaft tool's top.
+    ceiling_height: String,
+    floor_slope: String,
+    shaft_top: Option<Option<Id>>,
+    shaft_height: String,
     /// Each click ends a wall and starts the next; off, two clicks make one wall.
     chain: bool,
     /// The Wall tool draws arcs, by their ends and a point on them; the line its walls stand on.
@@ -434,6 +449,10 @@ impl BimApp {
             roof_slope: "30".into(),
             roof_overhang: units.length(500.0),
             roof_gable: false,
+            ceiling_height: units.length(CEILING_HEIGHT),
+            floor_slope: "5".into(),
+            shaft_top: None,
+            shaft_height: units.length(3000.0),
             chain: true,
             wall_arc: false,
             wall_location: Location::Centre,
@@ -508,7 +527,8 @@ impl BimApp {
             | Tool::Trim(_)
             | Tool::Split
             | Tool::Offset
-            | Tool::Attach => None,
+            | Tool::Attach
+            | Tool::SlopeArrow(_) => None,
             Tool::Wall(_) => Some("Place Wall"),
             Tool::Door => Some("Place Door"),
             Tool::Window => Some("Place Window"),
@@ -524,6 +544,9 @@ impl BimApp {
             Tool::Column => Some("Place Column"),
             Tool::Stair(_) => Some("Create Stair"),
             Tool::Roof => Some("Create Roof Footprint"),
+            Tool::Floor => Some("Create Floor"),
+            Tool::Ceiling => Some("Place Ceiling"),
+            Tool::Shaft(_) => Some("Create Shaft Opening"),
         };
         if let Some(what) = place {
             return Some(format!("{} | {}", t("Modify"), t(what)));
@@ -547,7 +570,9 @@ impl BimApp {
 
     fn view_name(&self, sheet: Sheet) -> String {
         match sheet {
-            Sheet::Plan(level) => self.session.model.level(level).map_or_else(|| "Floor Plan".into(), |l| l.name.clone()),
+            Sheet::Plan(level) | Sheet::Ceiling(level) => {
+                self.session.model.level(level).map_or_else(|| "Floor Plan".into(), |l| l.name.clone())
+            }
             Sheet::View3D => "{3D}".into(),
             Sheet::Section(id) => self.session.model.section(id).map_or_else(|| "Section".into(), |v| v.name.clone()),
             Sheet::Paper(id) => self.session.model.sheet(id).map_or_else(|| "Sheet".into(), |s| format!("{} - {}", s.number, s.name)),
@@ -559,6 +584,7 @@ impl BimApp {
     fn view_title(&self, sheet: Sheet) -> String {
         let kind = match sheet {
             Sheet::Plan(_) => "Floor Plan",
+            Sheet::Ceiling(_) => "Ceiling Plan",
             Sheet::View3D => "3D View",
             Sheet::Section(id) if matches!(self.session.model.elements.get(&id), Some(Element::Elevation(_))) => "Elevation",
             Sheet::Section(_) => "Section",
@@ -621,8 +647,8 @@ impl BimApp {
             // The plan sets the cursor each frame it shows.
             self.canvas.cursor = None;
             match self.sheet {
-                Sheet::Plan(level) if self.session.model.level(level).is_some() => self.canvas(ui, level),
-                Sheet::Plan(_) => {
+                Sheet::Plan(level) | Sheet::Ceiling(level) if self.session.model.level(level).is_some() => self.canvas(ui, level),
+                Sheet::Plan(_) | Sheet::Ceiling(_) => {
                     ui.centered_and_justified(|ui| ui.label(t("This project has no levels. Add one with the Level tool.")));
                 }
                 Sheet::View3D => self.view3d(ui),
@@ -641,8 +667,16 @@ impl BimApp {
         // The Options Bar's lengths, rewritten in the project's units when they change.
         let (from, to) = (self.units, self.session.model.units);
         if from != to {
-            for field in [&mut self.wall_height, &mut self.column_height, &mut self.stair_width, &mut self.roof_overhang, &mut self.offset]
-            {
+            let fields = [
+                &mut self.wall_height,
+                &mut self.column_height,
+                &mut self.stair_width,
+                &mut self.roof_overhang,
+                &mut self.offset,
+                &mut self.ceiling_height,
+                &mut self.shaft_height,
+            ];
+            for field in fields {
                 if let Some(mm) = from.parse(field) {
                     *field = to.length(mm);
                 }
@@ -652,7 +686,7 @@ impl BimApp {
         let m = &self.session.model;
         self.selection.retain(|id| m.elements.contains_key(id));
         let exists = |s: &Sheet| match s {
-            Sheet::Plan(level) => m.level(*level).is_some(),
+            Sheet::Plan(level) | Sheet::Ceiling(level) => m.level(*level).is_some(),
             Sheet::Section(id) => m.section(*id).is_some(),
             Sheet::Paper(id) => m.sheet(*id).is_some(),
             Sheet::View3D | Sheet::Schedule(_) => true,
@@ -700,7 +734,7 @@ impl BimApp {
         }
         // Enter places a typed length, else builds the wall chain.
         if pressed(Modifiers::NONE, Key::Enter)
-            && let Sheet::Plan(level) = self.sheet
+            && let Some(level) = self.plan_level()
         {
             if self.typed_length.is_empty() { self.finish_wall(level, false) } else { self.place_typed(level) }
         }
@@ -801,6 +835,10 @@ impl BimApp {
             self.status = Status { text: t("select the walls to attach first").into(), error: true };
             return;
         }
+        if matches!(tool, Tool::SlopeArrow(_)) && self.selected_floor().is_none() {
+            self.status = Status { text: t("select the floor to slope first").into(), error: true };
+            return;
+        }
         if let Tool::Rotate { centre, .. } = &mut tool
             && let Some(middle) = self.middle()
         {
@@ -810,7 +848,7 @@ impl BimApp {
             let top = self.session.model.levels().last().map_or(0.0, |(_, l)| l.elevation);
             self.new_level = (self.session.model.units.length(top + 3000.0), String::new());
         }
-        if tool != Tool::Modify && tool != Tool::Attach && !edits {
+        if tool != Tool::Modify && tool != Tool::Attach && !matches!(tool, Tool::SlopeArrow(_)) && !edits {
             self.selection.clear();
         }
         if tool != Tool::Modify && !picks {
@@ -824,6 +862,14 @@ impl BimApp {
     /// The walls among the selection.
     fn selected_walls(&self) -> Vec<Id> {
         self.selection.iter().copied().filter(|id| self.session.model.wall(*id).is_some()).collect()
+    }
+
+    /// The floor selected, when one floor is all that is.
+    pub(crate) fn selected_floor(&self) -> Option<Id> {
+        match self.selection.as_slice() {
+            &[id] if matches!(self.session.model.elements.get(&id), Some(Element::Floor(_))) => Some(id),
+            _ => None,
+        }
     }
 
     /// The selected walls turned round about their location lines: Revit's flip arrows, or Space.
@@ -845,7 +891,7 @@ impl BimApp {
             Tool::Wall(chain) => chain.last().copied(),
             _ => None,
         };
-        if let Sheet::Plan(level) = self.sheet
+        if let Some(level) = self.plan_level()
             && !self.wall_arc
         {
             self.finish_wall(level, false);
@@ -885,7 +931,15 @@ impl BimApp {
     fn base(&self) -> Option<P2> {
         match &self.tool {
             Tool::Wall(chain) => chain.last().copied(),
-            Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) => *start,
+            Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::SlopeArrow(start) => *start,
+            _ => None,
+        }
+    }
+
+    /// The level of the plan on screen, a floor plan or a ceiling plan.
+    pub(crate) fn plan_level(&self) -> Option<Id> {
+        match self.sheet {
+            Sheet::Plan(level) | Sheet::Ceiling(level) => Some(level),
             _ => None,
         }
     }
@@ -907,6 +961,8 @@ impl BimApp {
             Tool::Radial(Some(_)) => Tool::Radial(None),
             Tool::Section(Some(_)) => Tool::Section(None),
             Tool::Stair(Some(_)) => Tool::Stair(None),
+            Tool::Shaft(Some(_)) => Tool::Shaft(None),
+            Tool::SlopeArrow(Some(_)) => Tool::SlopeArrow(None),
             Tool::Modify => {
                 self.selection.clear();
                 Tool::Modify
@@ -923,7 +979,7 @@ impl BimApp {
 
     fn fit(&mut self) {
         match self.sheet {
-            Sheet::Plan(id) | Sheet::Section(id) | Sheet::Paper(id) => self.canvas.fit(id),
+            Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) | Sheet::Paper(id) => self.canvas.fit(id),
             Sheet::View3D => self.fit3d(),
             Sheet::Schedule(_) => {}
         }
@@ -940,7 +996,7 @@ impl BimApp {
         // The tools that pick points work in plans (Text in sections and on sheets too, Spot
         // Elevation in sections); any other view takes clicks to select.
         let works = match sheet {
-            Sheet::Plan(_) => true,
+            Sheet::Plan(_) | Sheet::Ceiling(_) => true,
             Sheet::Section(_) => matches!(self.tool, Tool::Text | Tool::Spot),
             Sheet::Paper(_) => self.tool == Tool::Text,
             _ => false,
@@ -953,8 +1009,8 @@ impl BimApp {
             Tool::Grid(start) => *start = None,
             Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
             Tool::Radial(r) => *r = None,
-            Tool::Section(start) | Tool::Stair(start) => *start = None,
-            Tool::Move(_) | Tool::Copy(_) => self.tool = Tool::Modify,
+            Tool::Section(start) | Tool::Stair(start) | Tool::Shaft(start) => *start = None,
+            Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) => self.tool = Tool::Modify,
             _ => {}
         }
     }
@@ -1008,6 +1064,7 @@ impl BimApp {
             let mut p = json!({"path": file, "width": 1600, "height": 1000});
             match (self.sheet, self.orbit.camera) {
                 (Sheet::Plan(id) | Sheet::Section(id) | Sheet::Paper(id), _) => p["view"] = json!(id),
+                (Sheet::Ceiling(id), _) => (p["view"], p["ceiling"]) = (json!(id), json!(true)),
                 (Sheet::View3D, camera) => {
                     p["view"] = json!("{3D}");
                     if let Some(c) = camera {
@@ -1241,6 +1298,8 @@ impl BimApp {
                 (Icon::Window, "Window", "Window (WN): click a wall", Tool::Window),
                 (Icon::Column, "Column", "Column (CL): click where it stands", Tool::Column),
                 (Icon::Roof, "Roof", "Roof by Footprint: click inside the walls to roof them, on the level above", Tool::Roof),
+                (Icon::Floor, "Floor", "Floor: click inside the walls to floor them", Tool::Floor),
+                (Icon::Ceiling, "Ceiling", "Ceiling: click inside a room for a ceiling out to its walls", Tool::Ceiling),
             ],
         );
         self.tools(
@@ -1249,6 +1308,16 @@ impl BimApp {
             &[(Icon::Stair, "Stair", "Stair: click where it starts, then which way it climbs", Tool::Stair(None))],
         );
         self.tools(ui, "Room & Area", &[(Icon::Room, "Room", "Room (RM): click inside walls", Tool::Room)]);
+        self.tools(
+            ui,
+            "Opening",
+            &[(
+                Icon::Shaft,
+                "Shaft",
+                "Shaft Opening: click two opposite corners; it cuts the floors, ceilings and roofs it passes through",
+                Tool::Shaft(None),
+            )],
+        );
         self.tools(
             ui,
             "Datum",
@@ -1525,6 +1594,15 @@ impl BimApp {
                 }
             });
         }
+        // A floor selected: its slope arrow.
+        if self.selected_floor().is_some() && matches!(self.tool, Tool::Modify | Tool::SlopeArrow(_)) {
+            panel(ui, "Shape Editing", |ui| {
+                let tip = "Slope Arrow: click its tail, then its head; the floor rises toward the head at the Options Bar's slope";
+                if big_button(ui, Icon::SlopeArrow, "Slope Arrow", matches!(self.tool, Tool::SlopeArrow(_)), tip).clicked() {
+                    self.set_tool(Tool::SlopeArrow(None));
+                }
+            });
+        }
         panel(ui, "Modify", |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -1560,9 +1638,23 @@ impl BimApp {
             match self.tool {
                 Tool::Wall(_) => self.wall_options(ui),
                 Tool::Column => {
-                    if let Sheet::Plan(level) = self.sheet {
+                    if let Some(level) = self.plan_level() {
                         height_options(ui, &self.session.model, level, &mut self.column_top, &mut self.column_height, "column-top");
                     }
+                }
+                Tool::Shaft(_) => {
+                    if let Some(level) = self.plan_level() {
+                        height_options(ui, &self.session.model, level, &mut self.shaft_top, &mut self.shaft_height, "shaft-top");
+                    }
+                }
+                Tool::Ceiling => {
+                    let l = ui.label(t("Height Offset:"));
+                    let hint = self.session.model.units.name();
+                    ui.add(TextEdit::singleline(&mut self.ceiling_height).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                }
+                Tool::SlopeArrow(_) => {
+                    let l = ui.label(t("Slope:"));
+                    ui.add(TextEdit::singleline(&mut self.floor_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
                 }
                 Tool::Stair(_) => {
                     let l = ui.label(t("Width:"));
@@ -1618,7 +1710,7 @@ impl BimApp {
     }
 
     fn wall_options(&mut self, ui: &mut Ui) {
-        let Sheet::Plan(level) = self.sheet else { return };
+        let Some(level) = self.plan_level() else { return };
         height_options(ui, &self.session.model, level, &mut self.wall_top, &mut self.wall_height, "wall-top");
         let l = ui.label(t("Location Line:"));
         let now = self.wall_location;
@@ -1742,6 +1834,12 @@ impl BimApp {
             Tool::Stair(None) => "Click where the stair starts: the middle of its first riser.",
             Tool::Stair(Some(_)) => "Click which way it climbs: its risers take it up to the level above. Esc cancels.",
             Tool::Roof => "Click inside the walls to roof them, on the level above: the overhang runs past their faces.",
+            Tool::Floor => "Click inside the walls to floor them: the slab runs under their outline, its top at the level.",
+            Tool::Ceiling => "Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says.",
+            Tool::Shaft(None) => "Click a corner of the shaft opening.",
+            Tool::Shaft(Some(_)) => "Click the opposite corner: the shaft cuts the floors, ceilings and roofs up to its top. Esc cancels.",
+            Tool::SlopeArrow(None) => "Click the slope arrow's tail: where the floor's top stays at its height offset.",
+            Tool::SlopeArrow(Some(_)) => "Click its head: the floor rises toward it at the Options Bar's slope. Esc cancels.",
         }
     }
 
@@ -1828,6 +1926,11 @@ impl BimApp {
                     open = item(ui, name, Sheet::Plan(*id)).or(open);
                 }
             });
+            CollapsingHeader::new(t("Ceiling Plans")).default_open(true).show(ui, |ui| {
+                for (id, name) in &levels {
+                    open = item(ui, name, Sheet::Ceiling(*id)).or(open);
+                }
+            });
             CollapsingHeader::new(t("3D Views")).default_open(true).show(ui, |ui| {
                 open = item(ui, "{3D}", Sheet::View3D).or(open);
             });
@@ -1864,7 +1967,8 @@ impl BimApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             for sheet in self.views.clone() {
-                let name = self.view_name(sheet);
+                // A ceiling plan's tab says so: its level's plan has the level's name too.
+                let name = if matches!(sheet, Sheet::Ceiling(_)) { self.view_title(sheet) } else { self.view_name(sheet) };
                 if tab_button(ui, &name, sheet == self.sheet, false).clicked() {
                     self.open_sheet(sheet);
                 }

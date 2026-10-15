@@ -116,8 +116,23 @@ fn rows(category: &str) -> &'static [Row] {
         ],
         "floor" => &[
             ("Constraints", "level", "Level", Level),
+            ("Constraints", "offset", "Height Offset From Level", Length),
+            ("Dimensions", "slope", "Slope (°)", Number),
             ("Dimensions", "area_m2", "Area", AreaShown),
             ("Dimensions", "thickness", "Thickness", LengthShown),
+        ],
+        "ceiling" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Constraints", "offset", "Height Offset From Level", Length),
+            ("Dimensions", "area_m2", "Area", AreaShown),
+            ("Dimensions", "thickness", "Thickness", LengthShown),
+        ],
+        "shaft" => &[
+            ("Constraints", "level", "Base Constraint", Level),
+            ("Constraints", "base_offset", "Base Offset", Length),
+            ("Constraints", "top_level", "Top Constraint", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Dimensions", "area_m2", "Area", AreaShown),
         ],
         "level" => &[("Constraints", "elevation", "Elevation", Length), ("Identity Data", "name", "Name", Text)],
         "grid" => &[("Identity Data", "name", "Name", Text), ("Other", "start", "Start", Point), ("Other", "end", "End", Point)],
@@ -210,6 +225,7 @@ fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
         "window" => &[("width", "Width"), ("height", "Height"), ("sill", "Default Sill Height")],
         "column" => &[("width", "Width"), ("depth", "Depth")],
         "roof" => &[("thickness", "Thickness")],
+        "ceiling" => &[("thickness", "Thickness"), ("grid", "Tile Size")],
         _ => &[],
     }
 }
@@ -233,6 +249,9 @@ fn icon(category: &str) -> Icon {
         "column" => Icon::Column,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,
+        "floor" => Icon::Floor,
+        "ceiling" | "ceiling plan" => Icon::Ceiling,
+        "shaft" => Icon::Shaft,
         "text" => Icon::Text,
         "spot" => Icon::Spot,
         "view3d" => Icon::View3D,
@@ -338,6 +357,7 @@ enum Subject {
     /// The elements a tool places, of a category.
     New(&'static str),
     Plan(Id),
+    CeilingPlan,
     View3D,
     Schedule,
 }
@@ -447,10 +467,14 @@ impl BimApp {
             ([], Tool::Column, _) => Subject::New("column"),
             ([], Tool::Stair(_), _) => Subject::New("stair"),
             ([], Tool::Roof, _) => Subject::New("roof"),
+            ([], Tool::Floor, _) => Subject::New("floor"),
+            ([], Tool::Ceiling, _) => Subject::New("ceiling"),
+            ([], Tool::Shaft(_), _) => Subject::New("shaft"),
             // A section's or an elevation's view shows its own parameters.
             ([], _, Sheet::Section(id) | Sheet::Paper(id)) => Subject::Element(id),
             // Modify, and the tools that pick walls rather than place anything: the view.
             ([], _, Sheet::Plan(level)) => Subject::Plan(level),
+            ([], _, Sheet::Ceiling(_)) => Subject::CeilingPlan,
             ([], _, Sheet::View3D) => Subject::View3D,
             ([], _, Sheet::Schedule(_)) => Subject::Schedule,
         }
@@ -470,7 +494,7 @@ impl BimApp {
         let category = match self.subject() {
             Subject::Element(id) => m.elements.get(&id)?.category(),
             Subject::Elements(category) | Subject::New(category) => category,
-            Subject::Mixed(_) | Subject::Plan(_) | Subject::View3D | Subject::Schedule => return None,
+            Subject::Mixed(_) | Subject::Plan(_) | Subject::CeilingPlan | Subject::View3D | Subject::Schedule => return None,
         };
         let name = match self.selection.is_empty() {
             false => self.shared_type(m),
@@ -500,7 +524,7 @@ impl BimApp {
             Subject::Mixed(n) => (tf("Multiple Categories ({})", &[&n.to_string()]), Vec::new(), &[][..]),
             Subject::New(category) => (tf("New {}", &[&lang::category(category, true)]), Vec::new(), &[][..]),
             Subject::Plan(level) => (self.view_title(Sheet::Plan(level)), vec![level], PLAN),
-            Subject::View3D | Subject::Schedule => (self.view_title(self.sheet), Vec::new(), &[][..]),
+            Subject::CeilingPlan | Subject::View3D | Subject::Schedule => (self.view_title(self.sheet), Vec::new(), &[][..]),
         };
         ui.horizontal(|ui| {
             ui.label(filter);
@@ -542,6 +566,7 @@ impl BimApp {
                 (category, self.types.get(category).cloned().or_else(|| model.default_type(category).map(String::from)))
             }
             Subject::Plan(_) => ("floor plan", None),
+            Subject::CeilingPlan => ("ceiling plan", None),
             Subject::View3D => ("3d view", None),
             Subject::Schedule => ("schedule", None),
         };
@@ -563,6 +588,7 @@ impl BimApp {
         let x = swatch.right() + 10.0;
         let family = match subject {
             Subject::Plan(_) => t("Floor Plan").to_string(),
+            Subject::CeilingPlan => t("Ceiling Plan").to_string(),
             Subject::View3D => t("3D View").to_string(),
             Subject::Mixed(_) => t("Multiple Categories").to_string(),
             _ => lang::category(category, false),

@@ -1,5 +1,5 @@
-//! The building model: levels, grids, walls, floors, doors, windows, rooms, columns, stairs and
-//! roofs, the types they use, the dimensions, tags, text notes and spot elevations annotating
+//! The building model: levels, grids, walls, floors, ceilings, shafts, doors, windows, rooms,
+//! columns, stairs and roofs, the types they use, the dimensions, tags, text notes and spot elevations annotating
 //! views, the sections, elevations, schedules and 3D views looking at it, and the sheets its views
 //! are placed on. Lengths are millimetres, x east, y north, z up; each level has an elevation. In
 //! a section or an elevation, millimetres along its line from its start, and up; on a sheet,
@@ -39,6 +39,12 @@ pub const STAIR_WIDTH: f64 = 1000.0;
 pub const MAX_TEXT: usize = 256;
 /// Points one command or floor outline may carry.
 pub const MAX_POINTS: usize = 10_000;
+/// Height of a reflected ceiling plan's cut plane above its level: it looks up from there.
+pub const CEILING_CUT: f64 = 2300.0;
+/// Height of a ceiling's underside above its level, unless told otherwise.
+pub const CEILING_HEIGHT: f64 = 2600.0;
+/// The steepest slope a floor or a roof may have, degrees.
+pub const MAX_SLOPE: f64 = 75.0;
 
 /// A level, and its floor plan: what the plan sees (its view range), and the part of it the plan
 /// shows (its crop region, corners south-west then north-east; all of it without one).
@@ -219,14 +225,49 @@ pub struct Layer {
 /// Layers a wall type may have.
 pub const MAX_LAYERS: usize = 32;
 
+/// A slab under its top, along `boundary` (counter-clockwise): its top at its level, `offset` mm
+/// above it; with a slope arrow, from tail to head in plan, the top there and rising `slope`
+/// degrees toward the head (falling, negative). It's its type's thickness across its slope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Floor {
     #[serde(rename = "type")]
     pub type_name: String,
     pub level: Id,
-    /// Outline, counter-clockwise. The slab's top is at the level.
     pub boundary: Vec<P2>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub offset: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub slope: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrow: Option<[P2; 2]>,
+}
+
+/// A ceiling along `boundary` (counter-clockwise), its underside `offset` mm above its level, its
+/// type's thickness over that.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ceiling {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub level: Id,
+    pub boundary: Vec<P2>,
+    pub offset: f64,
+}
+
+/// A shaft opening: a hole along `boundary` through the floors, ceilings and roofs it passes
+/// through, from `base_offset` above `level` up to `top_level`, or `height` mm.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Shaft {
+    pub level: Id,
+    pub boundary: Vec<P2>,
+    #[serde(default)]
+    pub top_level: Option<Id>,
+    #[serde(default)]
+    pub height: f64,
+    #[serde(default)]
+    pub base_offset: f64,
 }
 
 /// A door or window in a host wall, centred `offset` mm along it from the wall's start.
@@ -566,6 +607,8 @@ pub enum Element {
     Grid(Grid),
     Wall(Wall),
     Floor(Floor),
+    Ceiling(Ceiling),
+    Shaft(Shaft),
     Door(Opening),
     Window(Opening),
     Room(Room),
@@ -595,6 +638,8 @@ impl Element {
             Element::Grid(_) => "grid",
             Element::Wall(_) => "wall",
             Element::Floor(_) => "floor",
+            Element::Ceiling(_) => "ceiling",
+            Element::Shaft(_) => "shaft",
             Element::Door(_) => "door",
             Element::Window(_) => "window",
             Element::Room(_) => "room",
@@ -626,6 +671,16 @@ pub struct WallType {
 #[serde(deny_unknown_fields)]
 pub struct FloorType {
     pub thickness: f64,
+}
+
+/// A ceiling type: how thick, and with `grid`, square tiles that wide, which its reflected ceiling
+/// plan draws.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CeilingType {
+    pub thickness: f64,
+    #[serde(default)]
+    pub grid: f64,
 }
 
 /// A column type: `width` by `depth`, or round, `width` across.
@@ -665,6 +720,8 @@ pub struct Types {
     pub column: BTreeMap<String, ColumnType>,
     #[serde(default)]
     pub roof: BTreeMap<String, RoofType>,
+    #[serde(default)]
+    pub ceiling: BTreeMap<String, CeilingType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -723,6 +780,8 @@ impl Model {
         m.types.column.insert("Rectangular 400 x 400".into(), ColumnType { width: 400.0, depth: 400.0, round: false });
         m.types.column.insert("Round 300".into(), ColumnType { width: 300.0, depth: 300.0, round: true });
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0 });
+        m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0 });
+        m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0 });
         let level = language.word("Level");
         m.insert(Element::Level(Level::new(format!("{level} 1"), 0.0)));
         m.insert(Element::Level(Level::new(format!("{level} 2"), 3000.0)));
@@ -815,7 +874,8 @@ impl Model {
         self.spans(w, self.elevation(level) + CUT_HEIGHT)
     }
 
-    fn spans(&self, w: &Wall, z: f64) -> bool {
+    /// Whether the wall spans height `z`.
+    pub(crate) fn spans(&self, w: &Wall, z: f64) -> bool {
         self.base_z(w) <= z && z < self.top_z(w)
     }
 
@@ -841,6 +901,7 @@ impl Model {
             "window" => names(&self.types.window),
             "column" => names(&self.types.column),
             "roof" => names(&self.types.roof),
+            "ceiling" => names(&self.types.ceiling),
             _ => Vec::new(),
         }
     }
@@ -853,6 +914,7 @@ impl Model {
             "door" => "Single 900 x 2100",
             "column" => "Rectangular 400 x 400",
             "roof" => "Generic - 300mm",
+            "ceiling" => "Generic - 20mm",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);
@@ -875,6 +937,8 @@ impl Model {
         match e {
             Element::Wall(w) => Some(w.level),
             Element::Floor(f) => Some(f.level),
+            Element::Ceiling(c) => Some(c.level),
+            Element::Shaft(sh) => Some(sh.level),
             Element::Room(r) => Some(r.level),
             Element::Dimension(d) => Some(d.level),
             Element::Column(c) => Some(c.level),
@@ -959,6 +1023,64 @@ impl Model {
             piece.dedup_by(|p, q| P2(p[0], p[1]).dist(P2(q[0], q[1])) < TOL);
         }
         Ok((pieces, t / r.slope.to_radians().cos()))
+    }
+
+    /// A floor's top: level, at its level and offset; or through there at its slope arrow's tail,
+    /// rising `slope` degrees toward its head.
+    pub fn floor_top(&self, f: &Floor) -> walls::Plane {
+        let z = self.elevation(f.level) + f.offset;
+        match f.arrow {
+            Some([tail, head]) if f.slope != 0.0 && tail.dist(head) > 0.0 => {
+                let g = (head - tail).unit() * f.slope.to_radians().tan();
+                walls::Plane { z: z - g.dot(tail), g }
+            }
+            _ => walls::Plane::flat(z),
+        }
+    }
+
+    /// How far a floor's underside lies below its top, plumb: its type's thickness across its slope.
+    pub fn floor_depth(&self, f: &Floor) -> f64 {
+        self.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness) / f.slope.to_radians().cos()
+    }
+
+    /// A floor's slab: its underside, a flat polygon in space, counter-clockwise; and how far its
+    /// top lies above that.
+    pub fn floor_slab(&self, f: &Floor) -> (Vec<[f64; 3]>, f64) {
+        let (top, depth) = (self.floor_top(f), self.floor_depth(f));
+        (ccw(&f.boundary).iter().map(|q| [q.0, q.1, top.at(*q) - depth]).collect(), depth)
+    }
+
+    /// A ceiling's slab: its underside, counter-clockwise, and its thickness.
+    pub fn ceiling_slab(&self, c: &Ceiling) -> (Vec<[f64; 3]>, f64) {
+        let z = self.elevation(c.level) + c.offset;
+        let t = self.types.ceiling.get(&c.type_name).map_or(0.0, |t| t.thickness);
+        (ccw(&c.boundary).iter().map(|q| [q.0, q.1, z]).collect(), t)
+    }
+
+    /// A floor's, a ceiling's or a roof's slab: `face`, a flat polygon in space, counter-clockwise,
+    /// and what lies up to `rise` over it. In plan, what's left of it where shafts pass through it,
+    /// and those shafts: a shaft cuts what its span reaches into over its outline, all the way
+    /// through.
+    pub fn less_shafts(&self, face: &[[f64; 3]], rise: f64) -> (Vec<Vec<P2>>, Vec<Id>) {
+        let ring: Vec<P2> = face.iter().map(|p| P2(p[0], p[1])).collect();
+        let Some(plane) = walls::Plane::of(face) else { return (vec![ring], Vec::new()) };
+        let area = |rings: &[Vec<P2>]| rings.iter().map(|r| geom::area(r).abs()).sum::<f64>();
+        let (mut pieces, mut cut) = (vec![ring], Vec::new());
+        for (&id, e) in &self.elements {
+            let Element::Shaft(sh) = e else { continue };
+            let (bottom, top) = self.span(sh.level, sh.base_offset, sh.top_level, sh.height);
+            let zs = sh.boundary.iter().map(|q| plane.at(*q));
+            let (lo, hi) = zs.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), z| (lo.min(z), hi.max(z)));
+            if !(lo < top - TOL && hi + rise > bottom + TOL) {
+                continue;
+            }
+            let left = walls::minus(&pieces, &sh.boundary);
+            if area(&left) < area(&pieces) - 1.0 {
+                pieces = left;
+                cut.push(id);
+            }
+        }
+        (pieces, cut)
     }
 
     /// A column's outline in plan: its rectangle turned to its angle, or a round one's 24-sided
@@ -1249,7 +1371,8 @@ impl Model {
     /// What a spot elevation placed in the plan of `level` at `p` reads: the highest top there of
     /// what stands on the level.
     pub fn spot_host(&self, level: Id, p: P2) -> Option<Id> {
-        let on = |id: &Id| self.elements.get(id).is_some_and(|e| self.level_of(e) == Some(level));
+        // A floor plan looks down, under the ceilings.
+        let on = |id: &Id| self.elements.get(id).is_some_and(|e| self.level_of(e) == Some(level) && !matches!(e, Element::Ceiling(_)));
         crate::view3d::tops_at(self, p).into_iter().filter(|(id, _)| on(id)).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
     }
 
@@ -1273,6 +1396,15 @@ impl Model {
                 let line = walls::centre_line(self, id);
                 line.windows(2).filter_map(|s| s.first().zip(s.get(1)).map(|(a, b)| (*a, *b))).collect::<Vec<_>>()
             })
+            .collect()
+    }
+
+    /// The faces of the walls that bound the rooms of `level`: the edges of their outlines.
+    pub fn face_lines(&self, level: Id) -> Vec<(P2, P2)> {
+        self.elements
+            .iter()
+            .filter(|(_, e)| matches!(e, Element::Wall(w) if self.bounding(w, level)))
+            .flat_map(|(&id, _)| geom::ring_edges(&walls::outline(self, id)).collect::<Vec<_>>())
             .collect()
     }
 
@@ -1319,6 +1451,13 @@ impl Model {
         }
         for (n, t) in &self.types.roof {
             size(&format!("roof type `{n}` thickness"), t.thickness)?;
+        }
+        for (n, t) in &self.types.ceiling {
+            size(&format!("ceiling type `{n}` thickness"), t.thickness)?;
+            // A finer grid would draw a line every few pixels, and millions over a large ceiling.
+            if !(t.grid == 0.0 || (100.0..=MAX_COORD).contains(&t.grid)) {
+                return Err(format!("ceiling type `{n}`: grid {} mm; its tiles are 100 mm or wider, or 0 for none", t.grid));
+            }
         }
         let mut level_names = BTreeSet::new();
         let mut grid_names = BTreeSet::new();
@@ -1404,14 +1543,38 @@ impl Model {
                 Element::Floor(f) => {
                     known(&who, &f.type_name, &self.types.floor)?;
                     level_ok(f.level)?;
-                    if f.boundary.len() < 3 || f.boundary.len() > MAX_POINTS {
-                        return Err(format!("{who}: a boundary needs 3 to {MAX_POINTS} points"));
+                    boundary(&who, &f.boundary)?;
+                    coord(&format!("{who} offset"), f.offset)?;
+                    if !(f.slope.is_finite() && f.slope.abs() <= MAX_SLOPE) {
+                        return Err(format!("{who}: slope {}° isn't between -{MAX_SLOPE}° and {MAX_SLOPE}°", f.slope));
                     }
-                    for p in &f.boundary {
-                        point(&who, *p)?;
+                    match f.arrow {
+                        Some([tail, head]) => line(&format!("{who} arrow"), tail, head)?,
+                        None if f.slope != 0.0 => {
+                            return Err(format!(
+                                "{who}: a sloped floor needs a slope arrow, from where its top is at its offset toward where it rises"
+                            ));
+                        }
+                        None => {}
                     }
-                    if geom::area(&f.boundary).abs() <= TOL * TOL {
-                        return Err(format!("{who}: its boundary encloses no area"));
+                }
+                Element::Ceiling(c) => {
+                    known(&who, &c.type_name, &self.types.ceiling)?;
+                    level_ok(c.level)?;
+                    boundary(&who, &c.boundary)?;
+                    coord(&format!("{who} offset"), c.offset)?;
+                }
+                Element::Shaft(sh) => {
+                    level_ok(sh.level)?;
+                    boundary(&who, &sh.boundary)?;
+                    coord(&format!("{who} base_offset"), sh.base_offset)?;
+                    match sh.top_level {
+                        Some(t) => level_ok(t)?,
+                        None => size(&format!("{who} height"), sh.height)?,
+                    }
+                    let (bottom, top) = self.span(sh.level, sh.base_offset, sh.top_level, sh.height);
+                    if top <= bottom + TOL {
+                        return Err(format!("{who}: its top must be above its base"));
                     }
                 }
                 Element::Door(o) | Element::Window(o) => {
@@ -1597,8 +1760,8 @@ impl Model {
                         return Err(format!("{who}: its footprint encloses no area"));
                     }
                     coord(&format!("{who} overhang"), r.overhang)?;
-                    if !(0.0..=75.0).contains(&r.slope) {
-                        return Err(format!("{who}: slope {}° isn't from 0° (flat) to 75°", r.slope));
+                    if !(0.0..=MAX_SLOPE).contains(&r.slope) {
+                        return Err(format!("{who}: slope {}° isn't from 0° (flat) to {MAX_SLOPE}°", r.slope));
                     }
                     self.roof_pieces(r).map_err(|e| format!("{who}: {e}"))?;
                 }
@@ -1696,6 +1859,25 @@ fn crop(who: &str, a: P2, b: P2) -> Result<(), String> {
     } else {
         Err(format!("{who}: a crop region runs from its south-west corner to its north-east one (in a section, bottom left to top right)"))
     }
+}
+
+/// `ring` counter-clockwise.
+fn ccw(ring: &[P2]) -> Vec<P2> {
+    if geom::area(ring) < 0.0 { ring.iter().rev().copied().collect() } else { ring.to_vec() }
+}
+
+/// An outline: 3 to [`MAX_POINTS`] points around some area.
+fn boundary(who: &str, ring: &[P2]) -> Result<(), String> {
+    if ring.len() < 3 || ring.len() > MAX_POINTS {
+        return Err(format!("{who}: a boundary needs 3 to {MAX_POINTS} points"));
+    }
+    for p in ring {
+        point(who, *p)?;
+    }
+    if geom::area(ring).abs() <= TOL * TOL {
+        return Err(format!("{who}: its boundary encloses no area"));
+    }
+    Ok(())
 }
 
 fn line(who: &str, a: P2, b: P2) -> Result<(), String> {

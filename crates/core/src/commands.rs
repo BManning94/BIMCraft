@@ -11,9 +11,10 @@ use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
 use crate::language::Language;
 use crate::model::{
-    Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType, Grid, Id, Layer, Level, Line,
-    Location, MAX_COORD, MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER, Reference, Roof, RoofType, Room,
-    STAIR_WIDTH, Schedule, Section, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType,
+    Grid, Id, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER,
+    Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall,
+    WallType, heading, paper,
 };
 use crate::render::Drawing;
 use crate::units::Units;
@@ -83,8 +84,26 @@ pub static ALL: &[Command] = &[
         "floor",
         "Floor",
         &[],
-        "{boundary?: [[x,y],…], level?, type?} slab with its top at the level; no boundary = the outline of the level's walls",
+        "{boundary?: [[x,y],…], level?, type?, offset?, slope?, arrow?: [[x,y],[x,y]]} a slab, its top at the level, or \
+         `offset` mm above it; no boundary = the outline of the level's walls. Sloped: its top rises `slope` degrees (negative, \
+         falls) along the slope arrow, from its tail, where it's at the offset, toward its head",
         floor,
+    ),
+    edit(
+        "ceiling",
+        "Ceiling",
+        &[],
+        "{point: [x,y] | boundary: [[x,y],…], level?, type?, offset?} a ceiling, its underside `offset` mm (2600) above the \
+         level: in the room around `point`, out to its walls' faces, or along `boundary`. Reflected ceiling plans show it",
+        ceiling,
+    ),
+    edit(
+        "shaft",
+        "Shaft Opening",
+        &[],
+        "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?} a hole through the floors, ceilings and roofs it \
+         passes through, from `base_offset` above the level up to the next level, or `height` mm, or up to `top_level`",
+        shaft,
     ),
     edit("room", "Room", &["RM"], "{point: [x,y], level?, name?, number?} bounded by the walls around the point", room),
     edit(
@@ -202,10 +221,11 @@ pub static ALL: &[Command] = &[
         "type",
         "Edit Type",
         &[],
-        "{category: wall|floor|door|window|column|roof, name, thickness? | width?, height?, sill? | width?, depth?, round?} creates \
-         the type, or changes it everywhere it's used. A wall type may have `layers` [{function?: structure|substrate|thermal|\
-         membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, its core from its \
-         first structure layer to its last, and a new `thickness` goes to its structure",
+        "{category: wall|floor|ceiling|door|window|column|roof, name, thickness? | width?, height?, sill? | width?, depth?, \
+         round?} creates the type, or changes it everywhere it's used. A wall type may have `layers` [{function?: structure|\
+         substrate|thermal|membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, \
+         its core from its first structure layer to its last, and a new `thickness` goes to its structure. A ceiling type may \
+         have `grid`: its square tiles' width, mm, which reflected ceiling plans draw (0, none)",
         edit_type,
     ),
     edit(
@@ -293,8 +313,8 @@ pub static ALL: &[Command] = &[
     other(
         "render",
         "Render",
-        "{view?: a level's, section's or elevation's name or id, a sheet's number, or {3D}, width?, height?, path?, azimuth?, \
-         elevation?} a level's floor plan, a section, an elevation, a sheet (at 5 px a paper mm), or the 3D view seen from \
+        "{view?: a level's, section's or elevation's name or id, a sheet's number, or {3D}, ceiling?, width?, height?, path?, \
+         azimuth?, elevation?} a level's floor plan (with `ceiling`, its reflected ceiling plan, looking up from 2300 mm), a section, an elevation, a sheet (at 5 px a paper mm), or the 3D view seen from \
          `azimuth` degrees round from east (counter-clockwise) and `elevation` degrees up (by default from the south-east, \
          30° up), as a PNG (pngBase64), or written to a path: .png, .svg for a plan, .pdf for a sheet",
         render_view,
@@ -468,6 +488,11 @@ pub fn m2(mm2: f64) -> f64 {
     (mm2 / 1e4).round() / 100.0
 }
 
+/// The area of the rings together, mm².
+fn area(rings: &[Vec<P2>]) -> f64 {
+    rings.iter().map(|r| geom::area(r).abs()).sum()
+}
+
 fn hundredth(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
@@ -500,8 +525,9 @@ fn wall_at(m: &Model, level: Id, at: P2) -> Option<(Id, f64)> {
         .map(|(id, w, _)| (id, along(w, at)))
 }
 
-/// The outer outline of the walls a plan of `level` cuts (of the largest piece), counter-clockwise.
-fn outline(m: &Model, level: Id) -> Option<Vec<P2>> {
+/// The outline `floor` gives a floor on `level` by default: the outer outline of the walls that
+/// bound its rooms (of the largest piece), along their centre lines, counter-clockwise.
+pub fn floor_outline(m: &Model, level: Id) -> Option<Vec<P2>> {
     let outer = geom::faces(&m.bounding_lines(level), TOL).into_iter().filter(|f| geom::area(f) < -TOL * TOL);
     outer.min_by(|a, b| geom::area(a).total_cmp(&geom::area(b))).map(|mut f| {
         f.reverse();
@@ -606,9 +632,29 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("level".into(), json!(m.level_of(e)));
             extra.insert("at".into(), json!(m.anchor(t.host).map(|a| a + t.offset)));
         }
+        // Areas less the shafts through them.
         Element::Floor(f) => {
-            extra.insert("area_m2".into(), json!(m2(geom::area(&f.boundary).abs())));
+            let (face, rise) = m.floor_slab(f);
+            extra.insert("area_m2".into(), json!(m2(area(&m.less_shafts(&face, rise).0))));
             extra.insert("thickness".into(), json!(m.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness)));
+            // How high its top is, at its lowest and its highest.
+            let top = m.floor_top(f);
+            let (lo, hi) =
+                f.boundary.iter().map(|q| top.at(*q)).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), z| (lo.min(z), hi.max(z)));
+            extra.insert("top".into(), json!([hundredth(lo), hundredth(hi)]));
+        }
+        Element::Ceiling(cl) => {
+            let (face, rise) = m.ceiling_slab(cl);
+            extra.insert("area_m2".into(), json!(m2(area(&m.less_shafts(&face, rise).0))));
+            if let Some(t) = m.types.ceiling.get(&cl.type_name) {
+                extra.insert("thickness".into(), json!(t.thickness));
+                extra.insert("grid".into(), json!(t.grid));
+            }
+        }
+        Element::Shaft(sh) => {
+            let (bottom, top) = m.span(sh.level, sh.base_offset, sh.top_level, sh.height);
+            extra.insert("height".into(), json!(top - bottom));
+            extra.insert("area_m2".into(), json!(m2(geom::area(&sh.boundary).abs())));
         }
         Element::Room(r) => {
             let region = m.room_region(r);
@@ -824,14 +870,17 @@ fn render_view(s: &mut Session, p: &Value) -> R {
         return png_reply(c, p, render::png(&d)?, info);
     }
     let level = level_param(c, m, p, "view")?;
-    let d = render::plan(m, level, w, h);
+    let (d, kind) = match flag(c, p, "ceiling")? {
+        true => (render::ceiling_plan(m, level, w, h), "ceiling plan"),
+        false => (render::plan(m, level, w, h), "plan"),
+    };
     match string(c, p, "path")? {
         Some(path) => {
             let path = PathBuf::from(path);
             write_plan(&d, &path)?;
-            Ok(json!({"path": path, "width": w, "height": h, "view": level_name(m, level), "kind": "plan"}))
+            Ok(json!({"path": path, "width": w, "height": h, "view": level_name(m, level), "kind": kind}))
         }
-        None => Ok(json!({"pngBase64": base64(&render::png(&d)?), "width": w, "height": h, "view": level_name(m, level), "kind": "plan"})),
+        None => Ok(json!({"pngBase64": base64(&render::png(&d)?), "width": w, "height": h, "view": level_name(m, level), "kind": kind})),
     }
 }
 
@@ -1038,16 +1087,60 @@ fn floor(s: &mut Session, p: &Value) -> R {
     let level = level_param(c, m, p, "level")?;
     let type_name = type_param(c, p, m, "floor")?;
     let mut boundary = if absent(p.get("boundary")) {
-        outline(m, level).ok_or_else(|| bad(c, format!("no walls enclose an area on {}; give `boundary`", level_name(m, level))))?
+        floor_outline(m, level).ok_or_else(|| bad(c, format!("no walls enclose an area on {}; give `boundary`", level_name(m, level))))?
     } else {
         points(c, p, "boundary")?
     };
     if geom::area(&boundary) < 0.0 {
         boundary.reverse();
     }
+    let arrow = match absent(p.get("arrow")) {
+        true => None,
+        false => match points(c, p, "arrow")?.as_slice() {
+            &[tail, head] => Some([tail, head]),
+            _ => return Err(bad(c, "`arrow` is [[x, y], [x, y]]: its tail, then its head")),
+        },
+    };
+    let (offset, slope) = (num(c, p, "offset")?.unwrap_or(0.0), num(c, p, "slope")?.unwrap_or(0.0));
     let area = m2(geom::area(&boundary));
-    let id = s.model_mut().insert(Element::Floor(Floor { type_name, level, boundary }));
+    let id = s.model_mut().insert(Element::Floor(Floor { type_name, level, boundary, offset, slope, arrow }));
     Ok(json!({"id": id, "area_m2": area}))
+}
+
+fn ceiling(s: &mut Session, p: &Value) -> R {
+    let c = "ceiling";
+    let m = &s.model;
+    let level = level_param(c, m, p, "level")?;
+    let type_name = type_param(c, p, m, "ceiling")?;
+    let mut boundary = match (absent(p.get("boundary")), point_opt(c, p, "point")?) {
+        (false, _) => points(c, p, "boundary")?,
+        // The room's free floor: what the walls' faces close around the point.
+        (true, Some(at)) => geom::region_at(&m.face_lines(level), at, TOL)
+            .map(|r| geom::corners(&r.outer).into_iter().map(micron).collect())
+            .ok_or_else(|| bad(c, format!("no walls on {} close around [{}, {}]; give `boundary`", level_name(m, level), at.0, at.1)))?,
+        (true, None) => return Err(bad(c, "`point` [x, y] in a room, or `boundary` [[x, y], …], is required")),
+    };
+    if geom::area(&boundary) < 0.0 {
+        boundary.reverse();
+    }
+    let offset = num(c, p, "offset")?.unwrap_or(CEILING_HEIGHT);
+    let area = m2(geom::area(&boundary));
+    let id = s.model_mut().insert(Element::Ceiling(Ceiling { type_name, level, boundary, offset }));
+    Ok(json!({"id": id, "area_m2": area}))
+}
+
+fn shaft(s: &mut Session, p: &Value) -> R {
+    let c = "shaft";
+    let m = &s.model;
+    let level = level_param(c, m, p, "level")?;
+    let mut boundary = points(c, p, "boundary")?;
+    if geom::area(&boundary) < 0.0 {
+        boundary.reverse();
+    }
+    let (top_level, height) = top_param(c, m, p, level)?;
+    let base_offset = num(c, p, "base_offset")?.unwrap_or(0.0);
+    let id = s.model_mut().insert(Element::Shaft(Shaft { level, boundary, top_level, height, base_offset }));
+    Ok(json!({"id": id}))
 }
 
 fn room(s: &mut Session, p: &Value) -> R {
@@ -1310,7 +1403,7 @@ fn roof(s: &mut Session, p: &Value) -> R {
 pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<Vec<P2>, String> {
     let below = m.levels().into_iter().rev().find(|(_, l)| l.elevation < m.elevation(level) - TOL).map(|(id, _)| id);
     let below = below.ok_or_else(|| format!("{} has no level below to roof over; give `boundary`", level_name(m, level)))?;
-    let ring = outline(m, below).ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
+    let ring = floor_outline(m, below).ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
     // ponytail: the thickest wall on the level sets where the faces are; per edge if outlines mix wall types.
     let face = m
         .elements
@@ -1542,7 +1635,7 @@ fn place(s: &mut Session, p: &Value) -> R {
 
 fn edit_type(s: &mut Session, p: &Value) -> R {
     let c = "type";
-    let cat = category(&string(c, p, "category")?.ok_or_else(|| bad(c, "`category` is required: wall, floor, door or window"))?);
+    let cat = category(&string(c, p, "category")?.ok_or_else(|| bad(c, "`category` is required: wall, floor, ceiling, door or window"))?);
     let name = string(c, p, "name")?.filter(|n| !n.trim().is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
     let (thickness, width, height, sill) = (num(c, p, "thickness")?, num(c, p, "width")?, num(c, p, "height")?, num(c, p, "sill")?);
     let need = |what: &str| bad(c, format!("a new {cat} type needs `{what}`"));
@@ -1586,7 +1679,16 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             m.types.roof.insert(name.clone(), t.clone());
             json!(t)
         }
-        other => return Err(bad(c, format!("`{other}` has no types; use wall, floor, door, window, column or roof"))),
+        "ceiling" => {
+            let old = m.types.ceiling.get(&name).cloned();
+            let t = CeilingType {
+                thickness: thickness.or(old.as_ref().map(|t| t.thickness)).ok_or_else(|| need("thickness"))?,
+                grid: num(c, p, "grid")?.or(old.as_ref().map(|t| t.grid)).unwrap_or(0.0),
+            };
+            m.types.ceiling.insert(name.clone(), t.clone());
+            json!(t)
+        }
+        other => return Err(bad(c, format!("`{other}` has no types; use wall, floor, ceiling, door, window, column or roof"))),
     };
     Ok(json!({"category": cat, "name": name, "type": t}))
 }
@@ -1768,6 +1870,13 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
             // A mirror turns the outline clockwise; floors keep theirs counter-clockwise.
             if mo.mirror {
                 fl.boundary.reverse();
+            }
+            fl.arrow = fl.arrow.map(|a| a.map(f));
+        }
+        Element::Ceiling(Ceiling { boundary, .. }) | Element::Shaft(Shaft { boundary, .. }) => {
+            boundary.iter_mut().for_each(|q| *q = f(*q));
+            if mo.mirror {
+                boundary.reverse();
             }
         }
         Element::Room(r) => r.point = f(r.point),

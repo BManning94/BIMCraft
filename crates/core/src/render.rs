@@ -6,7 +6,9 @@
 //! rooms a tag, grids a dashed line with a bubble at each end, dimensions witness lines and ticks
 //! (an arc for an angle, an arrow for a radius), door and window tags their mark in a box, text
 //! notes their lines, spot elevations a triangle and their height, sections their line and head,
-//! elevations a marker; all of it inside the plan's crop region. Sections and elevations draw the
+//! elevations a marker, sloped floors their slope arrow, shafts their outline and a cross; all of
+//! it inside the plan's crop region. A level's reflected ceiling plan cuts its walls higher, over
+//! the doors, and looks up at its ceilings: their outlines and tiles. Sections and elevations draw the
 //! same way along their line and up: the cut in poché, levels and grids, notes and spot
 //! elevations, over the 3D view's hidden-line picture of what lies beyond.
 
@@ -17,7 +19,8 @@ use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder,
 
 use crate::geom::{self, P2};
 use crate::model::{
-    DimKind, Dimension, Element, Function, Id, Model, Note, Opening, PlanRange, Roof, Section, Stair, TOL, Tag, Wall, heading,
+    CEILING_CUT, Ceiling, DimKind, Dimension, Element, Floor, Function, Id, Model, Note, Opening, PlanRange, Roof, Section, Shaft, Stair,
+    TOL, Tag, Wall, heading,
 };
 use crate::units::Units;
 use crate::view3d::{self, Camera, Clip, Image, Scene};
@@ -308,13 +311,12 @@ impl Drawing {
     }
 }
 
-/// The outlines of the walls and columns a plan of `level` cuts.
-fn cut_outlines(m: &Model, level: Id) -> Vec<(Id, Vec<P2>)> {
-    let z = m.plan_range(level).cut;
+/// The outlines of the walls and columns a plan cutting at height `z` cuts.
+fn cut_outlines(m: &Model, z: f64) -> Vec<(Id, Vec<P2>)> {
     m.elements
         .iter()
         .filter_map(|(&id, e)| match e {
-            Element::Wall(w) if m.cut_by(w, level) => Some((id, walls::outline(m, id))),
+            Element::Wall(w) if m.spans(w, z) => Some((id, walls::outline(m, id))),
             Element::Column(col) => {
                 let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
                 (bottom <= z && z < top).then(|| (id, m.column_outline(col)))
@@ -364,11 +366,17 @@ pub(crate) fn plan_extent(m: &Model, level: Id) -> Vec<P2> {
 /// notes and spot elevations, the grids, and the marks of the sections and elevations.
 pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
     let r = m.plan_range(level);
-    let mut extent: Vec<P2> = cut_outlines(m, level).into_iter().flat_map(|(_, o)| o).collect();
+    let mut extent: Vec<P2> = cut_outlines(m, r.cut).into_iter().flat_map(|(_, o)| o).collect();
     extent.extend(seen_below(m, &r).into_iter().flat_map(|(_, o, _)| o));
     for e in m.elements.values() {
         match e {
-            Element::Floor(f) if f.level == level => extent.extend(&f.boundary),
+            Element::Floor(Floor { level: l, boundary, .. })
+            | Element::Ceiling(Ceiling { level: l, boundary, .. })
+            | Element::Shaft(Shaft { level: l, boundary, .. })
+                if *l == level =>
+            {
+                extent.extend(boundary)
+            }
             Element::Room(r) if r.level == level => extent.push(r.point),
             Element::Grid(g) => extent.extend([g.start, g.end]),
             Element::Dimension(dm) if dm.level == level => extent.push(dm.at),
@@ -607,23 +615,51 @@ pub fn section_png(m: &Model, id: Id, view: View) -> Result<Vec<u8>, String> {
 
 /// The plan of `level` as `view` shows it: what a canvas that pans and zooms draws.
 pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
+    draw_plan(m, level, view, false)
+}
+
+/// The reflected ceiling plan of `level` fitted into `width` x `height` px.
+pub fn ceiling_plan(m: &Model, level: Id, width: u32, height: u32) -> Drawing {
+    draw_ceiling(m, level, fit(&plan_shows(m, level), width, height))
+}
+
+/// The reflected ceiling plan of `level` as `view` shows it: cut [`CEILING_CUT`] above the level
+/// (over the doors) and looking up, at the ceilings up to the level above, as a floor plan lies
+/// (not mirrored). Its grids and its sections' marks; no annotation of the floor plan's.
+pub fn draw_ceiling(m: &Model, level: Id, view: View) -> Drawing {
+    draw_plan(m, level, view, true)
+}
+
+/// A floor plan of `level`, or `up`, its reflected ceiling plan.
+fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
     let mut d = Drawing { view, prims: Vec::new(), owners: Vec::new(), owner: None };
-    let range = m.plan_range(level);
-    // Floors whose tops it sees, from the cut plane down to the view depth.
-    for (&id, e) in &m.elements {
-        if let Element::Floor(f) = e
-            && (range.depth..=range.cut).contains(&m.elevation(f.level))
-        {
-            d.owner = Some(id);
-            d.line(&f.boundary, 1.0, FAINT, true);
+    let mut range = m.plan_range(level);
+    if up {
+        range.cut = m.elevation(level) + CEILING_CUT;
+        range.top = range.top.max(range.cut);
+    }
+    // Floors whose tops it sees, from the cut plane down to the view depth: their outlines, the
+    // holes shafts cut in them, and a sloped one's slope arrow.
+    for (&id, e) in m.elements.iter().filter(|_| !up) {
+        let Element::Floor(f) = e else { continue };
+        let top = m.floor_top(f);
+        let (lo, hi) = f.boundary.iter().map(|q| top.at(*q)).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), z| (lo.min(z), hi.max(z)));
+        if hi < range.depth || lo > range.cut {
+            continue;
+        }
+        d.owner = Some(id);
+        d.line(&f.boundary, 1.0, FAINT, true);
+        holes(&mut d, m, &m.floor_slab(f));
+        if let Some([tail, head]) = f.arrow.filter(|_| f.slope != 0.0) {
+            slope_arrow(&mut d, tail, head, f.slope);
         }
     }
     // Walls and columns below the cut plane, as seen from it; past the bottom, faint.
-    for (id, o, top) in seen_below(m, &range) {
+    for (id, o, top) in seen_below(m, &range).into_iter().filter(|_| !up) {
         d.owner = Some(id);
         d.line(&o, 1.0, if top > range.bottom { INK } else { FAINT }, true);
     }
-    let outlines = cut_outlines(m, level);
+    let outlines = cut_outlines(m, range.cut);
     // Outlines first, then poché over them: each fill covers the inner half of the outlines, so
     // where walls meet at their joins only the edge of their union stays inked. Their union is
     // filled first, as one, so no seam shows where two fills meet.
@@ -641,7 +677,7 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
     // A compound wall's layers: lighter where they aren't its structure, a thin line between each two.
     for (&id, e) in &m.elements {
         let Element::Wall(w) = e else { continue };
-        let Some(t) = m.types.wall.get(&w.type_name).filter(|t| !t.layers.is_empty() && m.cut_by(w, level)) else { continue };
+        let Some(t) = m.types.wall.get(&w.type_name).filter(|t| !t.layers.is_empty() && m.spans(w, range.cut)) else { continue };
         d.owner = Some(id);
         let lines = walls::layer_lines(m, id);
         for (k, layer) in t.layers.iter().enumerate() {
@@ -658,13 +694,14 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
     for (&id, e) in &m.elements {
         if let Element::Door(o) | Element::Window(o) = e
             && let Some(w) = m.wall(o.host)
-            && m.cut_by(w, level)
+            && m.spans(w, range.cut)
         {
             d.owner = Some(id);
             opening(&mut d, m, e, o, w, range.cut);
         }
     }
-    let crop = m.level(level).and_then(|l| l.crop);
+    // A ceiling plan isn't cropped: the crop region is the floor plan's.
+    let crop = m.level(level).and_then(|l| l.crop).filter(|_| !up);
     // Cropped, annotation shows whole while its anchor is inside the crop, and not at all outside it.
     let inside = |p: P2| crop.is_none_or(|[lo, hi]| (lo.0..=hi.0).contains(&p.0) && (lo.1..=hi.1).contains(&p.1));
     for (&id, e) in &m.elements {
@@ -676,7 +713,7 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
                     grid(&mut d, a, b, &g.name);
                 }
             }
-            Element::Room(r) if r.level == level && inside(r.point) => {
+            Element::Room(r) if r.level == level && inside(r.point) && !up => {
                 let area = m.room_region(r).map_or_else(
                     || m.language.word("NOT ENCLOSED").to_string(),
                     |g| {
@@ -689,6 +726,21 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
                 d.text(&r.number, (x, y), 10.0, INK);
                 d.text(&area, (x, y + 14.0), 10.0, INK);
             }
+            // A shaft the plane cuts: its outline, and a cross.
+            Element::Shaft(sh) => {
+                let (bottom, top) = m.span(sh.level, sh.base_offset, sh.top_level, sh.height);
+                if bottom <= range.cut && range.cut < top {
+                    shaft(&mut d, &sh.boundary);
+                }
+            }
+            // Over the cut plane, under the view range's top: its outline, and its tiles.
+            Element::Ceiling(c) if up => {
+                let z = m.elevation(c.level) + c.offset;
+                if range.cut < z && z <= range.top {
+                    ceiling(&mut d, m, c);
+                }
+            }
+            _ if up => {}
             Element::Stair(st) => stair(&mut d, m, st, level),
             Element::Roof(r) if r.level == level => roof(&mut d, m, r),
             // Overhead, from below: its edge, dashed, while its eaves are under the view range's top.
@@ -704,10 +756,12 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
             _ => {}
         }
     }
-    // Annotation last, over the model; sections and elevations show on every plan.
+    // Annotation last, over the model; sections and elevations show on every plan. A floor plan's
+    // annotation is its own.
     for (&id, e) in &m.elements {
         d.owner = Some(id);
         match e {
+            Element::Dimension(_) | Element::Tag(_) | Element::Text(_) | Element::Spot(_) if up => {}
             Element::Dimension(dm) if dm.level == level && inside(dm.at) => dimension(&mut d, m, dm),
             Element::Tag(t) if m.level_of(e) == Some(level) && m.anchor(t.host).is_some_and(|a| inside(a + t.offset)) => tag(&mut d, m, t),
             Element::Text(n) if n.view == level && inside(n.at) => note(&mut d, n),
@@ -737,10 +791,79 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
         });
     }
     d.owner = None;
-    let title = m.level(level).map_or_else(String::new, |l| l.name.clone());
+    let mut title = m.level(level).map_or_else(String::new, |l| l.name.clone());
+    if up {
+        title = format!("{title} ({})", m.language.word("Ceiling Plan"));
+    }
     let at = (24.0 + font::width(&title, 16.0) / 2.0, view.height as f32 - 26.0);
     d.text(&title, at, 16.0, INK);
     d
+}
+
+/// The outlines of the holes shafts cut in a floor's, a ceiling's or a roof's slab.
+fn holes(d: &mut Drawing, m: &Model, (face, rise): &(Vec<[f64; 3]>, f64)) {
+    for id in m.less_shafts(face, *rise).1 {
+        if let Some(Element::Shaft(sh)) = m.elements.get(&id) {
+            d.line(&sh.boundary, 1.0, FAINT, true);
+        }
+    }
+}
+
+/// A slope arrow from `tail` up to `head`, and its slope beside its middle.
+fn slope_arrow(d: &mut Drawing, tail: P2, head: P2, slope: f64) {
+    d.line(&[tail, head], 1.0, INK, false);
+    let (a, b) = (d.view.px(tail), d.view.px(head));
+    let (x, y) = arrow(d, a, b);
+    let text = format!("{}°", figure(slope));
+    // Beside it, to its left on screen.
+    let clear = font::width(&text, 10.0) / 2.0 * y.abs() + 6.0 * x.abs() + 4.0;
+    d.text(&text, ((a.0 + b.0) / 2.0 + y * clear, (a.1 + b.1) / 2.0 - x * clear), 10.0, INK);
+}
+
+/// A shaft cut in plan: its outline, and the diagonals of its box across it.
+fn shaft(d: &mut Drawing, ring: &[P2]) {
+    d.line(ring, 1.0, INK, true);
+    let Some((lo, hi)) = bounds(ring) else { return };
+    for (from, to) in [(lo, hi), (P2(lo.0, hi.1), P2(hi.0, lo.1))] {
+        let u = (to - from).unit();
+        for (s0, s1) in view3d::crossings(ring, from - u, u) {
+            d.line(&[from - u + u * s0, from - u + u * s1], 1.0, INK, false);
+        }
+    }
+}
+
+/// A ceiling in its reflected ceiling plan: its outline, the holes shafts cut in it, and with a
+/// grid, its tiles: lines through its middle, a tile apart.
+fn ceiling(d: &mut Drawing, m: &Model, c: &Ceiling) {
+    d.line(&c.boundary, 1.0, INK, true);
+    let slab = m.ceiling_slab(c);
+    holes(d, m, &slab);
+    let (Some(t), Some((lo, hi))) = (m.types.ceiling.get(&c.type_name), bounds(&c.boundary)) else { return };
+    // ponytail: tiles square to the axes; a ceiling's own grid angle when rooms turn.
+    if t.grid <= 0.0 || (hi.0 - lo.0).max(hi.1 - lo.1) / t.grid > 2000.0 {
+        return;
+    }
+    let pieces = m.less_shafts(&slab.0, slab.1).0;
+    let mid = (lo + hi) * 0.5;
+    for (u, across, (a, b)) in
+        [(P2(0.0, 1.0), P2(1.0, 0.0), (lo.0 - mid.0, hi.0 - mid.0)), (P2(1.0, 0.0), P2(0.0, 1.0), (lo.1 - mid.1, hi.1 - mid.1))]
+    {
+        let n = ((a / t.grid).ceil() as i64, (b / t.grid).floor() as i64);
+        for k in n.0..=n.1 {
+            let from = mid + across * (k as f64 * t.grid) - u * (hi - lo).length();
+            for piece in &pieces {
+                for (s0, s1) in view3d::crossings(piece, from, u) {
+                    d.line(&[from + u * s0, from + u * s1], 1.0, INK, false);
+                }
+            }
+        }
+    }
+}
+
+/// The corners of the box around `ring`.
+fn bounds(ring: &[P2]) -> Option<(P2, P2)> {
+    let first = *ring.first()?;
+    Some(ring.iter().fold((first, first), |(lo, hi), p| (P2(lo.0.min(p.0), lo.1.min(p.1)), P2(hi.0.max(p.0), hi.1.max(p.1)))))
 }
 
 /// The part of the segment from `p` to `q` inside the box from `lo` to `hi` (Liang-Barsky); its
@@ -1606,6 +1729,46 @@ mod tests {
             ["±0", "+3000", "-600"]
         );
         assert_eq!([height(Units::Metres, 0.0), height(Units::FeetInches, 3000.0)], ["±0.00", "+9'-10 1/8\""]);
+    }
+
+    #[test]
+    fn plans_show_slope_arrows_and_shafts_and_the_holes_they_cut() {
+        let mut s = house();
+        // A ramp (11) rising east; an upper floor (12); a shaft (13) from Level 1 up through it.
+        s.script(
+            r#"floor {"boundary": [[1000, 500], [7000, 500], [7000, 2000], [1000, 2000]], "slope": 5, "arrow": [[1000, 1250], [7000, 1250]]}
+               floor {"level": 2, "boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]]}
+               shaft {"boundary": [[3000, 3000], [4000, 3000], [4000, 5000], [3000, 5000]]}"#,
+        )
+        .unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        let ramp: Vec<&Prim> = d.prims.iter().zip(&d.owners).filter(|(_, o)| **o == Some(11)).map(|(p, _)| p).collect();
+        assert!(ramp.iter().any(|p| matches!(p, Prim::Fill { color, .. } if *color == INK)), "its slope arrow's head");
+        // Cut by Level 1's plan, the shaft shows its outline and a cross; from Level 2, the hole in its floor.
+        assert_eq!(d.pick(d.view.px(P2(3500.0, 4000.0)), 2.0), Some(13), "where its cross crosses");
+        let up = plan(&s.model, 2, 800, 600);
+        assert!(!up.owners.contains(&Some(13)));
+        assert_eq!(up.pick(up.view.px(P2(3500.0, 3000.0)), 2.0), Some(12), "the hole's edge");
+    }
+
+    #[test]
+    fn ceiling_plans_look_up_at_ceilings_over_walls_cut_above_the_doors() {
+        let mut s = house();
+        // A tiled ceiling (11) in the room, its grid through its middle: 600 mm squares from (4000, 3000).
+        s.script(r#"ceiling {"point": [4000, 1500], "type": "Tile 600 x 600"}"#).unwrap();
+        let d = ceiling_plan(&s.model, 1, 800, 600);
+        let png = png(&d).unwrap();
+        assert_eq!(pixel(&png, d.view.px(P2(2000.0, 0.0))), (POCHE.0, POCHE.1, POCHE.2), "cut at 2300 mm, over the door");
+        assert_eq!(pixel(&png, d.view.px(P2(8050.0, 3000.0))), (255, 255, 255), "the window's opening, cut");
+        let (r, g, b) = pixel(&png, d.view.px(P2(4000.0, 1500.0)));
+        assert!(r < 200 && g < 200 && b < 200, "a grid line: {:?}", (r, g, b));
+        assert_eq!(d.pick(d.view.px(P2(4300.0, 1500.0)), 2.0), None, "the middle of a tile");
+        assert!(d.owners.contains(&Some(11)) && !d.owners.contains(&Some(9)), "the ceiling; no room tag");
+        assert!(!plan(&s.model, 1, 800, 600).owners.contains(&Some(11)), "a floor plan looks down");
+        // A section cuts it.
+        s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}").unwrap();
+        let view = section_fit(&s.model, 12, 800, 600);
+        assert_eq!(section(&s.model, 12, view).pick(view.px(P2(5000.0, 2610.0)), 2.0), Some(11));
     }
 
     #[test]

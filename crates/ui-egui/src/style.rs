@@ -192,6 +192,10 @@ pub enum Icon {
     Flip,
     Attach,
     Detach,
+    Floor,
+    Ceiling,
+    Shaft,
+    SlopeArrow,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -470,6 +474,33 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(8.0, 14.0), (16.0, 14.0), (16.0, 22.0), (8.0, 22.0)]),
             line(&[(12.0, 7.0), (12.0, 12.0)]),
             line(&[(10.0, 10.0), (12.0, 12.0), (14.0, 10.0)]),
+        ],
+        // A slab, from above and to one side: its top and its edges.
+        Icon::Floor => vec![
+            ring(&[(2.0, 12.0), (13.0, 7.0), (22.0, 11.0), (11.0, 16.0)]),
+            line(&[(2.0, 12.0), (2.0, 15.0), (11.0, 19.0), (22.0, 14.0), (22.0, 11.0)]),
+            line(&[(11.0, 16.0), (11.0, 19.0)]),
+        ],
+        // A tiled ceiling hung over a room's floor.
+        Icon::Ceiling => vec![
+            ring(&[(2.0, 5.0), (22.0, 5.0), (22.0, 9.0), (2.0, 9.0)]),
+            line(&[(8.7, 5.0), (8.7, 9.0)]),
+            line(&[(15.3, 5.0), (15.3, 9.0)]),
+            line(&[(6.0, 2.0), (6.0, 5.0)]),
+            line(&[(18.0, 2.0), (18.0, 5.0)]),
+            line(&[(2.0, 21.0), (22.0, 21.0)]),
+        ],
+        // A shaft in plan: its outline, crossed.
+        Icon::Shaft => vec![
+            ring(&[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]),
+            line(&[(4.0, 4.0), (20.0, 20.0)]),
+            line(&[(20.0, 4.0), (4.0, 20.0)]),
+        ],
+        // A sloped slab, and the arrow up it.
+        Icon::SlopeArrow => vec![
+            ring(&[(2.0, 18.0), (22.0, 9.0), (22.0, 12.0), (2.0, 21.0)]),
+            line(&[(5.0, 12.5), (18.0, 6.5)]),
+            line(&[(14.2, 5.6), (18.0, 6.5), (16.0, 9.8)]),
         ],
         // Two crop marks, at opposite corners.
         Icon::Crop => vec![line(&[(6.0, 2.0), (6.0, 18.0), (22.0, 18.0)]), line(&[(2.0, 6.0), (18.0, 6.0), (18.0, 22.0)])],

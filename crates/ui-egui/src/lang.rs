@@ -65,6 +65,10 @@ pub fn category(category: &str, several: bool) -> String {
         "column" => (["Column", "Pilar", "Columna"], ["Columns", "Pilares", "Columnas"]),
         "stair" => (["Stair", "Escada", "Escalera"], ["Stairs", "Escadas", "Escaleras"]),
         "roof" => (["Roof", "Telhado", "Cubierta"], ["Roofs", "Telhados", "Cubiertas"]),
+        "ceiling" => (["Ceiling", "Forro", "Cielo raso"], ["Ceilings", "Forros", "Cielos rasos"]),
+        "shaft" => {
+            (["Shaft Opening", "Abertura de shaft", "Abertura de ducto"], ["Shaft Openings", "Aberturas de shaft", "Aberturas de ducto"])
+        }
         "text" => (["Text Note", "Nota de texto", "Nota de texto"], ["Text Notes", "Notas de texto", "Notas de texto"]),
         "spot" => (["Spot Elevation", "Elevação de ponto", "Cota de nivel"], ["Spot Elevations", "Elevações de ponto", "Cotas de nivel"]),
         "schedule" => (["Schedule", "Tabela", "Tabla"], ["Schedules", "Tabelas", "Tablas"]),
@@ -768,6 +772,74 @@ const WORDS: &[[&str; 3]] = &[
     ["Thermal", "Térmica", "Térmica"],
     ["Membrane", "Membrana", "Membrana"],
     ["Finish", "Acabamento", "Acabado"],
+    // Floors, ceilings and shafts.
+    ["Floor", "Piso", "Piso"],
+    [
+        "Floor: click inside the walls to floor them",
+        "Piso: clique dentro das paredes para criar o piso sob elas",
+        "Piso: haz clic dentro de los muros para crear el piso bajo ellos",
+    ],
+    ["Ceiling", "Forro", "Cielo raso"],
+    [
+        "Ceiling: click inside a room for a ceiling out to its walls",
+        "Forro: clique dentro de um ambiente para um forro até as paredes",
+        "Cielo raso: haz clic dentro de una habitación para un cielo raso hasta sus muros",
+    ],
+    ["Opening", "Abertura", "Abertura"],
+    ["Shaft", "Shaft", "Ducto"],
+    [
+        "Shaft Opening: click two opposite corners; it cuts the floors, ceilings and roofs it passes through",
+        "Abertura de shaft: clique em dois cantos opostos; ela corta os pisos, forros e telhados por onde passa",
+        "Abertura de ducto: haz clic en dos esquinas opuestas; corta los pisos, cielos rasos y cubiertas por donde pasa",
+    ],
+    ["Shape Editing", "Edição de forma", "Edición de forma"],
+    ["Slope Arrow", "Seta de inclinação", "Flecha de pendiente"],
+    [
+        "Slope Arrow: click its tail, then its head; the floor rises toward the head at the Options Bar's slope",
+        "Seta de inclinação: clique na cauda e depois na ponta; o piso sobe em direção à ponta com a inclinação da barra de opções",
+        "Flecha de pendiente: haz clic en la cola y luego en la punta; el piso sube hacia la punta con la pendiente de la barra de opciones",
+    ],
+    ["Create Floor", "Criar piso", "Crear piso"],
+    ["Place Ceiling", "Posicionar forro", "Colocar cielo raso"],
+    ["Create Shaft Opening", "Criar abertura de shaft", "Crear abertura de ducto"],
+    ["Ceiling Plans", "Plantas de forro", "Planos de cielo raso"],
+    ["Height Offset:", "Deslocamento de altura:", "Desfase de altura:"],
+    ["Height Offset From Level", "Deslocamento de altura do nível", "Desfase de altura desde nivel"],
+    ["Tile Size", "Tamanho da placa", "Tamaño de placa"],
+    [
+        "Click inside the walls to floor them: the slab runs under their outline, its top at the level.",
+        "Clique dentro das paredes para criar o piso: a laje passa sob o contorno delas, com o topo no nível.",
+        "Haz clic dentro de los muros para crear el piso: la losa pasa bajo su contorno, con la cara superior en el nivel.",
+    ],
+    [
+        "Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says.",
+        "Clique dentro de um ambiente: um forro até as faces das paredes, na altura que a barra de opções indica.",
+        "Haz clic dentro de una habitación: un cielo raso hasta las caras de sus muros, a la altura que indica la barra de opciones.",
+    ],
+    [
+        "Click a corner of the shaft opening.",
+        "Clique em um canto da abertura de shaft.",
+        "Haz clic en una esquina de la abertura de ducto.",
+    ],
+    [
+        "Click the opposite corner: the shaft cuts the floors, ceilings and roofs up to its top. Esc cancels.",
+        "Clique no canto oposto: o shaft corta os pisos, forros e telhados até o topo dele. Esc cancela.",
+        "Haz clic en la esquina opuesta: el ducto corta los pisos, cielos rasos y cubiertas hasta su parte superior. Esc cancela.",
+    ],
+    [
+        "Click the slope arrow's tail: where the floor's top stays at its height offset.",
+        "Clique na cauda da seta de inclinação: onde o topo do piso fica no deslocamento de altura.",
+        "Haz clic en la cola de la flecha de pendiente: donde la cara superior del piso queda en su desfase de altura.",
+    ],
+    [
+        "Click its head: the floor rises toward it at the Options Bar's slope. Esc cancels.",
+        "Clique na ponta: o piso sobe em direção a ela com a inclinação da barra de opções. Esc cancela.",
+        "Haz clic en la punta: el piso sube hacia ella con la pendiente de la barra de opciones. Esc cancela.",
+    ],
+    ["select the floor to slope first", "selecione primeiro o piso a inclinar", "selecciona primero el piso que quieres inclinar"],
+    ["ceiling: `{}` is not a height", "forro: `{}` não é uma altura", "cielo raso: `{}` no es una altura"],
+    ["shaft: {}", "shaft: {}", "ducto: {}"],
+    ["slope arrow: `{}` is not a slope", "seta de inclinação: `{}` não é uma inclinação", "flecha de pendiente: `{}` no es una pendiente"],
 ];
 
 #[cfg(test)]

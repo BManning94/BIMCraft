@@ -508,6 +508,17 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"id": 3, "location": "exterior-core", "arc": 179.99}),
         json!({"id": 3, "attach_top": 3}),
         json!({"id": 3, "arc": 90, "location": "interior-finish", "start": [0, 0]}),
+        json!({"boundary": [[0, 0], [4000, 0], [4000, 4000]], "slope": 89, "arrow": [[0, 0], [0, 0]]}),
+        json!({"boundary": [[0, 0], [4000, 0], [4000, 4000]], "slope": 5, "arrow": "x", "offset": 1e300}),
+        json!({"point": [4000, 3000], "offset": 1e300, "slope": -1e300}),
+        json!({"point": [4000, 3000], "top_level": u64::MAX, "height": -1, "base_offset": f64::MAX}),
+        json!({"boundary": [[1000, 1000], [2000, 1000], [2000, 2000]], "level": 2, "top_level": 1}),
+        json!({"view": 1, "ceiling": "yes"}),
+        json!({"view": "Level 1", "ceiling": true, "width": 1e9}),
+        json!({"category": "ceiling", "name": "T", "thickness": 20, "grid": 1e-9}),
+        json!({"category": "ceiling", "name": "T", "thickness": 1e300, "grid": -600}),
+        json!({"id": 3, "slope": 5, "arrow": [[0, 0], [1, 1]]}),
+        json!({"ids": [3, 4], "offset": 1e300, "grid": 600}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -921,6 +932,7 @@ fn the_sample_house_builds_with_four_rooms() {
     assert_eq!((i["counts"]["elevation"].as_u64(), i["counts"]["section"].as_u64()), (Some(4), Some(1)));
     assert_eq!((i["counts"]["sheet"].as_u64(), i["counts"]["viewport"].as_u64()), (Some(3), Some(6)));
     assert_eq!((i["counts"]["text"].as_u64(), i["counts"]["spot"].as_u64(), i["counts"]["schedule"].as_u64()), (Some(1), Some(1), Some(1)));
+    assert_eq!(i["counts"]["ceiling"].as_u64(), Some(4), "a ceiling in every room");
     let rooms = run(&mut s, "schedule", json!({"category": "rooms"}));
     let areas: Vec<f64> = rooms["rows"].as_array().unwrap().iter().map(|r| r[3].as_f64().unwrap()).collect();
     assert_eq!(areas, [24.0, 18.0, 14.0, 14.0]);
@@ -953,7 +965,9 @@ fn describe(m: &Model, id: u64) -> String {
     let keys: &[&str] = match e["category"].as_str() {
         Some("wall") => &["start", "end", "arc", "thickness", "base_offset", "height", "level", "top_level", "attach_top"],
         Some("door" | "window") => &["host", "offset", "width", "height", "sill"],
-        Some("floor") => &["level", "area_m2"],
+        Some("floor") => &["level", "area_m2", "slope", "top"],
+        Some("ceiling") => &["level", "offset", "thickness", "area_m2"],
+        Some("shaft") => &["level", "base_offset", "top_level", "height", "boundary"],
         Some("room") => &["level", "name", "number", "area_m2"],
         Some("column") => &["level", "at", "width", "depth", "round", "height", "base_offset"],
         Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length"],
@@ -976,7 +990,8 @@ fn describe(m: &Model, id: u64) -> String {
     };
     // A straight wall has no arc to tell; an attached one's top follows the roof, whatever its top
     // constraint (which IFC doesn't carry).
-    let untold = |k: &str| (matches!(k, "arc" | "attach_top") && e[k].is_null()) || (k == "top_level" && !e["attach_top"].is_null());
+    let untold =
+        |k: &str| (matches!(k, "arc" | "attach_top" | "slope") && e[k].is_null()) || (k == "top_level" && !e["attach_top"].is_null());
     keys.iter().filter(|k| !untold(k)).map(|k| format!("{k}={}", text(k, &e[*k]))).collect::<Vec<_>>().join(" ")
 }
 
@@ -996,6 +1011,15 @@ fn ifc_files_open_as_the_building_they_describe() {
     run(&mut s, "column", json!({"at": [8000, 5000], "angle": 30}));
     run(&mut s, "stair", json!({"start": [1000, 2000], "end": [2000, 2000], "width": 900}));
     run(&mut s, "wall", json!({"points": [[14000, 0], [18000, 0]], "arc": 90, "type": "Exterior - 300mm"}));
+    // A ramp rising north beside the house, a loft over the living room, and a shaft up through
+    // the living room's ceiling and the loft.
+    run(
+        &mut s,
+        "floor",
+        json!({"boundary": [[11000, 0], [13000, 0], [13000, 4000], [11000, 4000]], "slope": 4, "arrow": [[12000, 0], [12000, 4000]]}),
+    );
+    run(&mut s, "floor", json!({"level": "Level 2", "boundary": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}));
+    run(&mut s, "shaft", json!({"boundary": [[4000, 1000], [5000, 1000], [5000, 2000], [4000, 2000]]}));
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -1005,7 +1029,7 @@ fn ifc_files_open_as_the_building_they_describe() {
     assert_eq!(t.path, None, "an import is a new project: saving asks where");
     let levels = |m: &Model| m.levels().into_iter().map(|(_, l)| (l.name.clone(), l.elevation)).collect::<Vec<_>>();
     assert_eq!(levels(&t.model), levels(&s.model));
-    for category in ["wall", "door", "window", "floor", "room", "column", "stair", "roof"] {
+    for category in ["wall", "door", "window", "floor", "room", "column", "stair", "roof", "ceiling", "shaft"] {
         let (before, after) = (building(&s.model, category), building(&t.model, category));
         assert!(!before.is_empty(), "{category}");
         assert_eq!(after, before, "{category}");
@@ -1161,7 +1185,7 @@ fn ifc_files_from_other_tools_come_in_measured_from_their_geometry() {
             "host=(start=[900,2000] end=[900,7000] thickness=200 base_offset=0 height=2700 level=First top_level=-) offset=3500 width=1000 height=1200 sill=900"
         ]
     );
-    assert_eq!(building(m, "floor"), ["level=First area_m2=13.28"]);
+    assert_eq!(building(m, "floor"), ["level=First area_m2=13.28 top=[3000,3000]"]);
     assert_eq!(building(m, "grid"), ["name=\"1\" start=[0,-1000] end=[0,8000]", "name=\"A\" start=[-1000,0] end=[6000,0]"]);
     let room = m.elements.values().find_map(|e| match e {
         crate::model::Element::Room(r) => Some(r.clone()),
@@ -1416,4 +1440,105 @@ fn walls_attached_to_a_roof_follow_its_underside() {
     run(&mut s, "delete", json!({"ids": [low]}));
     assert_eq!(element(&mut s, part).get("attach_base"), None);
     assert!(s.execute("modify", &json!({"id": part, "attach_top": ids[0]})).unwrap_err().contains("roof or a floor"));
+}
+
+#[test]
+fn sloped_floors_rise_along_their_slope_arrow() {
+    let mut s = Session::new();
+    house(&mut s);
+    // A ramp along the south wall, 6 m long, rising 5° east from 100 mm up at its arrow's tail.
+    let ramp = run(
+        &mut s,
+        "floor",
+        json!({"boundary": [[1000, 500], [7000, 500], [7000, 2000], [1000, 2000]], "offset": 100, "slope": 5, "arrow": [[1000, 1250], [7000, 1250]]}),
+    )["id"]
+        .as_u64()
+        .unwrap();
+    let (tan, cos) = (5f64.to_radians().tan(), 5f64.to_radians().cos());
+    let top = |s: &Session, x: f64| crate::view3d::tops_at(&s.model, P2(x, 1000.0))[&ramp];
+    assert!((top(&s, 1500.0) - (100.0 + 500.0 * tan)).abs() < 1e-6);
+    assert!((top(&s, 4000.0) - (100.0 + 3000.0 * tan)).abs() < 1e-6);
+    let e = element(&mut s, ramp);
+    assert_eq!((e["slope"].as_f64(), e["offset"].as_f64(), e["top"].clone()), (Some(5.0), Some(100.0), json!([100.0, 624.93])));
+    // 200 mm thick across its slope: a wall under it, attached, stops 200 / cos 5° below its top.
+    let under = run(&mut s, "wall", json!({"points": [[4000, 500], [4000, 2000]], "type": "Interior - 100mm", "attach_top": ramp}))["ids"]
+        [0]
+    .as_u64()
+    .unwrap();
+    let tops = crate::view3d::tops_at(&s.model, P2(4000.0, 1000.0));
+    assert!((tops[&under] - (100.0 + 3000.0 * tan - 200.0 / cos)).abs() < 1e-6, "{tops:?}");
+    // A slope needs its arrow, and no more than 75°.
+    assert!(s.execute("modify", &json!({"id": ramp, "arrow": null})).unwrap_err().contains("arrow"));
+    assert!(s.execute("modify", &json!({"id": ramp, "slope": 80})).unwrap_err().contains("75°"));
+    // Mirrored, it rises the other way.
+    run(&mut s, "mirror", json!({"ids": [ramp], "axis": [[4000, 0], [4000, 1000]]}));
+    assert!((top(&s, 6500.0) - (100.0 + 500.0 * tan)).abs() < 1e-6 && (top(&s, 1500.0) - (100.0 + 5500.0 * tan)).abs() < 1e-6);
+    // Level, at its offset: (the wall under it, attached, needs it higher than its 200 mm).
+    assert!(s.execute("modify", &json!({"id": ramp, "slope": 0})).unwrap_err().contains("above its base"));
+    run(&mut s, "modify", json!({"id": ramp, "slope": 0, "offset": 500}));
+    assert_eq!((top(&s, 1500.0), top(&s, 6500.0)), (500.0, 500.0));
+}
+
+#[test]
+fn ceilings_fill_rooms_out_to_the_faces_of_their_walls() {
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "wall", json!({"points": [[5000, 0], [5000, 6000]], "type": "Interior - 100mm"}));
+    // The room around the point, out to its walls' faces: 4850 x 5800 mm; 2600 mm up, 20 mm thick.
+    let c = run(&mut s, "ceiling", json!({"point": [2000, 3000]}));
+    assert_eq!(c["area_m2"], 28.13);
+    let id = c["id"].as_u64().unwrap();
+    let e = element(&mut s, id);
+    assert_eq!((e["level"].as_u64(), e["offset"].as_f64(), e["thickness"].as_f64()), (Some(1), Some(2600.0), Some(20.0)));
+    assert_eq!(crate::view3d::tops_at(&s.model, P2(2000.0, 3000.0))[&id], 2620.0);
+    // Sketched, lower, in tiles; where no walls close around a point, it needs a boundary.
+    let tiles = run(
+        &mut s,
+        "ceiling",
+        json!({"boundary": [[5050, 100], [7900, 100], [7900, 5900], [5050, 5900]], "offset": 2400, "type": "Tile 600 x 600"}),
+    );
+    assert_eq!(element(&mut s, tiles["id"].as_u64().unwrap())["grid"], 600.0);
+    assert!(s.execute("ceiling", &json!({"point": [9000, 3000]})).unwrap_err().contains("boundary"));
+    // A spot elevation in the plan reads the floor under a ceiling, not the ceiling.
+    run(&mut s, "floor", json!({}));
+    let spot = run(&mut s, "spot", json!({"at": [2000, 3000]}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, spot)["elevation"], 0.0);
+    // The level's reflected ceiling plan.
+    let rcp = run(&mut s, "render", json!({"view": "Level 1", "ceiling": true}));
+    assert_eq!((rcp["kind"].as_str(), rcp["view"].as_str()), (Some("ceiling plan"), Some("Level 1")));
+    let t = run(&mut s, "type", json!({"category": "ceiling", "name": "Tile 1200", "thickness": 15, "grid": 1200}));
+    assert_eq!(t["type"], json!({"thickness": 15.0, "grid": 1200.0}));
+    assert!(s.execute("type", &json!({"category": "ceiling", "name": "Fine", "thickness": 15, "grid": 10})).unwrap_err().contains("grid"));
+}
+
+#[test]
+fn shafts_cut_the_floors_ceilings_and_roofs_they_pass_through() {
+    let mut s = Session::new();
+    house(&mut s);
+    let ground = run(&mut s, "floor", json!({}))["id"].as_u64().unwrap();
+    let upper = run(&mut s, "floor", json!({"level": 2, "boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]]}))["id"].as_u64().unwrap();
+    let ceiling = run(&mut s, "ceiling", json!({"point": [4000, 3000]}))["id"].as_u64().unwrap();
+    let roof = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
+    // A 1 x 2 m shaft from Level 1 up to the next: through the ceiling and the upper floor, not the
+    // ground floor under it, nor the roof high over it.
+    let shaft = run(&mut s, "shaft", json!({"boundary": [[3000, 2000], [4000, 2000], [4000, 4000], [3000, 4000]]}))["id"].as_u64().unwrap();
+    let tops = |s: &Session, x: f64| crate::view3d::tops_at(&s.model, P2(x, 3000.0));
+    let inside = tops(&s, 3500.0);
+    assert!(inside.contains_key(&ground) && inside.contains_key(&roof), "{inside:?}");
+    assert!(!inside.contains_key(&upper) && !inside.contains_key(&ceiling), "{inside:?}");
+    assert!(tops(&s, 5000.0).contains_key(&upper), "beside it, the floor is whole");
+    assert_eq!(element(&mut s, upper)["area_m2"], 46.0);
+    let e = element(&mut s, shaft);
+    assert_eq!((e["level"].as_u64(), e["top_level"].as_u64(), e["height"].as_f64()), (Some(1), Some(2), Some(3000.0)));
+    // Up through the roof, it cuts that too.
+    run(&mut s, "modify", json!({"id": shaft, "top_level": null, "height": 8000}));
+    assert!(!tops(&s, 3500.0).contains_key(&roof));
+    assert!(s.execute("modify", &json!({"id": shaft, "height": -5})).unwrap_err().contains("height"));
+    // In IFC, an opening voids each element it cuts.
+    let path = temp("shaft.ifc");
+    run(&mut s, "save", json!({"path": path}));
+    let ifc = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(path);
+    assert_eq!((ifc.matches("IFCOPENINGELEMENT(").count(), ifc.matches("IFCRELVOIDSELEMENT(").count()), (3, 3));
+    assert!(ifc.contains(".CEILING.)"), "the ceiling, as a covering");
 }

@@ -20,7 +20,7 @@ pub mod units;
 pub mod view3d;
 pub mod walls;
 
-pub use commands::{element_json, roof_footprint};
+pub use commands::{element_json, floor_outline, roof_footprint};
 
 #[cfg(test)]
 mod tests;

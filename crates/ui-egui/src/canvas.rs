@@ -1,4 +1,5 @@
-//! The plan canvas: a level's floor plan as `render::draw` lays it out, panned and zoomed. Over it:
+//! The plan canvas: a level's floor plan as `render::draw` lays it out (its reflected ceiling plan as
+//! `render::draw_ceiling` does), panned and zoomed. Over it:
 //! selection (click, Ctrl adds, Shift takes away, Tab for what's underneath, boxes), dragging,
 //! the tools' points, temporary dimensions, and previews of what a click would do.
 
@@ -11,8 +12,8 @@ use bimcraft_core::model::{
     Section, Spot, Stair, TOL, TREAD, Tag,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
-use bimcraft_core::roof_footprint;
 use bimcraft_core::walls::{self, Axis};
+use bimcraft_core::{floor_outline, roof_footprint};
 use egui::{
     Align, Align2, Color32, Event, FontId, Key, Layout, Mesh, Modifiers, Painter, PointerButton, Pos2, Rect, Response, Sense, Shape,
     Stroke, StrokeKind, TextEdit, TextureId, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
@@ -494,13 +495,14 @@ impl BimApp {
         // Clicks and drags; never the keyboard, which the shortcuts need.
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
         let model = std::sync::Arc::clone(&self.session.model);
-        let fit = |w, h| render::plan(&model, level, w, h).view;
+        let up = matches!(self.sheet, Sheet::Ceiling(_));
+        let fit = |w, h| if up { render::ceiling_plan(&model, level, w, h).view } else { render::plan(&model, level, w, h).view };
         let Some((view, local)) = self.canvas.navigate(ui, &response, rect, level, fit) else { return };
         let mods = ui.input(|i| i.modifiers);
         let c = &mut self.canvas;
         c.cursor = local.map(|q| view.mm(q));
         // ponytail: redraws the whole plan every frame; cache the drawing per model and view if plans grow slow.
-        let d = render::draw(&model, level, view);
+        let d = if up { render::draw_ceiling(&model, level, view) } else { render::draw(&model, level, view) };
 
         // What's under the cursor; Tab steps through it. (Without the app's input hook, as in
         // tests, egui moved the keyboard to a widget on that Tab: give it back.)
@@ -901,6 +903,58 @@ impl BimApp {
                     self.status = Status { text, error: true };
                 }
             },
+            // Under the walls of this plan's level; once made, selected, as a finished sketch is.
+            Tool::Floor => {
+                let p = typed(self, "floor", json!({"level": level}));
+                if let Some(made) = self.run("floor", p) {
+                    self.selection = made["id"].as_u64().into_iter().collect();
+                    self.tool = Tool::Modify;
+                }
+            }
+            Tool::Ceiling => match m.units.parse(&self.ceiling_height) {
+                Some(offset) => {
+                    let p = typed(self, "ceiling", json!({"point": point(round(v.mm(at))), "level": level, "offset": offset}));
+                    self.run("ceiling", p);
+                }
+                None => self.status = Status { text: tf("ceiling: `{}` is not a height", &[&self.ceiling_height]), error: true },
+            },
+            // Two opposite corners of a rectangle.
+            &Tool::Shaft(start) => {
+                let p = snap(m, level, v, at, start.as_slice(), false);
+                match start {
+                    None => self.tool = Tool::Shaft(Some(p)),
+                    Some(a) if (a.0 - p.0).abs() > TOL && (a.1 - p.1).abs() > TOL => {
+                        match top_params(m, level, self.shaft_top, &self.shaft_height) {
+                            Ok(mut q) => {
+                                q["boundary"] = json!([point(a), point(P2(p.0, a.1)), point(p), point(P2(a.0, p.1))]);
+                                q["level"] = json!(level);
+                                if self.run("shaft", q).is_some() {
+                                    self.tool = Tool::Shaft(None);
+                                }
+                            }
+                            Err(e) => self.status = Status { text: tf("shaft: {}", &[&e]), error: true },
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+            // The selected floor's slope arrow, from its tail to its head; then Modify, the floor
+            // still selected.
+            &Tool::SlopeArrow(tail) => {
+                let p = snap(m, level, v, at, tail.as_slice(), mods.shift);
+                match (tail, self.selected_floor(), number(&self.floor_slope)) {
+                    (None, ..) => self.tool = Tool::SlopeArrow(Some(p)),
+                    (Some(a), Some(floor), Some(slope)) if a.dist(p) > TOL => {
+                        if self.run("modify", json!({"id": floor, "arrow": [point(a), point(p)], "slope": slope})).is_some() {
+                            self.tool = Tool::Modify;
+                        }
+                    }
+                    (Some(_), _, None) => {
+                        self.status = Status { text: tf("slope arrow: `{}` is not a slope", &[&self.floor_slope]), error: true };
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -1190,7 +1244,13 @@ impl BimApp {
         let ghost = |f: &dyn Fn(Pos2) -> Pos2| ghost(p, origin, sc.d, &self.selection, f);
         let chain = match &self.tool {
             Tool::Wall(chain) => chain.as_slice(),
-            Tool::Grid(_) | Tool::Move(_) | Tool::Copy(_) | Tool::Section(None) | Tool::Stair(None) => start_of(&self.tool),
+            Tool::Grid(_)
+            | Tool::Move(_)
+            | Tool::Copy(_)
+            | Tool::Section(None)
+            | Tool::Stair(None)
+            | Tool::Shaft(None)
+            | Tool::SlopeArrow(None) => start_of(&self.tool),
             // The section a click would end, and the elevation a click would place.
             &Tool::Section(Some(start)) => {
                 let end = snap(m, level, v, q, &[start], shift);
@@ -1339,6 +1399,42 @@ impl BimApp {
                         tread: TREAD,
                     }));
                 }
+                return;
+            }
+            // The floor a click would make, under the walls.
+            Tool::Floor => {
+                if let Some(ring) = floor_outline(m, level) {
+                    p.add(Shape::closed_line(ring.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
+                }
+                return;
+            }
+            // The ceiling a click would make: the room's outline, out to its walls' faces.
+            Tool::Ceiling => {
+                if let Some(g) = geom::region_at(&m.face_lines(level), v.mm(q), TOL) {
+                    p.add(Shape::closed_line(g.outer.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
+                    let (area, unit) = m.units.area(geom::area(&g.outer).abs());
+                    label(cursor, format!("{area:.2} {unit}"));
+                }
+                return;
+            }
+            // The shaft a click would make: the rectangle to the cursor, crossed.
+            &Tool::Shaft(Some(a)) => {
+                let b = snap(m, level, v, q, &[a], false);
+                let c = [a, P2(b.0, a.1), b, P2(a.0, b.1)].map(|pt| sc.screen(pt));
+                p.add(Shape::closed_line(c.to_vec(), stroke));
+                p.line_segment([c[0], c[2]], thin);
+                p.line_segment([c[1], c[3]], thin);
+                return;
+            }
+            // The slope arrow a click would make, and its slope.
+            &Tool::SlopeArrow(Some(tail)) => {
+                let (a, b) = (sc.screen(tail), sc.screen(snap(m, level, v, q, &[tail], shift)));
+                p.line_segment([a, b], stroke);
+                if a.distance(b) > 1.0 {
+                    let (u, n) = ((b - a).normalized() * 10.0, (b - a).normalized().rot90() * 4.0);
+                    p.add(Shape::convex_polygon(vec![b, b - u + n, b - u - n], pal().accent, Stroke::NONE));
+                }
+                label(cursor, format!("{}°", self.floor_slope.trim()));
                 return;
             }
             // The roof a click would make, with its ridge and hips.

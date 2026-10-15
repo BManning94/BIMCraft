@@ -405,8 +405,9 @@ impl Bound {
                 (pieces.iter().filter_map(|f| Plane::of(f)).map(|p| Plane { z: p.z + lift, ..p }).collect(), r.boundary.clone())
             }
             Some(Element::Floor(f)) => {
-                let (z, t) = (m.elevation(f.level), m.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness));
-                (vec![Plane::flat(if top { z } else { z - t })], f.boundary.clone())
+                let face = m.floor_top(f);
+                let below = if top { 0.0 } else { m.floor_depth(f) };
+                (vec![Plane { z: face.z - below, ..face }], f.boundary.clone())
             }
             _ => (Vec::new(), Vec::new()),
         };
@@ -474,6 +475,15 @@ fn split(ring: Vec<P2>, piece: &[P2]) -> (Option<Vec<P2>>, Vec<Vec<P2>>) {
         inside = geom::clip(&inside, left);
     }
     (Some(inside).filter(big), outside)
+}
+
+/// What's left of `rings` outside `hole`: convex pieces, counter-clockwise.
+pub(crate) fn minus(rings: &[Vec<P2>], hole: &[P2]) -> Vec<Vec<P2>> {
+    let holes = convex_pieces(hole);
+    rings
+        .iter()
+        .flat_map(|r| holes.iter().fold(convex_pieces(r), |parts, piece| parts.into_iter().flat_map(|p| split(p, piece).1).collect()))
+        .collect()
 }
 
 fn lowest(planes: &[Plane], q: P2) -> f64 {

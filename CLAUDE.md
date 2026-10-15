@@ -39,7 +39,8 @@ cargo test --workspace
 - Desktop: `cargo run -p bimcraft -- --sample` (it needs a display; egui 0.36 needs Rust 1.95). After a UI change, look at a
   screenshot of the window, in both themes (View > Dark Mode). Without a display, egui_kittest's `wgpu` feature renders a `Harness` to an image; with no GPU,
   `WGPU_BACKEND=gl` falls back to Mesa's software renderer.
-- Plans: `bimcraft-cli run --sample --save /tmp/plan.png`, then read the PNG. After any drawing change, look at it.
+- Plans: `bimcraft-cli run --sample --save /tmp/plan.png`, then read the PNG. After any drawing change, look at it. A level's
+  reflected ceiling plan: `render {"view": "Level 1", "ceiling": true, "path": "/tmp/rcp.png"}`.
 - 3D: `bimcraft-cli run --sample --cmd 'render {"view": "{3D}", "path": "/tmp/3d.png"}'` (`azimuth` and `elevation`
   turn it). After touching `view3d.rs`, look at it. Sections and elevations render by name the same way: `"view": "Section 1"`.
 - Sheets: `bimcraft-cli run --sample --save /tmp/sheets.pdf` prints every sheet; read them back with poppler (`pdfinfo`,
@@ -71,5 +72,8 @@ layers from the exterior in. A curved wall turns `arc` degrees, counter-clockwis
 their faces meet in mitred caps at any angle, and a wall ending on another stops at its face (`walls::cap`); plans, 3D,
 sections and IFC all draw that outline (`walls::outline`, `walls::prisms`). Room areas are measured at the walls' centre
 lines, run on or back to meet at joins (`walls::centre_line`). An attached top or base follows the lowest of the roof's or
-floor's planes where it's over the wall; a mirrored wall runs back the other way. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
+floor's planes where it's over the wall; a mirrored wall runs back the other way. A floor's top is at its level plus `offset`,
+or with a slope arrow, there at the arrow's tail and rising `slope` degrees toward its head (`Model::floor_top`); it's its
+type's thickness across the slope, so plumb it's thicker. A ceiling's `offset` is its underside. A shaft cuts each floor,
+ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.

@@ -67,6 +67,12 @@ fn topmost(h: &mut Harness<BimApp>, name: &str) {
     h.run();
 }
 
+/// A view in the Project Browser, opened as screen readers do: it may lie below the browser's fold.
+fn browse(h: &mut Harness<BimApp>, label: &str) {
+    h.get_by_label(label).click_accesskit();
+    h.run();
+}
+
 /// A primary click on the plan at a model point.
 fn click(h: &mut Harness<BimApp>, p: P2) {
     click_with(h, p, Modifiers::NONE);
@@ -304,7 +310,8 @@ fn the_browser_opens_level_plans_and_schedules() {
     for label in ["Views (all)", "Floor Plans", "Schedules/Quantities (all)"] {
         assert!(h.query_by_label(label).is_some(), "{label}");
     }
-    press(&mut h, "Level 2");
+    // Its floor plan, over its ceiling plan.
+    topmost(&mut h, "Level 2");
     assert_eq!(h.state().sheet, Sheet::Plan(2));
     // Below the browser's fold, past the elevations and sections: reached as screen readers do.
     h.get_by_label("Room Schedule").click_accesskit();
@@ -341,7 +348,7 @@ fn the_level_and_grid_tools_add_datums() {
     press(&mut h, "Create");
     let levels = h.state().session.model.levels().iter().map(|(_, l)| (l.name.clone(), l.elevation)).collect::<Vec<_>>();
     assert_eq!(levels.last(), Some(&("Level 3".to_string(), 6000.0)));
-    press(&mut h, "Level 3");
+    topmost(&mut h, "Level 3");
     // Undoing the level leaves its plan open on nothing: the browser falls back to the lowest.
     h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
     h.run();
@@ -475,9 +482,8 @@ fn the_options_bar_sets_the_wall_height_and_chain() {
 #[test]
 fn views_open_in_tabs_that_switch_and_close() {
     let mut h = app(SAMPLE);
-    press(&mut h, "Level 2");
-    h.get_by_label("Room Schedule").click_accesskit();
-    h.run();
+    topmost(&mut h, "Level 2");
+    browse(&mut h, "Room Schedule");
     assert_eq!(h.state().sheet, Sheet::Schedule("room"));
     topmost(&mut h, "Level 1");
     assert_eq!(h.state().sheet, Sheet::Plan(1));
@@ -779,7 +785,7 @@ fn the_section_tool_draws_a_section_whose_view_opens_from_the_browser_or_a_doubl
     let section = ids(&h, "section");
     assert_eq!((section.len(), field(&h, section[0], "looking")), (1, json!([0.0, 1.0])));
     assert!(h.query_by_label("Sections (Building Section)").is_some());
-    press(&mut h, "Section 1");
+    browse(&mut h, "Section 1");
     assert_eq!(h.state().sheet, Sheet::Section(section[0]));
     // In the section, points run along its line from its start, and up: the west wall is cut at 1000.
     let west = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 6000.0)));
@@ -949,7 +955,7 @@ fn text_notes_go_where_clicked_in_plans_sections_and_sheets() {
         (json!("Tiled floor"), json!([2000.0, 2000.0]), json!(1))
     );
     // The tool goes on working in a section, along it and up, and on a sheet, in paper mm.
-    press(&mut h, "Section 1");
+    browse(&mut h, "Section 1");
     assert_eq!((h.state().sheet, &h.state().tool), (Sheet::Section(section), &Tool::Text));
     click(&mut h, P2(3000.0, 2500.0));
     h.get_by_label("A101 - Unnamed").click_accesskit();
@@ -1009,7 +1015,7 @@ fn crop_view_and_its_grips_frame_plans_and_sections() {
     crop_view(&mut h);
     assert_eq!(field(&h, 1, "crop"), Value::Null);
     // A section's top, dragged down; its start, dragged along its line: what's on screen stays put.
-    press(&mut h, "Section 1");
+    browse(&mut h, "Section 1");
     drag(&mut h, P2(5000.0, 3600.0), P2(5000.0, 2000.0));
     assert_eq!(field(&h, section, "crop"), json!([-600.0, 2000.0]));
     let before = h.state().screen(P2(1000.0, 700.0));
@@ -1170,7 +1176,8 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             missed.extend(english(&h, l));
         }
         // A wall's Properties and its contextual tab; a door's; the tools' Options Bars.
-        for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(0.0, 0.0), Some("Wall")), (P2(0.0, 0.0), Some("Roof"))] {
+        let tools = ["Wall", "Roof", "Floor", "Ceiling", "Shaft"].map(|t| (P2(0.0, 0.0), Some(t)));
+        for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None)].into_iter().chain(tools) {
             key(&mut h, Key::Escape);
             if let Some(tool) = tool {
                 press(&mut h, tr("Architecture"));
@@ -1263,4 +1270,69 @@ fn type_properties_build_a_wall_types_layers() {
     let t = &h.state().session.model.types.wall["Generic - 200mm"];
     assert_eq!((t.thickness, t.layers.len()), (300.0, 2));
     assert_eq!((t.layers[0].material.as_str(), t.layers[0].thickness, t.layers[1].thickness), ("Brick", 100.0, 200.0));
+}
+
+#[test]
+fn floors_go_under_the_walls_and_a_slope_arrow_slopes_them() {
+    let mut h = app(BOX);
+    tool(&mut h, "Floor");
+    assert!(h.query_by_label("Modify | Create Floor").is_some());
+    click(&mut h, P2(4000.0, 3000.0));
+    let floor = ids(&h, "floor");
+    assert_eq!((floor.len(), field(&h, floor[0], "area_m2")), (1, json!(48.0)));
+    assert_eq!(h.state().selection, floor, "finished, the floor is selected");
+    assert!(h.query_by_label("Modify | Floors").is_some() && h.query_by_label("Height Offset From Level").is_some());
+    // Its slope arrow, from Shape Editing: its tail, then its head, at the Options Bar's slope.
+    press(&mut h, "Slope Arrow");
+    type_into(&mut h, "Slope:", "3");
+    click(&mut h, P2(1000.0, 3000.0));
+    click(&mut h, P2(7000.0, 3000.0));
+    assert_eq!((field(&h, floor[0], "slope"), field(&h, floor[0], "arrow")), (json!(3.0), json!([[1000.0, 3000.0], [7000.0, 3000.0]])));
+    assert_eq!((h.state().selection.as_slice(), &h.state().tool), (floor.as_slice(), &Tool::Modify), "the floor stays selected");
+}
+
+#[test]
+fn ceilings_go_in_the_room_clicked_and_show_in_its_ceiling_plan() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(BOX);
+    tool(&mut h, "Ceiling");
+    assert!(h.query_by_label("Modify | Place Ceiling").is_some());
+    press(&mut h, "Type Selector");
+    press(&mut h, "Tile 600 x 600");
+    type_into(&mut h, "Height Offset:", "2400");
+    click(&mut h, P2(4000.0, 3000.0));
+    let c = ids(&h, "ceiling");
+    // Out to the walls' faces, 100 mm in from their centre lines.
+    assert_eq!((c.len(), field(&h, c[0], "offset"), field(&h, c[0], "area_m2")), (1, json!(2400.0), json!(45.24)));
+    assert_eq!(field(&h, c[0], "type"), json!("Tile 600 x 600"));
+    assert_eq!(h.state().tool, Tool::Ceiling, "ready for the next room");
+    // The browser's Ceiling Plans open the level's reflected ceiling plan: its tiles pick the ceiling.
+    key(&mut h, Key::Escape);
+    let lowest = h.get_all_by_label("Level 1").max_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).map(|n| n.accesskit_node().id());
+    h.get_by(|n| Some(n.id()) == lowest).click_accesskit();
+    h.run();
+    assert_eq!(h.state().sheet, Sheet::Ceiling(1));
+    assert_eq!(h.get_all_by_label("Ceiling Plan: Level 1").count(), 2, "its tab and the palette name the view");
+    click(&mut h, P2(4000.0, 1000.0));
+    assert_eq!(h.state().selection, c, "a tile line through the ceiling's middle");
+    assert!(h.query_by_label("Modify | Ceilings").is_some());
+}
+
+#[test]
+fn shaft_openings_take_two_corners_and_cut_the_floors_they_pass_through() {
+    let mut h = app(&format!("{BOX}\nfloor {{\"level\": 2, \"boundary\": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]]}}"));
+    tool(&mut h, "Shaft");
+    assert!(h.query_by_label("Modify | Create Shaft Opening").is_some());
+    click(&mut h, P2(3000.0, 2000.0));
+    assert!(ids(&h, "shaft").is_empty(), "the first click is a corner");
+    click(&mut h, P2(4000.0, 4000.0));
+    let shaft = ids(&h, "shaft");
+    assert_eq!((shaft.len(), field(&h, shaft[0], "area_m2"), field(&h, shaft[0], "top_level")), (1, json!(2.0), json!(2)));
+    assert_eq!(field(&h, ids(&h, "floor")[0], "area_m2"), json!(46.0), "the floor above, less the hole");
+    assert_eq!(h.state().tool, Tool::Shaft(None), "ready for the next one");
+    // Selected by its cross, its palette.
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(3500.0, 3000.0));
+    assert_eq!(h.state().selection, shaft);
+    assert!(h.query_by_label("Modify | Shaft Openings").is_some() && h.query_by_label("Top Constraint").is_some());
 }

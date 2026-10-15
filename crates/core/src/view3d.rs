@@ -1,5 +1,5 @@
-//! The 3D view: the model as solids (walls with their doors and windows cut out, floor slabs,
-//! door and window panels, columns, stairs' steps, roofs' slopes) in an axonometric projection, as Revit's default 3D view shows it. A
+//! The 3D view: the model as solids (walls with their doors and windows cut out, floor slabs and
+//! ceilings with the shafts through them cut out, door and window panels, columns, stairs' steps, roofs' slopes) in an axonometric projection, as Revit's default 3D view shows it. A
 //! depth buffer keeps the nearest surface at each pixel; faces are shaded by how they turn to
 //! the light, and an edge is drawn wherever the plane a pixel shows changes, so coplanar faces
 //! (joined walls' tops, a face's triangles) read as one. The picture keeps which element each
@@ -28,6 +28,7 @@ const SLAB: Rgb = Rgb(214, 214, 210);
 const DOOR: Rgb = Rgb(198, 168, 128);
 const GLASS: Rgb = Rgb(166, 200, 228);
 const ROOF: Rgb = Rgb(176, 118, 96);
+const CEILING: Rgb = Rgb(244, 242, 236);
 /// Room around a fitted model, px.
 const MARGIN: f64 = 30.0;
 
@@ -228,7 +229,7 @@ impl Solid {
 
 /// The stretches of the line from `p` along unit `u` that lie over `ring`, as distances from `p`:
 /// where it crosses the ring's edges, paired off, in and out.
-fn crossings(ring: &[P2], p: P2, u: P2) -> Vec<(f64, f64)> {
+pub(crate) fn crossings(ring: &[P2], p: P2, u: P2) -> Vec<(f64, f64)> {
     // ponytail: a line through a corner it only touches unpairs the rest; nudge it if slabs show gaps.
     let mut cross: Vec<f64> = geom::ring_edges(ring)
         .filter_map(|(a, b)| {
@@ -240,8 +241,23 @@ fn crossings(ring: &[P2], p: P2, u: P2) -> Vec<(f64, f64)> {
     cross.as_chunks::<2>().0.iter().map(|[s0, s1]| (*s0, *s1)).collect()
 }
 
-/// The model's solids: walls cut around their openings, door leaves and glass, floor slabs,
-/// columns, stairs' steps and roofs' slopes.
+/// The slabs `face`, and what lies `rise` over it, make: less the shafts through it, each piece of
+/// it on the face's plane.
+fn slabs(out: &mut Vec<Solid>, m: &Model, owner: Id, color: Rgb, face: Vec<P3>, rise: f64) {
+    let (pieces, shafts) = m.less_shafts(&face, rise);
+    match (shafts.is_empty(), Plane::of(&face)) {
+        (false, Some(plane)) => out.extend(pieces.into_iter().map(|ring| Solid::Slab {
+            owner,
+            color,
+            face: ring.iter().map(|q| [q.0, q.1, plane.at(*q)]).collect(),
+            rise,
+        })),
+        _ => out.push(Solid::Slab { owner, color, face, rise }),
+    }
+}
+
+/// The model's solids: walls cut around their openings, door leaves and glass, floor slabs and
+/// ceilings, columns, stairs' steps and roofs' slopes.
 pub(crate) fn solids(m: &Model) -> Vec<Solid> {
     let mut out = Vec::new();
     for (&id, e) in &m.elements {
@@ -255,8 +271,12 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 curve: p.curve,
             })),
             Element::Floor(f) => {
-                let (top, t) = (m.elevation(f.level), m.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness));
-                out.push(slab(id, SLAB, &f.boundary, (top - t, top)));
+                let (face, rise) = m.floor_slab(f);
+                slabs(&mut out, m, id, SLAB, face, rise);
+            }
+            Element::Ceiling(c) => {
+                let (face, rise) = m.ceiling_slab(c);
+                slabs(&mut out, m, id, CEILING, face, rise);
             }
             Element::Column(col) => {
                 out.push(slab(id, WALL, &m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height)))
@@ -274,7 +294,9 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
             }
             Element::Roof(r) => {
                 if let Ok((pieces, rise)) = m.roof_pieces(r) {
-                    out.extend(pieces.into_iter().map(|face| Solid::Slab { owner: id, color: ROOF, face, rise }));
+                    for face in pieces {
+                        slabs(&mut out, m, id, ROOF, face, rise);
+                    }
                 }
             }
             // A door's leaf or a window's glass: a 50 mm panel in the middle of the wall, square to it.

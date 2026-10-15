@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  Model a building the way Revit does: levels, walls, doors and windows, floors, rooms, columns, stairs and roofs that
-  know about each other. Draw plans, sections, elevations and a 3D view from them, lay them out on sheets, and read and
+  Model a building the way Revit does: levels, walls, doors and windows, floors and ceilings, rooms, columns, stairs,
+  roofs and shafts that know about each other. Draw plans, sections, elevations and a 3D view from them, lay them out on sheets, and read and
   write IFC. Every action is a command, so agents can drive it as well as you can.<br>
   <i>By IPedrax.</i>
 </p>
@@ -26,7 +26,7 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/desktop.png" alt="The BIMCraft desktop app on the sample house: the ribbon's Architecture tab (Wall, Door, Window, Column, Roof, Stair, Room, Level, Grid), Properties with the plan's view range and the Project Browser on the left, and the Level 1 plan with its dimensions, tags, a spot elevation, a note, the section, four elevation markers and the roof's edge dashed overhead" width="100%">
+  <img src="docs/images/desktop.png" alt="The BIMCraft desktop app on the sample house: the ribbon's Architecture tab (Wall, Door, Window, Column, Roof, Floor, Ceiling, Stair, Room, Shaft, Level, Grid), Properties with the plan's view range and the Project Browser, with its floor and ceiling plans, on the left, and the Level 1 plan with its dimensions, tags, a spot elevation, a note, the section, four elevation markers and the roof's edge dashed overhead" width="100%">
   <br><sub><b>The sample house</b> (<code>cargo run --release -p bimcraft -- --sample</code>): Revit's layout in BIMCraft's own icons and colours, with dimensions, door and window tags, a spot elevation, a note, a section and the four elevation marks, all built from BIMCraft commands.</sub>
 </p>
 
@@ -91,25 +91,27 @@ BIMCraft is in early, fast development. Honest status:
 | Datums | Levels with elevations; grids that name themselves 1, 2, 3… or A, B, C… |
 | Walls | Chains of walls, straight or curved (each turning `arc` degrees), on any of Revit's six location lines (the wall's or its core's centre line, a finish or a core face, exterior or interior); compound types with layers (structure, substrate, thermal, membrane, finish) from the exterior in, the exterior being to the left of start to end, so walls drawn clockwise face out; joins at any angle, mitred, three or more walls sharing a node, a wall ending on another stopped at its face, and sharp corners squared off; base level and offset; the top at a level or an unconnected height (by default, up to the next level), or attached to the underside of a roof or a floor (a base, onto one), following it where it's over the wall; flip, as Revit's arrows do |
 | Doors, windows | Hosted in walls: place one at a point on the wall (`at`), or by wall and offset; marks number themselves; flip facing and hand; refused when they don't fit their wall or overlap |
-| Floors | A boundary you give, or the outline of the walls on the level |
+| Floors | A boundary you give, or the outline of the walls on the level; the top at the level or a height offset from it, or sloped along a slope arrow (from its tail, where it's at the offset, rising so many degrees toward its head, as Revit's slope arrow does), as thick as its type across the slope; walls attached to one follow it; in plan, the slope arrow and its slope |
+| Ceilings | In the room around a point, out to its walls' faces (Revit's automatic ceiling), or along a boundary; their underside 2600 mm up by default, their type's thickness over it; types with square tiles, which the reflected ceiling plan draws |
+| Shaft openings | A hole along an outline from a level (and an offset) up to the next level, a level or a height, cut through every floor, ceiling and roof it reaches into: in 3D, sections, areas and IFC; in plan, its outline and a cross where the plan cuts it, and the hole in a floor seen below |
 | Columns, stairs, roofs | Columns of rectangular or round types, turned to any angle, from their level up to the next (or a height, or a level); cut in plan, in poché. Straight stairs from a start point toward an end point, in as many risers as keep each at most 180 mm, treads 280 mm deep, up to the next level; in plan, their risers up to the cut line and the rest dashed, and the walk line marked UP (DN from the level above). Roofs on a level, flat over any outline or pitched over a rectangle, hipped or with gable ends; by default over the walls of the level below, 500 mm past their faces, at 30°; in plan, their ridge and hips, and from the level below their edge dashed overhead |
 | Rooms | Placed at a point, bounded by the walls around it, and following them when they change; free-standing islands (a shaft) are subtracted; area and perimeter at the wall centre line |
-| Types | Wall, floor, door, window, column and roof types; editing one changes every element that uses it |
+| Types | Wall, floor, ceiling, door, window, column and roof types; editing one changes every element that uses it |
 | Editing | Modify any field, of one element or many in one step (a wall put on another location line stays where it is); move, copy, rotate and mirror, with the walls joined to them stretching to stay joined and doors and windows going with their walls (a mirrored wall runs back the other way, its exterior mirrored); trim or extend two walls to a corner; split a wall, an arc into two arcs; flip walls; delete (a wall takes its doors and windows with it, and they their tags; a roof or floor walls are attached to lets them go); undo and redo |
 | Annotation | Aligned dimensions between parallel references, one segment or a chain: wall faces, centre lines and ends, door and window centres and jambs, grids; angular dimensions between two lines that meet, and radial ones on round columns and curved walls; all measuring the model as it is, so they follow what they measure (a change that would turn a reference out of parallel with the others is refused). Door and window tags showing their marks, going where their doors and windows go, with or without a leader; tag everything not tagged yet in one go. Text notes in plans, sections, elevations and on sheets, of any size and angle, over several lines, with a leader; spot elevations reading the top of what they stand on in plan (a floor, a roof's slope, a stair's tread), or the height of a point in a section |
-| Views | A floor plan per level with Revit's view range: cut at its cut plane (1200 mm up by default), what lies below seen from it down to the bottom, faint beyond it down to the view depth, and roofs overhead up to the top: wall poché with clean joins at any angle, compound walls' layers (lighter where they aren't structure), door swings, window glass, room tags, grid bubbles, dimensions, door and window tags; PNG and SVG. Sections and elevations along any line: the cut in poché (a roof's along its slope, a compound wall's with its layers), what lies beyond in hidden line, levels named with their heights, grids; the four building elevations in one go; their marks on every plan; PNG. Crop regions on plans and sections: the view shows only what's inside, grids stopping at its edge with their bubbles. A 3D view, from any angle: walls with their doors and windows cut out, slabs, columns, stairs and roofs, door leaves and glass, shaded, with an edge wherever faces meet; PNG |
+| Views | A floor plan per level with Revit's view range: cut at its cut plane (1200 mm up by default), what lies below seen from it down to the bottom, faint beyond it down to the view depth, and roofs overhead up to the top: wall poché with clean joins at any angle, compound walls' layers (lighter where they aren't structure), door swings, window glass, room tags, grid bubbles, dimensions, door and window tags; PNG and SVG. Sections and elevations along any line: the cut in poché (a roof's along its slope, a compound wall's with its layers), what lies beyond in hidden line, levels named with their heights, grids; the four building elevations in one go; their marks on every plan; PNG. Crop regions on plans and sections: the view shows only what's inside, grids stopping at its edge with their bubbles. A reflected ceiling plan per level: its walls cut at 2300 mm (over the doors, through the windows), looking up at the ceilings, their tiles and the shafts through them. A 3D view, from any angle: walls with their doors and windows cut out, slabs and ceilings with their shafts cut out, columns, stairs and roofs, door leaves and glass, shaded, with an edge wherever faces meet; PNG |
 | Sheets | ISO A0 to A4, landscape, with a title block (project, sheet name and number, scale); plans, sections, elevations and the 3D view placed on them at a scale and titled, schedules as ruled tables, text notes on the paper, a view on one sheet; PNG, and PDF: one sheet, or every sheet a page |
 | Schedules | Rooms, doors, windows, walls, floors and levels; CSV; on sheets |
 | Units | Lengths shown and typed in millimetres, centimetres, metres, fractional inches, decimal feet, or feet and fractional inches (to 1/16"), areas in m² or ft², in drawings, schedules and the desktop alike; a length typed with its own unit (`10' 6 1/2"`, `3 m`) reads as that. The model, files and every command keep millimetres |
 | Languages | English, Brazilian Portuguese or Spanish, for the desktop and for each project: a project's language names what commands make (levels, sections, elevations, rooms, schedules) and is what its drawings print (SOBE or SUBE on stairs, ESCALA in the title block, schedule headings); what's already named stays. Commands' messages stay English, for agents |
-| IFC import | IFC2x3 and IFC4 files, as Revit and other BIM tools write them: storeys, straight and curved walls with their doors and windows (cut to a roof over them, attached to it), floors, rooms, columns, grids, single straight stairs, and roofs flat or pitched over a rectangle, each measured from its geometry, whether the file extrudes a profile, writes a Brep or a triangle mesh; walls that nearly meet are joined; a model at map coordinates is moved near the origin; what can't come in is listed, with why |
-| Files | `.bimcraft` projects (JSON); IFC4 export with storeys, walls swept up from their plan outline (mitred where they join, an arc in short chords) or, attached to a roof, as closed shells, compound walls with their material layer sets, slabs, spaces, columns and stairs, roofs as closed shells of flat faces, and openings that cut the walls and hold the doors and windows (dimensions, tags, notes and spot elevations belong to views, and stay out of it) |
+| IFC import | IFC2x3 and IFC4 files, as Revit and other BIM tools write them: storeys, straight and curved walls with their doors and windows (cut to a roof over them, attached to it), floors level or sloped, ceilings, rooms, columns, grids, single straight stairs, roofs flat or pitched over a rectangle, and the openings through floors, ceilings and roofs (as shafts), each measured from its geometry, whether the file extrudes a profile, writes a Brep or a triangle mesh; walls that nearly meet are joined; a model at map coordinates is moved near the origin; what can't come in is listed, with why |
+| Files | `.bimcraft` projects (JSON); IFC4 export with storeys, walls swept up from their plan outline (mitred where they join, an arc in short chords) or, attached to a roof, as closed shells, compound walls with their material layer sets, slabs (sloped ones as closed shells), ceilings as coverings, spaces, columns and stairs, roofs as closed shells of flat faces, openings that cut the walls and hold the doors and windows, and an opening for each slab, ceiling and roof a shaft passes through (dimensions, tags, notes and spot elevations belong to views, and stay out of it) |
 | Agents | MCP server, scripts, and every command callable with JSON |
-| Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan per level that pans and zooms, sections and elevations, a 3D view that orbits, and sheets; tools for walls (straight or arcs, on the location line picked), doors, windows, columns, roofs, stairs, rooms, levels, grids, dimensions (aligned, angular, radial), spot elevations, text, tags, sections and elevations; Flip, Attach Top/Base and Detach Top/Base for walls, and a wall type's layers in Type Properties; Crop View with grips to drag a crop region's edges, and the view range in Properties; project units, metric or feet and inches; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner); typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme; English, Portuguese or Spanish |
+| Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan and a reflected ceiling plan per level that pan and zoom, sections and elevations, a 3D view that orbits, and sheets; tools for walls (straight or arcs, on the location line picked), doors, windows, columns, roofs, floors (and a floor's slope arrow), ceilings, shaft openings, stairs, rooms, levels, grids, dimensions (aligned, angular, radial), spot elevations, text, tags, sections and elevations; Flip, Attach Top/Base and Detach Top/Base for walls, and a wall type's layers in Type Properties; Crop View with grips to drag a crop region's edges, and the view range in Properties; project units, metric or feet and inches; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner); typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme; English, Portuguese or Spanish |
 
 The IFC4 export is checked with [IfcOpenShell](https://ifcopenshell.org) 0.9: the sample house has no schema or EXPRESS rule
-errors, every element builds its geometry, and the walls' volumes (with the openings cut out) and the roof's match a hand
-calculation. Import is checked against it too: the sample comes back the same from IFC, element by element, also with its
+errors, every element builds its geometry, and the walls' volumes (with the openings cut out), the roof's and the slabs' and
+ceilings' (with their shafts cut out) match a hand calculation. Import is checked against it too: the sample comes back the same from IFC, element by element, also with its
 geometry turned into triangle meshes by IfcOpenShell, and a building IfcOpenShell's API writes comes in whole.
 
 ## Quick start
@@ -176,6 +178,9 @@ switches.
 | Place columns | Column (CL), click where it stands; it snaps to wall ends and centre lines. The Options Bar sets how high it goes (up to a level, or unconnected), the Type Selector rectangular or round |
 | Add stairs | Stair: click where it starts (the middle of its first riser), then which way it climbs. It goes up to the level above in risers of at most 180 mm; the Options Bar sets its width, Properties its riser, tread and top |
 | Roof the building | Roof, in a plan: click inside the walls, and a roof goes on the level above, over their outline and past their faces; its hips show before you click. The Options Bar sets the slope (0° for a flat roof), the overhang and gable ends |
+| Floors, slopes | Floor: click inside the walls, and a slab goes under their outline, its top at the level; Properties sets its Height Offset From Level. Selected, Shape Editing > Slope Arrow: click its tail, then its head, and the floor rises toward the head at the Options Bar's slope; Properties changes the slope |
+| Ceilings | Ceiling: click inside a room, and a ceiling fills it out to its walls' faces at the Options Bar's height (2600 mm); the outline shows before you click, and the Type Selector picks a plain one or tiles. The Project Browser's Ceiling Plans open each level's reflected ceiling plan |
+| Shafts | Architecture > Opening > Shaft: click two opposite corners; the Options Bar sets how high it goes (up to a level, or unconnected). It cuts the floors, ceilings and roofs on its way |
 | Add levels, grids | Level (LL) takes an elevation in the Options Bar; Grid (GR) takes two clicks |
 | Select | Click; Ctrl adds, Shift takes away, Tab reaches what's underneath (the wall under a door). Drag across empty floor for a box: left to right takes what's wholly inside, right to left what it crosses too |
 | Edit, delete | Properties edits the parameters of everything selected, in one step, grouped as Revit groups them; the Type Selector changes the type; Delete removes the selection |
@@ -187,7 +192,7 @@ switches.
 | Crop, view range | View > Crop View crops a plan or a section to what it shows; drag the grips at its edges' middles to move them (a section's sides move its line). Off shows it all again. Properties of a plan holds its View Range: Top (clear it for the level above), Cut Plane, Bottom and View Depth, in mm above the level |
 | Lengths | While a tool waits for its next point, type a length and press Enter: it goes that far toward the cursor. A selected wall shows its length as a temporary dimension; click the number to type a new one |
 | Edit types | Edit Type opens Type Properties: change the type everywhere it's used, or Duplicate it into a new one. A wall type's layers, from the exterior in: each one's function, material and thickness; Insert Layer, and Out, In and Delete on each |
-| Views | The Project Browser opens plans, elevations, sections, the 3D view and schedules in tabs; View > Close Inactive closes the others |
+| Views | The Project Browser opens floor plans, ceiling plans, elevations, sections, the 3D view and schedules in tabs; View > Close Inactive closes the others |
 | Lay out sheets | View > Sheet makes one (A101, A102…); on it, Place View puts a view that's on no sheet yet: a plan, a section or an elevation at 1 : 100, the 3D view as it's turned on screen, or a schedule. Drag a view or a note to move it, set its scale in Properties, double-click it to open it. File > Export > Sheets as PDF prints them all |
 | Cut a section, add an elevation | View > Section: click its start and end; it looks to the left of the line, so drawn west to east it looks north. View > Elevation: click beside the building, and it looks at that side. Open them from the browser, or double-click their marks in a plan; in them, click to select what they cut or see |
 | Look in 3D | The cube on the Quick Access Toolbar (or View > 3D View, or {3D} in the browser) opens the 3D view. Shift and the middle button orbit, as in Revit, and so does a drag; the middle button pans, the wheel zooms; Home in the navigation bar goes back to the south-east view. Click to select, as in plan |
@@ -223,7 +228,7 @@ or to any MCP client's configuration:
 | `inspect_model` | Levels, counts, types, warnings and undo history |
 | `query_elements {category?, level?}` | Elements with derived values: wall length and height, room area, door position |
 | `schedule {category}` | Columns and rows |
-| `render {view?, width?, height?, azimuth?, elevation?}` | A level's floor plan, a section or elevation by name, a sheet by number, or with `view: "{3D}"` the 3D view, as a PNG the agent can look at |
+| `render {view?, ceiling?, width?, height?, azimuth?, elevation?}` | A level's floor plan (or reflected ceiling plan), a section or elevation by name, a sheet by number, or with `view: "{3D}"` the 3D view, as a PNG the agent can look at |
 | `new_model`, `open`, `save` | Projects; `open` imports `.ifc` files, `save` to `.ifc`, `.svg` or `.png` exports |
 
 A command that fails comes back as a tool error saying what to fix (`door: no wall at [4000, 3000] on Level 1`), and it
@@ -236,7 +241,9 @@ changes nothing.
 | `wall` | WA | `points`, `closed?`, `type?`, `level?`, `top_level?`, `height?`, `base_offset?`, `arc?` (degrees each turns, counter-clockwise), `location?` (`centre`, `core-centre`, `exterior-finish`, `interior-finish`, `exterior-core`, `interior-core`), `attach_top?`, `attach_base?` (a roof or a floor) |
 | `door` | DR | `at`, or `wall` and `offset?`; `type?`, `mark?`, `flip_facing?`, `flip_hand?` |
 | `window` | WN | as `door`, plus `sill?` |
-| `floor` | | `boundary?`, `level?`, `type?` |
+| `floor` | | `boundary?`, `level?`, `type?`, `offset?` (its top above the level), `slope?` (degrees) and `arrow?` (its tail and head: it rises from the tail toward the head) |
+| `ceiling` | | `point` (in a room: out to its walls' faces) or `boundary`, `level?`, `type?`, `offset?` (its underside above the level, 2600) |
+| `shaft` | | `boundary`, `level?`, `top_level?`, `height?`, `base_offset?`: a hole through the floors, ceilings and roofs on its way |
 | `room` | RM | `point`, `name?`, `number?`, `level?` |
 | `column` | CL | `at`, `type?`, `angle?`, `level?`, `top_level?`, `height?`, `base_offset?` |
 | `stair` | | `start`, `end?` or `angle?` (the way it climbs), `level?`, `top_level?`, `height?`, `width?`, `riser?` (the most each riser may rise), `tread?` |
@@ -268,8 +275,8 @@ changes nothing.
 | `inspect`, `elements`, `schedule`, `render` | | read the model |
 | `new`, `open`, `save` | | projects; `new` takes `name?` and `language?`; `open` imports IFC, listing what it left out; `save` exports by extension |
 
-A `level` can be given by name or id; without one, commands use the lowest level. `render {view}` draws a plan, a section or
-an elevation by name, a sheet by number (a path ending .pdf prints it), or with `{3D}` (and `azimuth?`, `elevation?`) the 3D
+A `level` can be given by name or id; without one, commands use the lowest level. `render {view}` draws a plan (with
+`ceiling: true`, its reflected ceiling plan), a section or an elevation by name, a sheet by number (a path ending .pdf prints it), or with `{3D}` (and `azimuth?`, `elevation?`) the 3D
 view. `save` to a .pdf prints every sheet, a page each.
 
 ## Architecture
@@ -280,12 +287,13 @@ crates/core            bimcraft-core: everything but the front ends; no UI
   model.rs             the building model, and the rules checked after every command
   engine.rs            the session: commands, undo and redo, scripts
   commands.rs          the command set
-  render.rs, font.rs   plans, sections and elevations as display lists drawn to SVG, PNG or a canvas, cropped to their crop
-                       regions, in our own stroke lettering
+  render.rs, font.rs   plans, reflected ceiling plans, sections and elevations as display lists drawn to SVG, PNG or a
+                       canvas, cropped to their crop regions, in our own stroke lettering
   view3d.rs            the 3D view: the model as solids, drawn with a depth buffer, shaded and edged; picking
   sheet.rs, pdf.rs     sheets: the title block, the views on them at their scales, schedules as tables, notes; PDF
   schedule.rs, ifc.rs  schedules and CSV; IFC4 export
-  walls.rs             walls' geometry: arcs, faces and layers by location line, joins at any angle, attachment
+  walls.rs             walls' geometry: arcs, faces and layers by location line, joins at any angle, attachment; holes
+                       cut in plan
   units.rs             project units: lengths and areas as drawings and the desktop show them, typed lengths read
   language.rs          a project's language: the words its drawings print, the names commands give
   step.rs, import.rs   ISO 10303-21 files read; IFC import, every element measured from its geometry
@@ -312,9 +320,9 @@ the PNG and SVG exports do, and picks elements from it. Agent instructions are i
 
 Done: views and notes (view ranges, crop regions, text notes, spot elevations, angular and radial dimensions and dimensions to
 wall ends and openings, schedules and the 3D view on sheets), project units (metric, or feet and inches), Portuguese and
-Spanish, for the desktop and for projects, and real walls (compound types with layers, joins at any angle, curved walls,
-walls attached to roofs and floors, other location lines). Next, in order: sloped floors, ceilings and shaft openings; stairs of several
-flights with landings, railings and ramps; roofs over any footprint (hips over L-shaped plans), extrusion roofs and dormers;
+Spanish, for the desktop and for projects, real walls (compound types with layers, joins at any angle, curved walls,
+walls attached to roofs and floors, other location lines), and sloped floors, ceilings with reflected ceiling plans, and
+shaft openings. Next, in order: stairs of several flights with landings, railings and ramps; roofs over any footprint (hips over L-shaped plans), extrusion roofs and dormers;
 families, BIMCraft's own parametric components (never Autodesk's `.rfa`); project parameters and schedules with chosen fields,
 filters, sorting and formulas; visibility and graphics (overrides, filters, view templates, phases, design options); locked
 and equal dimensions, arrays and groups; materials, hatch patterns, perspective views and a section box; DWG and DXF, more of

@@ -1,14 +1,17 @@
 //! IFC4 export (ISO 16739 as an ISO 10303-21 STEP file), the open BIM exchange format every BIM
 //! tool reads. Levels become building storeys; walls (their plan outline, mitred where they join,
-//! curved or straight), slabs, spaces, columns and stairs get swept-solid bodies, roofs and walls
-//! attached to them closed shells of flat faces; each door and window fills an opening element that
-//! voids its wall, so readers cut the hole; compound walls carry their layers as a material layer set.
+//! curved or straight), slabs, ceilings (coverings), spaces, columns and stairs get swept-solid
+//! bodies, roofs, sloped slabs and walls attached to them closed shells of flat faces; each door and
+//! window fills an opening element that voids its wall, so readers cut the hole, and a shaft voids
+//! each slab, ceiling and roof it passes through with one; compound walls carry their layers as a
+//! material layer set.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::geom::{self, P2};
 use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Model, heading, mix};
+use crate::view3d::P3;
 use crate::walls::{self, Axis};
 
 // What a GlobalId is for, so each one stays the same from export to export.
@@ -24,6 +27,8 @@ const AGGREGATES: u64 = 9;
 const CONTAINS: u64 = 10;
 const SPACES: u64 = 11;
 const MATERIALS: u64 = 12;
+const SHAFT: u64 = 13;
+const SHAFT_VOIDS: u64 = 14;
 
 /// A STEP string literal: `'` doubled, `\` doubled, anything outside printable ASCII as `\X2\…\X0\`.
 fn s(text: &str) -> String {
@@ -171,6 +176,14 @@ impl Step {
         self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,({}))", refs(&reps)))
     }
 
+    /// A body of closed shells: around each of the flat counter-clockwise `faces` and its copy
+    /// `rise` above; heights from `base`.
+    fn breps(&mut self, faces: &[Vec<P3>], base: f64, rise: f64) -> u64 {
+        let breps: Vec<u64> = faces.iter().map(|face| self.brep(face, base, rise)).collect();
+        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Brep',({}))", self.body, refs(&breps)));
+        self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"))
+    }
+
     /// A closed shell around the flat counter-clockwise `face` and its copy `rise` above, its
     /// faces turned out; heights from `base`.
     fn brep(&mut self, face: &[[f64; 3]], base: f64, rise: f64) -> u64 {
@@ -241,6 +254,8 @@ pub fn export(m: &Model) -> String {
     let mut spaces: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
     // Walls as (entity, placement), for the openings in them.
     let mut placed: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
+    // Floors, ceilings and roofs as (entity, placement, its height), for the shafts through them.
+    let mut hosts: BTreeMap<Id, (u64, u64, f64)> = BTreeMap::new();
     for (&id, e) in &m.elements {
         match e {
             Element::Wall(wl) => {
@@ -289,10 +304,15 @@ pub fn export(m: &Model) -> String {
             }
             Element::Floor(f) => {
                 let Some(&(_, storey)) = storeys.get(&f.level) else { continue };
-                let t = m.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness);
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let profile = w.profile(&f.boundary, &[]);
-                let shape = w.body(profile, -t, t, &[]);
+                // Level, its outline swept up to its top; sloped, a shell.
+                let (face, rise) = m.floor_slab(f);
+                let shape = if m.floor_top(f).g == P2(0.0, 0.0) {
+                    let profile = w.profile(&f.boundary, &[]);
+                    w.body(profile, f.offset - rise, rise, &[])
+                } else {
+                    w.breps(&[face], m.elevation(f.level), rise)
+                };
                 let ent = w.add(format!(
                     "IFCSLAB({},$,{},$,{},#{at},#{shape},'{id}',.FLOOR.)",
                     w.guid(ELEMENT, id),
@@ -300,6 +320,21 @@ pub fn export(m: &Model) -> String {
                     s(&f.type_name)
                 ));
                 contained.entry(f.level).or_default().push(ent);
+                hosts.insert(id, (ent, at, m.elevation(f.level)));
+            }
+            Element::Ceiling(c) => {
+                let Some(&(_, storey)) = storeys.get(&c.level) else { continue };
+                let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
+                let profile = w.profile(&c.boundary, &[]);
+                let shape = w.body(profile, c.offset, m.ceiling_slab(c).1, &[]);
+                let ent = w.add(format!(
+                    "IFCCOVERING({},$,{},$,{},#{at},#{shape},'{id}',.CEILING.)",
+                    w.guid(ELEMENT, id),
+                    s(&c.type_name),
+                    s(&c.type_name)
+                ));
+                contained.entry(c.level).or_default().push(ent);
+                hosts.insert(id, (ent, at, m.elevation(c.level)));
             }
             Element::Room(r) => {
                 let Some(&(_, storey)) = storeys.get(&r.level) else { continue };
@@ -359,9 +394,7 @@ pub fn export(m: &Model) -> String {
             Element::Roof(r) => {
                 let (Some(&(_, storey)), Ok((pieces, rise))) = (storeys.get(&r.level), m.roof_pieces(r)) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let breps: Vec<u64> = pieces.iter().map(|face| w.brep(face, m.elevation(r.level), rise)).collect();
-                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Brep',({}))", w.body, refs(&breps)));
-                let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+                let shape = w.breps(&pieces, m.elevation(r.level), rise);
                 let kind = match (r.slope == 0.0, r.gable) {
                     (true, _) => ".FLAT_ROOF.",
                     (false, true) => ".GABLE_ROOF.",
@@ -374,8 +407,34 @@ pub fn export(m: &Model) -> String {
                     s(&r.type_name)
                 ));
                 contained.entry(r.level).or_default().push(ent);
+                hosts.insert(id, (ent, at, m.elevation(r.level)));
             }
             _ => {}
+        }
+    }
+    // A shaft voids each floor, ceiling and roof it passes through: an opening in each, its
+    // outline swept up the shaft's whole height.
+    for (&host, &(ent, at, z)) in &hosts {
+        let slabs = match m.elements.get(&host) {
+            Some(Element::Floor(f)) => vec![m.floor_slab(f)],
+            Some(Element::Ceiling(c)) => vec![m.ceiling_slab(c)],
+            Some(Element::Roof(r)) => {
+                m.roof_pieces(r).map(|(pieces, rise)| pieces.into_iter().map(|p| (p, rise)).collect()).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
+        let mut shafts: Vec<Id> = slabs.iter().flat_map(|(face, rise)| m.less_shafts(face, *rise).1).collect();
+        shafts.sort_unstable();
+        shafts.dedup();
+        for id in shafts {
+            let Some(Element::Shaft(sh)) = m.elements.get(&id) else { continue };
+            let (bottom, top) = m.span(sh.level, sh.base_offset, sh.top_level, sh.height);
+            let key = mix(id) ^ host;
+            let o_at = w.place(Some(at), (0.0, 0.0, bottom - z), None);
+            let profile = w.profile(&sh.boundary, &[]);
+            let shape = w.body(profile, 0.0, top - bottom, &[]);
+            let opening = w.add(format!("IFCOPENINGELEMENT({},$,'Shaft',$,$,#{o_at},#{shape},'{id}',.OPENING.)", w.guid(SHAFT, key)));
+            w.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{ent},#{opening})", w.guid(SHAFT_VOIDS, key)));
         }
     }
     for (&id, e) in &m.elements {

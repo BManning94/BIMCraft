@@ -1,9 +1,10 @@
 //! IFC import: an IFC2x3 or IFC4 file, as Revit, other BIM tools and BIMCraft itself write them,
 //! read into a model. Storeys become levels. Walls, straight or curved, and the doors and windows
-//! in them, floors, rooms, columns, grids, single straight stairs, and roofs (flat, or pitched
-//! over a rectangle) come in as BIMCraft elements, each measured from its geometry: an extruded
-//! profile, a Brep or a triangle mesh alike, so how a file describes an element doesn't matter. A
-//! wall cut to a roof over it comes in attached to it.
+//! in them, floors (level or sloped), ceilings, rooms, columns, grids, single straight stairs, and
+//! roofs (flat, or pitched over a rectangle) come in as BIMCraft elements, each measured from its
+//! geometry: an extruded profile, a Brep or a triangle mesh alike, so how a file describes an
+//! element doesn't matter. A wall cut to a roof over it comes in attached to it; the openings
+//! through floors, ceilings and roofs, as shafts.
 //! What BIMCraft has no element for, or what breaks one of its rules, is left out and listed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -12,12 +13,12 @@ use std::f64::consts::PI;
 use crate::commands::{micron, next_number};
 use crate::geom::{self, P2};
 use crate::model::{
-    Column, ColumnType, Element, Floor, FloorType, Grid, Id, Level, MAX_TEXT, Model, Opening, OpeningType, Roof, RoofType, Room, Stair,
-    TOL, Wall, WallType, culprit,
+    Ceiling, CeilingType, Column, ColumnType, Element, Floor, FloorType, Grid, Id, Level, MAX_TEXT, Model, Opening, OpeningType, Roof,
+    RoofType, Room, Shaft, Stair, TOL, Wall, WallType, culprit,
 };
 use crate::step::{self, Entity, File, V};
 use crate::view3d::{P3, add, cross, dot, mul, sub, unit};
-use crate::walls::{self, Axis};
+use crate::walls::{self, Axis, Plane};
 
 /// A model read from an IFC file: its schema, what was left out and why, and how far it was moved
 /// to bring it near the origin.
@@ -166,16 +167,16 @@ fn open(mut pts: Vec<P2>) -> Vec<P2> {
     pts
 }
 
-/// The outline of the level faces at height `z` (within half a millimetre) facing up, or
-/// down: the edges of theirs no two share, chained into loops. The largest loop, its corners
-/// counter-clockwise.
-fn outline(faces: &[Vec<P3>], z: f64, up: bool) -> Option<Vec<P2>> {
+/// The outline of the faces facing up, or down, whose points all lie within half a millimetre of
+/// `on`, a level or sloped plane: the edges of theirs no two share, chained into loops. The largest
+/// loop, its corners counter-clockwise.
+fn outline(faces: &[Vec<P3>], on: Plane, up: bool) -> Option<Vec<P2>> {
     type K = (i64, i64);
     let key = |p: P2| -> K { ((p.0 * 10.0).round() as i64, (p.1 * 10.0).round() as i64) };
     let mut edges: HashMap<(K, K), P2> = HashMap::new();
-    for f in faces.iter().filter(|f| f.len() >= 3 && f.iter().all(|p| (p[2] - z).abs() <= 0.5)) {
+    for f in faces.iter().filter(|f| f.len() >= 3 && f.iter().all(|p| (p[2] - on.at(P2(p[0], p[1]))).abs() <= 0.5)) {
         let n = normal(f);
-        if n[2].abs() < 0.9 || (n[2] > 0.0) != up {
+        if n[2].abs() < 0.2 || (n[2] > 0.0) != up {
             continue;
         }
         let mut ring: Vec<P2> = f.iter().map(|p| P2(p[0], p[1])).collect();
@@ -207,6 +208,21 @@ fn outline(faces: &[Vec<P3>], z: f64, up: bool) -> Option<Vec<P2>> {
         ring.reverse();
     }
     (ring.len() >= 3).then_some(ring)
+}
+
+/// A slab's top, sloped or level: the plane of its largest face turned up, and its outline in
+/// plan; and how far its underside, the plane of its largest face turned down, lies below it, plumb.
+fn top_of(faces: &[Vec<P3>]) -> Option<(Plane, Vec<P2>, f64)> {
+    let largest = |up: bool| {
+        faces
+            .iter()
+            .filter(|f| f.len() >= 3 && normal(f)[2].abs() > 0.2 && (normal(f)[2] > 0.0) == up)
+            .max_by(|a, b| area3(a).total_cmp(&area3(b)))
+    };
+    let (top, under) = (Plane::of(largest(true)?)?, Plane::of(largest(false)?)?);
+    let ring = outline(faces, top, true)?;
+    let q = *ring.first()?;
+    Some((top, ring, top.at(q) - under.at(q)))
 }
 
 /// A point well inside a ring: the middle of the largest of the triangles that make it up.
@@ -1029,17 +1045,58 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
             continue;
         };
-        let Some(ring) = outline(&faces, z1, true) else {
+        // Level at its highest, or sloped: then its slope arrow runs up it from its lowest corner,
+        // all the way across.
+        let shape = outline(&faces, Plane::flat(z1), true).map(|ring| (Plane::flat(z1), ring, z1 - z0)).or_else(|| top_of(&faces));
+        let Some((top, ring, rise)) = shape else {
+            leave(&mut skipped, &mut seen, id, "its top isn't flat");
+            continue;
+        };
+        let (tan, flat) = (top.g.length(), |p: P2| micron(r.flat([p.0, p.1, 0.0])));
+        let tail = ring.iter().copied().min_by(|a, b| top.at(*a).total_cmp(&top.at(*b))).unwrap_or_default();
+        let arrow = (tan > 1e-9).then(|| {
+            let u = top.g * (1.0 / tan);
+            let reach = ring.iter().map(|q| (*q - tail).dot(u)).fold(0.0, f64::max);
+            [flat(tail), flat(tail + u * reach)]
+        });
+        let t = ((rise * tan.atan().cos()) * 100.0).round() / 100.0;
+        let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
+        let type_name = kind(&mut m.types.floor, &base, |k| (k.thickness - t).abs() < 0.05, FloorType { thickness: t });
+        let z = top.at(tail);
+        let level = level_near(z).unwrap_or_else(|| level_for(id, z));
+        let floor = Floor {
+            type_name,
+            level,
+            boundary: ring.into_iter().map(flat).collect(),
+            offset: ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0,
+            slope: if arrow.is_some() { (tan.atan().to_degrees() * 1e6).round() / 1e6 } else { 0.0 },
+            arrow,
+        };
+        let fid = m.insert(Element::Floor(floor));
+        from.insert(fid, who(id));
+        seen.insert(id);
+    }
+
+    // Ceilings: coverings that are, their underside's height and their thickness.
+    for id in named(&["IFCCOVERING"]) {
+        let Some(c) = e(id).filter(|c| enumeration(c.args.get(8)) == Some("CEILING")) else { continue };
+        let faces = r.body(c);
+        let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else {
+            leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
+            continue;
+        };
+        let Some(ring) = outline(&faces, Plane::flat(z1), true) else {
             leave(&mut skipped, &mut seen, id, "its top isn't level");
             continue;
         };
         let t = ((z1 - z0) * 100.0).round() / 100.0;
         let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-        let type_name = kind(&mut m.types.floor, &base, |k| (k.thickness - t).abs() < 0.05, FloorType { thickness: t });
-        let level = level_near(z1).unwrap_or_else(|| level_for(id, z1));
+        let type_name = kind(&mut m.types.ceiling, &base, |k| (k.thickness - t).abs() < 0.05, CeilingType { thickness: t, grid: 0.0 });
+        let level = level_for(id, z0);
         let boundary = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
-        let fid = m.insert(Element::Floor(Floor { type_name, level, boundary }));
-        from.insert(fid, who(id));
+        let offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
+        let cid = m.insert(Element::Ceiling(Ceiling { type_name, level, boundary, offset }));
+        from.insert(cid, who(id));
         seen.insert(id);
     }
 
@@ -1091,6 +1148,34 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         {
             w.attach_top = Some(rid);
         }
+    }
+
+    // Shafts: the openings through floors, ceilings and roofs; openings alike (a shaft voids each
+    // it passes through), one shaft.
+    let mut shafts: Vec<(u64, Vec<P2>, f64, f64)> = Vec::new();
+    for id in named(&["IFCOPENINGELEMENT", "IFCOPENINGSTANDARDCASE"]) {
+        let host = l.host.get(&id).and_then(|h| e(*h)).map_or("", |h| h.name.as_str());
+        let Some(o) = e(id).filter(|_| SLABS.contains(&host) || matches!(host, "IFCCOVERING" | "IFCROOF")) else { continue };
+        let faces = r.body(o);
+        let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else { continue };
+        let Some(ring) = outline(&faces, Plane::flat(z1), true) else { continue };
+        let ring: Vec<P2> = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
+        let alike = |(_, b, lo, hi): &(u64, Vec<P2>, f64, f64)| {
+            (lo - z0).abs() < 1.0
+                && (hi - z1).abs() < 1.0
+                && b.len() == ring.len()
+                && b.iter().all(|p| ring.iter().any(|q| q.dist(*p) < 1.0))
+        };
+        if !shafts.iter().any(alike) {
+            shafts.push((id, ring, z0, z1));
+        }
+    }
+    for (id, boundary, z0, z1) in shafts {
+        let level = levels.iter().rev().find(|(_, lz)| *lz <= z0 + 1.0).or(levels.first()).map_or(0, |(id, _)| *id);
+        let (top_level, height) = topped(level, z0, z1);
+        let base_offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
+        let sid = m.insert(Element::Shaft(Shaft { level, boundary, top_level, height: (height * 1000.0).round() / 1000.0, base_offset }));
+        from.insert(sid, who(id));
     }
 
     // Columns: a section across them, and how high they stand.
@@ -1259,7 +1344,8 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let Some(s) = e(id) else { continue };
         let faces = r.body(s);
         let floor = span(faces.iter().flatten().map(|p| p[2])).map(|(z0, _)| z0);
-        let footprint = floor.and_then(|z0| outline(&faces, z0, false)).and_then(|ring| inside(&ring)).map(|p| r.flat([p.0, p.1, 0.0]));
+        let footprint =
+            floor.and_then(|z0| outline(&faces, Plane::flat(z0), false)).and_then(|ring| inside(&ring)).map(|p| r.flat([p.0, p.1, 0.0]));
         let Some(point) = footprint.or_else(|| faces.is_empty().then(|| r.flat(r.frame(s).o))) else {
             leave(&mut skipped, &mut seen, id, "its footprint isn't one BIMCraft can read");
             continue;
@@ -1352,7 +1438,7 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofShape, String> {
     let up: Vec<(&Vec<P3>, P3)> = faces.iter().map(|f| (f, normal(f))).filter(|(_, n)| n[2] > 0.01).collect();
     let sloped: Vec<&(&Vec<P3>, P3)> = up.iter().filter(|(_, n)| n[2] < 0.9998).collect();
     let Some((main, n)) = sloped.iter().max_by(|a, b| area3(a.0).total_cmp(&area3(b.0))).map(|x| (x.0, x.1)) else {
-        let ring = outline(faces, z1, true).ok_or("its top isn't level")?;
+        let ring = outline(faces, Plane::flat(z1), true).ok_or("its top isn't level")?;
         return Ok((
             ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect(),
             0.0,
