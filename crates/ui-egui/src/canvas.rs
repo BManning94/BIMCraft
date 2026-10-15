@@ -8,8 +8,8 @@ use std::f64::consts::PI;
 
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
-    Column, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Id, Line, MAX_COORD, Model, NOTE_SIZE, Note, RISER, Reference, Roof,
-    Section, Spot, Stair, TOL, TREAD, Tag,
+    Column, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note, RISER, Ramp,
+    Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::walls::{self, Axis};
@@ -555,6 +555,9 @@ impl BimApp {
             (Tool::Attach, Some(q)) => {
                 d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Roof(_) | Element::Floor(_))))
             }
+            (Tool::Railing(path), Some(q)) if path.is_empty() => {
+                d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Stair(_) | Element::Ramp(_))))
+            }
             _ => None,
         };
 
@@ -876,18 +879,47 @@ impl BimApp {
                 }
                 Err(e) => self.status = Status { text: tf("column: {}", &[&e]), error: true },
             },
-            &Tool::Stair(start) => {
-                let p = snap(m, level, v, at, start.as_slice(), mods.shift);
-                match (start, m.units.parse(&self.stair_width)) {
-                    (None, _) => self.tool = Tool::Stair(Some(p)),
-                    (Some(a), Some(width)) if a.dist(p) > TOL => {
-                        self.run("stair", json!({"start": point(a), "end": point(p), "level": level, "width": width}));
-                        self.tool = Tool::Stair(None);
-                    }
-                    (Some(_), None) => self.status = Status { text: tf("stair: `{}` is not a width", &[&self.stair_width]), error: true },
-                    (Some(_), Some(_)) => {}
+            // Its start, where its first run ends, and which way the next turns: done when it climbs all
+            // the way.
+            Tool::Stair(pts) | Tool::Ramp(pts) => {
+                let ramp = matches!(self.tool, Tool::Ramp(_));
+                let mut pts = pts.clone();
+                let p = snap(m, level, v, at, &pts, mods.shift);
+                if pts.last().is_some_and(|l| l.dist(p) <= TOL) {
+                    return;
                 }
+                pts.push(p);
+                let next = match (pts.len(), self.flight(m, level, &pts, ramp)) {
+                    (1, _) | (_, Ok((_, false))) => pts,
+                    (_, Ok((e, true))) => {
+                        let mut params = serde_json::to_value(&e).unwrap_or_default();
+                        params["railings"] = json!(self.railings);
+                        self.run(e.category(), params);
+                        Vec::new()
+                    }
+                    (_, Err(e)) => {
+                        self.status = Status { text: e, error: true };
+                        pts.truncate(1);
+                        pts
+                    }
+                };
+                self.tool = if ramp { Tool::Ramp(next) } else { Tool::Stair(next) };
             }
+            // A stair or a ramp picked: one down each side; else the path's next point.
+            Tool::Railing(path) => match (path.is_empty(), hovered) {
+                (true, Some(host)) => {
+                    let p = typed(self, "railing", json!({"host": host}));
+                    self.run("railing", p);
+                }
+                _ => {
+                    let p = snap(m, level, v, at, path, mods.shift);
+                    if let Tool::Railing(path) = &mut self.tool
+                        && path.last().is_none_or(|l| l.dist(p) > TOL)
+                    {
+                        path.push(p);
+                    }
+                }
+            },
             // On the level above, over this plan's walls; once made, selected, as a finished sketch is.
             Tool::Roof => match (number(&self.roof_slope), m.units.parse(&self.roof_overhang)) {
                 (Some(slope), Some(overhang)) => {
@@ -955,6 +987,76 @@ impl BimApp {
                     _ => {}
                 }
             }
+        }
+    }
+
+    /// The stair or the ramp the points clicked make (its start, where its first run ends, and a
+    /// point the next run goes toward from the landing), as the Options Bar sets it; and whether it's
+    /// done: its first run climbs all the way, or its next one has turned.
+    pub(crate) fn flight(&self, m: &Model, level: Id, pts: &[P2], ramp: bool) -> Result<(Element, bool), String> {
+        let (start, end) = match pts {
+            [a, b, ..] => (*a, *b),
+            _ => return Err(t("click where its run ends").into()),
+        };
+        let (u, run) = ((end - start).unit(), start.dist(end));
+        let angle = (u.1.atan2(u.0).to_degrees() * 1e9).round() / 1e9;
+        // Ahead of the landing, beside it, or back behind it, to its left or right.
+        let turn = pts.get(2).map_or(0.0, |&p| {
+            let d = p - end;
+            let a = d.dot(u.perp()).atan2(d.dot(u)).to_degrees();
+            if a.abs() < 45.0 {
+                0.0
+            } else if a.abs() < 135.0 {
+                90f64.copysign(a)
+            } else {
+                180f64.copysign(a)
+            }
+        });
+        let done = |landings: &[Landing]| landings.is_empty() || pts.len() > 2;
+        if ramp {
+            let slope = number(&self.ramp_slope).ok_or_else(|| tf("ramp: `{}` is not a slope", &[&self.ramp_slope]))?;
+            let width = m.units.parse(&self.ramp_width).ok_or_else(|| tf("ramp: `{}` is not a width", &[&self.ramp_width]))?;
+            let top = top_params(m, level, self.ramp_top, &self.ramp_height).map_err(|e| tf("ramp: {}", &[&e]))?;
+            let (top_level, height) = (top["top_level"].as_u64(), top["height"].as_f64().unwrap_or(0.0));
+            let (bottom, top) = m.span(level, 0.0, top_level, height);
+            let up = (run * slope / 100.0 * 1000.0).round() / 1000.0;
+            let landings = if top - bottom - up > 1.0 { vec![Landing { at: up, turn }] } else { Vec::new() };
+            let done = done(&landings);
+            Ok((Element::Ramp(Ramp { level, top_level, height, start, angle, width, slope, landings }), done))
+        } else {
+            let width = m.units.parse(&self.stair_width).ok_or_else(|| tf("stair: `{}` is not a width", &[&self.stair_width]))?;
+            let mut st = Stair {
+                level,
+                top_level: m.level_above(level),
+                height: DEFAULT_HEIGHT,
+                start,
+                angle,
+                width,
+                riser: RISER,
+                tread: TREAD,
+                landings: Vec::new(),
+            };
+            let (n, _, _) = m.flight(&st);
+            // As many risers as the run clicked holds, a tread between each two.
+            let first = ((run / TREAD).round() + 1.0).max(2.0);
+            if f64::from(n) - first >= 2.0 {
+                st.landings.push(Landing { at: first, turn });
+            }
+            let done = done(&st.landings);
+            Ok((Element::Stair(st), done))
+        }
+    }
+
+    /// The Railing tool's Enter: a railing along the path clicked, on the plan's level.
+    pub(crate) fn finish_railing(&mut self, level: Id) {
+        let Tool::Railing(path) = &mut self.tool else { return };
+        let path = std::mem::take(path);
+        if path.len() >= 2 {
+            let mut p = json!({"path": path.iter().map(|q| point(*q)).collect::<Vec<_>>(), "level": level});
+            if let Some(t) = self.types.get("railing") {
+                p["type"] = json!(t);
+            }
+            self.run("railing", p);
         }
     }
 
@@ -1243,14 +1345,31 @@ impl BimApp {
         let sketched = |e: &Element| ghost(p, origin, &render::sketch(m, *v, m.next_id, e), &[m.next_id], &|pt| pt);
         let ghost = |f: &dyn Fn(Pos2) -> Pos2| ghost(p, origin, sc.d, &self.selection, f);
         let chain = match &self.tool {
-            Tool::Wall(chain) => chain.as_slice(),
-            Tool::Grid(_)
-            | Tool::Move(_)
-            | Tool::Copy(_)
-            | Tool::Section(None)
-            | Tool::Stair(None)
-            | Tool::Shaft(None)
-            | Tool::SlopeArrow(None) => start_of(&self.tool),
+            Tool::Wall(chain) | Tool::Railing(chain) => chain.as_slice(),
+            Tool::Stair(pts) | Tool::Ramp(pts) if pts.is_empty() => &[],
+            // The stair or the ramp a click would make, and how far up its first run goes.
+            Tool::Stair(pts) | Tool::Ramp(pts) => {
+                let ramp = matches!(self.tool, Tool::Ramp(_));
+                let mut with = pts.clone();
+                with.push(snap(m, level, v, q, pts, shift));
+                if let Ok((e, _)) = self.flight(m, level, &with, ramp) {
+                    sketched(&e);
+                    let first = match &e {
+                        Element::Stair(st) => {
+                            st.landings.first().map(|l| tf("{} of {} risers", &[&l.at.to_string(), &m.flight(st).0.to_string()]))
+                        }
+                        Element::Ramp(r) => r.landings.first().map(|l| tf("{} up", &[&m.units.with_unit(l.at)])),
+                        _ => None,
+                    };
+                    if let Some(text) = first.filter(|_| with.len() == 2) {
+                        label(cursor, text);
+                    }
+                }
+                return;
+            }
+            Tool::Grid(_) | Tool::Move(_) | Tool::Copy(_) | Tool::Section(None) | Tool::Shaft(None) | Tool::SlopeArrow(None) => {
+                start_of(&self.tool)
+            }
             // The section a click would end, and the elevation a click would place.
             &Tool::Section(Some(start)) => {
                 let end = snap(m, level, v, q, &[start], shift);
@@ -1380,25 +1499,6 @@ impl BimApp {
                 let type_name =
                     self.types.get("column").cloned().or_else(|| m.default_type("column").map(String::from)).unwrap_or_default();
                 sketched(&Element::Column(Column { type_name, level, at, angle: 0.0, top_level: None, height: 0.0, base_offset: 0.0 }));
-                return;
-            }
-            // The stair a click would make: its risers up to the level above, toward the cursor.
-            &Tool::Stair(Some(start)) => {
-                let end = snap(m, level, v, q, &[start], shift);
-                if let Some(width) = m.units.parse(&self.stair_width).filter(|_| end.dist(start) > TOL) {
-                    let angle = (end.1 - start.1).atan2(end.0 - start.0).to_degrees();
-                    let top_level = m.level_above(level);
-                    sketched(&Element::Stair(Stair {
-                        level,
-                        top_level,
-                        height: DEFAULT_HEIGHT,
-                        start,
-                        angle,
-                        width,
-                        riser: RISER,
-                        tread: TREAD,
-                    }));
-                }
                 return;
             }
             // The floor a click would make, under the walls.

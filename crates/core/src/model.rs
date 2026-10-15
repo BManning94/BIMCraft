@@ -1,5 +1,5 @@
 //! The building model: levels, grids, walls, floors, ceilings, shafts, doors, windows, rooms,
-//! columns, stairs and roofs, the types they use, the dimensions, tags, text notes and spot elevations annotating
+//! columns, stairs, ramps, railings and roofs, the types they use, the dimensions, tags, text notes and spot elevations annotating
 //! views, the sections, elevations, schedules and 3D views looking at it, and the sheets its views
 //! are placed on. Lengths are millimetres, x east, y north, z up; each level has an elevation. In
 //! a section or an elevation, millimetres along its line from its start, and up; on a sheet,
@@ -35,6 +35,13 @@ pub const DEFAULT_HEIGHT: f64 = 3000.0;
 pub const RISER: f64 = 180.0;
 pub const TREAD: f64 = 280.0;
 pub const STAIR_WIDTH: f64 = 1000.0;
+/// A ramp's steepest slope, percent (1 in 12), and its width, unless told otherwise.
+pub const RAMP_SLOPE: f64 = 100.0 / 12.0;
+pub const RAMP_WIDTH: f64 = 1200.0;
+/// How far a railing on a stair or a ramp runs in from its edge, mm.
+pub const RAILING_INSET: f64 = 50.0;
+/// Balusters one railing may have.
+pub const MAX_BALUSTERS: f64 = 10_000.0;
 /// Names, marks and numbers longer than this are refused.
 pub const MAX_TEXT: usize = 256;
 /// Points one command or floor outline may carry.
@@ -462,9 +469,10 @@ pub struct Column {
     pub base_offset: f64,
 }
 
-/// A straight flight of stairs from `level` up to `top_level` (or `height` mm), climbing from the
-/// middle of its first riser at `start` toward `angle` degrees (counter-clockwise from east): as
-/// many risers as keep each no higher than `riser`, a tread `tread` deep between each two.
+/// A stair from `level` up to `top_level` (or `height` mm), climbing from the middle of its first
+/// riser at `start` toward `angle` degrees (counter-clockwise from east): as many risers as keep
+/// each no higher than `riser`, a tread `tread` deep between each two; in one straight run, or in
+/// runs with a landing between each two.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Stair {
@@ -478,6 +486,65 @@ pub struct Stair {
     pub width: f64,
     pub riser: f64,
     pub tread: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landings: Vec<Landing>,
+}
+
+/// A landing between two runs of a stair or a ramp: after `at` risers of a stair, or `at` mm up a
+/// ramp; then the next run goes on straight (`turn` 0), turned left (90) or right (-90), or back
+/// beside the last, to its left (180) or its right (-180). It's as deep as the runs are wide.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Landing {
+    pub at: f64,
+    #[serde(default)]
+    pub turn: f64,
+}
+
+/// A ramp from `level` up to `top_level` (or `height` mm), from the middle of its foot at `start`
+/// toward `angle` degrees: rising at its slope, `slope` percent (rise over run), in one run or in
+/// runs with a landing between each two. Solid down to its level.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ramp {
+    pub level: Id,
+    #[serde(default)]
+    pub top_level: Option<Id>,
+    #[serde(default)]
+    pub height: f64,
+    pub start: P2,
+    pub angle: f64,
+    pub width: f64,
+    pub slope: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub landings: Vec<Landing>,
+}
+
+/// A side of a stair or a ramp, going up it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Side {
+    #[default]
+    Left,
+    Right,
+}
+
+/// A railing: along a side of a stair or a ramp, `host`, climbing with it; or along `path` on its
+/// level, `base_offset` mm above it. Its rail is its type's height over what it runs along.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Railing {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub level: Id,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<P2>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub base_offset: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<Side>,
 }
 
 /// A roof by its footprint, on `level`: its eaves along `boundary`, reaching the level `overhang`
@@ -620,6 +687,8 @@ pub enum Element {
     Viewport(Viewport),
     Column(Column),
     Stair(Stair),
+    Ramp(Ramp),
+    Railing(Railing),
     Roof(Roof),
     Text(Note),
     Spot(Spot),
@@ -651,6 +720,8 @@ impl Element {
             Element::Viewport(_) => "viewport",
             Element::Column(_) => "column",
             Element::Stair(_) => "stair",
+            Element::Ramp(_) => "ramp",
+            Element::Railing(_) => "railing",
             Element::Roof(_) => "roof",
         }
     }
@@ -671,6 +742,15 @@ pub struct WallType {
 #[serde(deny_unknown_fields)]
 pub struct FloorType {
     pub thickness: f64,
+}
+
+/// A railing type: how high its rail stands, and how far apart its balusters are (0: none).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RailingType {
+    pub height: f64,
+    #[serde(default)]
+    pub spacing: f64,
 }
 
 /// A ceiling type: how thick, and with `grid`, square tiles that wide, which its reflected ceiling
@@ -722,6 +802,8 @@ pub struct Types {
     pub roof: BTreeMap<String, RoofType>,
     #[serde(default)]
     pub ceiling: BTreeMap<String, CeilingType>,
+    #[serde(default)]
+    pub railing: BTreeMap<String, RailingType>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -782,6 +864,7 @@ impl Model {
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0 });
         m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0 });
         m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0 });
+        m.types.railing.insert("Railing - 1000mm".into(), RailingType { height: 1000.0, spacing: 120.0 });
         let level = language.word("Level");
         m.insert(Element::Level(Level::new(format!("{level} 1"), 0.0)));
         m.insert(Element::Level(Level::new(format!("{level} 2"), 3000.0)));
@@ -902,6 +985,7 @@ impl Model {
             "column" => names(&self.types.column),
             "roof" => names(&self.types.roof),
             "ceiling" => names(&self.types.ceiling),
+            "railing" => names(&self.types.railing),
             _ => Vec::new(),
         }
     }
@@ -915,6 +999,7 @@ impl Model {
             "column" => "Rectangular 400 x 400",
             "roof" => "Generic - 300mm",
             "ceiling" => "Generic - 20mm",
+            "railing" => "Railing - 1000mm",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);
@@ -943,6 +1028,9 @@ impl Model {
             Element::Dimension(d) => Some(d.level),
             Element::Column(c) => Some(c.level),
             Element::Stair(st) => Some(st.level),
+            Element::Ramp(r) => Some(r.level),
+            // On a stair or a ramp, its host's.
+            Element::Railing(r) => r.host.and_then(|h| self.elements.get(&h)).and_then(|e| self.level_of(e)).or(Some(r.level)),
             Element::Roof(r) => Some(r.level),
             Element::Door(o) | Element::Window(o) => wall_level(o),
             Element::Tag(t) => match self.elements.get(&t.host) {
@@ -968,14 +1056,16 @@ impl Model {
         (base, top_level.map_or(base + height, |t| self.elevation(t)))
     }
 
-    /// A stair's flight: how many risers, how high each is, and how long its run is.
+    /// A stair's flight: how many risers, how high each is, and how long its runs are together
+    /// (a tread less each, the last riser of each climbing onto a landing or the floor above).
     pub fn flight(&self, st: &Stair) -> (u32, f64, f64) {
         let (base, top) = self.span(st.level, 0.0, st.top_level, st.height);
         let rise = top - base;
         // Not a number, or less than one, is none.
         let n = (rise / st.riser - 1e-9).ceil().clamp(0.0, 1e6) as u32;
         let each = if n > 0 { rise / f64::from(n) } else { 0.0 };
-        (n, each, f64::from(n.saturating_sub(1)) * st.tread)
+        let runs = u32::try_from(st.landings.len()).unwrap_or(u32::MAX).saturating_add(1);
+        (n, each, f64::from(n.saturating_sub(runs)) * st.tread)
     }
 
     /// A roof's pieces: each slope's underside (a flat polygon, x, y, z), and the roof's thickness
@@ -1452,6 +1542,12 @@ impl Model {
         for (n, t) in &self.types.roof {
             size(&format!("roof type `{n}` thickness"), t.thickness)?;
         }
+        for (n, t) in &self.types.railing {
+            size(&format!("railing type `{n}` height"), t.height)?;
+            if !(t.spacing == 0.0 || (50.0..=MAX_COORD).contains(&t.spacing)) {
+                return Err(format!("railing type `{n}`: spacing {} mm; balusters stand 50 mm apart or more, or 0 for none", t.spacing));
+            }
+        }
         for (n, t) in &self.types.ceiling {
             size(&format!("ceiling type `{n}` thickness"), t.thickness)?;
             // A finer grid would draw a line every few pixels, and millions over a large ceiling.
@@ -1746,6 +1842,60 @@ impl Model {
                             st.riser
                         ));
                     }
+                    landings(&who, &st.landings, Some(f64::from(n)))?;
+                }
+                Element::Ramp(r) => {
+                    level_ok(r.level)?;
+                    point(&who, r.start)?;
+                    coord(&format!("{who} angle"), r.angle)?;
+                    match r.top_level {
+                        Some(t) => level_ok(t)?,
+                        None => size(&format!("{who} height"), r.height)?,
+                    }
+                    size(&format!("{who} width"), r.width)?;
+                    if !(1.0..=50.0).contains(&r.slope) {
+                        return Err(format!("{who}: slope {}% isn't from 1% to 50%", r.slope));
+                    }
+                    let (bottom, top) = self.span(r.level, 0.0, r.top_level, r.height);
+                    if top <= bottom + TOL {
+                        return Err(format!("{who}: its top must be above its base"));
+                    }
+                    coord(&format!("{who} length"), (top - bottom) / r.slope * 100.0)?;
+                    landings(&who, &r.landings, None)?;
+                    if let Some(l) = r.landings.last().filter(|l| l.at >= top - bottom - TOL) {
+                        return Err(format!("{who}: a landing {} mm up isn't below its top, {} mm up", l.at, top - bottom));
+                    }
+                }
+                Element::Railing(rl) => {
+                    let t = known(&who, &rl.type_name, &self.types.railing)?;
+                    level_ok(rl.level)?;
+                    coord(&format!("{who} base_offset"), rl.base_offset)?;
+                    match (rl.host, rl.side) {
+                        (Some(h), Some(_)) => {
+                            if !matches!(self.elements.get(&h), Some(Element::Stair(_) | Element::Ramp(_))) {
+                                return Err(format!("{who}: host {h} isn't a stair or a ramp"));
+                            }
+                        }
+                        (Some(_), None) => {
+                            return Err(format!("{who}: a railing on a stair or a ramp runs along its left or its right side"));
+                        }
+                        (None, _) => {
+                            if rl.path.len() < 2 || rl.path.len() > MAX_POINTS {
+                                return Err(format!("{who}: a path needs 2 to {MAX_POINTS} points"));
+                            }
+                            for p in &rl.path {
+                                point(&who, *p)?;
+                            }
+                        }
+                    }
+                    let line = crate::stairs::railing(self, rl);
+                    let length: f64 = line.windows(2).map(|w| w.first().zip(w.get(1)).map_or(0.0, |(a, b)| a.0.dist(b.0))).sum();
+                    if length <= TOL {
+                        return Err(format!("{who}: its path has no length"));
+                    }
+                    if t.spacing > 0.0 && length / t.spacing > MAX_BALUSTERS {
+                        return Err(format!("{who}: {:.0} balusters, more than {MAX_BALUSTERS}; space them wider", length / t.spacing));
+                    }
                 }
                 Element::Roof(r) => {
                     known(&who, &r.type_name, &self.types.roof)?;
@@ -1859,6 +2009,41 @@ fn crop(who: &str, a: P2, b: P2) -> Result<(), String> {
     } else {
         Err(format!("{who}: a crop region runs from its south-west corner to its north-east one (in a section, bottom left to top right)"))
     }
+}
+
+/// Landings between runs, going up: each a run of two risers or more from the last and to the
+/// next (on a stair of `risers`), after a whole number of them; or on a ramp, up from its foot;
+/// each turning square or back.
+fn landings(who: &str, landings: &[Landing], risers: Option<f64>) -> Result<(), String> {
+    if landings.len() > 100 {
+        return Err(format!("{who}: more than 100 landings"));
+    }
+    let mut last = 0.0;
+    for l in landings {
+        coord(&format!("{who} landing"), l.at)?;
+        if !matches!(l.turn, 0.0 | 90.0 | -90.0 | 180.0 | -180.0) {
+            return Err(format!(
+                "{who}: a landing turns 0 (straight on), 90 or -90 (left or right), or 180 or -180 (back beside the run, to its left or \
+                 its right), not {}",
+                l.turn
+            ));
+        }
+        match risers {
+            Some(_) if l.at.fract() != 0.0 => return Err(format!("{who}: a landing goes after a whole number of risers, not {}", l.at)),
+            Some(n) if l.at < last + 2.0 || l.at > n - 2.0 => {
+                return Err(format!(
+                    "{who}: a landing after {} risers leaves a run of fewer than 2 risers; each run needs 2 or more",
+                    l.at
+                ));
+            }
+            None if l.at <= last + TOL => {
+                return Err(format!("{who}: a landing {} mm up isn't above its foot or the landing before it", l.at));
+            }
+            _ => {}
+        }
+        last = l.at;
+    }
+    Ok(())
 }
 
 /// `ring` counter-clockwise.

@@ -75,5 +75,8 @@ lines, run on or back to meet at joins (`walls::centre_line`). An attached top o
 floor's planes where it's over the wall; a mirrored wall runs back the other way. A floor's top is at its level plus `offset`,
 or with a slope arrow, there at the arrow's tail and rising `slope` degrees toward its head (`Model::floor_top`); it's its
 type's thickness across the slope, so plumb it's thicker. A ceiling's `offset` is its underside. A shaft cuts each floor,
-ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
+ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). A stair or a ramp
+is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): a landing after `at` risers (a ramp's, `at`
+mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to
+its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.

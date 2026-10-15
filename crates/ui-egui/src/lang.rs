@@ -69,6 +69,8 @@ pub fn category(category: &str, several: bool) -> String {
         "shaft" => {
             (["Shaft Opening", "Abertura de shaft", "Abertura de ducto"], ["Shaft Openings", "Aberturas de shaft", "Aberturas de ducto"])
         }
+        "ramp" => (["Ramp", "Rampa", "Rampa"], ["Ramps", "Rampas", "Rampas"]),
+        "railing" => (["Railing", "Guarda-corpo", "Barandal"], ["Railings", "Guarda-corpos", "Barandales"]),
         "text" => (["Text Note", "Nota de texto", "Nota de texto"], ["Text Notes", "Notas de texto", "Notas de texto"]),
         "spot" => (["Spot Elevation", "Elevação de ponto", "Cota de nivel"], ["Spot Elevations", "Elevações de ponto", "Cotas de nivel"]),
         "schedule" => (["Schedule", "Tabela", "Tabla"], ["Schedules", "Tabelas", "Tablas"]),
@@ -840,6 +842,67 @@ const WORDS: &[[&str; 3]] = &[
     ["ceiling: `{}` is not a height", "forro: `{}` não é uma altura", "cielo raso: `{}` no es una altura"],
     ["shaft: {}", "shaft: {}", "ducto: {}"],
     ["slope arrow: `{}` is not a slope", "seta de inclinação: `{}` não é uma inclinação", "flecha de pendiente: `{}` no es una pendiente"],
+    // Stairs, ramps and railings.
+    ["Ramp", "Rampa", "Rampa"],
+    ["Railing", "Guarda-corpo", "Barandal"],
+    ["Railings", "Guarda-corpos", "Barandales"],
+    [
+        "Stair: click where it starts, then where its run ends; a landing turns it",
+        "Escada: clique onde ela começa e depois onde o lance termina; um patamar a faz virar",
+        "Escalera: haz clic donde empieza y luego donde termina su tramo; un descanso la hace girar",
+    ],
+    [
+        "Ramp: click where it starts, then where its run ends; a landing turns it",
+        "Rampa: clique onde ela começa e depois onde o lance termina; um patamar a faz virar",
+        "Rampa: haz clic donde empieza y luego donde termina su tramo; un descanso la hace girar",
+    ],
+    [
+        "Railing: click a stair or a ramp for one down each side, or click a path and press Enter",
+        "Guarda-corpo: clique numa escada ou rampa para um em cada lado, ou clique um caminho e tecle Enter",
+        "Barandal: haz clic en una escalera o una rampa para uno a cada lado, o haz clic en un recorrido y pulsa Enter",
+    ],
+    ["Create Ramp", "Criar rampa", "Crear rampa"],
+    ["Create Railing Path", "Criar caminho do guarda-corpo", "Crear recorrido del barandal"],
+    [
+        "Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels.",
+        "Clique onde o lance termina: além do último espelho, um lance até o nível acima; antes dele, um patamar. Esc cancela.",
+        "Haz clic donde termina el tramo: más allá de su última contrahuella, un tramo hasta el nivel superior; antes, un descanso. Esc cancela.",
+    ],
+    [
+        "Click where the ramp starts: the middle of its foot.",
+        "Clique onde a rampa começa: o meio do seu pé.",
+        "Haz clic donde empieza la rampa: el centro de su arranque.",
+    ],
+    [
+        "Click where its run ends: past its top, one run, as high as the Options Bar says; short of it, a landing. Esc cancels.",
+        "Clique onde o lance termina: além do topo, um lance, na altura que a barra de opções indica; antes dele, um patamar. Esc cancela.",
+        "Haz clic donde termina el tramo: más allá de su parte superior, un tramo, a la altura que indica la barra de opciones; antes, un descanso. Esc cancela.",
+    ],
+    [
+        "Click which way the next run goes from the landing: on, left, right, or back beside it.",
+        "Clique para onde o próximo lance segue a partir do patamar: em frente, à esquerda, à direita ou de volta ao lado.",
+        "Haz clic hacia donde sigue el siguiente tramo desde el descanso: de frente, a la izquierda, a la derecha o de vuelta a su lado.",
+    ],
+    [
+        "Click a stair or a ramp for a railing down each side, or the start of a path.",
+        "Clique numa escada ou rampa para um guarda-corpo em cada lado, ou no início de um caminho.",
+        "Haz clic en una escalera o una rampa para un barandal a cada lado, o en el inicio de un recorrido.",
+    ],
+    [
+        "Click the path's next point. Enter finishes, Esc cancels.",
+        "Clique no próximo ponto do caminho. Enter termina, Esc cancela.",
+        "Haz clic en el siguiente punto del recorrido. Enter termina, Esc cancela.",
+    ],
+    ["click where its run ends", "clique onde o lance termina", "haz clic donde termina el tramo"],
+    ["ramp: `{}` is not a slope", "rampa: `{}` não é uma inclinação", "rampa: `{}` no es una pendiente"],
+    ["ramp: `{}` is not a width", "rampa: `{}` não é uma largura", "rampa: `{}` no es un ancho"],
+    ["ramp: {}", "rampa: {}", "rampa: {}"],
+    ["{} of {} risers", "{} de {} espelhos", "{} de {} contrahuellas"],
+    ["{} up", "{} de subida", "{} de subida"],
+    ["Max Slope (%)", "Inclinação máxima (%)", "Pendiente máxima (%)"],
+    ["Host", "Hospedeiro", "Anfitrión"],
+    ["Side", "Lado", "Lado"],
+    ["Baluster Spacing", "Espaçamento dos balaústres", "Separación de balaustres"],
 ];
 
 #[cfg(test)]

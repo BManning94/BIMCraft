@@ -12,14 +12,14 @@ use crate::geom::{self, P2};
 use crate::language::Language;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType,
-    Grid, Id, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER,
-    Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall,
-    WallType, heading, paper,
+    Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType,
+    RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft,
+    Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
 use crate::units::Units;
 use crate::walls::{self, Axis, stacked};
-use crate::{pdf, render, schedule, sheet, view3d};
+use crate::{pdf, render, schedule, sheet, stairs, view3d};
 
 type R = Result<Value, String>;
 
@@ -118,10 +118,33 @@ pub static ALL: &[Command] = &[
         "stair",
         "Stair",
         &[],
-        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, riser?, tread?} a straight flight from the \
-         middle of its first riser at `start`, climbing toward `end` (or `angle` degrees) up to the next level: as many risers \
-         as keep each at most `riser` mm (180), treads `tread` deep (280), `width` wide (1000); the run is as long as that makes it",
+        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, riser?, tread?, landings?: [{at, turn?}, …], \
+         railings?} a stair from the middle of its first riser at `start`, climbing toward `end` (or `angle` degrees) up to the next level: \
+         as many risers as keep each at most `riser` mm (180), treads `tread` deep (280), `width` wide (1000). One straight \
+         run, as long as that makes it; or with landings (each as deep as the stair is wide) after `at` risers, the next run \
+         going on as `turn` says: 0 straight on, 90 or -90 turned left or right, 180 or -180 back beside it, to its left or right. \
+         With `railings`, a railing down each side too",
         stair,
+    ),
+    edit(
+        "ramp",
+        "Ramp",
+        &[],
+        "{start: [x,y], end?: [x,y] | angle?, level?, top_level?, height?, width?, slope?, landings?: [{at, turn?}, …], railings?} a ramp \
+         from the middle of its foot at `start`, climbing toward `end` (or `angle` degrees) up to the next level, or `height` mm, \
+         `width` wide (1200), at `slope` percent (8.33, 1 in 12), as long as that makes it; with landings `at` mm up, turning \
+         as a stair's do, and with `railings`, a railing down each side. Solid down to its level",
+        ramp,
+    ),
+    edit(
+        "railing",
+        "Railing",
+        &[],
+        "{host: a stair or a ramp, side?: left|right, type?} | {path: [[x,y],…], level?, base_offset?, type?} a railing along \
+         the stair's or the ramp's sides (both, or the one going up it on `side`), 50 mm in from its edges and climbing with it, \
+         going where it goes; or along `path`, `base_offset` mm above the level. Its type sets how high its rail stands over \
+         what it runs along, and how far apart its balusters are",
+        railing,
     ),
     edit(
         "roof",
@@ -221,11 +244,12 @@ pub static ALL: &[Command] = &[
         "type",
         "Edit Type",
         &[],
-        "{category: wall|floor|ceiling|door|window|column|roof, name, thickness? | width?, height?, sill? | width?, depth?, \
-         round?} creates the type, or changes it everywhere it's used. A wall type may have `layers` [{function?: structure|\
+        "{category: wall|floor|ceiling|door|window|column|roof|railing, name, thickness? | width?, height?, sill? | width?, \
+         depth?, round? | height?, spacing?} creates the type, or changes it everywhere it's used. A wall type may have `layers` [{function?: structure|\
          substrate|thermal|membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, \
          its core from its first structure layer to its last, and a new `thickness` goes to its structure. A ceiling type may \
-         have `grid`: its square tiles' width, mm, which reflected ceiling plans draw (0, none)",
+         have `grid`: its square tiles' width, mm, which reflected ceiling plans draw (0, none); a railing type, `height` (its \
+         rail over what it runs along) and `spacing` (its balusters' centres, 0 for none)",
         edit_type,
     ),
     edit(
@@ -488,6 +512,13 @@ pub fn m2(mm2: f64) -> f64 {
     (mm2 / 1e4).round() / 100.0
 }
 
+/// A stair's or a ramp's runs, each from its foot to its top, and where its last one ends.
+fn runs(extra: &mut Map<String, Value>, l: &stairs::Layout) {
+    let runs: Vec<[P2; 2]> = l.runs.iter().map(|r| [micron(r.start), micron(r.end())]).collect();
+    extra.insert("end".into(), json!(runs.last().map(|r| r[1])));
+    extra.insert("runs".into(), json!(runs));
+}
+
 /// The area of the rings together, mm².
 fn area(rings: &[Vec<P2>]) -> f64 {
     rings.iter().map(|r| geom::area(r).abs()).sum()
@@ -603,7 +634,20 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("risers".into(), json!(n));
             extra.insert("riser_height".into(), json!(hundredth(each)));
             extra.insert("length".into(), json!(length));
-            extra.insert("end".into(), json!(st.start + heading(st.angle) * length));
+            runs(&mut extra, &stairs::stair(m, st));
+        }
+        Element::Ramp(r) => {
+            let (bottom, top) = m.span(r.level, 0.0, r.top_level, r.height);
+            let l = stairs::ramp(m, r);
+            extra.insert("height".into(), json!(top - bottom));
+            extra.insert("length".into(), json!(hundredth(l.runs.iter().map(|r| r.length).sum())));
+            runs(&mut extra, &l);
+        }
+        Element::Railing(rl) => {
+            let path: Vec<P2> = stairs::railing(m, rl).into_iter().map(|(p, _)| micron(p)).collect();
+            extra.insert("path".into(), json!(path));
+            extra.insert("level".into(), json!(m.level_of(e)));
+            extra.insert("height".into(), json!(m.types.railing.get(&rl.type_name).map(|t| t.height)));
         }
         Element::Roof(r) => {
             let ridge =
@@ -1350,15 +1394,30 @@ fn column(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id}))
 }
 
+/// The way a stair or a ramp climbs from `start`: toward `end`, else `angle` degrees (east by default).
+fn climb(c: &str, p: &Value, start: P2) -> Result<f64, String> {
+    match (point_opt(c, p, "end")?, num(c, p, "angle")?) {
+        (Some(end), _) if end.dist(start) > TOL => Ok(degrees((end.1 - start.1).atan2(end.0 - start.0).to_degrees())),
+        (Some(_), _) => Err(bad(c, format!("`end` must be away from `start`: it says which way the {c} climbs"))),
+        (None, a) => Ok(a.unwrap_or(0.0)),
+    }
+}
+
+/// `landings` [{at, turn?}, …], or none.
+fn landings_param(c: &str, p: &Value) -> Result<Vec<Landing>, String> {
+    match p.get("landings") {
+        v if absent(v) => Ok(Vec::new()),
+        Some(v @ Value::Array(a)) if a.len() <= 100 => serde_json::from_value(v.clone()).map_err(|e| bad(c, format!("`landings`: {e}"))),
+        Some(_) => Err(bad(c, "`landings` is a list of at most 100 landings [{at, turn?}, …]")),
+        None => Ok(Vec::new()),
+    }
+}
+
 fn stair(s: &mut Session, p: &Value) -> R {
     let c = "stair";
     let m = &s.model;
     let start = point_req(c, p, "start")?;
-    let angle = match (point_opt(c, p, "end")?, num(c, p, "angle")?) {
-        (Some(end), _) if end.dist(start) > TOL => degrees((end.1 - start.1).atan2(end.0 - start.0).to_degrees()),
-        (Some(_), _) => return Err(bad(c, "`end` must be away from `start`: it says which way the stair climbs")),
-        (None, a) => a.unwrap_or(0.0),
-    };
+    let angle = climb(c, p, start)?;
     let level = level_param(c, m, p, "level")?;
     let (top_level, height) = top_param(c, m, p, level)?;
     let dim = |key: &str, default: f64| num(c, p, key).map(|v| v.unwrap_or(default));
@@ -1371,10 +1430,77 @@ fn stair(s: &mut Session, p: &Value) -> R {
         width: dim("width", STAIR_WIDTH)?,
         riser: dim("riser", RISER)?,
         tread: dim("tread", TREAD)?,
+        landings: landings_param(c, p)?,
     };
     let (n, _, length) = m.flight(&st);
+    let level = st.level;
     let id = s.model_mut().insert(Element::Stair(st));
-    Ok(json!({"id": id, "risers": n, "length": length}))
+    let railings = sides(c, s, p, id, level)?;
+    Ok(json!({"id": id, "risers": n, "length": length, "railings": railings}))
+}
+
+/// With `railings`, a railing of the default type down each side of stair or ramp `id`: their ids.
+fn sides(c: &str, s: &mut Session, p: &Value, id: Id, level: Id) -> Result<Vec<Id>, String> {
+    if !flag(c, p, "railings")? {
+        return Ok(Vec::new());
+    }
+    let type_name = s.model.default_type("railing").map(String::from).ok_or_else(|| bad(c, "the model has no railing types"))?;
+    let m = s.model_mut();
+    let railing =
+        |side| Railing { type_name: type_name.clone(), level, path: Vec::new(), base_offset: 0.0, host: Some(id), side: Some(side) };
+    Ok([Side::Left, Side::Right].into_iter().map(|side| m.insert(Element::Railing(railing(side)))).collect())
+}
+
+fn ramp(s: &mut Session, p: &Value) -> R {
+    let c = "ramp";
+    let m = &s.model;
+    let start = point_req(c, p, "start")?;
+    let angle = climb(c, p, start)?;
+    let level = level_param(c, m, p, "level")?;
+    let (top_level, height) = top_param(c, m, p, level)?;
+    let r = Ramp {
+        level,
+        top_level,
+        height,
+        start,
+        angle,
+        width: num(c, p, "width")?.unwrap_or(RAMP_WIDTH),
+        slope: num(c, p, "slope")?.unwrap_or(RAMP_SLOPE),
+        landings: landings_param(c, p)?,
+    };
+    let length: f64 = stairs::ramp(m, &r).runs.iter().map(|r| r.length).sum();
+    let level = r.level;
+    let id = s.model_mut().insert(Element::Ramp(r));
+    let railings = sides(c, s, p, id, level)?;
+    Ok(json!({"id": id, "length": hundredth(length), "railings": railings}))
+}
+
+fn railing(s: &mut Session, p: &Value) -> R {
+    let c = "railing";
+    let m = &s.model;
+    let type_name = type_param(c, p, m, "railing")?;
+    let base = |level, path, host, side| Railing { type_name: type_name.clone(), level, path, base_offset: 0.0, host, side };
+    let made: Vec<Railing> = match id_opt(c, p, "host")? {
+        // Along a stair's or a ramp's sides.
+        Some(host) => {
+            let level = m.elements.get(&host).and_then(|e| m.level_of(e)).ok_or_else(|| bad(c, format!("no stair or ramp {host}")))?;
+            let sides = match string(c, p, "side")?.as_deref() {
+                None => vec![Side::Left, Side::Right],
+                Some("left") => vec![Side::Left],
+                Some("right") => vec![Side::Right],
+                Some(other) => return Err(bad(c, format!("`side` is left or right, going up, not `{other}`"))),
+            };
+            sides.into_iter().map(|side| base(level, Vec::new(), Some(host), Some(side))).collect()
+        }
+        None => {
+            let mut r = base(level_param(c, m, p, "level")?, points(c, p, "path")?, None, None);
+            r.base_offset = num(c, p, "base_offset")?.unwrap_or(0.0);
+            vec![r]
+        }
+    };
+    let m = s.model_mut();
+    let ids: Vec<Id> = made.into_iter().map(|r| m.insert(Element::Railing(r))).collect();
+    Ok(json!({"ids": ids}))
 }
 
 fn roof(s: &mut Session, p: &Value) -> R {
@@ -1679,6 +1805,15 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             m.types.roof.insert(name.clone(), t.clone());
             json!(t)
         }
+        "railing" => {
+            let old = m.types.railing.get(&name).cloned();
+            let t = RailingType {
+                height: height.or(old.as_ref().map(|t| t.height)).ok_or_else(|| need("height"))?,
+                spacing: num(c, p, "spacing")?.or(old.as_ref().map(|t| t.spacing)).unwrap_or(0.0),
+            };
+            m.types.railing.insert(name.clone(), t.clone());
+            json!(t)
+        }
         "ceiling" => {
             let old = m.types.ceiling.get(&name).cloned();
             let t = CeilingType {
@@ -1688,7 +1823,7 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             m.types.ceiling.insert(name.clone(), t.clone());
             json!(t)
         }
-        other => return Err(bad(c, format!("`{other}` has no types; use wall, floor, ceiling, door, window, column or roof"))),
+        other => return Err(bad(c, format!("`{other}` has no types; use wall, floor, ceiling, door, window, column, roof or railing"))),
     };
     Ok(json!({"category": cat, "name": name, "type": t}))
 }
@@ -1855,7 +1990,23 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         Element::Spot(sp) => sp.at = f(sp.at),
         Element::Viewport(v) => v.at = f(v.at),
         Element::Column(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
-        Element::Stair(st) => (st.start, st.angle) = turned(f, st.start, st.angle),
+        // A mirror image turns the other way at its landings.
+        Element::Stair(Stair { start, angle, landings, .. }) | Element::Ramp(Ramp { start, angle, landings, .. }) => {
+            (*start, *angle) = turned(f, *start, *angle);
+            if mo.mirror {
+                landings.iter_mut().for_each(|l| l.turn = -l.turn + 0.0);
+            }
+        }
+        Element::Railing(rl) => match rl.host {
+            // Its stair's or ramp's, mirrored, its sides swap.
+            Some(h) if with.contains(&h) => {
+                if mo.mirror {
+                    rl.side = rl.side.map(other_side);
+                }
+            }
+            Some(_) => return Err(bad(c, format!("railing {id} goes only with its stair or ramp; select that too"))),
+            None => rl.path.iter_mut().for_each(|q| *q = f(*q)),
+        },
         Element::Roof(r) => {
             r.boundary.iter_mut().for_each(|q| *q = f(*q));
             if mo.mirror {
@@ -1897,6 +2048,13 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         }
     }
     Ok(e)
+}
+
+fn other_side(s: Side) -> Side {
+    match s {
+        Side::Left => Side::Right,
+        Side::Right => Side::Left,
+    }
 }
 
 /// Where `f` takes a point and the way `angle` degrees points from it.
@@ -2059,8 +2217,9 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
     let mut notes = Vec::new();
     for &id in ids {
         match transformed(c, m, id, mo, &copying)? {
-            // A copied wall brings its doors and windows; see below.
+            // A copied wall brings its doors and windows, a stair or a ramp its railings; see below.
             Element::Door(o) | Element::Window(o) if copying.contains(&o.host) => {}
+            Element::Railing(Railing { host: Some(h), .. }) if copying.contains(&h) => {}
             e @ (Element::Dimension(_) | Element::Tag(_) | Element::Spot(_)) => notes.push((id, e)),
             e => copies.push((id, e)),
         }
@@ -2068,15 +2227,21 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
     let hosted: Vec<(Id, Element)> = m
         .elements
         .iter()
-        .filter(|(_, e)| matches!(e, Element::Door(o) | Element::Window(o) if copying.contains(&o.host)))
+        .filter(|(_, e)| match e {
+            Element::Door(o) | Element::Window(o) => copying.contains(&o.host),
+            Element::Railing(r) => r.host.is_some_and(|h| copying.contains(&h)),
+            _ => false,
+        })
         .map(|(&id, e)| {
             let mut e = e.clone();
-            // On a mirrored copy, which runs back the other way: from its other end, on the other jamb.
-            if let Element::Door(o) | Element::Window(o) = &mut e
-                && mo.mirror
-            {
-                o.offset = m.wall(o.host).map_or(o.offset, |w| Axis::of(w).length() - o.offset);
-                o.flip_hand = !o.flip_hand;
+            match &mut e {
+                // On a mirrored copy, which runs back the other way: from its other end, on the other jamb.
+                Element::Door(o) | Element::Window(o) if mo.mirror => {
+                    o.offset = m.wall(o.host).map_or(o.offset, |w| Axis::of(w).length() - o.offset);
+                    o.flip_hand = !o.flip_hand;
+                }
+                Element::Railing(r) if mo.mirror => r.side = r.side.map(other_side),
+                _ => {}
             }
             (id, e)
         })
@@ -2097,6 +2262,7 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
                     _ => None,
                 }))
             }
+            Element::Railing(r) => r.host = r.host.map(|h| hosts.get(&h).copied().unwrap_or(h)),
             Element::Door(o) | Element::Window(o) => {
                 o.host = hosts.get(&o.host).copied().unwrap_or(o.host);
                 o.mark = next_number(m.elements.values().filter_map(|e| match e {
@@ -2304,6 +2470,7 @@ fn delete(s: &mut Session, p: &Value) -> R {
                 !gone.contains(id)
                     && match e {
                         Element::Door(o) | Element::Window(o) => gone.contains(&o.host),
+                        Element::Railing(r) => r.host.is_some_and(|h| gone.contains(&h)),
                         Element::Tag(t) => gone.contains(&t.host),
                         Element::Viewport(v) => gone.contains(&v.sheet) || gone.contains(&v.view),
                         // Notes and spot elevations go with their view, spots with what they read.

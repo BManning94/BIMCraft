@@ -519,6 +519,16 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"category": "ceiling", "name": "T", "thickness": 1e300, "grid": -600}),
         json!({"id": 3, "slope": 5, "arrow": [[0, 0], [1, 1]]}),
         json!({"ids": [3, 4], "offset": 1e300, "grid": 600}),
+        json!({"start": [0, 0], "landings": [{"at": 1e300, "turn": 90}]}),
+        json!({"start": [0, 0], "landings": [{"at": 8, "turn": "left"}], "slope": 1e-300}),
+        json!({"start": [0, 0], "landings": "x", "height": 1e9, "slope": 50}),
+        json!({"start": [0, 0], "height": 600, "landings": [{"at": 300, "turn": 180}, {"at": 300, "turn": -180}]}),
+        json!({"host": 3, "side": "up"}),
+        json!({"host": u64::MAX}),
+        json!({"path": [[0, 0], [1e9, 1e9]], "base_offset": 1e300}),
+        json!({"path": [[0, 0], [0, 0], [0, 0]]}),
+        json!({"category": "railing", "name": "R", "height": 1e300, "spacing": 1e-9}),
+        json!({"id": 3, "landings": [{"at": 2, "turn": 90}]}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -970,7 +980,9 @@ fn describe(m: &Model, id: u64) -> String {
         Some("shaft") => &["level", "base_offset", "top_level", "height", "boundary"],
         Some("room") => &["level", "name", "number", "area_m2"],
         Some("column") => &["level", "at", "width", "depth", "round", "height", "base_offset"],
-        Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length"],
+        Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length", "landings"],
+        Some("ramp") => &["level", "start", "angle", "width", "slope", "height", "length", "landings"],
+        Some("railing") => &["level", "host", "side", "path", "height"],
         Some("roof") => &["level", "slope", "gable", "ridge", "area_m2", "boundary"],
         Some("grid") => &["name", "start", "end"],
         _ => &[],
@@ -978,20 +990,26 @@ fn describe(m: &Model, id: u64) -> String {
     let text = |k: &str, v: &Value| match k {
         "level" | "top_level" => v.as_u64().and_then(|l| m.level(l)).map_or_else(|| "-".to_string(), |l| l.name.clone()),
         "host" => v.as_u64().map_or_else(|| "-".to_string(), |h| format!("({})", describe(m, h))),
+        "landings" => {
+            v.as_array().into_iter().flatten().map(|l| format!("{}@{}", mm(&l["turn"]), mm(&l["at"]))).collect::<Vec<_>>().join(" ")
+        }
         "boundary" => {
             let mut pts: Vec<String> = v.as_array().into_iter().flatten().map(mm).collect();
             pts.sort();
             pts.join(" ")
         }
-        "area_m2" | "riser_height" | "slope" | "name" | "number" | "round" | "gable" => v.to_string(),
+        "area_m2" | "riser_height" | "name" | "number" | "round" | "gable" | "side" => v.to_string(),
+        "slope" => format!("{:.4}", v.as_f64().unwrap_or(f64::NAN)),
         // Attached to what: a roof or a floor, whatever its id.
         "attach_top" => m.elements.get(&v.as_u64().unwrap_or_default()).map_or("-", |e| e.category()).to_string(),
         _ => mm(v),
     };
     // A straight wall has no arc to tell; an attached one's top follows the roof, whatever its top
     // constraint (which IFC doesn't carry).
-    let untold =
-        |k: &str| (matches!(k, "arc" | "attach_top" | "slope") && e[k].is_null()) || (k == "top_level" && !e["attach_top"].is_null());
+    let untold = |k: &str| {
+        (matches!(k, "arc" | "attach_top" | "slope" | "host" | "side" | "landings") && e[k].is_null())
+            || (k == "top_level" && !e["attach_top"].is_null())
+    };
     keys.iter().filter(|k| !untold(k)).map(|k| format!("{k}={}", text(k, &e[*k]))).collect::<Vec<_>>().join(" ")
 }
 
@@ -1020,6 +1038,15 @@ fn ifc_files_open_as_the_building_they_describe() {
     );
     run(&mut s, "floor", json!({"level": "Level 2", "boundary": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}));
     run(&mut s, "shaft", json!({"boundary": [[4000, 1000], [5000, 1000], [5000, 2000], [4000, 2000]]}));
+    // A stair that turns back at a landing, with its railings; a ramp turning right at one; a railing along a path.
+    let u =
+        run(&mut s, "stair", json!({"start": [20000, 0], "angle": 90, "width": 1100, "landings": [{"at": 9, "turn": 180}]}))["id"].clone();
+    run(&mut s, "railing", json!({"host": u}));
+    let ramp =
+        run(&mut s, "ramp", json!({"start": [11000, -4000], "angle": 0, "height": 450, "landings": [{"at": 300, "turn": -90}]}))["id"]
+            .clone();
+    run(&mut s, "railing", json!({"host": ramp, "side": "left"}));
+    run(&mut s, "railing", json!({"path": [[0, -500], [3000, -500]]}));
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -1029,7 +1056,7 @@ fn ifc_files_open_as_the_building_they_describe() {
     assert_eq!(t.path, None, "an import is a new project: saving asks where");
     let levels = |m: &Model| m.levels().into_iter().map(|(_, l)| (l.name.clone(), l.elevation)).collect::<Vec<_>>();
     assert_eq!(levels(&t.model), levels(&s.model));
-    for category in ["wall", "door", "window", "floor", "room", "column", "stair", "roof", "ceiling", "shaft"] {
+    for category in ["wall", "door", "window", "floor", "room", "column", "stair", "roof", "ceiling", "shaft", "ramp", "railing"] {
         let (before, after) = (building(&s.model, category), building(&t.model, category));
         assert!(!before.is_empty(), "{category}");
         assert_eq!(after, before, "{category}");
@@ -1541,4 +1568,109 @@ fn shafts_cut_the_floors_ceilings_and_roofs_they_pass_through() {
     let _ = std::fs::remove_file(path);
     assert_eq!((ifc.matches("IFCOPENINGELEMENT(").count(), ifc.matches("IFCRELVOIDSELEMENT(").count()), (3, 3));
     assert!(ifc.contains(".CEILING.)"), "the ceiling, as a covering");
+}
+
+#[test]
+fn stairs_turn_at_landings_into_several_runs() {
+    let mut s = Session::new();
+    house(&mut s);
+    // 17 risers of 176.47 mm up to Level 2: 8 north, a landing a metre square, turning right, 9 east.
+    let st =
+        run(&mut s, "stair", json!({"start": [1000, 1000], "angle": 90, "landings": [{"at": 8, "turn": -90}]}))["id"].as_u64().unwrap();
+    let e = element(&mut s, st);
+    assert_eq!(e["risers"], 17);
+    assert_eq!(e["runs"], json!([[[1000.0, 1000.0], [1000.0, 2960.0]], [[1500.0, 3460.0], [3740.0, 3460.0]]]), "{e}");
+    assert!(near(&e["end"], [3740.0, 3460.0]), "{e}");
+    let each = 3000.0 / 17.0;
+    let tops = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&st).copied();
+    assert!((tops(&s, 1000.0, 3460.0).unwrap() - 8.0 * each).abs() < 1e-6, "the landing, 8 risers up");
+    assert!((tops(&s, 3600.0, 3460.0).unwrap() - 16.0 * each).abs() < 1e-6, "the last tread, a riser under Level 2");
+    assert_eq!(tops(&s, 2500.0, 2000.0), None, "nothing between the runs");
+    // A landing goes between two runs of two risers or more, and turns square or back.
+    for (landings, why) in [
+        (json!([{"at": 1, "turn": 0}]), "risers"),
+        (json!([{"at": 16, "turn": 0}]), "risers"),
+        (json!([{"at": 8, "turn": 45}]), "turn"),
+        (json!([{"at": 9, "turn": 0}, {"at": 8, "turn": 0}]), "risers"),
+        (json!([{"at": 8.5, "turn": 0}]), "whole"),
+    ] {
+        let e = s.execute("modify", &json!({"id": st, "landings": landings})).unwrap_err();
+        assert!(e.contains(why), "{landings}: {e}");
+    }
+    // Back beside itself, to its left: a U, the landing two runs wide.
+    run(&mut s, "modify", json!({"id": st, "landings": [{"at": 8, "turn": 180}]}));
+    assert_eq!(element(&mut s, st)["runs"][1], json!([[0.0, 2960.0], [0.0, 720.0]]));
+    assert!(tops(&s, 0.0, 3460.0).is_some() && tops(&s, 1000.0, 3460.0).is_some(), "one landing across both runs");
+    // Mirrored, it turns the other way.
+    run(&mut s, "mirror", json!({"ids": [st], "axis": [[4000, 0], [4000, 1000]]}));
+    let e = element(&mut s, st);
+    assert_eq!((e["landings"][0]["turn"].as_f64(), e["runs"][1][0].clone()), (Some(-180.0), json!([8000.0, 2960.0])));
+}
+
+#[test]
+fn ramps_climb_at_their_slope_with_landings_between_runs() {
+    let mut s = Session::new();
+    house(&mut s);
+    // 600 mm up at 1 in 12 (8.33%): 7.2 m of slope, in two runs of 300 mm, back beside each other.
+    let r = run(
+        &mut s,
+        "ramp",
+        json!({"start": [-4000, -6000], "angle": 0, "height": 600, "slope": 100.0 / 12.0, "landings": [{"at": 300, "turn": 180}]}),
+    )["id"]
+        .as_u64()
+        .unwrap();
+    let e = element(&mut s, r);
+    assert_eq!((e["width"].as_f64(), e["length"].as_f64()), (Some(1200.0), Some(7200.0)), "{e}");
+    assert_eq!(e["runs"], json!([[[-4000.0, -6000.0], [-400.0, -6000.0]], [[-400.0, -4800.0], [-4000.0, -4800.0]]]), "{e}");
+    let top = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&r).copied();
+    assert!((top(&s, -2200.0, -6000.0).unwrap() - 150.0).abs() < 1e-6, "halfway up its first run");
+    assert!((top(&s, 200.0, -5400.0).unwrap() - 300.0).abs() < 1e-6, "the landing");
+    assert!((top(&s, -2200.0, -4800.0).unwrap() - 450.0).abs() < 1e-6, "halfway up its second run");
+    // A slope from 1% to 50%; landings within its rise, going up.
+    assert!(s.execute("modify", &json!({"id": r, "slope": 60})).unwrap_err().contains("slope"));
+    assert!(s.execute("modify", &json!({"id": r, "landings": [{"at": 600, "turn": 0}]})).unwrap_err().contains("landing"));
+    assert!(s.execute("ramp", &json!({"start": [0, 0], "slope": 0})).unwrap_err().contains("slope"));
+}
+
+#[test]
+fn railings_run_along_stairs_and_ramps_or_along_a_path() {
+    let mut s = Session::new();
+    house(&mut s);
+    let st = run(&mut s, "stair", json!({"start": [1000, 1000], "end": [1000, 2000]}))["id"].as_u64().unwrap();
+    // Both sides of the stair, 50 mm in from its edges: going north, its left is west.
+    let ids: Vec<u64> =
+        run(&mut s, "railing", json!({"host": st}))["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    assert_eq!(ids.len(), 2);
+    let left = element(&mut s, ids[0]);
+    assert_eq!((left["side"].as_str(), left["height"].as_f64()), (Some("left"), Some(1000.0)));
+    assert_eq!(left["path"], json!([[550.0, 1000.0], [550.0, 5480.0]]), "{left}");
+    // Its rail rises with the stair, a metre over its walk line.
+    let rail = |s: &Session, id: u64, p: P2| crate::view3d::tops_at(&s.model, p).get(&id).copied();
+    let at = |y: f64| 3000.0 * (y - 1000.0) / 4480.0 + 1000.0;
+    assert!((rail(&s, ids[0], P2(550.0, 3000.0)).unwrap() - at(3000.0)).abs() < 1.0, "{:?}", rail(&s, ids[0], P2(550.0, 3000.0)));
+    // It goes where its stair goes, and with it.
+    run(&mut s, "move", json!({"ids": [st], "by": [500, 0]}));
+    assert_eq!(element(&mut s, ids[1])["path"][0], json!([1950.0, 1000.0]));
+    assert!(s.execute("move", &json!({"ids": [ids[0]], "by": [100, 0]})).unwrap_err().contains("stair"));
+    let copies = run(&mut s, "copy", json!({"ids": [st], "by": [3000, 0]}))["ids"].clone();
+    assert_eq!(copies.as_array().map(Vec::len), Some(3), "the stair and its railings: {copies}");
+    run(&mut s, "delete", json!({"ids": [st]}));
+    assert_eq!(count(&mut s, "railing"), 2, "only the copy's");
+    // Along a path on a level, its rail a metre over it; its type sets how high and its balusters.
+    let edge = run(&mut s, "railing", json!({"path": [[0, 7000], [4000, 7000], [4000, 9000]], "level": 2}))["ids"][0].as_u64().unwrap();
+    assert_eq!(rail(&s, edge, P2(2000.0, 7000.0)), Some(4000.0));
+    run(&mut s, "type", json!({"category": "railing", "name": "Glass - 1100mm", "height": 1100, "spacing": 0}));
+    run(&mut s, "modify", json!({"id": edge, "type": "Glass - 1100mm"}));
+    assert_eq!(rail(&s, edge, P2(2000.0, 7000.0)), Some(4100.0));
+    // A ramp made with its railings, in one step.
+    let before = count(&mut s, "railing");
+    let r = run(&mut s, "ramp", json!({"start": [-5000, -5000], "height": 300, "railings": true}));
+    assert_eq!((r["railings"].as_array().map(Vec::len), count(&mut s, "railing")), (Some(2), before + 2));
+    run(&mut s, "undo", json!({}));
+    assert_eq!((count(&mut s, "railing"), count(&mut s, "ramp")), (before, 0));
+    assert!(s.execute("railing", &json!({"path": [[0, 0]]})).unwrap_err().contains("path"));
+    assert!(s.execute("railing", &json!({"host": 3})).unwrap_err().contains("stair or a ramp"));
+    assert!(
+        s.execute("type", &json!({"category": "railing", "name": "Dense", "height": 1000, "spacing": 5})).unwrap_err().contains("spacing")
+    );
 }

@@ -186,6 +186,22 @@ fn rows(category: &str) -> &'static [Row] {
             ("Dimensions", "riser_height", "Actual Riser Height", LengthShown),
             ("Other", "start", "Start", Point),
         ],
+        "ramp" => &[
+            ("Constraints", "level", "Base Level", Level),
+            ("Constraints", "top_level", "Top Level", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Dimensions", "width", "Width", Length),
+            ("Dimensions", "slope", "Max Slope (%)", Number),
+            ("Dimensions", "length", "Length", LengthShown),
+            ("Other", "start", "Start", Point),
+        ],
+        "railing" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Constraints", "base_offset", "Base Offset", Length),
+            ("Constraints", "host", "Host", Shown),
+            ("Constraints", "side", "Side", Shown),
+            ("Dimensions", "height", "Height", LengthShown),
+        ],
         "roof" => &[
             ("Constraints", "level", "Base Level", Level),
             ("Dimensions", "slope", "Slope (°)", Number),
@@ -226,6 +242,7 @@ fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
         "column" => &[("width", "Width"), ("depth", "Depth")],
         "roof" => &[("thickness", "Thickness")],
         "ceiling" => &[("thickness", "Thickness"), ("grid", "Tile Size")],
+        "railing" => &[("height", "Height"), ("spacing", "Baluster Spacing")],
         _ => &[],
     }
 }
@@ -252,6 +269,8 @@ fn icon(category: &str) -> Icon {
         "floor" => Icon::Floor,
         "ceiling" | "ceiling plan" => Icon::Ceiling,
         "shaft" => Icon::Shaft,
+        "ramp" => Icon::Ramp,
+        "railing" => Icon::Railing,
         "text" => Icon::Text,
         "spot" => Icon::Spot,
         "view3d" => Icon::View3D,
@@ -466,6 +485,8 @@ impl BimApp {
             ([], Tool::Elevation, _) => Subject::New("elevation"),
             ([], Tool::Column, _) => Subject::New("column"),
             ([], Tool::Stair(_), _) => Subject::New("stair"),
+            ([], Tool::Ramp(_), _) => Subject::New("ramp"),
+            ([], Tool::Railing(_), _) => Subject::New("railing"),
             ([], Tool::Roof, _) => Subject::New("roof"),
             ([], Tool::Floor, _) => Subject::New("floor"),
             ([], Tool::Ceiling, _) => Subject::New("ceiling"),

@@ -17,11 +17,13 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "BIMCraft is a BIM modeler, a Revit-class building model. Lengths are millimetres; x east, y north, z up; \
 the model starts with Level 1 (0) and Level 2 (3000). Model with execute: wall {points: [[0,0],[8000,0],[8000,6000],[0,6000]], \
 closed: true}, door {at: [2000, 0]}, window {at: [8000, 3000]}, room {point: [4000, 3000], name: \"Living\"}, floor {}, \
-roof {} (on Level 2, over the walls below), column {at: [4000, 3000]}, stair {start: [1000, 1000], end: [1000, 2000]}, \
+roof {} (on Level 2, over the walls below), column {at: [4000, 3000]}, stair {start: [1000, 1000], end: [1000, 2000], \
+railings: true} (with landings: [{at: 8, turn: -90}], it turns right after 8 risers), ramp {start: [-5000, 0], height: 600}, \
 dimension {refs: [[0, 3000], [8000, 3000]], at: [4000, -1000]} (between the walls under those points), tag {} (every door and \
 window); or send several at once with script, one `command {json}` per line. list_commands shows every command and its \
-parameters. Check your work with inspect_model and query_elements, look at it with render (a PNG of a level's plan, of a \
-section or elevation by name, or of the 3D view with view \"{3D}\"), and save to .bimcraft or .ifc.";
+parameters. Check your work with inspect_model and query_elements, look at it with render (a PNG of a level's plan, with \
+ceiling: true its reflected ceiling plan, of a section or elevation by name, or of the 3D view with view \"{3D}\"), and save \
+to .bimcraft or .ifc.";
 
 pub struct Server {
     session: Session,
@@ -60,11 +62,11 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"category": {"type": "string"}, "level": {"type": ["string", "integer"]}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}},
         {"name": "schedule", "description": "A schedule as columns and rows: rooms (number, name, level, area, perimeter), doors, windows, walls, floors or levels.",
          "inputSchema": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}},
-        {"name": "render", "description": "Look at the model as a PNG: a level's floor plan (walls and columns with poché, doors with swings, windows, stairs, roofs, room tags with areas, grids, dimensions, door and window tags), a section or elevation by name (the cut in poché, what's beyond, levels and grids), a sheet by number (its title block and the views on it), or with view \"{3D}\" the 3D view, seen from azimuth degrees round from east (counter-clockwise) and elevation degrees up; by default from the south-east, 30° up.",
-         "inputSchema": {"type": "object", "properties": {"view": {"type": ["string", "integer"]}, "width": {"type": "integer"}, "height": {"type": "integer"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}}}},
+        {"name": "render", "description": "Look at the model as a PNG: a level's floor plan (walls and columns with poché, doors with swings, windows, stairs, ramps and railings, roofs, room tags with areas, grids, dimensions, door and window tags), or with ceiling true its reflected ceiling plan, a section or elevation by name (the cut in poché, what's beyond, levels and grids), a sheet by number (its title block and the views on it), or with view \"{3D}\" the 3D view, seen from azimuth degrees round from east (counter-clockwise) and elevation degrees up; by default from the south-east, 30° up.",
+         "inputSchema": {"type": "object", "properties": {"view": {"type": ["string", "integer"]}, "ceiling": {"type": "boolean"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}}}},
         {"name": "new_model", "description": "Start an empty project with Level 1 and Level 2.",
          "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
-        {"name": "open", "description": "Open a .bimcraft project, or import an .ifc file (IFC2x3 or IFC4, from Revit or any BIM tool): its storeys, straight walls with their doors and windows, floors, rooms, columns, grids, single straight stairs and roofs (flat, or pitched over a rectangle) come in measured from their geometry; the reply lists what was left out and why.",
+        {"name": "open", "description": "Open a .bimcraft project, or import an .ifc file (IFC2x3 or IFC4, from Revit or any BIM tool): its storeys, straight and curved walls with their doors and windows, floors (level or sloped), ceilings, rooms, columns, grids, stairs and ramps of straight runs with landings, railings, shafts and roofs (flat, or pitched over a rectangle) come in measured from their geometry; the reply lists what was left out and why.",
          "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
         {"name": "save", "description": "Save to .bimcraft (the project), or export by extension: .ifc (IFC4 for other BIM tools), .svg or .png (the lowest level's plan), .pdf (every sheet, a page each).",
          "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}}
@@ -191,7 +193,7 @@ impl Server {
             "open" => s.execute("open", &args),
             "save" => s.execute("save", &args),
             "render" => {
-                let keys = ["view", "width", "height", "azimuth", "elevation"];
+                let keys = ["view", "ceiling", "width", "height", "azimuth", "elevation"];
                 let view: serde_json::Map<String, Value> = keys.iter().map(|k| (k.to_string(), args[*k].clone())).collect();
                 return Ok(match s.execute("render", &Value::Object(view)) {
                     Ok(v) => {

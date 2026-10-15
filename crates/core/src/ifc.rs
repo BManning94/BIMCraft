@@ -1,16 +1,18 @@
 //! IFC4 export (ISO 16739 as an ISO 10303-21 STEP file), the open BIM exchange format every BIM
 //! tool reads. Levels become building storeys; walls (their plan outline, mitred where they join,
-//! curved or straight), slabs, ceilings (coverings), spaces, columns and stairs get swept-solid
-//! bodies, roofs, sloped slabs and walls attached to them closed shells of flat faces; each door and
-//! window fills an opening element that voids its wall, so readers cut the hole, and a shaft voids
-//! each slab, ceiling and roof it passes through with one; compound walls carry their layers as a
-//! material layer set.
+//! curved or straight), slabs, ceilings (coverings), spaces and columns get swept-solid bodies,
+//! roofs, sloped slabs and walls attached to them closed shells of flat faces; each door and window
+//! fills an opening element that voids its wall, so readers cut the hole, and a shaft voids each
+//! slab, ceiling and roof it passes through with one; compound walls carry their layers as a
+//! material layer set. A stair or a ramp is the sum of its parts: its flights, its landings and
+//! the railings along it; a railing carries its rail's top line as its axis.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::geom::{self, P2};
-use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Model, heading, mix};
+use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Model, Railing, heading, mix};
+use crate::stairs;
 use crate::view3d::P3;
 use crate::walls::{self, Axis};
 
@@ -29,6 +31,28 @@ const SPACES: u64 = 11;
 const MATERIALS: u64 = 12;
 const SHAFT: u64 = 13;
 const SHAFT_VOIDS: u64 = 14;
+const FLIGHT: u64 = 15;
+const LANDING: u64 = 16;
+const PARTS: u64 = 17;
+
+/// Part `i` of element `id`, for its GlobalId.
+fn part(id: Id, i: usize) -> u64 {
+    mix(id).wrapping_add(i as u64)
+}
+
+/// What a stair's or a ramp's IFC type is, by its landings: `kind` is STAIR or RAMP.
+fn shape_of(landings: &[crate::model::Landing], kind: &str) -> String {
+    let turns: Vec<f64> = landings.iter().map(|l| l.turn).collect();
+    let shape = match turns.as_slice() {
+        [] => "STRAIGHT_RUN",
+        [0.0] => "TWO_STRAIGHT_RUN",
+        [t] if t.abs() == 90.0 => "QUARTER_TURN",
+        [t] if t.abs() == 180.0 => "HALF_TURN",
+        [a, b] if a.abs() == 90.0 && a == b => "TWO_QUARTER_TURN",
+        _ => return ".NOTDEFINED.".into(),
+    };
+    format!(".{shape}_{kind}.")
+}
 
 /// A STEP string literal: `'` doubled, `\` doubled, anything outside printable ASCII as `\X2\…\X0\`.
 fn s(text: &str) -> String {
@@ -180,8 +204,54 @@ impl Step {
     /// `rise` above; heights from `base`.
     fn breps(&mut self, faces: &[Vec<P3>], base: f64, rise: f64) -> u64 {
         let breps: Vec<u64> = faces.iter().map(|face| self.brep(face, base, rise)).collect();
-        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Brep',({}))", self.body, refs(&breps)));
-        self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"))
+        self.solid(&breps, &[])
+    }
+
+    /// A body of closed shells, plus any extra representations.
+    fn solid(&mut self, breps: &[u64], extra: &[u64]) -> u64 {
+        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Brep',({}))", self.body, refs(breps)));
+        let reps: Vec<u64> = std::iter::once(rep).chain(extra.iter().copied()).collect();
+        self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,({}))", refs(&reps)))
+    }
+
+    /// A closed shell around a ring in plan, counter-clockwise, from one plane up to another;
+    /// heights from `base`.
+    fn prism(&mut self, ring: &[P2], bottom: &walls::Plane, top: &walls::Plane, base: f64) -> u64 {
+        let at = |q: &P2, p: &walls::Plane| [q.0, q.1, p.at(*q) - base];
+        let (b, t): (Vec<P3>, Vec<P3>) = ring.iter().map(|q| (at(q, bottom), at(q, top))).unzip();
+        self.shell(&b, &t)
+    }
+
+    /// Landings: each a slab from `base` up to its top, placed in `at`.
+    fn landings(&mut self, l: &stairs::Layout, at: u64, base: f64, id: Id) -> Vec<u64> {
+        l.pads
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let pat = self.place(Some(at), (0.0, 0.0, 0.0), None);
+                let profile = self.profile(&p.ring, &[]);
+                let shape = self.body(profile, 0.0, p.z - base, &[]);
+                self.add(format!("IFCSLAB({},$,'Landing',$,$,#{pat},#{shape},$,.LANDING.)", self.guid(LANDING, part(id, i))))
+            })
+            .collect()
+    }
+
+    /// A railing, placed in `at`: its rail and balusters as closed shells, its rail's top line
+    /// as its axis (in the `axis` context); heights from `base`.
+    fn railing(&mut self, m: &Model, id: Id, rl: &Railing, at: u64, base: f64, axis: u64) -> u64 {
+        let height = m.types.railing.get(&rl.type_name).map_or(0.0, |t| t.height);
+        let parts = stairs::railing_parts(m, rl);
+        let breps: Vec<u64> = parts.iter().map(|(ring, bottom, top)| self.prism(ring, bottom, top, base)).collect();
+        let pts: Vec<u64> = stairs::railing(m, rl)
+            .iter()
+            .map(|(p, z)| self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(p.0), real(p.1), real(z + height - base))))
+            .collect();
+        let line = self.add(format!("IFCPOLYLINE(({}))", refs(&pts)));
+        let axis_rep = self.add(format!("IFCSHAPEREPRESENTATION(#{axis},'Axis','Curve3D',(#{line}))"));
+        let shape = self.solid(&breps, &[axis_rep]);
+        let rat = self.place(Some(at), (0.0, 0.0, 0.0), None);
+        let name = s(&rl.type_name);
+        self.add(format!("IFCRAILING({},$,{name},$,{name},#{rat},#{shape},'{id}',.GUARDRAIL.)", self.guid(ELEMENT, id)))
     }
 
     /// A closed shell around the flat counter-clockwise `face` and its copy `rise` above, its
@@ -256,6 +326,8 @@ pub fn export(m: &Model) -> String {
     let mut placed: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
     // Floors, ceilings and roofs as (entity, placement, its height), for the shafts through them.
     let mut hosts: BTreeMap<Id, (u64, u64, f64)> = BTreeMap::new();
+    // Stairs and ramps as (entity, placement, its height, its parts), for the railings along them.
+    let mut wholes: BTreeMap<Id, (u64, u64, f64, Vec<u64>)> = BTreeMap::new();
     for (&id, e) in &m.elements {
         match e {
             Element::Wall(wl) => {
@@ -378,18 +450,60 @@ pub fn export(m: &Model) -> String {
             }
             Element::Stair(st) => {
                 let Some(&(_, storey)) = storeys.get(&st.level) else { continue };
-                let (n, each, _) = m.flight(st);
-                let at = w.place(Some(storey), (st.start.0, st.start.1, 0.0), Some(heading(st.angle)));
-                // Each tread a block from the floor up to it, as in 3D.
-                let steps: Vec<(u64, f64, f64)> = (1..n)
-                    .map(|k| {
-                        let k = f64::from(k);
-                        (w.rectangle(P2((k - 0.5) * st.tread, 0.0), P2(st.tread, st.width)), 0.0, k * each)
-                    })
-                    .collect();
-                let shape = w.bodies(&steps, &[]);
-                let ent = w.add(format!("IFCSTAIR({},$,'Stair',$,$,#{at},#{shape},'{id}',.STRAIGHT_RUN_STAIR.)", w.guid(ELEMENT, id)));
+                let (_, each, _) = m.flight(st);
+                let (base, l) = (m.elevation(st.level), stairs::stair(m, st));
+                let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
+                let ent =
+                    w.add(format!("IFCSTAIR({},$,'Stair',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&st.landings, "STAIR")));
                 contained.entry(st.level).or_default().push(ent);
+                // Its flights, each tread a block from the floor up to it, as in 3D; its landings.
+                let mut parts = Vec::new();
+                for (i, run) in l.runs.iter().enumerate() {
+                    let fat = w.place(Some(at), (run.start.0, run.start.1, run.z.0 - base), Some(run.u));
+                    let steps: Vec<(u64, f64, f64)> = (1..run.risers)
+                        .map(|k| {
+                            let k = f64::from(k);
+                            (w.rectangle(P2((k - 0.5) * st.tread, 0.0), P2(st.tread, st.width)), base - run.z.0, run.z.0 - base + k * each)
+                        })
+                        .collect();
+                    let shape = w.bodies(&steps, &[]);
+                    parts.push(w.add(format!(
+                        "IFCSTAIRFLIGHT({},$,'Flight',$,$,#{fat},#{shape},$,{},{},{},{},.STRAIGHT.)",
+                        w.guid(FLIGHT, part(id, i)),
+                        run.risers,
+                        run.risers.saturating_sub(1),
+                        real(each),
+                        real(st.tread)
+                    )));
+                }
+                parts.extend(w.landings(&l, at, base, id));
+                wholes.insert(id, (ent, at, base, parts));
+            }
+            Element::Ramp(r) => {
+                let Some(&(_, storey)) = storeys.get(&r.level) else { continue };
+                let (base, l) = (m.elevation(r.level), stairs::ramp(m, r));
+                let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
+                let ent = w.add(format!("IFCRAMP({},$,'Ramp',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&r.landings, "RAMP")));
+                contained.entry(r.level).or_default().push(ent);
+                // Its flights, each solid from the floor up to its slope, as in 3D; its landings.
+                let mut parts = Vec::new();
+                for (i, run) in l.runs.iter().enumerate() {
+                    let g = run.u * ((run.z.1 - run.z.0) / run.length.max(1e-9));
+                    let top = walls::Plane { z: run.z.0 - g.dot(run.start), g };
+                    let brep = w.prism(&run.ring(r.width), &walls::Plane::flat(base), &top, base);
+                    let shape = w.solid(&[brep], &[]);
+                    let fat = w.place(Some(at), (0.0, 0.0, 0.0), None);
+                    parts
+                        .push(w.add(format!("IFCRAMPFLIGHT({},$,'Flight',$,$,#{fat},#{shape},$,.STRAIGHT.)", w.guid(FLIGHT, part(id, i)))));
+                }
+                parts.extend(w.landings(&l, at, base, id));
+                wholes.insert(id, (ent, at, base, parts));
+            }
+            // On a stair or a ramp, it's one of its parts; see below.
+            Element::Railing(rl) if rl.host.is_none() => {
+                let Some(&(_, storey)) = storeys.get(&rl.level) else { continue };
+                let ent = w.railing(m, id, rl, storey, m.elevation(rl.level), axis);
+                contained.entry(rl.level).or_default().push(ent);
             }
             Element::Roof(r) => {
                 let (Some(&(_, storey)), Ok((pieces, rise))) = (storeys.get(&r.level), m.roof_pieces(r)) else { continue };
@@ -411,6 +525,20 @@ pub fn export(m: &Model) -> String {
             }
             _ => {}
         }
+    }
+    // Railings along stairs and ramps join their parts; each stair and ramp is the sum of its parts.
+    for (&id, e) in &m.elements {
+        if let Element::Railing(rl) = e
+            && let Some((_, at, base, _)) = rl.host.and_then(|h| wholes.get(&h)).cloned()
+        {
+            let ent = w.railing(m, id, rl, at, base, axis);
+            if let Some((_, _, _, parts)) = rl.host.and_then(|h| wholes.get_mut(&h)) {
+                parts.push(ent);
+            }
+        }
+    }
+    for (id, (ent, _, _, parts)) in &wholes {
+        w.add(format!("IFCRELAGGREGATES({},$,$,$,#{ent},({}))", w.guid(PARTS, *id), refs(parts)));
     }
     // A shaft voids each floor, ceiling and roof it passes through: an opening in each, its
     // outline swept up the shaft's whole height.

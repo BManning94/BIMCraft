@@ -15,6 +15,7 @@ pub mod render;
 pub mod sample;
 pub mod schedule;
 pub mod sheet;
+pub mod stairs;
 pub mod step;
 pub mod units;
 pub mod view3d;

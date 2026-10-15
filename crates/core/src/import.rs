@@ -1,7 +1,8 @@
 //! IFC import: an IFC2x3 or IFC4 file, as Revit, other BIM tools and BIMCraft itself write them,
 //! read into a model. Storeys become levels. Walls, straight or curved, and the doors and windows
-//! in them, floors (level or sloped), ceilings, rooms, columns, grids, single straight stairs, and
-//! roofs (flat, or pitched over a rectangle) come in as BIMCraft elements, each measured from its
+//! in them, floors (level or sloped), ceilings, rooms, columns, grids, stairs and ramps of straight
+//! flights with landings between them, railings that have an axis, and roofs (flat, or pitched
+//! over a rectangle) come in as BIMCraft elements, each measured from its
 //! geometry: an extruded profile, a Brep or a triangle mesh alike, so how a file describes an
 //! element doesn't matter. A wall cut to a roof over it comes in attached to it; the openings
 //! through floors, ceilings and roofs, as shafts.
@@ -13,9 +14,10 @@ use std::f64::consts::PI;
 use crate::commands::{micron, next_number};
 use crate::geom::{self, P2};
 use crate::model::{
-    Ceiling, CeilingType, Column, ColumnType, Element, Floor, FloorType, Grid, Id, Level, MAX_TEXT, Model, Opening, OpeningType, Roof,
-    RoofType, Room, Shaft, Stair, TOL, Wall, WallType, culprit,
+    Ceiling, CeilingType, Column, ColumnType, Element, Floor, FloorType, Grid, Id, Landing, Level, MAX_TEXT, Model, Opening, OpeningType,
+    Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
 };
+use crate::stairs;
 use crate::step::{self, Entity, File, V};
 use crate::view3d::{P3, add, cross, dot, mul, sub, unit};
 use crate::walls::{self, Axis, Plane};
@@ -1237,50 +1239,172 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(id);
     }
 
-    // Stairs: one straight flight each, measured from its treads.
+    // Stairs: each flight measured from its treads, a landing between each two and the way the next
+    // one turns there. The railings among a stair's parts come in along it.
+    let mut railings_on: HashMap<u64, Id> = HashMap::new();
     let flights_alone = named(&["IFCSTAIRFLIGHT"]).into_iter().filter(|id| !in_whole(*id, &["IFCSTAIR"]));
     for id in named(&["IFCSTAIR"]).into_iter().filter(|id| !l.whole.contains_key(id)).chain(flights_alone) {
         let parts: Vec<u64> = l.parts.get(&id).cloned().unwrap_or_default();
         seen.insert(id);
         seen.extend(&parts);
-        let flights: Vec<u64> = parts.iter().copied().filter(|p| e(*p).is_some_and(|x| x.name == "IFCSTAIRFLIGHT")).collect();
-        let source = match flights.as_slice() {
-            [] => id,
-            [one] => *one,
-            more => {
-                leave(
-                    &mut skipped,
-                    &mut seen,
-                    id,
-                    &format!("it has {} flights, and BIMCraft's stairs are single straight flights", more.len()),
-                );
+        let of = |name: &str| parts.iter().copied().filter(|p| e(*p).is_some_and(|x| x.name == name)).collect::<Vec<u64>>();
+        let flights = of("IFCSTAIRFLIGHT");
+        let sources = if flights.is_empty() { vec![id] } else { flights };
+        let measured: Result<Vec<Flight>, String> = sources.iter().filter_map(|f| e(*f)).map(|s| stair_from(&r, s, &r.body(s))).collect();
+        let mut fl = match measured {
+            Ok(fl) if !fl.is_empty() => fl,
+            Ok(_) => {
+                leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
+                continue;
+            }
+            Err(why) => {
+                leave(&mut skipped, &mut seen, id, &why);
                 continue;
             }
         };
-        let Some(s) = e(source) else { continue };
-        match stair_from(&r, s, &r.body(s)) {
-            Ok((start, angle, width, risers, rise, run, z0)) => {
-                let level = level_for(id, z0);
-                let (top_level, height) = topped(level, z0, z0 + rise);
-                let height = (height * 1000.0).round() / 1000.0;
-                // Its riser, from the rise the model will measure, so it counts the same risers.
-                let climb = top_level.map_or(height, |t| elevation(t) - elevation(level));
-                let tread = if risers > 1 { run / f64::from(risers - 1) } else { run };
-                let stair = Stair {
-                    level,
-                    top_level,
-                    height,
-                    start: micron(start),
-                    angle,
-                    width: (width * 100.0).round() / 100.0,
-                    riser: climb / f64::from(risers),
-                    tread: (tread * 1000.0).round() / 1000.0,
-                };
-                let sid = m.insert(Element::Stair(stair));
-                from.insert(sid, who(id));
-            }
-            Err(why) => leave(&mut skipped, &mut seen, id, &why),
+        fl.sort_by(|a, b| a.6.total_cmp(&b.6));
+        let tread = |f: &Flight| if f.3 > 1 { f.5 / f64::from(f.3 - 1) } else { f.5 };
+        let Some(&first) = fl.first() else { continue };
+        let (start, angle, width, _, _, _, z0) = first;
+        if fl.iter().any(|f| (f.2 - width).abs() > 1.0 || (tread(f) - tread(&first)).abs() > 1.0) {
+            leave(&mut skipped, &mut seen, id, "its flights aren't all as wide, or their treads as deep");
+            continue;
         }
+        let risers: u32 = fl.iter().map(|f| f.3).sum();
+        let rise: f64 = fl.iter().map(|f| f.4).sum();
+        let mut below = 0;
+        let landings = fl
+            .windows(2)
+            .filter_map(|w| match w {
+                [a, b] => {
+                    below += a.3;
+                    Some(Landing { at: f64::from(below), turn: turn_between((a.0, a.1, a.5), (b.0, b.1)) })
+                }
+                _ => None,
+            })
+            .collect();
+        let level = level_for(id, z0);
+        let (top_level, height) = topped(level, z0, z0 + rise);
+        let height = (height * 1000.0).round() / 1000.0;
+        // Its riser, from the rise the model will measure, so it counts the same risers.
+        let climb = top_level.map_or(height, |t| elevation(t) - elevation(level));
+        let stair = Stair {
+            level,
+            top_level,
+            height,
+            start: micron(start),
+            angle,
+            width: (width * 100.0).round() / 100.0,
+            riser: climb / f64::from(risers),
+            tread: (tread(&first) * 1000.0).round() / 1000.0,
+            landings,
+        };
+        let sid = m.insert(Element::Stair(stair));
+        from.insert(sid, who(id));
+        railings_on.extend(of("IFCRAILING").into_iter().map(|p| (p, sid)));
+    }
+
+    // Ramps: each flight's slope from its top, landings between them as a stair's.
+    for id in named(&["IFCRAMP"]).into_iter().filter(|id| !l.whole.contains_key(id)) {
+        let parts: Vec<u64> = l.parts.get(&id).cloned().unwrap_or_default();
+        seen.insert(id);
+        seen.extend(&parts);
+        let of = |name: &str| parts.iter().copied().filter(|p| e(*p).is_some_and(|x| x.name == name)).collect::<Vec<u64>>();
+        let flights = of("IFCRAMPFLIGHT");
+        let sources = if flights.is_empty() { vec![id] } else { flights };
+        let measured: Result<Vec<RampRun>, String> = sources.iter().filter_map(|f| e(*f)).map(|f| ramp_from(&r, &r.body(f))).collect();
+        let mut fl = match measured {
+            Ok(fl) if !fl.is_empty() => fl,
+            Ok(_) => {
+                leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
+                continue;
+            }
+            Err(why) => {
+                leave(&mut skipped, &mut seen, id, &why);
+                continue;
+            }
+        };
+        fl.sort_by(|a, b| a.5.total_cmp(&b.5));
+        let Some(&(start, angle, width, _, slope, z0)) = fl.first() else { continue };
+        if fl.iter().any(|f| (f.2 - width).abs() > 1.0 || (f.4 - slope).abs() > 0.01) {
+            leave(&mut skipped, &mut seen, id, "its flights aren't all as wide, or as steep");
+            continue;
+        }
+        let up = |f: &RampRun| f.5 + f.3 * f.4 / 100.0 - z0;
+        let landings = fl
+            .windows(2)
+            .filter_map(|w| match w {
+                [a, b] => Some(Landing { at: (up(a) * 1000.0).round() / 1000.0, turn: turn_between((a.0, a.1, a.3), (b.0, b.1)) }),
+                _ => None,
+            })
+            .collect();
+        let rise = fl.last().map_or(0.0, up);
+        let level = level_for(id, z0);
+        let (top_level, height) = topped(level, z0, z0 + rise);
+        let ramp = Ramp {
+            level,
+            top_level,
+            height: (height * 1000.0).round() / 1000.0,
+            start: micron(start),
+            angle,
+            width: (width * 100.0).round() / 100.0,
+            slope: (slope * 1e6).round() / 1e6,
+            landings,
+        };
+        let rid = m.insert(Element::Ramp(ramp));
+        from.insert(rid, who(id));
+        railings_on.extend(of("IFCRAILING").into_iter().map(|p| (p, rid)));
+    }
+
+    // Railings: along their axis, the top of their rail; without one, a straight one along the middle
+    // of its body. One among a stair's or a ramp's parts runs along the side its axis starts nearer.
+    for id in named(&["IFCRAILING"]) {
+        let Some(x) = e(id) else { continue };
+        seen.insert(id);
+        let Some(axis) = r.axis(x).filter(|a| a.len() >= 2).or_else(|| straight(&r, x)) else {
+            leave(&mut skipped, &mut seen, id, "it has no axis for BIMCraft to follow, and it isn't straight");
+            continue;
+        };
+        let first = axis.first().copied().unwrap_or_default();
+        let named = label(id);
+        let railing = match railings_on.get(&id) {
+            Some(&host) => {
+                let level = m.elements.get(&host).and_then(|h| m.level_of(h)).unwrap_or(0);
+                let on = |side| Railing {
+                    type_name: String::new(),
+                    level,
+                    path: Vec::new(),
+                    base_offset: 0.0,
+                    host: Some(host),
+                    side: Some(side),
+                };
+                let start = |side| stairs::railing(&m, &on(side)).first().copied();
+                let side = [Side::Left, Side::Right]
+                    .into_iter()
+                    .filter_map(|side| Some((side, start(side)?)))
+                    .min_by(|a, b| a.1.0.dist(r.flat(first)).total_cmp(&b.1.0.dist(r.flat(first))));
+                let Some((side, (_, z))) = side else { continue };
+                let h = first[2] - z;
+                let base = named.clone().unwrap_or_else(|| format!("Imported - {}mm", num(h)));
+                Railing {
+                    type_name: kind(&mut m.types.railing, &base, |t| (t.height - h).abs() < 0.5, RailingType { height: h, spacing: 0.0 }),
+                    ..on(side)
+                }
+            }
+            None => {
+                let pts: Vec<P3> = r.body(x).into_iter().flatten().collect();
+                let span = span(pts.iter().map(|p| p[2])).map_or(0.0, |(lo, hi)| hi - lo);
+                let h = named.as_ref().and_then(|n| m.types.railing.get(n)).map_or(span, |t| t.height);
+                let base = named.clone().unwrap_or_else(|| format!("Imported - {}mm", num(h)));
+                let type_name = kind(&mut m.types.railing, &base, |t| (t.height - h).abs() < 0.5, RailingType { height: h, spacing: 0.0 });
+                let level = level_for(id, first[2] - h);
+                let path = axis.iter().map(|p| micron(r.flat(*p))).collect();
+                let base_offset = ((first[2] - h - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
+                Railing { type_name, level, path, base_offset, host: None, side: None }
+            }
+        };
+        let rid = m.insert(Element::Railing(railing));
+        from.insert(rid, who(id));
     }
 
     // Doors and windows: where their openings cut their walls.
@@ -1485,8 +1609,72 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofShape, String> {
 }
 
 /// A straight flight: where its first riser's middle is, the way it climbs (degrees), its width,
-/// how many risers, how high they climb, its run, and the height it starts at.
+/// how many risers, how high they climb, its run, and the height its first riser starts from.
 type Flight = (P2, f64, f64, u32, f64, f64, f64);
+
+/// A ramp's straight flight: the middle of its foot, the way it climbs (degrees), its width, its
+/// run, its slope (percent), and the height of its foot.
+type RampRun = (P2, f64, f64, f64, f64, f64);
+
+/// How the run from one flight (its start, the way it climbs in degrees, its length) to the next
+/// (its start and way) turns at the landing between: straight on, left or right, or back to
+/// whichever side it lies on; not a turn BIMCraft makes, not a number.
+fn turn_between((a, along, _): (P2, f64, f64), (b, toward): (P2, f64)) -> f64 {
+    let d = (toward - along).rem_euclid(360.0);
+    let d = if d > 180.0 { d - 360.0 } else { d };
+    match d {
+        d if d.abs() < 1.0 => 0.0,
+        d if (d - 90.0).abs() < 1.0 => 90.0,
+        d if (d + 90.0).abs() < 1.0 => -90.0,
+        d if d.abs() > 179.0 => {
+            if heading(along).cross(b - a) > 0.0 {
+                180.0
+            } else {
+                -180.0
+            }
+        }
+        _ => f64::NAN,
+    }
+}
+
+/// A railing with no axis, straight and thin: the line along the middle of its body, along its
+/// own x or y, at its top.
+fn straight(r: &Reader, x: &Entity) -> Option<Vec<P3>> {
+    let pts: Vec<P3> = r.body(x).into_iter().flatten().collect();
+    let f = r.frame(x);
+    let (_, top) = span(pts.iter().map(|p| p[2]))?;
+    let spread = |u: P2| span(pts.iter().map(|p| P2(p[0], p[1]).dot(u)));
+    let along = [P2(f.x[0], f.x[1]), P2(f.y[0], f.y[1])]
+        .into_iter()
+        .filter(|u| u.length() > 0.5)
+        .map(|u| u.unit())
+        .max_by(|a, b| spread(*a).map_or(0.0, |(lo, hi)| hi - lo).total_cmp(&spread(*b).map_or(0.0, |(lo, hi)| hi - lo)))?;
+    let ((s0, s1), (c0, c1)) = (spread(along)?, spread(along.perp())?);
+    // Thin: no wider than a rail and its balusters could be.
+    (c1 - c0 <= 300.0 && s1 - s0 > TOL).then(|| {
+        let at = |s: f64| {
+            let p = along * s + along.perp() * ((c0 + c1) / 2.0);
+            [p.0, p.1, top]
+        };
+        vec![at(s0), at(s1)]
+    })
+}
+
+/// A ramp's flight, from its sloping top: up its slope, across it, and how steep.
+fn ramp_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RampRun, String> {
+    let (top, ring, _) = top_of(faces).ok_or("its top isn't one flat face BIMCraft can read")?;
+    let tan = top.g.length();
+    if tan < 1e-6 {
+        return Err("its top is level".into());
+    }
+    let (u, n) = (top.g * (1.0 / tan), (top.g * (1.0 / tan)).perp());
+    let (Some((s0, s1)), Some((c0, c1))) = (span(ring.iter().map(|p| p.dot(u))), span(ring.iter().map(|p| p.dot(n)))) else {
+        return Err("it has no body BIMCraft can read".into());
+    };
+    let foot = u * s0 + n * ((c0 + c1) / 2.0);
+    let angle = (u.1.atan2(u.0).to_degrees() * 1e6).round() / 1e6 + 0.0;
+    Ok((r.flat([foot.0, foot.1, 0.0]), angle, c1 - c0, s1 - s0, tan * 100.0, top.at(foot)))
+}
 
 fn stair_from(r: &Reader, s: &Entity, faces: &[Vec<P3>]) -> Result<Flight, String> {
     let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else {
@@ -1526,8 +1714,9 @@ fn stair_from(r: &Reader, s: &Entity, faces: &[Vec<P3>]) -> Result<Flight, Strin
         return Err("it has no body BIMCraft can read".into());
     };
     let start = u * s0 + n * ((c0 + c1) / 2.0);
-    let angle = (u.1.atan2(u.0).to_degrees() * 1e6).round() / 1e6;
-    Ok((start, angle, c1 - c0, risers, each * f64::from(risers), s1 - s0, z0))
+    let angle = (u.1.atan2(u.0).to_degrees() * 1e6).round() / 1e6 + 0.0;
+    let from = treads.first().map_or(z0, |(z, _)| z - each);
+    Ok((start, angle, c1 - c0, risers, each * f64::from(risers), s1 - s0, from))
 }
 
 #[cfg(test)]

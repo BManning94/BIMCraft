@@ -19,13 +19,13 @@ use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder,
 
 use crate::geom::{self, P2};
 use crate::model::{
-    CEILING_CUT, Ceiling, DimKind, Dimension, Element, Floor, Function, Id, Model, Note, Opening, PlanRange, Roof, Section, Shaft, Stair,
-    TOL, Tag, Wall, heading,
+    CEILING_CUT, Ceiling, DimKind, Dimension, Element, Floor, Function, Id, Model, Note, Opening, PlanRange, Railing, Ramp, Roof, Section,
+    Shaft, Stair, TOL, Tag, Wall,
 };
 use crate::units::Units;
 use crate::view3d::{self, Camera, Clip, Image, Scene};
 use crate::walls::{self, Axis};
-use crate::{font, sheet};
+use crate::{font, sheet, stairs};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -382,9 +382,14 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
             Element::Dimension(dm) if dm.level == level => extent.push(dm.at),
             Element::Section(v) | Element::Elevation(v) => extent.extend([v.start, v.end]),
             Element::Tag(t) if m.level_of(e) == Some(level) => extent.extend(m.anchor(t.host).map(|a| a + t.offset)),
-            Element::Stair(st) if st.level == level || st.top_level == Some(level) => {
-                extent.extend([st.start, st.start + heading(st.angle) * m.flight(st).2]);
+            Element::Stair(Stair { level: l, top_level: t, .. }) | Element::Ramp(Ramp { level: l, top_level: t, .. })
+                if *l == level || *t == Some(level) =>
+            {
+                if let Some(l) = stairs::layout(m, e) {
+                    extent.extend(l.runs.iter().flat_map(|r| r.ring(l.width)).chain(l.pads.into_iter().flat_map(|p| p.ring)));
+                }
             }
+            Element::Railing(rl) if m.level_of(e) == Some(level) => extent.extend(stairs::railing(m, rl).into_iter().map(|(p, _)| p)),
             Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(&r.boundary),
             Element::Text(n) if n.view == level => extent.extend([Some(n.at), n.leader].into_iter().flatten()),
             Element::Spot(sp) if sp.view == level => extent.push(sp.at),
@@ -407,6 +412,8 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
         Element::Elevation(v) => elevation_mark(&mut d, v),
         Element::Column(col) => d.line(&m.column_outline(col), 2.0, INK, true),
         Element::Stair(st) => stair(&mut d, m, st, st.level),
+        Element::Ramp(r) => ramp(&mut d, m, r, r.level),
+        Element::Railing(rl) => d.line(&stairs::railing(m, rl).into_iter().map(|(p, _)| p).collect::<Vec<_>>(), 1.5, INK, false),
         Element::Roof(r) => roof(&mut d, m, r),
         _ => {}
     }
@@ -742,6 +749,8 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             }
             _ if up => {}
             Element::Stair(st) => stair(&mut d, m, st, level),
+            Element::Ramp(r) => ramp(&mut d, m, r, level),
+            Element::Railing(rl) if m.level_of(e) == Some(level) => railing(&mut d, m, rl, range.cut),
             Element::Roof(r) if r.level == level => roof(&mut d, m, r),
             // Overhead, from below: its edge, dashed, while its eaves are under the view range's top.
             Element::Roof(r) => {
@@ -965,41 +974,108 @@ fn opening(d: &mut Drawing, m: &Model, e: &Element, o: &Opening, w: &Wall, cut: 
 }
 
 /// A stair in the plan of `level`. From its own level: its risers up to the cut plane, a cut line
-/// across the run, the rest dashed, and its walk line marked UP. From the level it climbs to: all
-/// of it, and the walk line marked DN.
+/// across the run there, the rest (and the landings over the cut plane) dashed, and its walk line
+/// marked UP. From the level it climbs to: all of it, and the walk line marked DN.
 fn stair(d: &mut Drawing, m: &Model, st: &Stair, level: Id) {
     let up = st.level == level;
     if !up && st.top_level != Some(level) {
         return;
     }
-    let (n, each, length) = m.flight(st);
-    let (u, half) = (heading(st.angle), st.width / 2.0);
-    let at = |along: f64, across: f64| st.start + u * along + u.perp() * across;
-    // The riser the cut plane passes through, from its own level; from above, none.
+    let (_, each, _) = m.flight(st);
+    let l = stairs::stair(m, st);
+    let half = st.width / 2.0;
+    // The riser the cut plane passes through, counted from the first; from above, none.
     let rise = m.plan_range(level).cut - m.elevation(st.level);
     let cut = if up && each > 0.0 { (rise / each).floor() } else { f64::INFINITY };
-    let seg = |d: &mut Drawing, a: P2, b: P2, past: bool| {
-        let pts = vec![d.view.px(a), d.view.px(b)];
-        d.push(Prim::Line { pts, width: 1.0, color: INK, dash: past.then_some([6.0, 4.0]), closed: false });
-    };
-    for k in 0..n {
-        let k = f64::from(k);
-        seg(d, at(k * st.tread, -half), at(k * st.tread, half), k > cut);
+    // Risers below the run drawn.
+    let mut below = 0.0;
+    for run in &l.runs {
+        let at = |along: f64, across: f64| run.start + run.u * along + run.u.perp() * across;
+        for k in 0..run.risers {
+            let k = f64::from(k);
+            segment(d, at(k * st.tread, -half), at(k * st.tread, half), below + k > cut);
+        }
+        let line = ((cut - below + 0.5) * st.tread).clamp(0.0, run.length);
+        for side in [-half, half] {
+            if line > 0.0 {
+                segment(d, at(0.0, side), at(line, side), false);
+            }
+            if line < run.length {
+                segment(d, at(line, side), at(run.length, side), true);
+            }
+        }
+        if cut >= below && line < run.length {
+            d.line(&[at(line - 0.4 * st.tread, -half), at(line + 0.4 * st.tread, half)], 1.0, INK, false);
+        }
+        below += f64::from(run.risers);
     }
-    let line = ((cut + 0.5) * st.tread).min(length);
-    for side in [-half, half] {
-        seg(d, at(0.0, side), at(line, side), false);
-        seg(d, at(line, side), at(length, side), true);
+    for pad in &l.pads {
+        let over = up && pad.z - m.elevation(st.level) > rise;
+        for (a, b) in geom::ring_edges(&pad.ring) {
+            segment(d, a, b, over);
+        }
     }
-    if line < length {
-        d.line(&[at(line - 0.4 * st.tread, -half), at(line + 0.4 * st.tread, half)], 1.0, INK, false);
+    walk(d, m, &l.walk, up);
+}
+
+/// A ramp in the plan of `level`: from its own level, its runs' and landings' outlines, dashed
+/// where they're over the cut plane, and its walk line marked UP; from the level it climbs to, all
+/// of it, marked DN.
+fn ramp(d: &mut Drawing, m: &Model, r: &Ramp, level: Id) {
+    let up = r.level == level;
+    if !up && r.top_level != Some(level) {
+        return;
     }
-    // The walk line up the middle, its arrow at the top; from above, the other way.
-    let (from, to, label) = if up { (at(0.0, 0.0), at(length, 0.0), "UP") } else { (at(length, 0.0), at(0.0, 0.0), "DN") };
-    let label = m.language.word(label);
-    d.line(&[from, to], 1.0, INK, false);
-    let (a, b) = (d.view.px(from), d.view.px(to));
-    let (x, y) = arrow(d, a, b);
+    let l = stairs::ramp(m, r);
+    let cut = if up { m.plan_range(level).cut } else { f64::INFINITY };
+    let rings = l.runs.iter().map(|run| (run.ring(r.width), run.z.0)).chain(l.pads.iter().map(|p| (p.ring.clone(), p.z)));
+    for (ring, z) in rings {
+        for (a, b) in geom::ring_edges(&ring) {
+            segment(d, a, b, z > cut);
+        }
+    }
+    walk(d, m, &l.walk, up);
+}
+
+/// A railing in a plan cutting at height `cut`: its line, solid where what it runs along is under
+/// the cut plane, dashed over it.
+fn railing(d: &mut Drawing, m: &Model, rl: &Railing, cut: f64) {
+    for w in stairs::railing(m, rl).windows(2) {
+        let &[(a, za), (b, zb)] = w else { continue };
+        let parts = if (za > cut) != (zb > cut) {
+            let mid = a + (b - a) * ((cut - za) / (zb - za));
+            vec![(a, mid, za > cut), (mid, b, zb > cut)]
+        } else {
+            vec![(a, b, za > cut)]
+        };
+        for (p, q, over) in parts {
+            let pts = vec![d.view.px(p), d.view.px(q)];
+            d.push(Prim::Line { pts, width: 1.5, color: INK, dash: over.then_some([6.0, 4.0]), closed: false });
+        }
+    }
+}
+
+/// A line from `a` to `b`, one pixel wide; dashed, `over`.
+fn segment(d: &mut Drawing, a: P2, b: P2, over: bool) {
+    let pts = vec![d.view.px(a), d.view.px(b)];
+    d.push(Prim::Line { pts, width: 1.0, color: INK, dash: over.then_some([6.0, 4.0]), closed: false });
+}
+
+/// A stair's or a ramp's walk line, its arrow at the top, marked UP at its foot; from above, the
+/// other way, marked DN.
+fn walk(d: &mut Drawing, m: &Model, line: &[(P2, f64)], up: bool) {
+    let mut pts: Vec<P2> = line.iter().map(|(p, _)| *p).collect();
+    pts.dedup_by(|a, b| a.dist(*b) < 1e-6);
+    if !up {
+        pts.reverse();
+    }
+    let (Some(&first), Some(&second), [.., before, last]) = (pts.first(), pts.get(1), pts.as_slice()) else { return };
+    let label = m.language.word(if up { "UP" } else { "DN" });
+    d.line(&pts, 1.0, INK, false);
+    arrow(d, d.view.px(*before), d.view.px(*last));
+    let (a, b) = (d.view.px(first), d.view.px(second));
+    let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-3);
+    let (x, y) = ((b.0 - a.0) / len, (b.1 - a.1) / len);
     // Before the walk line's start, clear of it however long the word is.
     let back = font::width(label, 9.0) / 2.0 * x.abs() + 5.0 * y.abs() + 8.0;
     d.text(label, (a.0 - x * back, a.1 - y * back), 9.0, INK);
@@ -1769,6 +1845,32 @@ mod tests {
         s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}").unwrap();
         let view = section_fit(&s.model, 12, 800, 600);
         assert_eq!(section(&s.model, 12, view).pick(view.px(P2(5000.0, 2610.0)), 2.0), Some(11));
+    }
+
+    #[test]
+    fn plans_draw_stairs_that_turn_ramps_and_railings() {
+        let mut s = house();
+        // A stair (11) turning right at a landing and its railings (12, 13); a ramp (14) turning back
+        // at a landing; a railing (15) along a path.
+        s.script(
+            r#"stair {"start": [1000, 1000], "angle": 90, "landings": [{"at": 8, "turn": -90}]}
+               railing {"host": 11}
+               ramp {"start": [-6000, -3000], "angle": 0, "height": 600, "landings": [{"at": 300, "turn": 180}]}
+               railing {"path": [[0, 7000], [4000, 7000]]}"#,
+        )
+        .unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        let at = |x, y| d.view.px(P2(x, y));
+        assert_eq!(d.pick(at(2340.0, 3200.0), 2.0), Some(11), "a riser of the run past the landing");
+        assert_eq!(d.pick(at(550.0, 2000.0), 1.0), Some(12), "the left railing, in from the stair's edge");
+        assert_eq!(d.pick(at(-4200.0, -3600.0), 2.0), Some(14), "the ramp's edge");
+        assert_eq!(d.pick(at(2000.0, 7000.0), 2.0), Some(15));
+        let drawn = |d: &Drawing, id, f: &dyn Fn(&Prim) -> bool| d.prims.iter().zip(&d.owners).any(|(p, o)| *o == Some(id) && f(p));
+        let arrow = |p: &Prim| matches!(p, Prim::Fill { color, .. } if *color == INK);
+        assert!(drawn(&d, 11, &arrow) && drawn(&d, 14, &arrow), "walk lines ending in arrows");
+        assert!(drawn(&d, 11, &|p| matches!(p, Prim::Line { dash: Some(_), .. })), "above the cut plane, dashed");
+        let up = plan(&s.model, 2, 800, 600);
+        assert!(up.owners.contains(&Some(11)) && !up.owners.contains(&Some(14)), "from above: the stair, not the ramp");
     }
 
     #[test]

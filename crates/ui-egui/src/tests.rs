@@ -874,15 +874,77 @@ fn stairs_start_where_clicked_and_climb_toward_the_second_click() {
     type_into(&mut h, "Width:", "1200");
     click(&mut h, P2(1000.0, 1000.0));
     assert!(ids(&h, "stair").is_empty(), "the first click starts it");
-    click(&mut h, P2(1000.0, 2000.0));
+    // Past the end of a run of all its risers: one straight run.
+    click(&mut h, P2(1000.0, 6000.0));
     let st = ids(&h, "stair");
     assert_eq!((st.len(), field(&h, st[0], "angle"), field(&h, st[0], "width")), (1, json!(90.0), json!(1200.0)));
     assert_eq!(
-        (field(&h, st[0], "risers"), field(&h, st[0], "top_level")),
-        (json!(17), json!(2)),
+        (field(&h, st[0], "risers"), field(&h, st[0], "top_level"), field(&h, st[0], "landings")),
+        (json!(17), json!(2), Value::Null),
         "up to Level 2, in risers of 180 at most"
     );
-    assert_eq!(h.state().tool, Tool::Stair(None), "ready for the next one");
+    assert_eq!(ids(&h, "railing").len(), 2, "with its railings, as the Options Bar says");
+    assert_eq!(h.state().tool, Tool::Stair(Vec::new()), "ready for the next one");
+}
+
+#[test]
+fn a_stair_run_ends_where_clicked_and_the_next_turns_toward_the_third_click() {
+    let mut h = app(BOX);
+    tool(&mut h, "Stair");
+    press(&mut h, "Railings");
+    // 7 treads north: 8 risers, 9 to go; then to the right of the landing.
+    click(&mut h, P2(1000.0, 1000.0));
+    click(&mut h, P2(1000.0, 2960.0));
+    assert!(ids(&h, "stair").is_empty(), "risers are left: the next run waits");
+    click(&mut h, P2(3000.0, 3500.0));
+    let st = ids(&h, "stair");
+    assert_eq!((st.len(), field(&h, st[0], "landings")), (1, json!([{"at": 8.0, "turn": -90.0}])));
+    assert!(ids(&h, "railing").is_empty(), "Railings off");
+}
+
+#[test]
+fn ramps_climb_at_the_options_bars_slope_and_turn_at_landings() {
+    let mut h = app(BOX);
+    tool(&mut h, "Ramp");
+    assert!(h.query_by_label("Modify | Create Ramp").is_some());
+    h.get_by_role_and_label(Role::ComboBox, "Height:").click();
+    h.run();
+    press(&mut h, "Unconnected");
+    h.get_by_role_and_label(Role::TextInput, "Height:").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by_role_and_label(Role::TextInput, "Height:").type_text("600");
+    h.run();
+    type_into(&mut h, "Slope:", "10");
+    // 360 mm up its first run, 3.6 m at 10%; then back beside it, to its left.
+    click(&mut h, P2(1000.0, 1000.0));
+    click(&mut h, P2(4600.0, 1000.0));
+    assert!(ids(&h, "ramp").is_empty());
+    click(&mut h, P2(1000.0, 2200.0));
+    let r = ids(&h, "ramp");
+    assert_eq!((r.len(), field(&h, r[0], "height"), field(&h, r[0], "length")), (1, json!(600.0), json!(6000.0)));
+    assert_eq!(field(&h, r[0], "landings"), json!([{"at": 360.0, "turn": 180.0}]));
+    assert_eq!(ids(&h, "railing").len(), 2, "with its railings");
+}
+
+#[test]
+fn the_railing_tool_follows_a_stair_picked_or_a_path_clicked() {
+    let mut h = app(&format!("{BOX}\nstair {{\"start\": [1000, 1000], \"end\": [1000, 2000]}}"));
+    let stair = ids(&h, "stair")[0];
+    tool(&mut h, "Railing");
+    assert!(h.query_by_label("Modify | Create Railing Path").is_some());
+    // The stair picked: a railing down each side.
+    click(&mut h, P2(1000.0, 3000.0));
+    let on: Vec<Id> = ids(&h, "railing");
+    assert_eq!(on.len(), 2);
+    assert!(on.iter().all(|r| field(&h, *r, "host") == json!(stair)));
+    // A path clicked away from it, then Enter: one railing along it, on the plan's level.
+    click(&mut h, P2(4000.0, 4000.0));
+    click(&mut h, P2(7000.0, 4000.0));
+    click(&mut h, P2(7000.0, 5500.0));
+    key(&mut h, Key::Enter);
+    let path = ids(&h, "railing")[2];
+    assert_eq!(field(&h, path, "path"), json!([[4000.0, 4000.0], [7000.0, 4000.0], [7000.0, 5500.0]]));
 }
 
 #[test]
@@ -1176,7 +1238,7 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             missed.extend(english(&h, l));
         }
         // A wall's Properties and its contextual tab; a door's; the tools' Options Bars.
-        let tools = ["Wall", "Roof", "Floor", "Ceiling", "Shaft"].map(|t| (P2(0.0, 0.0), Some(t)));
+        let tools = ["Wall", "Roof", "Floor", "Ceiling", "Shaft", "Stair", "Ramp", "Railing"].map(|t| (P2(0.0, 0.0), Some(t)));
         for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None)].into_iter().chain(tools) {
             key(&mut h, Key::Escape);
             if let Some(tool) = tool {

@@ -196,6 +196,8 @@ pub enum Icon {
     Ceiling,
     Shaft,
     SlopeArrow,
+    Ramp,
+    Railing,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -501,6 +503,21 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(2.0, 18.0), (22.0, 9.0), (22.0, 12.0), (2.0, 21.0)]),
             line(&[(5.0, 12.5), (18.0, 6.5)]),
             line(&[(14.2, 5.6), (18.0, 6.5), (16.0, 9.8)]),
+        ],
+        // A wedge climbing to the right, an arrow up it.
+        Icon::Ramp => vec![
+            ring(&[(2.0, 20.0), (22.0, 20.0), (22.0, 10.0)]),
+            line(&[(6.0, 14.5), (16.0, 9.5)]),
+            line(&[(12.6, 8.9), (16.0, 9.5), (14.4, 12.6)]),
+        ],
+        // A rail over balusters, on the floor.
+        Icon::Railing => vec![
+            line(&[(2.0, 7.0), (22.0, 7.0)]),
+            line(&[(4.0, 7.0), (4.0, 20.0)]),
+            line(&[(9.3, 7.0), (9.3, 20.0)]),
+            line(&[(14.7, 7.0), (14.7, 20.0)]),
+            line(&[(20.0, 7.0), (20.0, 20.0)]),
+            line(&[(2.0, 20.0), (22.0, 20.0)]),
         ],
         // Two crop marks, at opposite corners.
         Icon::Crop => vec![line(&[(6.0, 2.0), (6.0, 18.0), (22.0, 18.0)]), line(&[(2.0, 6.0), (18.0, 6.0), (18.0, 22.0)])],

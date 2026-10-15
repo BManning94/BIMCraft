@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{CEILING_HEIGHT, Element, Id, Location, Model, Reference, STAIR_WIDTH, heading};
-use bimcraft_core::schedule;
+use bimcraft_core::model::{CEILING_HEIGHT, Element, Id, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
 use bimcraft_core::units::Units;
+use bimcraft_core::{schedule, stairs};
 use egui::containers::menu::{MenuButton, SubMenuButton};
 use egui::{
     Align, Align2, Area, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, CornerRadius, Event, FontId, Frame, Grid, Id as UiId,
@@ -109,8 +109,14 @@ pub enum Tool {
     Elevation,
     /// A column where clicked.
     Column,
-    /// A stair: where it starts, once clicked; the next click says which way it climbs.
-    Stair(Option<P2>),
+    /// A stair: the points clicked, its start and where its first run ends; the next click, which
+    /// way its next run turns from the landing.
+    Stair(Vec<P2>),
+    /// A ramp, clicked as a stair is.
+    Ramp(Vec<P2>),
+    /// A railing's path, as clicked so far; with none, a click on a stair or a ramp puts one down
+    /// each side.
+    Railing(Vec<P2>),
     /// A roof over the walls of the plan's level, on the level above: Revit's Roof by Footprint,
     /// with every wall picked at once.
     Roof,
@@ -217,6 +223,12 @@ pub struct BimApp {
     roof_slope: String,
     roof_overhang: String,
     roof_gable: bool,
+    /// Stairs and ramps made with a railing down each side; the Ramp tool's top, width and slope.
+    railings: bool,
+    ramp_top: Option<Option<Id>>,
+    ramp_height: String,
+    ramp_width: String,
+    ramp_slope: String,
     /// How high the Ceiling tool's ceilings are; the Slope Arrow's slope; the Shaft tool's top.
     ceiling_height: String,
     floor_slope: String,
@@ -449,6 +461,11 @@ impl BimApp {
             roof_slope: "30".into(),
             roof_overhang: units.length(500.0),
             roof_gable: false,
+            railings: true,
+            ramp_top: Some(None),
+            ramp_height: units.length(600.0),
+            ramp_width: units.length(RAMP_WIDTH),
+            ramp_slope: "8.33".into(),
             ceiling_height: units.length(CEILING_HEIGHT),
             floor_slope: "5".into(),
             shaft_top: None,
@@ -543,6 +560,8 @@ impl BimApp {
             Tool::Elevation => Some("Elevation"),
             Tool::Column => Some("Place Column"),
             Tool::Stair(_) => Some("Create Stair"),
+            Tool::Ramp(_) => Some("Create Ramp"),
+            Tool::Railing(_) => Some("Create Railing Path"),
             Tool::Roof => Some("Create Roof Footprint"),
             Tool::Floor => Some("Create Floor"),
             Tool::Ceiling => Some("Place Ceiling"),
@@ -674,6 +693,8 @@ impl BimApp {
                 &mut self.roof_overhang,
                 &mut self.offset,
                 &mut self.ceiling_height,
+                &mut self.ramp_height,
+                &mut self.ramp_width,
                 &mut self.shaft_height,
             ];
             for field in fields {
@@ -736,7 +757,11 @@ impl BimApp {
         if pressed(Modifiers::NONE, Key::Enter)
             && let Some(level) = self.plan_level()
         {
-            if self.typed_length.is_empty() { self.finish_wall(level, false) } else { self.place_typed(level) }
+            match (&self.tool, self.typed_length.is_empty()) {
+                (Tool::Railing(_), true) => self.finish_railing(level),
+                (_, true) => self.finish_wall(level, false),
+                (_, false) => self.place_typed(level),
+            }
         }
         if !self.typed_length.is_empty() && pressed(Modifiers::NONE, Key::Backspace) {
             self.typed_length.pop();
@@ -917,7 +942,10 @@ impl BimApp {
                 Some(Element::Section(v) | Element::Elevation(v)) => pts.extend([v.start, v.end]),
                 Some(Element::Tag(t)) => pts.extend(m.anchor(t.host).map(|a| a + t.offset)),
                 Some(Element::Column(c)) => pts.push(c.at),
-                Some(Element::Stair(st)) => pts.extend([st.start, st.start + heading(st.angle) * m.flight(st).2]),
+                Some(e @ (Element::Stair(_) | Element::Ramp(_))) => {
+                    pts.extend(stairs::layout(m, e).into_iter().flat_map(|l| l.walk.into_iter().map(|(p, _)| p)));
+                }
+                Some(Element::Railing(rl)) => pts.extend(stairs::railing(m, rl).into_iter().map(|(p, _)| p)),
                 Some(Element::Roof(r)) => pts.extend(&r.boundary),
                 _ => {}
             }
@@ -932,6 +960,7 @@ impl BimApp {
         match &self.tool {
             Tool::Wall(chain) => chain.last().copied(),
             Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::SlopeArrow(start) => *start,
+            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) => pts.last().copied(),
             _ => None,
         }
     }
@@ -960,7 +989,9 @@ impl BimApp {
             Tool::Angular(refs) if !refs.is_empty() => Tool::Angular(Vec::new()),
             Tool::Radial(Some(_)) => Tool::Radial(None),
             Tool::Section(Some(_)) => Tool::Section(None),
-            Tool::Stair(Some(_)) => Tool::Stair(None),
+            Tool::Stair(pts) if !pts.is_empty() => Tool::Stair(Vec::new()),
+            Tool::Ramp(pts) if !pts.is_empty() => Tool::Ramp(Vec::new()),
+            Tool::Railing(pts) if !pts.is_empty() => Tool::Railing(Vec::new()),
             Tool::Shaft(Some(_)) => Tool::Shaft(None),
             Tool::SlopeArrow(Some(_)) => Tool::SlopeArrow(None),
             Tool::Modify => {
@@ -1009,7 +1040,8 @@ impl BimApp {
             Tool::Grid(start) => *start = None,
             Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
             Tool::Radial(r) => *r = None,
-            Tool::Section(start) | Tool::Stair(start) | Tool::Shaft(start) => *start = None,
+            Tool::Section(start) | Tool::Shaft(start) => *start = None,
+            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) => pts.clear(),
             Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) => self.tool = Tool::Modify,
             _ => {}
         }
@@ -1305,7 +1337,21 @@ impl BimApp {
         self.tools(
             ui,
             "Circulation",
-            &[(Icon::Stair, "Stair", "Stair: click where it starts, then which way it climbs", Tool::Stair(None))],
+            &[
+                (
+                    Icon::Stair,
+                    "Stair",
+                    "Stair: click where it starts, then where its run ends; a landing turns it",
+                    Tool::Stair(Vec::new()),
+                ),
+                (Icon::Ramp, "Ramp", "Ramp: click where it starts, then where its run ends; a landing turns it", Tool::Ramp(Vec::new())),
+                (
+                    Icon::Railing,
+                    "Railing",
+                    "Railing: click a stair or a ramp for one down each side, or click a path and press Enter",
+                    Tool::Railing(Vec::new()),
+                ),
+            ],
         );
         self.tools(ui, "Room & Area", &[(Icon::Room, "Room", "Room (RM): click inside walls", Tool::Room)]);
         self.tools(
@@ -1660,6 +1706,18 @@ impl BimApp {
                     let l = ui.label(t("Width:"));
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.stair_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    ui.checkbox(&mut self.railings, t("Railings"));
+                }
+                Tool::Ramp(_) => {
+                    if let Some(level) = self.plan_level() {
+                        height_options(ui, &self.session.model, level, &mut self.ramp_top, &mut self.ramp_height, "ramp-top");
+                    }
+                    let hint = self.session.model.units.name();
+                    let l = ui.label(t("Width:"));
+                    ui.add(TextEdit::singleline(&mut self.ramp_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
+                    let l = ui.label(t("Slope:"));
+                    ui.add(TextEdit::singleline(&mut self.ramp_slope).desired_width(48.0).hint_text("%")).labelled_by(l.id);
+                    ui.checkbox(&mut self.railings, t("Railings"));
                 }
                 Tool::Roof => {
                     let l = ui.label(t("Slope:"));
@@ -1831,8 +1889,17 @@ impl BimApp {
             Tool::Section(Some(_)) => "Click the section's end.",
             Tool::Elevation => "Click beside the building: the elevation looks at the side you click by.",
             Tool::Column => "Click to place a column, as high as the Options Bar says.",
-            Tool::Stair(None) => "Click where the stair starts: the middle of its first riser.",
-            Tool::Stair(Some(_)) => "Click which way it climbs: its risers take it up to the level above. Esc cancels.",
+            Tool::Stair(pts) if pts.is_empty() => "Click where the stair starts: the middle of its first riser.",
+            Tool::Stair(pts) if pts.len() == 1 => {
+                "Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels."
+            }
+            Tool::Ramp(pts) if pts.is_empty() => "Click where the ramp starts: the middle of its foot.",
+            Tool::Ramp(pts) if pts.len() == 1 => {
+                "Click where its run ends: past its top, one run, as high as the Options Bar says; short of it, a landing. Esc cancels."
+            }
+            Tool::Stair(_) | Tool::Ramp(_) => "Click which way the next run goes from the landing: on, left, right, or back beside it.",
+            Tool::Railing(pts) if pts.is_empty() => "Click a stair or a ramp for a railing down each side, or the start of a path.",
+            Tool::Railing(_) => "Click the path's next point. Enter finishes, Esc cancels.",
             Tool::Roof => "Click inside the walls to roof them, on the level above: the overhang runs past their faces.",
             Tool::Floor => "Click inside the walls to floor them: the slab runs under their outline, its top at the level.",
             Tool::Ceiling => "Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says.",

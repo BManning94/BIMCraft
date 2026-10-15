@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 
 use crate::geom::{self, P2};
-use crate::model::{Element, Id, Model, heading};
+use crate::model::{Element, Id, Model};
 use crate::render::{PAPER, Rgb};
+use crate::stairs;
 use crate::walls::{self, Axis, Plane};
 
 /// A model point in mm: x east, y north, z up.
@@ -29,6 +30,7 @@ const DOOR: Rgb = Rgb(198, 168, 128);
 const GLASS: Rgb = Rgb(166, 200, 228);
 const ROOF: Rgb = Rgb(176, 118, 96);
 const CEILING: Rgb = Rgb(244, 242, 236);
+const RAIL: Rgb = Rgb(120, 122, 128);
 /// Room around a fitted model, px.
 const MARGIN: f64 = 30.0;
 
@@ -281,17 +283,39 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
             Element::Column(col) => {
                 out.push(slab(id, WALL, &m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height)))
             }
-            // Each tread a block from the floor up to it; the last riser climbs to the floor above.
+            // Each tread a block from the floor up to it, each landing a slab up to its top; the last
+            // riser of a run climbs onto a landing, or the floor above.
             Element::Stair(st) => {
-                let (n, each, _) = m.flight(st);
-                let (base, u) = (m.elevation(st.level), heading(st.angle));
-                let frame = Frame { o: st.start, u, n: u.perp() };
-                for k in 1..n {
-                    let k = f64::from(k);
-                    let (a, c) = (((k - 1.0) * st.tread, k * st.tread), (-st.width / 2.0, st.width / 2.0));
-                    out.push(Solid::Box { owner: id, color: SLAB, frame, a, c, z: (base, base + k * each) });
+                let (_, each, _) = m.flight(st);
+                let (base, l) = (m.elevation(st.level), stairs::stair(m, st));
+                for run in &l.runs {
+                    let frame = Frame { o: run.start, u: run.u, n: run.u.perp() };
+                    for k in 1..run.risers {
+                        let k = f64::from(k);
+                        let (a, c) = (((k - 1.0) * st.tread, k * st.tread), (-st.width / 2.0, st.width / 2.0));
+                        out.push(Solid::Box { owner: id, color: SLAB, frame, a, c, z: (base, run.z.0 + k * each) });
+                    }
                 }
+                out.extend(l.pads.iter().map(|p| slab(id, SLAB, &p.ring, (base, p.z))));
             }
+            // Each run solid from its level up to its slope, each landing up to its top.
+            Element::Ramp(r) => {
+                let (base, l) = (m.elevation(r.level), stairs::ramp(m, r));
+                for run in &l.runs {
+                    let g = run.u * ((run.z.1 - run.z.0) / run.length.max(1e-9));
+                    let top = Plane { z: run.z.0 - g.dot(run.start), g };
+                    out.push(Solid::Prism { owner: id, color: SLAB, ring: run.ring(r.width), bottom: Plane::flat(base), top, curve: None });
+                }
+                out.extend(l.pads.iter().map(|p| slab(id, SLAB, &p.ring, (base, p.z))));
+            }
+            Element::Railing(rl) => out.extend(stairs::railing_parts(m, rl).into_iter().map(|(ring, bottom, top)| Solid::Prism {
+                owner: id,
+                color: RAIL,
+                ring,
+                bottom,
+                top,
+                curve: None,
+            })),
             Element::Roof(r) => {
                 if let Ok((pieces, rise)) = m.roof_pieces(r) {
                     for face in pieces {
