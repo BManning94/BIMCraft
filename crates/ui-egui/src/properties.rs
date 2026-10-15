@@ -16,8 +16,9 @@ use egui::{
 };
 use serde_json::{Value, json};
 
+use crate::lang::{self, t, tf};
 use crate::style::{self, Icon, pal};
-use crate::{BimApp, Sheet, Status, Tool, plural, title};
+use crate::{BimApp, Sheet, Status, Tool};
 
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -266,20 +267,20 @@ fn shown(kind: Kind, v: &Value, units: Units) -> String {
 
 /// What was typed into a field of `kind`, as the value `modify` takes: lengths in `units`.
 fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
-    let length = |t: &str| units.parse(t).ok_or_else(|| format!("`{}` is not a length", t.trim()));
+    let length = |typed: &str| units.parse(typed).ok_or_else(|| tf("`{}` is not a length", &[typed.trim()]));
     match kind {
-        Number => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number")),
+        Number => number(s).map(|x| json!(x)).ok_or_else(|| tf("`{}` is not a number", &[s])),
         Length | Height => length(s).map(|x| json!(x)),
         Limit if s.trim().is_empty() => Ok(Value::Null),
         Limit => length(s).map(|x| json!(x)),
         // Lengths with feet and inches hold spaces: a comma parts x from y.
         Point => match s.split(',').collect::<Vec<_>>()[..] {
             [x, y] => Ok(json!([length(x)?, length(y)?])),
-            _ => Err(format!("`{s}` is not a point; type x, y")),
+            _ => Err(tf("`{}` is not a point; type x, y", &[s])),
         },
         PaperPoint => match s.split([',', ' ']).filter(|t| !t.trim().is_empty()).collect::<Vec<_>>()[..] {
             [x, y] if number(x).is_some() && number(y).is_some() => Ok(json!([number(x), number(y)])),
-            _ => Err(format!("`{s}` is not a point; type x, y in mm")),
+            _ => Err(tf("`{}` is not a point; type x, y in mm", &[s])),
         },
         _ => Ok(json!(s)),
     }
@@ -354,7 +355,7 @@ impl TypeDialog {
     fn params(&self, name: &str, units: Units) -> Result<Value, String> {
         let mut p = json!({"category": self.category, "name": name});
         for (key, label, typed) in &self.fields {
-            p[*key] = json!(units.parse(typed).ok_or_else(|| format!("{label}: `{typed}` is not a length"))?);
+            p[*key] = json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t(label), typed]))?);
         }
         Ok(p)
     }
@@ -433,21 +434,21 @@ impl BimApp {
         self.type_selector(ui, &model, subject);
         let (filter, ids, rows) = match subject {
             Subject::Element(id) => match model.elements.get(&id) {
-                Some(e) => (format!("{} (1)", plural(e.category())), vec![id], rows(e.category())),
+                Some(e) => (format!("{} (1)", lang::category(e.category(), true)), vec![id], rows(e.category())),
                 None => return,
             },
             Subject::Elements(category) => {
-                (format!("{} ({})", plural(category), self.selection.len()), self.selection.clone(), rows(category))
+                (format!("{} ({})", lang::category(category, true), self.selection.len()), self.selection.clone(), rows(category))
             }
-            Subject::Mixed(n) => (format!("Multiple Categories ({n})"), Vec::new(), &[][..]),
-            Subject::New(category) => (format!("New {}", plural(category)), Vec::new(), &[][..]),
+            Subject::Mixed(n) => (tf("Multiple Categories ({})", &[&n.to_string()]), Vec::new(), &[][..]),
+            Subject::New(category) => (tf("New {}", &[&lang::category(category, true)]), Vec::new(), &[][..]),
             Subject::Plan(level) => (self.view_title(Sheet::Plan(level)), vec![level], PLAN),
             Subject::View3D | Subject::Schedule => (self.view_title(self.sheet), Vec::new(), &[][..]),
         };
         ui.horizontal(|ui| {
             ui.label(filter);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add_enabled(self.type_subject().is_some(), Button::new("Edit Type")).clicked() {
+                if ui.add_enabled(self.type_subject().is_some(), Button::new(t("Edit Type"))).clicked() {
                     self.edit_type();
                 }
             });
@@ -466,7 +467,7 @@ impl BimApp {
         ui.add_space(8.0);
         // Fields commit on Enter or when they lose the keyboard, which a click here does.
         ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-            let _ = ui.button("Apply");
+            let _ = ui.button(t("Apply"));
         });
     }
 
@@ -490,7 +491,7 @@ impl BimApp {
         let names: Vec<String> = model.type_names(category).into_iter().map(String::from).collect();
         let enabled = !names.is_empty();
         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), if enabled { Sense::click() } else { Sense::hover() });
-        r.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, enabled, "Type Selector"));
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, enabled, t("Type Selector")));
         let p = ui.painter();
         p.rect(
             rect,
@@ -504,10 +505,10 @@ impl BimApp {
         style::paint(p, icon(category), swatch.shrink(8.0), pal().icon);
         let x = swatch.right() + 10.0;
         let family = match subject {
-            Subject::Plan(_) => "Floor Plan".to_string(),
-            Subject::View3D => "3D View".to_string(),
-            Subject::Mixed(_) => "Multiple Categories".to_string(),
-            _ => title(category),
+            Subject::Plan(_) => t("Floor Plan").to_string(),
+            Subject::View3D => t("3D View").to_string(),
+            Subject::Mixed(_) => t("Multiple Categories").to_string(),
+            _ => lang::category(category, false),
         };
         let first = if current.is_some() { rect.top() + 16.0 } else { rect.center().y };
         p.text(egui::pos2(x, first), Align2::LEFT_CENTER, family, FontId::proportional(13.0), pal().text);
@@ -572,7 +573,7 @@ impl BimApp {
         let paper = matches!(model.elements.get(&id), Some(Element::Text(n)) if model.sheet(n.view).is_some());
         for group in groups {
             let open = !self.collapsed.contains(group);
-            if group_header(ui, group, open) && !self.collapsed.remove(group) {
+            if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
                 self.collapsed.insert(group);
             }
             if !open {
@@ -587,6 +588,7 @@ impl BimApp {
                             Point if paper => PaperPoint,
                             kind => kind,
                         };
+                        let label = t(label);
                         let name = ui.label(label);
                         match kind {
                             Shown => {
@@ -625,15 +627,15 @@ impl BimApp {
                                 }
                             }
                             TopLevel => {
-                                const NONE: &str = "Unconnected";
-                                let options: Vec<String> = std::iter::once(NONE.to_string()).chain(levels.iter().cloned()).collect();
-                                let current = if val.is_null() { NONE.to_string() } else { level_name(val) };
+                                let none = t("Unconnected");
+                                let options: Vec<String> = std::iter::once(none.to_string()).chain(levels.iter().cloned()).collect();
+                                let current = if val.is_null() { none.to_string() } else { level_name(val) };
                                 if let Some(l) = combo(ui, (id, key), &current, &options) {
-                                    change = Some((key, Ok(if l == NONE { Value::Null } else { json!(l) })));
+                                    change = Some((key, Ok(if l == none { Value::Null } else { json!(l) })));
                                 }
                             }
                             Text | Number | Length | Point | PaperPoint | Height | Limit => {
-                                let hint = if kind == Limit { "Level Above" } else { "" };
+                                let hint = if kind == Limit { t("Level Above") } else { "" };
                                 if let Some(typed) = self.field(ui, id, key, shown(kind, val, units), name.id, hint) {
                                     change = Some((key, parse(kind, &typed, units)));
                                 }
@@ -645,7 +647,7 @@ impl BimApp {
             });
         }
         if ids.len() == 1 && v["enclosed"] == json!(false) {
-            ui.label(RichText::new("Not enclosed: the walls around it don't close.").color(pal().error));
+            ui.label(RichText::new(t("Not enclosed: the walls around it don't close.")).color(pal().error));
         }
         // A view's crop: on to all it shows, or off.
         if let (Some(on), &[view]) = (crop, ids) {
@@ -694,13 +696,13 @@ impl BimApp {
         let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
         let r = Modal::new(UiId::new("type-properties")).show(ctx, |ui| {
             ui.set_width(400.0);
-            ui.label(RichText::new("Type Properties").heading());
+            ui.label(RichText::new(t("Type Properties")).heading());
             ui.add_space(6.0);
             Grid::new("type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
-                ui.label("Family:");
-                ui.label(title(d.category));
+                ui.label(t("Family:"));
+                ui.label(lang::category(d.category, false));
                 ui.end_row();
-                let l = ui.label("Type:");
+                let l = ui.label(t("Type:"));
                 ui.horizontal(|ui| {
                     let c = ComboBox::from_id_salt("type-name").selected_text(&d.name).width(200.0).show_ui(ui, |ui| {
                         for n in &names {
@@ -710,37 +712,37 @@ impl BimApp {
                         }
                     });
                     c.response.labelled_by(l.id);
-                    if d.duplicate.is_none() && ui.button("Duplicate…").clicked() {
+                    if d.duplicate.is_none() && ui.button(t("Duplicate…")).clicked() {
                         d.duplicate = Some(format!("{} 2", d.name));
                     }
                 });
                 ui.end_row();
                 if let Some(new) = &mut d.duplicate {
-                    let l = ui.label("New type");
+                    let l = ui.label(t("New type"));
                     ui.horizontal(|ui| {
                         ui.add(TextEdit::singleline(new).desired_width(200.0)).labelled_by(l.id);
-                        create = ui.button("Create").clicked();
+                        create = ui.button(t("Create")).clicked();
                     });
                     ui.end_row();
                 }
             });
             ui.add_space(6.0);
-            ui.label(RichText::new("Type Parameters").strong());
+            ui.label(RichText::new(t("Type Parameters")).strong());
             Grid::new("type-parameters").num_columns(2).striped(true).min_col_width(150.0).show(ui, |ui| {
-                ui.label(RichText::new("Parameter").color(pal().muted));
-                ui.label(RichText::new("Value").color(pal().muted));
+                ui.label(RichText::new(t("Parameter")).color(pal().muted));
+                ui.label(RichText::new(t("Value")).color(pal().muted));
                 ui.end_row();
                 for (_, label, typed) in &mut d.fields {
-                    let l = ui.label(*label);
+                    let l = ui.label(t(label));
                     ui.add(TextEdit::singleline(typed).desired_width(160.0)).labelled_by(l.id);
                     ui.end_row();
                 }
             });
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                apply = ui.button("Apply").clicked();
-                cancel = ui.button("Cancel").clicked();
-                ok = ui.button("OK").clicked();
+                apply = ui.button(t("Apply")).clicked();
+                cancel = ui.button(t("Cancel")).clicked();
+                ok = ui.button(t("OK")).clicked();
             });
         });
         if let Some(n) = switch {

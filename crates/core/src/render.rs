@@ -615,7 +615,7 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
             }
             Element::Room(r) if r.level == level && inside(r.point) => {
                 let area = m.room_region(r).map_or_else(
-                    || "NOT ENCLOSED".to_string(),
+                    || m.language.word("NOT ENCLOSED").to_string(),
                     |g| {
                         let (area, unit) = m.units.area(g.area());
                         format!("{area:.2} {unit}")
@@ -815,10 +815,13 @@ fn stair(d: &mut Drawing, m: &Model, st: &Stair, level: Id) {
     }
     // The walk line up the middle, its arrow at the top; from above, the other way.
     let (from, to, label) = if up { (at(0.0, 0.0), at(length, 0.0), "UP") } else { (at(length, 0.0), at(0.0, 0.0), "DN") };
+    let label = m.language.word(label);
     d.line(&[from, to], 1.0, INK, false);
     let (a, b) = (d.view.px(from), d.view.px(to));
     let (x, y) = arrow(d, a, b);
-    d.text(label, (a.0 - x * 14.0, a.1 - y * 14.0), 9.0, INK);
+    // Before the walk line's start, clear of it however long the word is.
+    let back = font::width(label, 9.0) / 2.0 * x.abs() + 5.0 * y.abs() + 8.0;
+    d.text(label, (a.0 - x * back, a.1 - y * back), 9.0, INK);
 }
 
 /// An arrowhead at pixel `b`, pointing from `a`; the way it points, on screen.

@@ -11,6 +11,7 @@ use std::f64::consts::{PI, TAU};
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{self, P2, Region};
+use crate::language::Language;
 use crate::units::Units;
 
 pub type Id = u64;
@@ -391,8 +392,9 @@ impl Facing {
         }
     }
 
+    /// A side by its name, in English or in Portuguese.
     pub fn parse(s: &str) -> Option<Facing> {
-        Facing::ALL.into_iter().find(|f| f.name().eq_ignore_ascii_case(s.trim()))
+        Facing::ALL.into_iter().find(|f| Language::Portuguese.find(s, &[f.name()]).is_some())
     }
 
     /// Out of the building, toward its side.
@@ -551,6 +553,9 @@ pub struct Model {
     /// How lengths and areas are shown and typed; the model itself is in millimetres.
     #[serde(default)]
     pub units: Units,
+    /// What its drawings say, and the names commands give.
+    #[serde(default)]
+    pub language: Language,
     pub next_id: Id,
     pub types: Types,
     pub elements: BTreeMap<Id, Element>,
@@ -559,10 +564,16 @@ pub struct Model {
 impl Model {
     /// An empty project with two levels and a few types to start from.
     pub fn new(name: &str) -> Model {
+        Model::new_in(name, Language::English)
+    }
+
+    /// An empty project in `language`: its two levels named in it.
+    pub fn new_in(name: &str, language: Language) -> Model {
         let mut m = Model {
             name: name.into(),
             uid: fresh_uid(),
             units: Units::default(),
+            language,
             next_id: 1,
             types: Types::default(),
             elements: BTreeMap::new(),
@@ -580,8 +591,9 @@ impl Model {
         m.types.column.insert("Rectangular 400 x 400".into(), ColumnType { width: 400.0, depth: 400.0, round: false });
         m.types.column.insert("Round 300".into(), ColumnType { width: 300.0, depth: 300.0, round: true });
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0 });
-        m.insert(Element::Level(Level::new("Level 1", 0.0)));
-        m.insert(Element::Level(Level::new("Level 2", 3000.0)));
+        let level = language.word("Level");
+        m.insert(Element::Level(Level::new(format!("{level} 1"), 0.0)));
+        m.insert(Element::Level(Level::new(format!("{level} 2"), 3000.0)));
         m
     }
 

@@ -18,6 +18,7 @@ use egui::{
 };
 use serde_json::{Value, json};
 
+use crate::lang::{t, tf};
 use crate::properties::number;
 use crate::style::{Icon, pal};
 use crate::{BimApp, Sheet, Status, Tool, icon_button, top_params};
@@ -826,7 +827,7 @@ impl BimApp {
                     let p = typed(self, "column", p);
                     self.run("column", p);
                 }
-                Err(e) => self.status = Status { text: format!("column: {e}"), error: true },
+                Err(e) => self.status = Status { text: tf("column: {}", &[&e]), error: true },
             },
             &Tool::Stair(start) => {
                 let p = snap(m, level, v, at, start.as_slice(), mods.shift);
@@ -836,7 +837,7 @@ impl BimApp {
                         self.run("stair", json!({"start": point(a), "end": point(p), "level": level, "width": width}));
                         self.tool = Tool::Stair(None);
                     }
-                    (Some(_), None) => self.status = Status { text: format!("stair: `{}` is not a width", self.stair_width), error: true },
+                    (Some(_), None) => self.status = Status { text: tf("stair: `{}` is not a width", &[&self.stair_width]), error: true },
                     (Some(_), Some(_)) => {}
                 }
             }
@@ -851,7 +852,7 @@ impl BimApp {
                     }
                 }
                 _ => {
-                    let text = format!("roof: the slope `{}` and the overhang `{}` must be numbers", self.roof_slope, self.roof_overhang);
+                    let text = tf("roof: the slope `{}` and the overhang `{}` must be numbers", &[&self.roof_slope, &self.roof_overhang]);
                     self.status = Status { text, error: true };
                 }
             },
@@ -862,7 +863,7 @@ impl BimApp {
     /// view `view` (a plan's level, a section, an elevation or a sheet).
     pub(crate) fn write_note(&mut self, view: Id, at: P2) {
         if self.note_text.trim().is_empty() {
-            self.status = Status { text: "text: type what the note says in the Options Bar first".into(), error: true };
+            self.status = Status { text: t("text: type what the note says in the Options Bar first").into(), error: true };
             return;
         }
         // `\n` typed in the bar breaks the line.
@@ -899,7 +900,7 @@ impl BimApp {
     /// Align's second pick: element `id` moved across so its `line` lies on the reference line.
     fn align(&mut self, reference: (P2, P2), id: Id, line: (P2, P2)) {
         if !geom::parallel(reference.0, reference.1, line.0, line.1) {
-            self.status = Status { text: "align: the lines aren't parallel".into(), error: true };
+            self.status = Status { text: t("align: the lines aren't parallel").into(), error: true };
             return;
         }
         let n = (reference.1 - reference.0).unit().perp();
@@ -915,7 +916,7 @@ impl BimApp {
     fn offset_by(&mut self, m: &Model, id: Id, p: P2) -> Option<P2> {
         let w = m.wall(id)?;
         let Some(d) = m.units.parse(&self.offset).filter(|d| *d > 0.0) else {
-            self.status = Status { text: format!("offset: `{}` is not a distance", self.offset), error: true };
+            self.status = Status { text: tf("offset: `{}` is not a distance", &[&self.offset]), error: true };
             return None;
         };
         let n = (w.end - w.start).unit().perp();
@@ -988,7 +989,7 @@ impl BimApp {
         let (Some(base), Some(cursor)) = (self.base(), self.canvas.cursor) else { return };
         match self.session.model.units.parse(&typed) {
             Some(len) if len > 0.0 => self.place(level, micron(base + snap_angle(cursor - base) * len)),
-            _ => self.status = Status { text: format!("`{}` is not a length", typed.trim()), error: true },
+            _ => self.status = Status { text: tf("`{}` is not a length", &[typed.trim()]), error: true },
         }
     }
 
@@ -1008,7 +1009,7 @@ impl BimApp {
             Ok(Value::Object(top)) => p.as_object_mut().into_iter().for_each(|p| p.extend(top.clone())),
             Ok(_) => {}
             Err(e) => {
-                self.status = Status { text: format!("wall: {e}"), error: true };
+                self.status = Status { text: tf("wall: {}", &[&e]), error: true };
                 return;
             }
         }
@@ -1057,7 +1058,7 @@ impl BimApp {
             }
             _ => {
                 let r = ui.interact(at, field.with("number"), Sense::click());
-                r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, format!("Temporary dimension {text}")));
+                r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Temporary dimension {}", &[&text])));
                 p.rect_filled(at, 2.0, pal().surface);
                 p.text(at.center(), Align2::CENTER_CENTER, &text, font, if r.hovered() { pal().hover } else { pal().accent });
                 start = r.clicked();
@@ -1075,7 +1076,7 @@ impl BimApp {
                         self.run("move", json!({"ids": [id], "by": point(by), "end": "end"}));
                     }
                 }
-                Some((_, t)) => self.status = Status { text: format!("`{}` is not a length", t.trim()), error: true },
+                Some((_, typed)) => self.status = Status { text: tf("`{}` is not a length", &[typed.trim()]), error: true },
                 None => {}
             }
         }

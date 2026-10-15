@@ -9,6 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
+use crate::language::Language;
 use crate::model::{
     Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType, Grid, Id, Level, Line, MAX_COORD,
     MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule,
@@ -30,7 +31,13 @@ const fn other(id: &'static str, label: &'static str, params: &'static str, run:
 }
 
 pub static ALL: &[Command] = &[
-    other("new", "New", "{name?} an empty project with Level 1 (0) and Level 2 (3000)", new),
+    other(
+        "new",
+        "New",
+        "{name?, language?: en|pt} an empty project with Level 1 (0) and Level 2 (3000), named in its language (Nível 1, Nível 2 \
+         in Portuguese)",
+        new,
+    ),
     other("open", "Open", "{path} a .bimcraft project", open),
     other(
         "save",
@@ -256,6 +263,15 @@ pub static ALL: &[Command] = &[
          millimetres, centimetres, metres, fractional inches, decimal feet, or feet and fractional inches (to 1/16\"); areas \
          in m², or ft² with inches and feet. The model, and every command, keep millimetres",
         units,
+    ),
+    edit(
+        "language",
+        "Project Language",
+        &[],
+        "{code?: en|pt} the language the project's drawings speak (a stair's UP, a title block's SCALE, a schedule's \
+         headings) and new names come in (levels, sections, elevations, sheets, rooms, schedules): English or Brazilian \
+         Portuguese. What's already named stays named",
+        language,
     ),
     other("inspect", "Inspect", "{} levels, element counts, types, warnings and undo history", inspect),
     other(
@@ -601,9 +617,29 @@ fn ext(p: &Path) -> String {
 }
 
 fn new(s: &mut Session, p: &Value) -> R {
-    let name = string("new", p, "name")?.unwrap_or_else(|| "Project".into());
-    s.reset(Model::new(&name), None);
-    Ok(json!({"name": name}))
+    let c = "new";
+    let language = match string(c, p, "language")? {
+        Some(code) => language_param(c, &code)?,
+        None => Language::English,
+    };
+    let name = string(c, p, "name")?.unwrap_or_else(|| language.word("Project").into());
+    s.reset(Model::new_in(&name, language), None);
+    Ok(json!({"name": name, "language": language.code()}))
+}
+
+fn language_param(c: &str, code: &str) -> Result<Language, String> {
+    Language::from_code(code).ok_or_else(|| bad(c, format!("`{code}` is no language here; there are en (English) and pt (Português)")))
+}
+
+fn language(s: &mut Session, p: &Value) -> R {
+    let c = "language";
+    if let Some(code) = string(c, p, "code")? {
+        let l = language_param(c, &code)?;
+        if l != s.model.language {
+            s.model_mut().language = l;
+        }
+    }
+    Ok(json!({"language": s.model.language.code()}))
 }
 
 fn open(s: &mut Session, p: &Value) -> R {
@@ -800,7 +836,10 @@ fn level(s: &mut Session, p: &Value) -> R {
     let taken: BTreeSet<&str> = m.levels().into_iter().map(|(_, l)| l.name.as_str()).collect();
     let name = match string(c, p, "name")? {
         Some(n) => n,
-        None => (taken.len() + 1..).map(|n| format!("Level {n}")).find(|n| !taken.contains(n.as_str())).unwrap_or_default(),
+        None => {
+            let level = m.language.word("Level");
+            (taken.len() + 1..).map(|n| format!("{level} {n}")).find(|n| !taken.contains(n.as_str())).unwrap_or_default()
+        }
     };
     let id = s.model_mut().insert(Element::Level(Level::new(name.clone(), elevation)));
     Ok(json!({"id": id, "name": name}))
@@ -928,7 +967,7 @@ fn room(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let point = point_req(c, p, "point")?;
     let level = level_param(c, m, p, "level")?;
-    let name = string(c, p, "name")?.unwrap_or_else(|| "Room".into());
+    let name = string(c, p, "name")?.unwrap_or_else(|| m.language.word("Room").into());
     let number = match string(c, p, "number")? {
         Some(n) => n,
         None => next_number(m.elements.values().filter_map(|e| match e {
@@ -1206,7 +1245,7 @@ fn section(s: &mut Session, p: &Value) -> R {
     let (start, end, depth) = (point_req(c, p, "start")?, point_req(c, p, "end")?, num(c, p, "depth")?);
     let name = match string(c, p, "name")? {
         Some(n) => n,
-        None => s.model.free_view_name("Section", true),
+        None => s.model.free_view_name(s.model.language.word("Section"), true),
     };
     let id = s.model_mut().insert(Element::Section(Section { name: name.clone(), start, end, depth, crop: None }));
     Ok(json!({"id": id, "name": name}))
@@ -1222,13 +1261,14 @@ fn elevation(s: &mut Session, p: &Value) -> R {
     };
     let nothing = || bad(c, "there are no walls or floors to look at; draw some, or give `start` and `end`");
     let lines: Vec<(String, P2, P2)> = match (point_opt(c, p, "start")?, point_opt(c, p, "end")?) {
-        (Some(a), Some(b)) => vec![(name.unwrap_or_else(|| m.free_view_name("Elevation", true)), a, b)],
+        (Some(a), Some(b)) => vec![(name.unwrap_or_else(|| m.free_view_name(m.language.word("Elevation"), true)), a, b)],
         (None, None) => {
             let sides = match (facing, at) {
                 (Some(f), _) => vec![f],
                 (None, Some(q)) => vec![m.facing_from(q).ok_or_else(nothing)?],
                 (None, None) => {
-                    let there = |f: &Facing| m.elements.values().any(|e| matches!(e, Element::Elevation(v) if v.name == f.name()));
+                    let there =
+                        |f: &Facing| m.elements.values().any(|e| matches!(e, Element::Elevation(v) if v.name == m.language.word(f.name())));
                     let missing: Vec<Facing> = Facing::ALL.into_iter().filter(|f| !there(f)).collect();
                     if missing.is_empty() {
                         return Err(bad(c, "the four building elevations are there already"));
@@ -1239,7 +1279,7 @@ fn elevation(s: &mut Session, p: &Value) -> R {
             let mut lines = Vec::new();
             for f in sides {
                 let (a, b) = m.elevation_line(f, at).ok_or_else(nothing)?;
-                lines.push((name.clone().unwrap_or_else(|| m.free_view_name(f.name(), false)), a, b));
+                lines.push((name.clone().unwrap_or_else(|| m.free_view_name(m.language.word(f.name()), false)), a, b));
             }
             lines
         }
@@ -1355,7 +1395,7 @@ fn new_sheet(s: &mut Session, p: &Value) -> R {
             (101..).map(|n| format!("A{n}")).find(|n| !taken.contains(n.as_str())).unwrap_or_default()
         }
     };
-    let name = string(c, p, "name")?.unwrap_or_else(|| "Unnamed".into());
+    let name = string(c, p, "name")?.unwrap_or_else(|| m.language.word("Unnamed").into());
     let size = string(c, p, "size")?.map_or_else(|| "A3".into(), |z| z.trim().to_ascii_uppercase());
     let id = s.model_mut().insert(Element::Sheet(Sheet { number: number.clone(), name, size }));
     Ok(json!({"id": id, "number": number}))
@@ -1378,18 +1418,27 @@ fn place(s: &mut Session, p: &Value) -> R {
     let view = match p.get("view") {
         Some(Value::String(n)) => match m.elements.keys().find(|id| m.view_name(**id) == Some(n.as_str())) {
             Some(id) => *id,
-            // A schedule, or the 3D view, comes to be as it's first placed.
+            // A schedule, or the 3D view, comes to be as it's first placed: a schedule by its name in
+            // English or in the project's language, named in the latter.
             None => {
-                let made = match schedule::VIEWS.iter().find(|(_, name)| name == n) {
-                    Some((category, name)) => Element::Schedule(Schedule { name: name.to_string(), of: category.to_string() }),
-                    None if n == "{3D}" => Element::View3D(View3D {
+                let names: Vec<&'static str> = schedule::VIEWS.iter().map(|(_, name)| *name).collect();
+                let builtin = m.language.find(n, &names).and_then(|name| schedule::VIEWS.iter().find(|(_, v)| *v == name));
+                let existing = builtin.and_then(|(of, _)| {
+                    m.elements.iter().find_map(|(id, e)| matches!(e, Element::Schedule(sc) if sc.of == *of).then_some(*id))
+                });
+                match (builtin, existing) {
+                    (_, Some(id)) => id,
+                    (Some((of, name)), None) => {
+                        let name = m.language.word(name).to_string();
+                        s.model_mut().insert(Element::Schedule(Schedule { name, of: of.to_string() }))
+                    }
+                    (None, _) if n == "{3D}" => s.model_mut().insert(Element::View3D(View3D {
                         name: n.clone(),
                         azimuth: num(c, p, "azimuth")?.unwrap_or(view3d::AZIMUTH),
                         elevation: num(c, p, "elevation")?.unwrap_or(view3d::ELEVATION),
-                    }),
-                    None => return Err(bad(c, format!("no level, section, elevation, schedule or 3D view named `{n}`"))),
-                };
-                s.model_mut().insert(made)
+                    })),
+                    (None, _) => return Err(bad(c, format!("no level, section, elevation, schedule or 3D view named `{n}`"))),
+                }
             }
         },
         Some(v) => v
@@ -1756,8 +1805,8 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
         let door = matches!(e, Element::Door(_));
         match &mut e {
             Element::Grid(g) => g.name = next_grid_name(m),
-            Element::Section(v) => v.name = m.free_view_name("Section", true),
-            Element::Elevation(v) => v.name = m.free_view_name("Elevation", true),
+            Element::Section(v) => v.name = m.free_view_name(m.language.word("Section"), true),
+            Element::Elevation(v) => v.name = m.free_view_name(m.language.word("Elevation"), true),
             Element::Room(r) => {
                 r.number = next_number(m.elements.values().filter_map(|e| match e {
                     Element::Room(r) => Some(r.number.as_str()),
@@ -2027,7 +2076,8 @@ fn inspect(s: &mut Session, _: &Value) -> R {
         })
         .collect();
     Ok(json!({
-        "name": m.name, "units": "mm", "project_units": m.units.name(), "path": s.path, "levels": levels, "counts": counts,
+        "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
+        "counts": counts,
         "types": m.types, "warnings": warnings, "history": s.history(),
     }))
 }

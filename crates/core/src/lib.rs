@@ -8,6 +8,7 @@ mod font;
 pub mod geom;
 pub mod ifc;
 pub mod import;
+pub mod language;
 pub mod model;
 pub mod pdf;
 pub mod render;

@@ -155,7 +155,8 @@ impl BimApp {
         match clicked {
             Some(found) if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
             Some(_) => {
-                self.status = Status { text: "this tool works in plan views: open one from the Project Browser".into(), error: true }
+                self.status =
+                    Status { text: crate::lang::t("this tool works in plan views: open one from the Project Browser").into(), error: true }
             }
             None => {}
         }

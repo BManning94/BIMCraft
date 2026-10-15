@@ -55,7 +55,12 @@ cargo test --workspace
 
 Millimetres; x east, y north, z up. A project's units (`Model::units`, `units.rs`) change only what's shown and typed:
 drawings, schedules and the desktop format lengths with `Units::length` and areas with `Units::area`, and read typed
-lengths with `Units::parse`; files, JSON and every command stay in millimetres. Levels have elevations, and a level is its plan: its view range (`Model::plan_range`)
+lengths with `Units::parse`; files, JSON and every command stay in millimetres. A project's language (`Model::language`,
+`language.rs`) is what its drawings print and what new names come in: the core passes the English word through
+`Language::word`. The desktop's own words go through `lang::t` and `lang::tf`, so a new label needs its Portuguese in
+`crates/ui-egui/src/lang.rs`; `nothing_the_portuguese_interface_shows_is_left_in_english` catches a label the table knows
+that the window forgot to translate. The core's messages stay English, because agents read them.
+Levels have elevations, and a level is its plan: its view range (`Model::plan_range`)
 cuts 1200 mm above it unless set, and its crop region bounds what the plan shows. Rooms find their walls at 1200 mm whatever
 a plan cuts (`Model::bounding`). In a section or an elevation, points run along its line from its start, and up; on a sheet,
 they're paper mm from its bottom left corner; notes and spot elevations live in those terms in their view. Wall location

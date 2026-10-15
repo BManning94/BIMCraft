@@ -492,6 +492,9 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"length": 5}),
         json!({"length": "parsecs"}),
         json!({"length": "ft-in", "width": "10'"}),
+        json!({"code": 5}),
+        json!({"code": "klingon"}),
+        json!({"language": "xx", "name": ""}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -1206,4 +1209,31 @@ fn project_units_change_what_is_shown_not_the_model() {
     run(&mut t, "open", json!({"path": path}));
     assert_eq!(run(&mut t, "inspect", json!({}))["project_units"], "m");
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_project_in_portuguese_names_what_it_makes_in_portuguese() {
+    let mut s = Session::new();
+    run(&mut s, "new", json!({"name": "Casa", "language": "pt"}));
+    let i = run(&mut s, "inspect", json!({}));
+    assert_eq!((i["levels"][0]["name"].clone(), i["language"].clone()), (json!("Nível 1"), json!("pt")));
+    house(&mut s);
+    assert_eq!(run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["name"], "Corte 1");
+    let ids = run(&mut s, "elevation", json!({}))["ids"].clone();
+    let names: Vec<Value> = ids.as_array().unwrap().iter().map(|id| element(&mut s, id.as_u64().unwrap())["name"].clone()).collect();
+    assert_eq!(names, ["Norte", "Sul", "Leste", "Oeste"]);
+    let room = run(&mut s, "room", json!({"point": [4000, 3000]}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, room)["name"], "Ambiente");
+    let sheet = run(&mut s, "sheet", json!({}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, sheet)["name"], "Sem nome");
+    // A schedule placed by its name in either language is named in the project's.
+    let vp = run(&mut s, "place", json!({"sheet": "A101", "view": "Room Schedule"}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, vp)["title"], "Tabela de ambientes");
+    run(&mut s, "sheet", json!({}));
+    assert!(s.execute("place", &json!({"sheet": "A102", "view": "Tabela de ambientes"})).unwrap_err().contains("A101"));
+    // What's named stays named; what comes next follows the language.
+    run(&mut s, "language", json!({"code": "en"}));
+    assert_eq!(run(&mut s, "level", json!({"elevation": 6000}))["name"], "Level 3");
+    assert_eq!(element(&mut s, room)["name"], "Ambiente");
+    assert!(s.execute("language", &json!({"code": "klingon"})).unwrap_err().contains("pt"));
 }

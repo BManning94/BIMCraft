@@ -101,10 +101,11 @@ BIMCraft is in early, fast development. Honest status:
 | Sheets | ISO A0 to A4, landscape, with a title block (project, sheet name and number, scale); plans, sections, elevations and the 3D view placed on them at a scale and titled, schedules as ruled tables, text notes on the paper, a view on one sheet; PNG, and PDF: one sheet, or every sheet a page |
 | Schedules | Rooms, doors, windows, walls, floors and levels; CSV; on sheets |
 | Units | Lengths shown and typed in millimetres, centimetres, metres, fractional inches, decimal feet, or feet and fractional inches (to 1/16"), areas in m² or ft², in drawings, schedules and the desktop alike; a length typed with its own unit (`10' 6 1/2"`, `3 m`) reads as that. The model, files and every command keep millimetres |
+| Languages | English or Brazilian Portuguese, for the desktop and for each project: a project's language names what commands make (levels, sections, elevations, rooms, schedules) and is what its drawings print (SOBE and DESCE on stairs, ESCALA in the title block, schedule headings); what's already named stays. Commands' messages stay English, for agents |
 | IFC import | IFC2x3 and IFC4 files, as Revit and other BIM tools write them: storeys, straight walls with their doors and windows, floors, rooms, columns, grids, single straight stairs, and roofs flat or pitched over a rectangle, each measured from its geometry, whether the file extrudes a profile, writes a Brep or a triangle mesh; walls that nearly meet are joined; a model at map coordinates is moved near the origin; what can't come in is listed, with why |
 | Files | `.bimcraft` projects (JSON); IFC4 export with storeys, swept-solid walls, slabs, spaces, columns and stairs, roofs as closed shells of flat faces, and openings that cut the walls and hold the doors and windows (dimensions, tags, notes and spot elevations belong to views, and stay out of it) |
 | Agents | MCP server, scripts, and every command callable with JSON |
-| Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan per level that pans and zooms, sections and elevations, a 3D view that orbits, and sheets; tools for walls, doors, windows, columns, roofs, stairs, rooms, levels, grids, dimensions (aligned, angular, radial), spot elevations, text, tags, sections and elevations; Crop View with grips to drag a crop region's edges, and the view range in Properties; project units, metric or feet and inches; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner); typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme |
+| Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan per level that pans and zooms, sections and elevations, a 3D view that orbits, and sheets; tools for walls, doors, windows, columns, roofs, stairs, rooms, levels, grids, dimensions (aligned, angular, radial), spot elevations, text, tags, sections and elevations; Crop View with grips to drag a crop region's edges, and the view range in Properties; project units, metric or feet and inches; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner); typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme; English or Portuguese |
 
 The IFC4 export is checked with [IfcOpenShell](https://ifcopenshell.org) 0.9: the sample house has no schema or EXPRESS rule
 errors, every element builds its geometry, and the walls' volumes (with the openings cut out) and the roof's match a hand
@@ -192,6 +193,7 @@ switches.
 | Move around | The wheel zooms at the cursor, the middle button pans, the navigation bar or ZF zooms to fit; TL toggles Thin Lines |
 | Go dark | View > Dark Mode: the window, plans, sections and the 3D view go dark; sheets stay white paper |
 | Units | Manage > Project Units (UN): millimetres, centimetres, metres, inches, feet, or feet and inches. Dimensions, spot elevations, room areas, schedules, Properties and the Options Bar follow; fields read what's typed in those units, or in the unit typed with it, and so do lengths typed while drawing |
+| Language | View > User Interface > Language: English or Português (Brasil); the window starts in the system's language. Manage > Project Language: the language the project's drawings print, and that new levels, views, sheets and rooms are named in. A new project takes the window's |
 | Undo, redo | Ctrl+Z, Ctrl+Y, or the Quick Access Toolbar |
 | Files | Ctrl+N, Ctrl+O, Ctrl+S; Open takes IFC files too, and a note says what came in and what was left out; the File tab saves, and exports IFC, the sheets as PDF, and the view on screen as PNG (or a plan as SVG) |
 
@@ -249,6 +251,7 @@ changes nothing.
 | `crop` | | `view`, `region?` (two corners: plan mm, or along a section and up), or `null` to uncrop; none: to what the view shows |
 | `level` | LL | `elevation`, `name?` |
 | `units` | UN | `length?` (`mm`, `cm`, `m`, `in`, `ft` or `ft-in`): how lengths show in drawings, schedules and the desktop; commands keep mm |
+| `language` | | `code?` (`en` or `pt`): the language the project's drawings print and new names come in; names already given stay |
 | `grid` | GR | `start`, `end`, `name?` |
 | `type` | | `category`, `name`, and its sizes: creates the type, or edits it everywhere it's used |
 | `modify` | | `id` (or `ids`, several in one step) and the fields to change; into a field that is an object, such as a level's `view_range` (`top`, `cut`, `bottom`, `depth`), they merge |
@@ -261,7 +264,7 @@ changes nothing.
 | `delete` | DE | `ids` |
 | `undo`, `redo` | | |
 | `inspect`, `elements`, `schedule`, `render` | | read the model |
-| `new`, `open`, `save` | | projects; `open` imports IFC, listing what it left out; `save` exports by extension |
+| `new`, `open`, `save` | | projects; `new` takes `name?` and `language?`; `open` imports IFC, listing what it left out; `save` exports by extension |
 
 A `level` can be given by name or id; without one, commands use the lowest level. `render {view}` draws a plan, a section or
 an elevation by name, a sheet by number (a path ending .pdf prints it), or with `{3D}` (and `azimuth?`, `elevation?`) the 3D
@@ -281,6 +284,7 @@ crates/core            bimcraft-core: everything but the front ends; no UI
   sheet.rs, pdf.rs     sheets: the title block, the views on them at their scales, schedules as tables, notes; PDF
   schedule.rs, ifc.rs  schedules and CSV; IFC4 export
   units.rs             project units: lengths and areas as drawings and the desktop show them, typed lengths read
+  language.rs          a project's language: the words its drawings print, the names commands give
   step.rs, import.rs   ISO 10303-21 files read; IFC import, every element measured from its geometry
 crates/ui-egui         bimcraft-ui-egui: the desktop front end, a thin shell over the session
   lib.rs               the window: Quick Access Toolbar, ribbon tabs, Options Bar, browser, view tabs, status bar, files
@@ -289,6 +293,7 @@ crates/ui-egui         bimcraft-ui-egui: the desktop front end, a thin shell ove
   section.rs           sections and elevations: their picture and drawing, pan, zoom, picking
   paper.rs             sheets: their drawing at paper density, scaled as they zoom; views picked, dragged, opened
   properties.rs        Properties: the Type Selector, parameters through `modify`, Type Properties through `type`
+  lang.rs              the desktop's words in Portuguese, and the language it starts in
   style.rs             a light and a dark palette, spacing, and the icons, drawn in code
 apps/bimcraft          the desktop app
 apps/bimcraft-cli      run, info, convert, commands, and the MCP server
@@ -303,8 +308,8 @@ the PNG and SVG exports do, and picks elements from it. Agent instructions are i
 ## Roadmap
 
 Done: views and notes (view ranges, crop regions, text notes, spot elevations, angular and radial dimensions and dimensions to
-wall ends and openings, schedules and the 3D view on sheets), and project units (metric, or feet and inches). Next, in order:
-a Portuguese translation; then real walls (compound types with layers, joins at any angle, curved walls,
+wall ends and openings, schedules and the 3D view on sheets), project units (metric, or feet and inches), and Portuguese,
+for the desktop and for projects. Next, in order: real walls (compound types with layers, joins at any angle, curved walls,
 walls attached to roofs and floors, other location lines); sloped floors, ceilings and shaft openings; stairs of several
 flights with landings, railings and ramps; roofs over any footprint (hips over L-shaped plans), extrusion roofs and dormers;
 families, BIMCraft's own parametric components (never Autodesk's `.rfa`); project parameters and schedules with chosen fields,

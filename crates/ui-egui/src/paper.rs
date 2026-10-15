@@ -132,7 +132,12 @@ impl BimApp {
                     let p = view.mm((q.x - rect.min.x, q.y - rect.min.y));
                     self.write_note(id, P2((p.0 * 2.0).round() / 2.0, (p.1 * 2.0).round() / 2.0));
                 }
-                _ => self.status = Status { text: "this tool works in plan views: open one from the Project Browser".into(), error: true },
+                _ => {
+                    self.status = Status {
+                        text: crate::lang::t("this tool works in plan views: open one from the Project Browser").into(),
+                        error: true,
+                    }
+                }
             }
         }
         self.nav_bar(ui, rect, id);

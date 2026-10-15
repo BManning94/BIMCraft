@@ -6,6 +6,7 @@
 //! (plans, the 3D view, schedules), and the tool's prompt in the status bar.
 
 mod canvas;
+pub mod lang;
 mod orbit;
 mod paper;
 mod properties;
@@ -31,6 +32,8 @@ use egui::{
 };
 use serde_json::{Value, json};
 
+use bimcraft_core::language::Language;
+use lang::{t, tf};
 use style::{Icon, pal};
 
 /// A view: what the middle of the window shows.
@@ -146,39 +149,29 @@ type Tools<'a> = &'a [(Icon, &'a str, &'a str, Tool)];
 /// The Modify panel's small buttons: icon, label, tooltip, the tool (none for Delete), enabled.
 type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
-/// `wall` as a title: `Wall`.
-fn title(category: &str) -> String {
-    let mut c = category.chars();
-    c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
-}
-
-/// `wall` as Revit's palette and tabs count them: `Walls`.
-fn plural(category: &str) -> String {
-    title(category) + "s"
-}
-
-/// What an IFC import brought in, and the first few things it left out.
+/// What an IFC import brought in, and the first few things it left out (the core's reasons, in
+/// English).
 fn import_note(file: &str, reply: &Value) -> String {
     let counts: Vec<String> = reply["elements"]
         .as_object()
         .into_iter()
         .flatten()
         .map(|(cat, n)| match n.as_u64().unwrap_or(0) {
-            1 => format!("1 {cat}"),
-            n => format!("{n} {}", plural(cat).to_lowercase()),
+            1 => format!("1 {}", lang::category(cat, false).to_lowercase()),
+            n => format!("{n} {}", lang::category(cat, true).to_lowercase()),
         })
         .collect();
-    let mut text = format!("Imported {file}: {}.", counts.join(", "));
+    let mut text = tf("Imported {}: {}.", &[file, &counts.join(", ")]);
     let skipped: Vec<&str> = reply["skipped"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
     if !skipped.is_empty() {
         let more = match skipped.len().saturating_sub(3) {
             0 => String::new(),
-            n => format!("; and {n} more"),
+            n => tf("; and {} more", &[&n.to_string()]),
         };
-        text += &format!(" Left out: {}{more}.", skipped.iter().take(3).copied().collect::<Vec<_>>().join("; "));
+        text += &tf(" Left out: {}{}.", &[&skipped.iter().take(3).copied().collect::<Vec<_>>().join("; "), &more]);
     }
     if let Some([x, y]) = reply["moved"].as_array().map(Vec::as_slice) {
-        text += &format!(" Moved {}, {} mm to bring it near the origin.", x, y);
+        text += &tf(" Moved {}, {} mm to bring it near the origin.", &[&x.to_string(), &y.to_string()]);
     }
     text
 }
@@ -191,6 +184,8 @@ pub struct BimApp {
     /// The selected elements, in the order they were picked.
     pub selection: Vec<Id>,
     pub status: Status,
+    /// The interface's language: English unless told otherwise (the app asks the environment).
+    pub lang: Language,
     views: Vec<Sheet>,
     tab: Tab,
     /// Where the ribbon goes back to when the contextual tab goes.
@@ -267,15 +262,15 @@ fn height_options(ui: &mut Ui, m: &Model, level: Id, top: &mut Option<Option<Id>
     let z = m.elevation(level);
     let above: Vec<(Id, &str)> = m.levels().into_iter().filter(|(_, l)| l.elevation > z).map(|(id, l)| (id, l.name.as_str())).collect();
     let now = top.unwrap_or_else(|| above.first().map(|(id, _)| *id));
-    let current = now.and_then(|id| m.level(id)).map_or("Unconnected", |l| l.name.as_str());
-    let label = ui.label("Height:");
+    let current = now.and_then(|id| m.level(id)).map_or(t("Unconnected"), |l| l.name.as_str());
+    let label = ui.label(t("Height:"));
     let combo = ComboBox::from_id_salt(salt).selected_text(current).width(130.0).show_ui(ui, |ui| {
         for (id, name) in &above {
             if ui.selectable_label(now == Some(*id), *name).clicked() {
                 *top = Some(Some(*id));
             }
         }
-        if ui.selectable_label(now.is_none(), "Unconnected").clicked() {
+        if ui.selectable_label(now.is_none(), t("Unconnected")).clicked() {
             *top = Some(None);
         }
     });
@@ -290,12 +285,13 @@ fn height_options(ui: &mut Ui, m: &Model, level: Id, top: &mut Option<Option<Id>
 fn top_params(m: &Model, level: Id, top: Option<Option<Id>>, height: &str) -> Result<Value, String> {
     match top.unwrap_or_else(|| m.level_above(level)) {
         Some(t) => Ok(json!({"top_level": t})),
-        None => m.units.parse(height).map(|h| json!({"height": h})).ok_or_else(|| format!("`{height}` is not a height")),
+        None => m.units.parse(height).map(|h| json!({"height": h})).ok_or_else(|| tf("`{}` is not a height", &[height])),
     }
 }
 
 /// A ribbon button: an icon over its label, tinted while its tool is on; as wide as its label.
 fn big_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
+    let (label, tip) = (t(label), t(tip));
     let font = FontId::proportional(12.0);
     let width = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal().text).size().x + 14.0;
     let (rect, r) = ui.allocate_exact_size(vec2(width.max(58.0), 52.0), Sense::click());
@@ -322,6 +318,7 @@ fn big_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> 
 
 /// A small ribbon button: an icon alone, as in Revit's Modify panel; its name in its tooltip.
 fn small_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -> Response {
+    let (label, tip) = (t(label), t(tip));
     let (rect, r) = ui.allocate_exact_size(vec2(30.0, 25.0), Sense::click());
     let enabled = ui.is_enabled();
     r.widget_info(|| WidgetInfo::selected(WidgetType::Button, enabled, active, label));
@@ -338,6 +335,7 @@ fn small_button(ui: &mut Ui, icon: Icon, label: &str, active: bool, tip: &str) -
 
 /// A small icon button, named for screen readers and tests.
 fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
+    let label = t(label);
     let (rect, r) = ui.allocate_exact_size(vec2(26.0, 22.0), Sense::click());
     r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, label));
     if r.hovered() {
@@ -352,6 +350,7 @@ fn icon_button(ui: &mut Ui, icon: Icon, label: &str) -> Response {
 
 /// A tab, of the ribbon or of a view. Contextual tabs are green, as Revit's are.
 fn tab_button(ui: &mut Ui, label: &str, active: bool, contextual: bool) -> Response {
+    let label = t(label);
     let font = FontId::proportional(13.0);
     let size = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal().text).size();
     let (rect, r) = ui.allocate_exact_size(size + vec2(24.0, 10.0), Sense::click());
@@ -378,6 +377,7 @@ fn tab_button(ui: &mut Ui, label: &str, active: bool, contextual: bool) -> Respo
 
 /// A palette's title bar, across its width.
 fn title_bar(ui: &mut Ui, title: &str) {
+    let title = t(title);
     let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), Sense::hover());
     response.widget_info(|| WidgetInfo::labeled(WidgetType::Label, true, title));
     let p = ui.painter();
@@ -388,6 +388,7 @@ fn title_bar(ui: &mut Ui, title: &str) {
 
 /// A ribbon panel: its buttons over its name, as Revit groups tools.
 fn panel(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+    let title = t(title);
     ui.vertical(|ui| {
         let row = ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -437,6 +438,7 @@ impl BimApp {
             tag_leader: false,
             note_text: String::new(),
             units,
+            lang: Language::English,
             typed_length: String::new(),
             dim_edit: None,
             tab_cycle: false,
@@ -512,14 +514,14 @@ impl BimApp {
             Tool::Roof => Some("Create Roof Footprint"),
         };
         if let Some(what) = place {
-            return Some(format!("Modify | {what}"));
+            return Some(format!("{} | {}", t("Modify"), t(what)));
         }
         let m = &self.session.model;
         let categories: BTreeSet<&str> = self.selection.iter().filter_map(|id| m.elements.get(id)).map(|e| e.category()).collect();
         match categories.len() {
             0 => None,
-            1 => categories.first().map(|c| format!("Modify | {}", plural(c))),
-            _ => Some("Modify | Multi-Select".into()),
+            1 => categories.first().map(|c| format!("{} | {}", t("Modify"), lang::category(c, true))),
+            _ => Some(format!("{} | {}", t("Modify"), t("Multi-Select"))),
         }
     }
 
@@ -537,7 +539,7 @@ impl BimApp {
             Sheet::View3D => "{3D}".into(),
             Sheet::Section(id) => self.session.model.section(id).map_or_else(|| "Section".into(), |v| v.name.clone()),
             Sheet::Paper(id) => self.session.model.sheet(id).map_or_else(|| "Sheet".into(), |s| format!("{} - {}", s.number, s.name)),
-            Sheet::Schedule(cat) => SCHEDULES.iter().find(|(c, _)| *c == cat).map_or(cat, |(_, t)| t).to_string(),
+            Sheet::Schedule(cat) => t(SCHEDULES.iter().find(|(c, _)| *c == cat).map_or(cat, |(_, name)| name)).to_string(),
         }
     }
 
@@ -551,7 +553,7 @@ impl BimApp {
             Sheet::Paper(_) => "Sheet",
             Sheet::Schedule(_) => "Schedule",
         };
-        format!("{kind}: {}", self.view_name(sheet))
+        format!("{}: {}", t(kind), self.view_name(sheet))
     }
 
     /// The whole window.
@@ -562,6 +564,7 @@ impl BimApp {
             self.styled = true;
         }
         style::follow(&ctx);
+        lang::set(self.lang);
         self.tidy();
         self.keys(&ctx);
         let view = self.view_title(self.sheet);
@@ -608,7 +611,7 @@ impl BimApp {
             match self.sheet {
                 Sheet::Plan(level) if self.session.model.level(level).is_some() => self.canvas(ui, level),
                 Sheet::Plan(_) => {
-                    ui.centered_and_justified(|ui| ui.label("This project has no levels. Add one with the Level tool."));
+                    ui.centered_and_justified(|ui| ui.label(t("This project has no levels. Add one with the Level tool.")));
                 }
                 Sheet::View3D => self.view3d(ui),
                 Sheet::Section(id) => self.section_view(ui, id),
@@ -776,7 +779,7 @@ impl BimApp {
         let edits = matches!(tool, Tool::Move(_) | Tool::Copy(_) | Tool::Rotate { .. } | Tool::Mirror { .. });
         let picks = matches!(tool, Tool::Align(_) | Tool::Trim(_) | Tool::Split | Tool::Offset);
         if edits && self.selection.is_empty() {
-            self.status = Status { text: "select what to move, copy, rotate or mirror first".into(), error: true };
+            self.status = Status { text: t("select what to move, copy, rotate or mirror first").into(), error: true };
             return;
         }
         if let Tool::Rotate { centre, .. } = &mut tool
@@ -915,14 +918,14 @@ impl BimApp {
                 _ => None,
             })
             .collect();
-        let plans = m.levels().into_iter().map(|(id, l)| (json!(id), format!("Floor Plan: {}", l.name), l.name.as_str()));
+        let plans = m.levels().into_iter().map(|(id, l)| (json!(id), tf("Floor Plan: {}", &[&l.name]), l.name.as_str()));
         let cuts = m.elements.iter().filter_map(|(id, e)| match e {
-            Element::Section(v) => Some((json!(id), format!("Section: {}", v.name), v.name.as_str())),
-            Element::Elevation(v) => Some((json!(id), format!("Elevation: {}", v.name), v.name.as_str())),
+            Element::Section(v) => Some((json!(id), tf("Section: {}", &[&v.name]), v.name.as_str())),
+            Element::Elevation(v) => Some((json!(id), tf("Elevation: {}", &[&v.name]), v.name.as_str())),
             _ => None,
         });
-        let others = std::iter::once((json!("{3D}"), "3D View: {3D}".to_string(), "{3D}"))
-            .chain(SCHEDULES.iter().map(|(_, name)| (json!(name), format!("Schedule: {name}"), *name)));
+        let others = std::iter::once((json!("{3D}"), t("3D View: {3D}").to_string(), "{3D}"))
+            .chain(SCHEDULES.iter().map(|(_, name)| (json!(name), tf("Schedule: {}", &[t(name)]), *name)));
         plans.chain(cuts).chain(others).filter(|(_, _, name)| !placed.contains(name)).map(|(v, label, _)| (v, label)).collect()
     }
 
@@ -989,7 +992,7 @@ impl BimApp {
     /// Where to save, from the system's file dialog, ending in `.ext`.
     fn ask_path(&self, what: &str, ext: &str) -> Option<PathBuf> {
         let name = format!("{}.{ext}", self.session.model.name.replace(['/', '\\'], "-"));
-        let p = rfd::FileDialog::new().add_filter(what, &[ext]).set_file_name(name).save_file()?;
+        let p = rfd::FileDialog::new().add_filter(t(what), &[ext]).set_file_name(name).save_file()?;
         Some(if p.extension().is_some_and(|e| e.eq_ignore_ascii_case(ext)) { p } else { p.with_extension(ext) })
     }
 
@@ -1009,7 +1012,8 @@ impl BimApp {
     fn reopened(&mut self) {
         let mut fresh = BimApp::new(std::mem::take(&mut self.session));
         fresh.status = std::mem::take(&mut self.status);
-        (fresh.thin, fresh.show_properties, fresh.show_browser) = (self.thin, self.show_properties, self.show_browser);
+        (fresh.thin, fresh.show_properties, fresh.show_browser, fresh.lang) =
+            (self.thin, self.show_properties, self.show_browser, self.lang);
         *self = fresh;
     }
 
@@ -1021,7 +1025,8 @@ impl BimApp {
     fn proceed(&mut self, p: Pending, ctx: &Context) {
         match p {
             Pending::New => {
-                if self.run("new", json!({})).is_some() {
+                // In the interface's language: its levels named in it.
+                if self.run("new", json!({"language": self.lang.code()})).is_some() {
                     self.reopened();
                 }
             }
@@ -1082,8 +1087,9 @@ impl BimApp {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                let file =
-                    egui::Button::new(RichText::new("File").color(Color32::WHITE).strong()).fill(pal().accent).min_size(vec2(58.0, 26.0));
+                let file = egui::Button::new(RichText::new(t("File")).color(Color32::WHITE).strong())
+                    .fill(pal().accent)
+                    .min_size(vec2(58.0, 26.0));
                 MenuButton::from_button(file).ui(ui, |ui| self.file_menu(ui, &ctx));
                 for (tab, label) in [
                     (Tab::Architecture, "Architecture"),
@@ -1118,7 +1124,7 @@ impl BimApp {
     /// The application menu, under the File tab.
     fn file_menu(&mut self, ui: &mut Ui, ctx: &Context) {
         let item = |ui: &mut Ui, label: &str, keys: Option<KeyboardShortcut>| {
-            let b = egui::Button::new(label);
+            let b = egui::Button::new(t(label));
             ui.add(match keys {
                 Some(k) => b.shortcut_text(ctx.format_shortcut(&k)),
                 None => b,
@@ -1138,17 +1144,17 @@ impl BimApp {
         if item(ui, "Save As…", Some(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S))) {
             self.save_as();
         }
-        SubMenuButton::new("Export").ui(ui, |ui| {
-            if ui.button("IFC…").clicked() {
+        SubMenuButton::new(t("Export")).ui(ui, |ui| {
+            if ui.button(t("IFC…")).clicked() {
                 self.export("IFC4", "ifc");
             }
-            if ui.button("View as PNG…").clicked() {
+            if ui.button(t("View as PNG…")).clicked() {
                 self.export("PNG image", "png");
             }
-            if ui.button("Plan as SVG…").clicked() {
+            if ui.button(t("Plan as SVG…")).clicked() {
                 self.export("SVG drawing", "svg");
             }
-            if ui.button("Sheets as PDF…").clicked() {
+            if ui.button(t("Sheets as PDF…")).clicked() {
                 self.export("PDF", "pdf");
             }
         });
@@ -1303,13 +1309,13 @@ impl BimApp {
                 Sheet::Paper(id) => Some(id),
                 _ => None,
             };
-            let tip = "Put a view on this sheet: a plan, a section or an elevation not on one yet";
+            let tip = "Put a view on this sheet: one not on a sheet yet";
             let r = ui.add_enabled_ui(sheet.is_some(), |ui| big_button(ui, Icon::PlaceView, "Place View", false, tip)).inner;
             if let Some(sheet) = sheet {
                 let views = self.unplaced_views();
                 Popup::menu(&r).show(|ui| {
                     if views.is_empty() {
-                        ui.label("Every view is on a sheet.");
+                        ui.label(t("Every view is on a sheet."));
                     }
                     for (view, label) in views {
                         if ui.button(label).clicked() {
@@ -1329,10 +1335,18 @@ impl BimApp {
                 let active = self.sheet;
                 self.views.retain(|v| *v == active);
             }
-            let r = big_button(ui, Icon::Interface, "User Interface", false, "Show or hide the palettes");
+            let tip = "Show or hide the palettes, and pick the interface's language";
+            let r = big_button(ui, Icon::Interface, "User Interface", false, tip);
             Popup::menu(&r).show(|ui| {
-                ui.checkbox(&mut self.show_properties, "Properties");
-                ui.checkbox(&mut self.show_browser, "Project Browser");
+                ui.checkbox(&mut self.show_properties, t("Properties"));
+                ui.checkbox(&mut self.show_browser, t("Project Browser"));
+                ui.separator();
+                ui.label(RichText::new(t("Language")).color(pal().muted));
+                for l in Language::ALL {
+                    if ui.selectable_label(self.lang == l, l.label()).clicked() {
+                        self.lang = l;
+                    }
+                }
             });
         });
     }
@@ -1341,12 +1355,23 @@ impl BimApp {
     fn manage_tab(&mut self, ui: &mut Ui) {
         panel(ui, "Settings", |ui| {
             let now = self.session.model.units;
-            let tip = format!("Project Units (UN): how lengths show and read; now {}", now.label().to_lowercase());
+            let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
             let r = big_button(ui, Icon::Units, "Project Units", false, &tip);
             Popup::menu(&r).show(|ui| {
                 for u in Units::ALL {
-                    if ui.selectable_label(u == now, u.label()).clicked() {
+                    if ui.selectable_label(u == now, t(u.label())).clicked() {
                         self.run("units", json!({"length": u.name()}));
+                    }
+                }
+            });
+            // What the drawings say, and how new things are named.
+            let now = self.session.model.language;
+            let tip = tf("Project Language: what the drawings say and how new things are named; now {}", &[now.label()]);
+            let r = big_button(ui, Icon::Text, "Project Language", false, &tip);
+            Popup::menu(&r).show(|ui| {
+                for l in Language::ALL {
+                    if ui.selectable_label(l == now, l.label()).clicked() {
+                        self.run("language", json!({"code": l.code()}));
                     }
                 }
             });
@@ -1455,43 +1480,43 @@ impl BimApp {
                     }
                 }
                 Tool::Stair(_) => {
-                    let l = ui.label("Width:");
+                    let l = ui.label(t("Width:"));
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.stair_width).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
                 }
                 Tool::Roof => {
-                    let l = ui.label("Slope:");
+                    let l = ui.label(t("Slope:"));
                     ui.add(TextEdit::singleline(&mut self.roof_slope).desired_width(48.0).hint_text("°")).labelled_by(l.id);
-                    let l = ui.label("Overhang:");
+                    let l = ui.label(t("Overhang:"));
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.roof_overhang).desired_width(64.0).hint_text(hint)).labelled_by(l.id);
-                    ui.checkbox(&mut self.roof_gable, "Gable");
+                    ui.checkbox(&mut self.roof_gable, t("Gable"));
                 }
                 Tool::Level => self.level_options(ui),
                 Tool::Move(_) => {
-                    ui.checkbox(&mut self.constrain, "Constrain");
+                    ui.checkbox(&mut self.constrain, t("Constrain"));
                 }
                 Tool::Copy(_) => {
-                    ui.checkbox(&mut self.constrain, "Constrain");
-                    ui.checkbox(&mut self.multiple, "Multiple");
+                    ui.checkbox(&mut self.constrain, t("Constrain"));
+                    ui.checkbox(&mut self.multiple, t("Multiple"));
                 }
                 Tool::Rotate { .. } => self.rotate_options(ui),
                 Tool::Mirror { .. } => {
-                    ui.checkbox(&mut self.mirror_copy, "Copy");
+                    ui.checkbox(&mut self.mirror_copy, t("Copy"));
                 }
                 Tool::Tag => {
-                    ui.checkbox(&mut self.tag_leader, "Leader");
+                    ui.checkbox(&mut self.tag_leader, t("Leader"));
                 }
                 Tool::Text => {
-                    let l = ui.label("Text:");
-                    ui.add(TextEdit::singleline(&mut self.note_text).desired_width(240.0).hint_text("what the note says"))
+                    let l = ui.label(t("Text:"));
+                    ui.add(TextEdit::singleline(&mut self.note_text).desired_width(240.0).hint_text(t("what the note says")))
                         .labelled_by(l.id);
                 }
                 Tool::Offset => {
-                    let l = ui.label("Offset:");
+                    let l = ui.label(t("Offset:"));
                     let hint = self.session.model.units.name();
                     ui.add(TextEdit::singleline(&mut self.offset).desired_width(70.0).hint_text(hint)).labelled_by(l.id);
-                    ui.checkbox(&mut self.offset_copy, "Copy");
+                    ui.checkbox(&mut self.offset_copy, t("Copy"));
                 }
                 _ => {}
             }
@@ -1501,33 +1526,33 @@ impl BimApp {
     fn wall_options(&mut self, ui: &mut Ui) {
         let Sheet::Plan(level) = self.sheet else { return };
         height_options(ui, &self.session.model, level, &mut self.wall_top, &mut self.wall_height, "wall-top");
-        ui.checkbox(&mut self.chain, "Chain");
+        ui.checkbox(&mut self.chain, t("Chain"));
     }
 
     /// Rotate's Options Bar: an angle to type (Enter turns by it), Place Centre, and Copy.
     fn rotate_options(&mut self, ui: &mut Ui) {
-        let l = ui.label("Angle:");
+        let l = ui.label(t("Angle:"));
         let r = ui.add(TextEdit::singleline(&mut self.angle).desired_width(60.0).hint_text("°")).labelled_by(l.id);
         if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
             match (self.angle.trim().parse::<f64>(), &self.tool) {
                 (Ok(a), &Tool::Rotate { centre, .. }) if a.is_finite() => self.turn(centre, a),
-                _ => self.status = Status { text: format!("rotate: `{}` is not an angle in degrees", self.angle), error: true },
+                _ => self.status = Status { text: tf("rotate: `{}` is not an angle in degrees", &[&self.angle]), error: true },
             }
         }
-        if ui.button("Place Centre").clicked()
+        if ui.button(t("Place Centre")).clicked()
             && let Tool::Rotate { place, .. } = &mut self.tool
         {
             *place = true;
         }
-        ui.checkbox(&mut self.rotate_copy, "Copy");
+        ui.checkbox(&mut self.rotate_copy, t("Copy"));
     }
 
     fn level_options(&mut self, ui: &mut Ui) {
-        let l = ui.label("Elevation");
+        let l = ui.label(t("Elevation"));
         ui.add(TextEdit::singleline(&mut self.new_level.0).desired_width(80.0)).labelled_by(l.id);
-        let l = ui.label("Name");
-        ui.add(TextEdit::singleline(&mut self.new_level.1).hint_text("the next free name").desired_width(140.0)).labelled_by(l.id);
-        if ui.button("Create").clicked() {
+        let l = ui.label(t("Name"));
+        ui.add(TextEdit::singleline(&mut self.new_level.1).hint_text(t("the next free name")).desired_width(140.0)).labelled_by(l.id);
+        if ui.button(t("Create")).clicked() {
             match self.session.model.units.parse(&self.new_level.0) {
                 Some(elevation) => {
                     let mut p = json!({"elevation": elevation});
@@ -1538,7 +1563,7 @@ impl BimApp {
                         self.tool = Tool::Modify;
                     }
                 }
-                None => self.status = Status { text: format!("level: `{}` is not an elevation", self.new_level.0), error: true },
+                None => self.status = Status { text: tf("level: `{}` is not an elevation", &[&self.new_level.0]), error: true },
             }
         }
     }
@@ -1614,7 +1639,7 @@ impl BimApp {
 
     fn status_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.label(RichText::new(self.prompt()).color(pal().muted));
+            ui.label(RichText::new(t(self.prompt())).color(pal().muted));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // How many elements are selected, by the selection filter, as Revit shows it.
                 ui.label(format!(":{}", self.selection.len()));
@@ -1625,7 +1650,7 @@ impl BimApp {
                     ui.monospace(format!("x {}  y {}", u.with_unit(p.0), u.with_unit(p.1)));
                 }
                 if self.dirty() {
-                    ui.label(RichText::new("Unsaved changes").color(pal().muted));
+                    ui.label(RichText::new(t("Unsaved changes")).color(pal().muted));
                 }
             });
         });
@@ -1636,7 +1661,7 @@ impl BimApp {
         if self.status.text.is_empty() {
             return;
         }
-        let (title, color) = if self.status.error { ("Error", pal().error) } else { ("Note", pal().accent) };
+        let (title, color) = if self.status.error { (t("Error"), pal().error) } else { (t("Note"), pal().accent) };
         let at = self.view_rect.right_bottom() - vec2(16.0, 16.0);
         Area::new(UiId::new("warning")).order(Order::Foreground).fixed_pos(at).pivot(Align2::RIGHT_BOTTOM).show(ctx, |ui| {
             Frame::popup(ui.style()).fill(pal().surface).stroke(Stroke::new(1.0, color)).show(ui, |ui| {
@@ -1662,7 +1687,7 @@ impl BimApp {
     }
 
     fn browser_palette(&mut self, ui: &mut Ui) {
-        title_bar(ui, &format!("Project Browser · {}", self.session.model.name));
+        title_bar(ui, &tf("Project Browser · {}", &[&self.session.model.name]));
         ScrollArea::vertical().id_salt("browser").show(ui, |ui| Frame::new().inner_margin(8.0).show(ui, |ui| self.browser(ui)));
     }
 
@@ -1689,18 +1714,18 @@ impl BimApp {
         let mut open = None;
         let active = self.sheet;
         let item = |ui: &mut Ui, name: &str, sheet: Sheet| ui.selectable_label(active == sheet, name).clicked().then_some(sheet);
-        CollapsingHeader::new("Views (all)").default_open(true).show(ui, |ui| {
-            CollapsingHeader::new("Floor Plans").default_open(true).show(ui, |ui| {
+        CollapsingHeader::new(t("Views (all)")).default_open(true).show(ui, |ui| {
+            CollapsingHeader::new(t("Floor Plans")).default_open(true).show(ui, |ui| {
                 for (id, name) in &levels {
                     open = item(ui, name, Sheet::Plan(*id)).or(open);
                 }
             });
-            CollapsingHeader::new("3D Views").default_open(true).show(ui, |ui| {
+            CollapsingHeader::new(t("3D Views")).default_open(true).show(ui, |ui| {
                 open = item(ui, "{3D}", Sheet::View3D).or(open);
             });
             for (group, views) in [("Elevations (Building Elevation)", &elevations), ("Sections (Building Section)", &sections)] {
                 if !views.is_empty() {
-                    CollapsingHeader::new(group).default_open(true).show(ui, |ui| {
+                    CollapsingHeader::new(t(group)).default_open(true).show(ui, |ui| {
                         for (id, name) in views {
                             open = item(ui, name, Sheet::Section(*id)).or(open);
                         }
@@ -1708,13 +1733,13 @@ impl BimApp {
                 }
             }
         });
-        CollapsingHeader::new("Schedules/Quantities (all)").default_open(true).show(ui, |ui| {
+        CollapsingHeader::new(t("Schedules/Quantities (all)")).default_open(true).show(ui, |ui| {
             for (cat, name) in SCHEDULES {
-                open = item(ui, name, Sheet::Schedule(cat)).or(open);
+                open = item(ui, t(name), Sheet::Schedule(cat)).or(open);
             }
         });
         if !sheets.is_empty() {
-            CollapsingHeader::new("Sheets (all)").default_open(true).show(ui, |ui| {
+            CollapsingHeader::new(t("Sheets (all)")).default_open(true).show(ui, |ui| {
                 for (id, name) in &sheets {
                     open = item(ui, name, Sheet::Paper(*id)).or(open);
                 }
@@ -1735,7 +1760,7 @@ impl BimApp {
                 if tab_button(ui, &name, sheet == self.sheet, false).clicked() {
                     self.open_sheet(sheet);
                 }
-                if self.views.len() > 1 && icon_button(ui, Icon::Close, &format!("Close {name}")).clicked() {
+                if self.views.len() > 1 && icon_button(ui, Icon::Close, &tf("Close {}", &[&name])).clicked() {
                     self.close_view(sheet);
                 }
                 ui.add_space(6.0);
@@ -1754,14 +1779,14 @@ impl BimApp {
                     ui.label(e);
                 }
                 Ok(t) if t.rows.is_empty() => {
-                    ui.label(RichText::new(format!("No rows yet: the {} is empty.", name.to_lowercase())).color(pal().muted));
+                    ui.label(RichText::new(tf("No rows yet: the {} is empty.", &[&name.to_lowercase()])).color(pal().muted));
                 }
                 Ok(t) => {
                     ScrollArea::both().show(ui, |ui| {
                         Grid::new(("schedule", cat)).striped(true).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
                             let units = self.session.model.units;
                             for c in &t.columns {
-                                ui.label(RichText::new(schedule::heading(units, c)).strong());
+                                ui.label(RichText::new(lang::t(&schedule::heading(units, c))).strong());
                             }
                             ui.end_row();
                             for row in &t.rows {
@@ -1794,12 +1819,12 @@ impl BimApp {
         let mut choice = None;
         let name = self.session.model.name.clone();
         let r = Modal::new(UiId::new("unsaved")).show(ctx, |ui| {
-            ui.label(RichText::new(format!("Save changes to {name}?")).strong());
-            ui.label("If you don't, the changes since it was last saved are lost.");
+            ui.label(RichText::new(tf("Save changes to {}?", &[&name])).strong());
+            ui.label(t("If you don't, the changes since it was last saved are lost."));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 for (label, c) in [("Save", Choice::Save), ("Don't Save", Choice::Discard), ("Cancel", Choice::Cancel)] {
-                    if ui.button(label).clicked() {
+                    if ui.button(t(label)).clicked() {
                         choice = Some(c);
                     }
                 }

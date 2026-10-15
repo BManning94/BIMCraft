@@ -6,6 +6,7 @@
 //! size its lettering makes it. Text notes go on the paper itself.
 
 use crate::geom::P2;
+use crate::language::Language;
 use crate::model::{Element, Id, Model, Schedule, Sheet, Viewport, paper};
 use crate::render::{self, Drawing, PAPER, Prim, Rgb, View};
 use crate::{font, schedule, view3d};
@@ -131,7 +132,7 @@ fn table_of(m: &Model, sc: &Schedule) -> Table {
     let t = schedule::table(m, &sc.of).unwrap_or(schedule::Table { columns: Vec::new(), rows: Vec::new() });
     let cells: Vec<Vec<String>> =
         t.rows.iter().map(|r| r.iter().zip(&t.columns).map(|(v, c)| schedule::shown(m.units, c, v)).collect()).collect();
-    let headings: Vec<String> = t.columns.iter().map(|c| schedule::heading(m.units, c)).collect();
+    let headings: Vec<String> = t.columns.iter().map(|c| m.language.word(&schedule::heading(m.units, c)).to_string()).collect();
     let widths = (0..headings.len())
         .map(|i| {
             let widest = headings.get(i).map_or(0.0, |c| font::width(c, CELL_TEXT));
@@ -180,12 +181,12 @@ fn table(d: &mut Drawing, m: &Model, sc: &Schedule, (x, y): (f32, f32)) {
     }
 }
 
-/// The scale a sheet's title box gives: its views', when they share one.
-fn scale_note(views: &[&Viewport]) -> String {
+/// The scale a sheet's title box gives, in `language`: its views', when they share one.
+fn scale_note(views: &[&Viewport], language: Language) -> String {
     match views.split_first() {
         None => String::new(),
-        Some((first, rest)) if rest.iter().all(|v| v.scale == first.scale) => format!("SCALE 1 : {}", first.scale),
-        Some(_) => "SCALE AS INDICATED".into(),
+        Some((first, rest)) if rest.iter().all(|v| v.scale == first.scale) => format!("{} 1 : {}", language.word("SCALE"), first.scale),
+        Some(_) => language.word("SCALE AS INDICATED").into(),
     }
 }
 
@@ -206,7 +207,7 @@ pub fn draw(m: &Model, id: Id) -> Option<Drawing> {
     // Schedules keep their own size: no scale of theirs.
     let scaled: Vec<&Viewport> =
         views.iter().filter(|(_, v)| !matches!(m.elements.get(&v.view), Some(Element::Schedule(_)))).map(|(_, v)| *v).collect();
-    title_block(&mut d, &m.name, sheet, paper, &scale_note(&scaled));
+    title_block(&mut d, &m.name, sheet, paper, &scale_note(&scaled, m.language));
     let mut scene = None;
     for (vid, vp) in views {
         let Some((view, (ox, oy))) = frame(m, vid) else { continue };

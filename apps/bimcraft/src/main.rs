@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use bimcraft_core::engine::Session;
 use bimcraft_core::sample::SAMPLE;
-use bimcraft_ui_egui::{BimApp, Status};
+use bimcraft_ui_egui::{BimApp, Status, lang};
 use serde_json::json;
 
 const USAGE: &str = "USAGE: bimcraft [FILE] [--sample]
@@ -15,7 +15,12 @@ const USAGE: &str = "USAGE: bimcraft [FILE] [--sample]
   --sample  start on the sample house";
 
 fn main() -> ExitCode {
+    let language = lang::from_env();
     let mut session = Session::new();
+    // A blank project starts in the interface's language: its levels named in it.
+    if std::env::args().len() == 1 {
+        let _ = session.execute("new", &json!({"language": language.code()}));
+    }
     let mut problem = None;
     for arg in std::env::args().skip(1) {
         let done = match arg.as_str() {
@@ -36,6 +41,7 @@ fn main() -> ExitCode {
     let (model, path) = ((*session.model).clone(), session.path.clone());
     session.reset(model, path);
     let mut app = BimApp::new(session);
+    app.lang = language;
     if let Some(text) = problem {
         app.status = Status { text, error: true };
     }

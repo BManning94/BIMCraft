@@ -95,7 +95,8 @@ impl BimApp {
                 self.run("spot", json!({"at": [at(q).0, at(q).1], "view": id}));
             }
             (Some(_), _) => {
-                self.status = Status { text: "this tool works in plan views: open one from the Project Browser".into(), error: true }
+                self.status =
+                    Status { text: crate::lang::t("this tool works in plan views: open one from the Project Browser").into(), error: true }
             }
             (None, _) => {}
         }
