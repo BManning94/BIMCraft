@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
 rfd = { workspace = true }
+sys-locale = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true }

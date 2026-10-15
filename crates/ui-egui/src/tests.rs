@@ -1125,40 +1125,60 @@ fn the_interface_speaks_portuguese() {
 }
 
 #[test]
-fn nothing_the_portuguese_interface_shows_is_left_in_english() {
-    use egui_kittest::kittest::{By, NodeT};
-    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
-    h.state_mut().lang = bimcraft_core::language::Language::Portuguese;
+fn the_interface_speaks_spanish() {
+    let mut h = app(BOX);
+    press(&mut h, "View");
+    press(&mut h, "User Interface");
+    press(&mut h, "Español");
+    for label in ["Arquitectura", "Anotar", "Vista", "Gestionar", "Modificar", "Propiedades", "Plantas", "Rango de vista"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    press(&mut h, "Arquitectura");
+    press(&mut h, "Muro");
+    assert!(h.query_by_label("Modificar | Colocar muro").is_some());
+    key(&mut h, Key::Escape);
+    press(&mut h, "Archivo");
+    h.get_by_label_contains("Nuevo").click();
     h.run();
+    let levels: Vec<String> = h.state().session.model.levels().iter().map(|(_, l)| l.name.clone()).collect();
+    assert_eq!(levels, ["Nivel 1", "Nivel 2"]);
+}
+
+#[test]
+fn nothing_a_translated_interface_shows_is_left_in_english() {
+    use bimcraft_core::language::Language;
+    use egui_kittest::kittest::{By, NodeT};
     // A label in English that the table translates is a string the window forgot to translate.
-    let english = |h: &Harness<BimApp>| -> Vec<String> {
-        h.query_all(By::new().predicate(|n| n.label().is_some_and(|l| crate::lang::portuguese(&l).is_some_and(|pt| pt != l))))
+    let english = |h: &Harness<BimApp>, l: Language| -> Vec<String> {
+        h.query_all(By::new().predicate(move |n| n.label().is_some_and(|s| crate::lang::translated(l, &s).is_some_and(|x| x != s))))
             .filter_map(|n| n.accesskit_node().label())
             .collect()
     };
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
     // The probe finds what it looks for: in English, the same labels are all English.
-    h.state_mut().lang = bimcraft_core::language::Language::English;
-    h.run();
-    assert!(english(&h).contains(&"Architecture".to_string()));
-    h.state_mut().lang = bimcraft_core::language::Language::Portuguese;
-    h.run();
-    let mut missed = Vec::new();
-    for tab in ["Arquitetura", "Anotar", "Vista", "Gerenciar", "Modificar"] {
-        press(&mut h, tab);
-        missed.extend(english(&h));
-    }
-    // A wall's Properties and its contextual tab; a door's; the tools' Options Bars.
-    for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(0.0, 0.0), Some("Parede")), (P2(0.0, 0.0), Some("Telhado"))] {
-        key(&mut h, Key::Escape);
-        if let Some(tool) = tool {
-            press(&mut h, "Arquitetura");
-            press(&mut h, tool);
-        } else {
-            click(&mut h, at);
+    assert!(english(&h, Language::Spanish).contains(&"Architecture".to_string()));
+    for l in [Language::Portuguese, Language::Spanish] {
+        h.state_mut().lang = l;
+        h.run();
+        let tr = |en: &'static str| crate::lang::translated(l, en).unwrap_or(en);
+        let mut missed = Vec::new();
+        for tab in ["Architecture", "Annotate", "View", "Manage", "Modify"] {
+            press(&mut h, tr(tab));
+            missed.extend(english(&h, l));
         }
-        missed.extend(english(&h));
+        // A wall's Properties and its contextual tab; a door's; the tools' Options Bars.
+        for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(0.0, 0.0), Some("Wall")), (P2(0.0, 0.0), Some("Roof"))] {
+            key(&mut h, Key::Escape);
+            if let Some(tool) = tool {
+                press(&mut h, tr("Architecture"));
+                press(&mut h, tr(tool));
+            } else {
+                click(&mut h, at);
+            }
+            missed.extend(english(&h, l));
+        }
+        missed.sort();
+        missed.dedup();
+        assert!(missed.is_empty(), "{l:?}: left in English: {missed:?}");
     }
-    missed.sort();
-    missed.dedup();
-    assert!(missed.is_empty(), "left in English: {missed:?}");
 }

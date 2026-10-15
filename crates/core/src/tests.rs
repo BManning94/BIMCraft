@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::engine::{Session, commands};
 use crate::geom::P2;
-use crate::model::Model;
+use crate::model::{Facing, Model};
 
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
     s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
@@ -1236,4 +1236,27 @@ fn a_project_in_portuguese_names_what_it_makes_in_portuguese() {
     assert_eq!(run(&mut s, "level", json!({"elevation": 6000}))["name"], "Level 3");
     assert_eq!(element(&mut s, room)["name"], "Ambiente");
     assert!(s.execute("language", &json!({"code": "klingon"})).unwrap_err().contains("pt"));
+}
+
+#[test]
+fn a_project_in_spanish_names_what_it_makes_in_spanish() {
+    let mut s = Session::new();
+    run(&mut s, "new", json!({"language": "es"}));
+    let i = run(&mut s, "inspect", json!({}));
+    assert_eq!([&i["name"], &i["levels"][1]["name"], &i["language"]], [&json!("Proyecto"), &json!("Nivel 2"), &json!("es")]);
+    house(&mut s);
+    assert_eq!(run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["name"], "Sección 1");
+    let ids = run(&mut s, "elevation", json!({}))["ids"].clone();
+    let names: Vec<Value> = ids.as_array().unwrap().iter().map(|id| element(&mut s, id.as_u64().unwrap())["name"].clone()).collect();
+    assert_eq!(names, ["Norte", "Sur", "Este", "Oeste"]);
+    let room = run(&mut s, "room", json!({"point": [4000, 3000]}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, room)["name"], "Habitación");
+    run(&mut s, "sheet", json!({}));
+    let vp = run(&mut s, "place", json!({"sheet": "A101", "view": "tabla de habitaciones"}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, vp)["title"], "Tabla de habitaciones");
+    // Sides are named in any language there is.
+    assert_eq!(
+        [Facing::parse("Sur"), Facing::parse("leste"), Facing::parse("West")],
+        [Some(Facing::South), Some(Facing::East), Some(Facing::West)]
+    );
 }

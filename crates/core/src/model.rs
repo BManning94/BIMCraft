@@ -392,9 +392,9 @@ impl Facing {
         }
     }
 
-    /// A side by its name, in English or in Portuguese.
+    /// A side by its name, in any language there is.
     pub fn parse(s: &str) -> Option<Facing> {
-        Facing::ALL.into_iter().find(|f| Language::Portuguese.find(s, &[f.name()]).is_some())
+        Facing::ALL.into_iter().find(|f| Language::ALL.iter().any(|l| l.find(s, &[f.name()]).is_some()))
     }
 
     /// Out of the building, toward its side.
