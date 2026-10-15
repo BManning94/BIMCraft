@@ -187,6 +187,11 @@ pub enum Icon {
     Radial,
     Crop,
     Units,
+    Line,
+    Arc,
+    Flip,
+    Attach,
+    Detach,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -430,6 +435,41 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(10.0, 8.0), (10.0, 11.0)]),
             line(&[(14.0, 8.0), (14.0, 12.0)]),
             line(&[(18.0, 8.0), (18.0, 11.0)]),
+        ],
+        // A line between two points.
+        Icon::Line => vec![
+            line(&[(5.0, 19.0), (19.0, 5.0)]),
+            ring(&[(2.5, 16.5), (7.5, 16.5), (7.5, 21.5), (2.5, 21.5)]),
+            ring(&[(16.5, 2.5), (21.5, 2.5), (21.5, 7.5), (16.5, 7.5)]),
+        ],
+        // An arc between two points, through a third.
+        Icon::Arc => vec![
+            Shape::line(arc(at(12.0, 22.0), 10.0 * k, -2.8, -0.34), s),
+            ring(&[(0.5, 15.0), (5.0, 15.0), (5.0, 19.5), (0.5, 19.5)]),
+            ring(&[(19.0, 15.0), (23.5, 15.0), (23.5, 19.5), (19.0, 19.5)]),
+            Shape::circle_filled(at(12.0, 12.0), 1.6 * k, color),
+        ],
+        // A wall, and the arrows that turn it round.
+        Icon::Flip => vec![
+            ring(&[(2.0, 10.0), (22.0, 10.0), (22.0, 14.0), (2.0, 14.0)]),
+            line(&[(12.0, 2.0), (12.0, 8.0)]),
+            line(&[(9.0, 5.0), (12.0, 2.0), (15.0, 5.0)]),
+            line(&[(12.0, 16.0), (12.0, 22.0)]),
+            line(&[(9.0, 19.0), (12.0, 22.0), (15.0, 19.0)]),
+        ],
+        // A wall reaching up to the roof over it.
+        Icon::Attach => vec![
+            line(&[(2.0, 9.0), (12.0, 3.0), (22.0, 9.0)]),
+            ring(&[(8.0, 12.0), (16.0, 12.0), (16.0, 22.0), (8.0, 22.0)]),
+            line(&[(12.0, 12.0), (12.0, 6.5)]),
+            line(&[(10.0, 8.5), (12.0, 6.5), (14.0, 8.5)]),
+        ],
+        // A wall come loose from the roof.
+        Icon::Detach => vec![
+            line(&[(2.0, 9.0), (12.0, 3.0), (22.0, 9.0)]),
+            ring(&[(8.0, 14.0), (16.0, 14.0), (16.0, 22.0), (8.0, 22.0)]),
+            line(&[(12.0, 7.0), (12.0, 12.0)]),
+            line(&[(10.0, 10.0), (12.0, 12.0), (14.0, 10.0)]),
         ],
         // Two crop marks, at opposite corners.
         Icon::Crop => vec![line(&[(6.0, 2.0), (6.0, 18.0), (22.0, 18.0)]), line(&[(2.0, 6.0), (18.0, 6.0), (18.0, 22.0)])],

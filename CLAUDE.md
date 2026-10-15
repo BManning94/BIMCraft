@@ -64,8 +64,12 @@ translate. The core's messages stay English, because agents read them.
 Levels have elevations, and a level is its plan: its view range (`Model::plan_range`)
 cuts 1200 mm above it unless set, and its crop region bounds what the plan shows. Rooms find their walls at 1200 mm whatever
 a plan cuts (`Model::bounding`). In a section or an elevation, points run along its line from its start, and up; on a sheet,
-they're paper mm from its bottom left corner; notes and spot elevations live in those terms in their view. Wall location
-lines are centre lines; walls meeting end to end reach past each other by half the other's thickness so corners close, in
-plans and in IFC alike (`Model::join_reach`). Room areas are measured at the wall centre lines. `modify` merges into fields
-that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
+they're paper mm from its bottom left corner; notes and spot elevations live in those terms in their view.
+A wall's `start` and `end` are on its location line: its centre line unless `location` says otherwise (`walls::faces`).
+Its exterior is to the left of start to end, as in Revit, so walls drawn clockwise face out; a compound type lists its
+layers from the exterior in. A curved wall turns `arc` degrees, counter-clockwise positive (`walls::Axis`). Where walls meet,
+their faces meet in mitred caps at any angle, and a wall ending on another stops at its face (`walls::cap`); plans, 3D,
+sections and IFC all draw that outline (`walls::outline`, `walls::prisms`). Room areas are measured at the walls' centre
+lines, run on or back to meet at joins (`walls::centre_line`). An attached top or base follows the lowest of the roof's or
+floor's planes where it's over the wall; a mirrored wall runs back the other way. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.

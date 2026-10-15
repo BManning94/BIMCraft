@@ -495,7 +495,8 @@ fn ctrl_adds_shift_takes_away_and_tab_reaches_what_is_underneath() {
     let mut h = app(SAMPLE);
     let door = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "1"));
     let window = find(&h, |e| matches!(e, Element::Window(o) if o.mark == "1"));
-    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0) && w.end == P2(10000.0, 0.0)));
+    // The south wall: drawn clockwise, it runs west.
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(10000.0, 0.0) && w.end == P2(0.0, 0.0)));
     click(&mut h, P2(2000.0, 0.0));
     click_with(&mut h, P2(4300.0, 0.0), Modifiers::COMMAND);
     assert_eq!(h.state().selection, [door, window]);
@@ -514,7 +515,8 @@ fn ctrl_adds_shift_takes_away_and_tab_reaches_what_is_underneath() {
 fn dragging_across_empty_floor_selects_by_window_or_crossing() {
     let mut h = app(SAMPLE);
     let window = find(&h, |e| matches!(e, Element::Window(o) if o.type_name == "Fixed 600 x 900"));
-    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(10000.0, 0.0)));
+    // The east wall: drawn clockwise, it runs south.
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(10000.0, 7000.0) && w.end == P2(10000.0, 0.0)));
     let tag = find(&h, |e| matches!(e, Element::Tag(t) if t.host == window));
     // Left to right: what's wholly inside, the window and its tag. (From empty floor, clear of the
     // Bedroom's tag and the dimension at x = 10900.)
@@ -618,7 +620,8 @@ fn mirror_pick_axis_copies_across_the_line_picked() {
     click(&mut h, P2(2000.0, 0.0));
     press(&mut h, "Mirror Pick Axis");
     click(&mut h, P2(6000.0, 2000.0));
-    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4000.0, 0.0)), (P2(12000.0, 0.0), P2(8000.0, 0.0))], "Copy is on, as in Revit");
+    // Copy is on, as in Revit; the copy runs back the other way, its exterior mirrored.
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4000.0, 0.0)), (P2(8000.0, 0.0), P2(12000.0, 0.0))]);
 }
 
 #[test]
@@ -1181,4 +1184,83 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
         missed.dedup();
         assert!(missed.is_empty(), "{l:?}: left in English: {missed:?}");
     }
+}
+
+#[test]
+fn the_wall_tool_draws_arcs_and_walls_on_the_location_line_picked() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    // Revit's Draw panel: a Start-End-Radius Arc takes its start, its end, then a point it passes through.
+    press(&mut h, "Start-End-Radius Arc");
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(4000.0, 0.0));
+    click(&mut h, P2(2000.0, -2000.0));
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4000.0, 0.0))]);
+    let arc = ids(&h, "wall")[0];
+    assert!((field(&h, arc, "arc").as_f64().unwrap() - 180.0).abs() < 1e-6, "{}", field(&h, arc, "arc"));
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(4000.0, 0.0)]), "chained, the next one starts where it ends");
+    key(&mut h, Key::Escape);
+    // Straight again, on the exterior finish face: the Options Bar's Location Line.
+    press(&mut h, "Line");
+    h.get_by_role_and_label(Role::ComboBox, "Location Line:").click();
+    h.run();
+    press(&mut h, "Finish Face: Exterior");
+    click(&mut h, P2(0.0, 3000.0));
+    click(&mut h, P2(4000.0, 3000.0));
+    key(&mut h, Key::Enter);
+    let line = ids(&h, "wall")[1];
+    assert_eq!((field(&h, line, "location"), field(&h, line, "arc")), (json!("exterior-finish"), Value::Null));
+}
+
+#[test]
+fn a_selected_wall_attaches_flips_and_takes_another_location_line() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(&format!("{BOX}\nroof {{}}"));
+    click(&mut h, P2(4000.0, 0.0));
+    let wall = h.state().selection[0];
+    // Put on its interior face (going east, its exterior is to its left, north), it stays where it is.
+    h.get_by_role_and_label(Role::ComboBox, "Location Line").click();
+    h.run();
+    press(&mut h, "Finish Face: Interior");
+    assert_eq!((field(&h, wall, "location"), field(&h, wall, "start")), (json!("interior-finish"), json!([0.0, -100.0])));
+    // Attach Top/Base, then the roof, by its edge seen overhead: the wall's top follows it.
+    press(&mut h, "Attach Top/Base");
+    let roof = ids(&h, "roof")[0];
+    click(&mut h, P2(4000.0, -600.0));
+    assert_eq!(field(&h, wall, "attach_top"), json!(roof));
+    assert_eq!(h.state().selection, [wall], "the wall stays selected");
+    let attached = h.get_by_role_and_label(Role::CheckBox, "Top is Attached").accesskit_node().toggled();
+    assert_eq!(attached, Some(egui::accesskit::Toggled::True));
+    // Flipped from the same tab, it runs the other way; detached, its top is its own again.
+    press(&mut h, "Flip");
+    assert_eq!(walls(&h)[0], (P2(8000.0, -100.0), P2(0.0, -100.0)));
+    press(&mut h, "Detach Top/Base");
+    assert_eq!(field(&h, wall, "attach_top"), Value::Null);
+}
+
+#[test]
+fn type_properties_build_a_wall_types_layers() {
+    use egui_kittest::kittest::{By, NodeT};
+    let mut h = app(BOX);
+    click(&mut h, P2(4000.0, 0.0));
+    press(&mut h, "Edit Type");
+    // One structure layer as thick as the type; a finish inserted outside it, a brick 100 thick.
+    press(&mut h, "Insert Layer");
+    let nth = |h: &Harness<BimApp>, role: Role, label: &'static str, n: usize| {
+        h.query_all(By::new().role(role).label(label)).nth(n).map(|n| n.accesskit_node().id()).unwrap()
+    };
+    let field = nth(&h, Role::TextInput, "Material", 0);
+    h.get_by(|n| n.id() == field).focus();
+    h.run();
+    h.get_by(|n| n.id() == field).type_text("Brick");
+    let thick = nth(&h, Role::TextInput, "Thickness", 0);
+    h.get_by(|n| n.id() == thick).focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by(|n| n.id() == thick).type_text("100");
+    h.run();
+    press(&mut h, "OK");
+    let t = &h.state().session.model.types.wall["Generic - 200mm"];
+    assert_eq!((t.thickness, t.layers.len()), (300.0, 2));
+    assert_eq!((t.layers[0].material.as_str(), t.layers[0].thickness, t.layers[1].thickness), ("Brick", 100.0, 200.0));
 }

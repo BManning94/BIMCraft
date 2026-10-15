@@ -1,13 +1,15 @@
 //! IFC4 export (ISO 16739 as an ISO 10303-21 STEP file), the open BIM exchange format every BIM
-//! tool reads. Levels become building storeys; walls, slabs, spaces, columns and stairs get
-//! swept-solid bodies, roofs a closed shell of flat faces for each slope; each door and window
-//! fills an opening element that voids its wall, so readers cut the hole.
+//! tool reads. Levels become building storeys; walls (their plan outline, mitred where they join,
+//! curved or straight), slabs, spaces, columns and stairs get swept-solid bodies, roofs and walls
+//! attached to them closed shells of flat faces; each door and window fills an opening element that
+//! voids its wall, so readers cut the hole; compound walls carry their layers as a material layer set.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::geom::P2;
-use crate::model::{DEFAULT_HEIGHT, Element, Id, Model, heading, mix};
+use crate::geom::{self, P2};
+use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Model, heading, mix};
+use crate::walls::{self, Axis};
 
 // What a GlobalId is for, so each one stays the same from export to export.
 const PROJECT: u64 = 1;
@@ -21,6 +23,7 @@ const FILLS: u64 = 8;
 const AGGREGATES: u64 = 9;
 const CONTAINS: u64 = 10;
 const SPACES: u64 = 11;
+const MATERIALS: u64 = 12;
 
 /// A STEP string literal: `'` doubled, `\` doubled, anything outside printable ASCII as `\X2\…\X0\`.
 fn s(text: &str) -> String {
@@ -171,12 +174,17 @@ impl Step {
     /// A closed shell around the flat counter-clockwise `face` and its copy `rise` above, its
     /// faces turned out; heights from `base`.
     fn brep(&mut self, face: &[[f64; 3]], base: f64, rise: f64) -> u64 {
-        let mut ring = |up: f64| -> Vec<u64> {
-            face.iter()
-                .map(|p| self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(p[0]), real(p[1]), real(p[2] - base + up))))
-                .collect()
+        let ring = |up: f64| -> Vec<[f64; 3]> { face.iter().map(|p| [p[0], p[1], p[2] - base + up]).collect() };
+        self.shell(&ring(0.0), &ring(rise))
+    }
+
+    /// A closed shell from the counter-clockwise `bottom` ring up to `top`, the same points above
+    /// it: its faces turned out.
+    fn shell(&mut self, bottom: &[[f64; 3]], top: &[[f64; 3]]) -> u64 {
+        let mut ring = |pts: &[[f64; 3]]| -> Vec<u64> {
+            pts.iter().map(|p| self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(p[0]), real(p[1]), real(p[2])))).collect()
         };
-        let (bottom, top) = (ring(0.0), ring(rise));
+        let (bottom, top) = (ring(bottom), ring(top));
         let mut loops = vec![bottom.iter().rev().copied().collect(), top.clone()];
         let pairs = || bottom.iter().zip(&top);
         loops.extend(pairs().zip(pairs().cycle().skip(1)).map(|((b0, t0), (b1, t1))| vec![*b0, *b1, *t1, *t0]));
@@ -232,20 +240,44 @@ pub fn export(m: &Model) -> String {
     let mut contained: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
     let mut spaces: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
     // Walls as (entity, placement), for the openings in them.
-    let mut walls: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
+    let mut placed: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
     for (&id, e) in &m.elements {
         match e {
             Element::Wall(wl) => {
                 let Some(&(_, storey)) = storeys.get(&wl.level) else { continue };
-                let (len, t, h) = (wl.start.dist(wl.end), m.thickness(wl), m.top_z(wl) - m.base_z(wl));
-                let at = w.place(Some(storey), (wl.start.0, wl.start.1, wl.base_offset), Some((wl.end - wl.start).unit()));
-                let (a, b) = (w.point(P2(0.0, 0.0)), w.point(P2(len, 0.0)));
-                let line = w.add(format!("IFCPOLYLINE((#{a},#{b}))"));
+                let (path, base) = (Axis::of(wl), m.own_base(wl));
+                // Placed at its start, along the way it sets off: its axis, outline and openings in that frame.
+                let u = path.tangent(0.0);
+                let local = |p: P2| P2((p - wl.start).dot(u), (p - wl.start).dot(u.perp()));
+                let at = w.place(Some(storey), (wl.start.0, wl.start.1, wl.base_offset), Some(u));
+                let pts: Vec<u64> = path.points(0.0, path.length(), 0.0).into_iter().map(|p| w.point(local(p))).collect();
+                let line = w.add(format!("IFCPOLYLINE(({}))", refs(&pts)));
                 let axis_rep = w.add(format!("IFCSHAPEREPRESENTATION(#{axis},'Axis','Curve2D',(#{line}))"));
-                // The body reaches past shared ends like the plan's, so corners close in 3D too.
-                let (back, on) = (m.join_reach(id, wl.start), m.join_reach(id, wl.end));
-                let profile = w.rectangle(P2((len + on - back) / 2.0, 0.0), P2(len + back + on, t));
-                let shape = w.body(profile, 0.0, h, &[axis_rep]);
+                // Its outline swept up, mitred where it joins others as the plan's is; attached to a
+                // roof or a floor, a closed shell for each piece under (or over) a plane of it.
+                let shape = if wl.attach_top.is_none() && wl.attach_base.is_none() {
+                    let outline: Vec<P2> = walls::outline(m, id).into_iter().map(local).collect();
+                    let profile = w.profile(&outline, &[]);
+                    w.body(profile, 0.0, m.own_top(wl) - base, &[axis_rep])
+                } else {
+                    let breps: Vec<u64> = walls::prisms(m, id, false)
+                        .iter()
+                        .map(|p| {
+                            let mut ring = p.ring.clone();
+                            if geom::area(&ring) < 0.0 {
+                                ring.reverse();
+                            }
+                            let up = |q: &P2, plane: &walls::Plane| {
+                                let l = local(*q);
+                                [l.0, l.1, plane.at(*q) - base]
+                            };
+                            let (bottom, top): (Vec<_>, Vec<_>) = ring.iter().map(|q| (up(q, &p.bottom), up(q, &p.top))).unzip();
+                            w.shell(&bottom, &top)
+                        })
+                        .collect();
+                    let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Brep',({}))", w.body, refs(&breps)));
+                    w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep},#{axis_rep}))"))
+                };
                 let ent = w.add(format!(
                     "IFCWALL({},$,{},$,{},#{at},#{shape},'{id}',.STANDARD.)",
                     w.guid(ELEMENT, id),
@@ -253,7 +285,7 @@ pub fn export(m: &Model) -> String {
                     s(&wl.type_name)
                 ));
                 contained.entry(wl.level).or_default().push(ent);
-                walls.insert(id, (ent, at));
+                placed.insert(id, (ent, at));
             }
             Element::Floor(f) => {
                 let Some(&(_, storey)) = storeys.get(&f.level) else { continue };
@@ -348,10 +380,18 @@ pub fn export(m: &Model) -> String {
     }
     for (&id, e) in &m.elements {
         let (Element::Door(o) | Element::Window(o)) = e else { continue };
-        let (Some(t), Some(wl), Some(&(wall, wall_at))) = (m.opening_type(e), m.wall(o.host), walls.get(&o.host)) else { continue };
-        let at = w.place(Some(wall_at), (o.offset - t.width / 2.0, 0.0, o.sill), None);
-        // The hole reaches 10 mm past both faces so it cuts cleanly.
-        let profile = w.rectangle(P2(t.width / 2.0, 0.0), P2(t.width, m.thickness(wl) + 20.0));
+        let (Some(t), Some(wl), Some(&(wall, wall_at))) = (m.opening_type(e), m.wall(o.host), placed.get(&o.host)) else { continue };
+        // From its jamb toward the wall's start, square to the wall at its middle, in the wall's frame.
+        let axis = Axis::of(wl);
+        let (u, way) = (axis.tangent(0.0), axis.tangent(o.offset));
+        let jamb = axis.at(o.offset, walls::centre(m, wl)) - way * (t.width / 2.0) - wl.start;
+        let at = w.place(Some(wall_at), (jamb.dot(u), jamb.dot(u.perp()), o.sill), Some(P2(way.dot(u), way.dot(u.perp()))));
+        // The hole reaches 10 mm past both faces so it cuts cleanly; through a curved wall, past its bow too.
+        let bow = axis.radius().map_or(0.0, |r| {
+            let inner = r - m.thickness(wl) / 2.0 - walls::centre(m, wl).abs();
+            if inner > t.width / 2.0 { inner - (inner * inner - t.width * t.width / 4.0).sqrt() } else { t.width }
+        });
+        let profile = w.rectangle(P2(t.width / 2.0, 0.0), P2(t.width, m.thickness(wl) + 20.0 + 2.0 * bow));
         let shape = w.body(profile, 0.0, t.height, &[]);
         let opening = w.add(format!("IFCOPENINGELEMENT({},$,'Opening',$,$,#{at},#{shape},$,.OPENING.)", w.guid(OPENING, id)));
         w.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{wall},#{opening})", w.guid(VOIDS, id)));
@@ -380,6 +420,46 @@ pub fn export(m: &Model) -> String {
         };
         w.add(format!("IFCRELFILLSELEMENT({},$,$,$,#{opening},#{ent})", w.guid(FILLS, id)));
         contained.entry(wl.level).or_default().push(ent);
+    }
+    // Compound wall types' layers: a layer set for each type, and for each type and line its walls
+    // stand on, the set's use, from their exterior faces in.
+    let mut materials: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut sets: BTreeMap<&str, u64> = BTreeMap::new();
+    let used: std::collections::BTreeSet<&str> = placed.keys().filter_map(|id| m.wall(*id)).map(|wl| wl.type_name.as_str()).collect();
+    for (name, t) in m.types.wall.iter().filter(|(name, t)| !t.layers.is_empty() && used.contains(name.as_str())) {
+        let mut layers = Vec::new();
+        for l in &t.layers {
+            let material = match l.material.trim() {
+                "" => "$".to_string(),
+                named => {
+                    let id = match materials.get(named) {
+                        Some(id) => *id,
+                        None => w.add(format!("IFCMATERIAL({},$,$)", s(named))),
+                    };
+                    materials.insert(named, id);
+                    format!("#{id}")
+                }
+            };
+            let category = match l.function {
+                Function::Structure => "'LoadBearing'",
+                Function::Thermal => "'Insulation'",
+                Function::Finish => "'Finish'",
+                Function::Substrate | Function::Membrane => "$",
+            };
+            layers.push(w.add(format!("IFCMATERIALLAYER({material},{},$,$,$,{category},$)", real(l.thickness))));
+        }
+        sets.insert(name, w.add(format!("IFCMATERIALLAYERSET(({}),{},$)", refs(&layers), s(name))));
+    }
+    let mut uses: BTreeMap<(&str, String), Vec<u64>> = BTreeMap::new();
+    for (id, (ent, _)) in &placed {
+        if let Some(wl) = m.wall(*id).filter(|wl| sets.contains_key(wl.type_name.as_str())) {
+            uses.entry((wl.type_name.as_str(), real(walls::faces(m, wl).0))).or_default().push(*ent);
+        }
+    }
+    for (k, ((name, offset), ents)) in uses.into_iter().enumerate() {
+        let Some(set) = sets.get(name) else { continue };
+        let usage = w.add(format!("IFCMATERIALLAYERSETUSAGE(#{set},.AXIS2.,.NEGATIVE.,{offset},$)"));
+        w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,({}),#{usage})", w.guid(MATERIALS, k as u64), refs(&ents)));
     }
     for (level, (storey, _)) in &storeys {
         if let Some(items) = contained.get(level) {
@@ -454,6 +534,53 @@ mod tests {
         assert_eq!([n("IFCWALL"), n("IFCDOOR"), n("IFCWINDOW"), n("IFCSLAB"), n("IFCSPACE")], [7, 4, 5, 1, 4]);
         assert_eq!([n("IFCOPENINGELEMENT"), n("IFCRELVOIDSELEMENT"), n("IFCRELFILLSELEMENT")], [9, 9, 9]);
         assert!(f.contains("'Kitchen'"), "rooms keep their names");
+    }
+
+    #[test]
+    fn compound_curved_and_attached_walls_export_their_layers_and_shapes() {
+        let mut s = Session::new();
+        s.script(
+            r#"type {"category": "wall", "name": "Cavity", "layers": [{"function": "finish", "material": "Brick", "thickness": 100}, {"function": "structure", "material": "Block", "thickness": 200}]}
+               wall {"points": [[0, 0], [0, 6000], [8000, 6000], [8000, 0]], "type": "Cavity"}
+               wall {"points": [[8000, 0], [0, 0]], "arc": -60, "type": "Cavity", "location": "interior-finish"}
+               window {"at": [4000, -1100]}
+               roof {"gable": true, "boundary": [[-600, -1800], [8600, -1800], [8600, 6600], [-600, 6600]]}
+               modify {"ids": [3, 5], "attach_top": 8}
+               door {"at": [4000, 6000]}"#,
+        )
+        .unwrap();
+        let f = export(&s.model);
+        let n = |e: &str| f.matches(&format!("={e}(")).count();
+        assert_eq!([n("IFCMATERIAL"), n("IFCMATERIALLAYER"), n("IFCMATERIALLAYERSET")], [2, 2, 1]);
+        // One use for the walls on their centre lines, one for the curved one on its interior face.
+        assert_eq!([n("IFCMATERIALLAYERSETUSAGE"), n("IFCRELASSOCIATESMATERIAL")], [2, 2]);
+        assert!(
+            f.contains("IFCMATERIALLAYERSETUSAGE(") && f.contains(".AXIS2.,.NEGATIVE.,150.,$)") && f.contains(".AXIS2.,.NEGATIVE.,300.,$)")
+        );
+        assert!(f.contains("IFCMATERIALLAYER(#") && f.contains("'LoadBearing'") && f.contains("'Brick'"));
+        // The walls attached to the roof, and the roof, as closed shells; the others swept up.
+        assert_eq!(f.matches("'Body','Brep'").count(), 3);
+        assert_eq!([n("IFCWALL"), n("IFCOPENINGELEMENT"), n("IFCWINDOW")], [4, 2, 1]);
+        // Every hole, through a straight wall or a curved one, has a size.
+        for line in f.lines().filter(|l| l.contains("=IFCRECTANGLEPROFILEDEF(")) {
+            assert!(!line.contains(",0.)") && !line.contains(",0.,"), "{line}");
+        }
+        dangling(&f);
+    }
+
+    /// Every reference in `f` points at an entity written once.
+    fn dangling(f: &str) {
+        let mut defined = BTreeSet::new();
+        let mut referenced = BTreeSet::new();
+        for line in f.lines().filter(|l| l.starts_with('#')) {
+            let (head, body) = line.split_once('=').unwrap();
+            assert!(defined.insert(head[1..].parse::<u64>().unwrap()), "{head} written twice");
+            for r in body.split('#').skip(1) {
+                referenced.insert(r.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u64>().unwrap());
+            }
+        }
+        let dangling: Vec<_> = referenced.difference(&defined).collect();
+        assert!(dangling.is_empty(), "dangling references: {dangling:?}");
     }
 
     #[test]

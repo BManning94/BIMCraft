@@ -12,9 +12,10 @@ use bimcraft_core::model::{
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::roof_footprint;
+use bimcraft_core::walls::{self, Axis};
 use egui::{
-    Align, Align2, Color32, Event, FontId, Key, Layout, Modifiers, Painter, PointerButton, Pos2, Rect, Response, Sense, Shape, Stroke,
-    StrokeKind, TextEdit, TextureId, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Color32, Event, FontId, Key, Layout, Mesh, Modifiers, Painter, PointerButton, Pos2, Rect, Response, Sense, Shape,
+    Stroke, StrokeKind, TextEdit, TextureId, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -194,6 +195,19 @@ pub(crate) fn color(c: Rgb) -> Color32 {
     Color32::from_rgb(over(r), over(g), over(b))
 }
 
+/// Whether a ring turns one way all round.
+fn convex(r: &[(f32, f32)]) -> bool {
+    let n = r.len();
+    let turns: Vec<f32> = (0..n)
+        .map(|i| {
+            let (a, b, c) = (r[i], r[(i + 1) % n], r[(i + 2) % n]);
+            (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0)
+        })
+        .filter(|t| t.abs() > 1e-3)
+        .collect();
+    turns.iter().all(|t| *t > 0.0) || turns.iter().all(|t| *t < 0.0)
+}
+
 fn pos(origin: Pos2, (x, y): (f32, f32)) -> Pos2 {
     origin + vec2(x, y)
 }
@@ -229,11 +243,28 @@ pub(crate) fn paint(p: &Painter, at: Place, d: &Drawing, selected: &[Id], hovere
             _ => None,
         };
         match prim {
-            // ponytail: convex rings only (every fill the plans make today); tessellate once they fill holes or concave rings.
+            // A convex ring alone, smooth-edged; else (a curved wall's outline, walls' union) cut into
+            // triangles, which meet without a seam. No holes: no fill has one.
             Prim::Fill { rings, color: c } => {
-                for r in rings {
-                    let fill = accent.map_or(color(*c), |a| a.1);
-                    p.add(Shape::convex_polygon(r.iter().map(|q| at.pos(*q)).collect(), fill, Stroke::NONE));
+                let fill = accent.map_or(color(*c), |a| a.1);
+                match rings.as_slice() {
+                    [r] if convex(r) => {
+                        p.add(Shape::convex_polygon(r.iter().map(|q| at.pos(*q)).collect(), fill, Stroke::NONE));
+                    }
+                    _ => {
+                        let mut mesh = Mesh::default();
+                        for r in rings {
+                            let ring: Vec<P2> = r.iter().map(|q| P2(f64::from(q.0), f64::from(q.1))).collect();
+                            let first = mesh.vertices.len() as u32;
+                            for q in r {
+                                mesh.colored_vertex(at.pos(*q), fill);
+                            }
+                            for [a, b, c] in geom::triangulate(&ring) {
+                                mesh.add_triangle(first + a as u32, first + b as u32, first + c as u32);
+                            }
+                        }
+                        p.add(Shape::mesh(mesh));
+                    }
                 }
             }
             Prim::Image { at: corner, width, height, .. } => {
@@ -432,27 +463,27 @@ fn snap(m: &Model, level: Id, v: &View, at: (f32, f32), chain: &[P2], square: bo
             p.0 = from.0;
         }
     }
-    let walls: Vec<(P2, P2, f64)> = m
+    let walls: Vec<(Axis, f64)> = m
         .elements
         .values()
         .filter_map(|e| match e {
-            Element::Wall(w) if m.cut_by(w, level) => Some((w.start, w.end, m.thickness(w))),
+            Element::Wall(w) if m.cut_by(w, level) => Some((Axis::of(w), m.thickness(w))),
             _ => None,
         })
         .collect();
     let near = SNAP / v.scale;
-    let ends = walls.iter().flat_map(|(a, b, _)| [*a, *b]).chain(chain.iter().copied());
+    let ends = walls.iter().flat_map(|(a, _)| [a.start, a.end]).chain(chain.iter().copied());
     if let Some(end) = ends.filter(|e| e.dist(p) <= near).min_by(|a, b| a.dist(p).total_cmp(&b.dist(p))) {
         return end;
     }
     let on = walls
         .iter()
-        .map(|(a, b, t)| (*a, *b, geom::dist_to_segment(p, *a, *b) - t / 2.0))
-        .filter(|(_, _, d)| *d <= f64::from(PICK) / v.scale)
-        .min_by(|x, y| x.2.total_cmp(&y.2));
+        .map(|(a, t)| (a, a.distance(p, 0.0) - t / 2.0))
+        .filter(|(_, d)| *d <= f64::from(PICK) / v.scale)
+        .min_by(|x, y| x.1.total_cmp(&y.1));
     match on {
-        // Along the wall to the nearest 10 mm from its start.
-        Some((a, b, _)) => micron(a + (b - a).unit() * ((geom::param_on_segment(p, a, b) * a.dist(b) / 10.0).round() * 10.0)),
+        // Along the wall's line to the nearest 10 mm from its start.
+        Some((a, _)) => micron(a.at((a.project(p).0 / 10.0).round() * 10.0, 0.0)),
         None => round(p),
     }
 }
@@ -518,6 +549,9 @@ impl BimApp {
             (Tool::Spot, Some(q)) => model.spot_host(level, view.mm(q)),
             (Tool::Tag, Some(q)) => {
                 d.pick(q, PICK).filter(|id| matches!(model.elements.get(id), Some(Element::Door(_) | Element::Window(_))))
+            }
+            (Tool::Attach, Some(q)) => {
+                d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Roof(_) | Element::Floor(_))))
             }
             _ => None,
         };
@@ -820,6 +854,17 @@ impl BimApp {
                     self.run("tag", json!({"ids": [id], "leader": self.tag_leader}));
                 }
             }
+            // The selected walls, onto the roof or floor picked; then Modify, the walls still selected.
+            Tool::Attach => {
+                if let Some(id) = hovered {
+                    let field = if self.attach_base { "attach_base" } else { "attach_top" };
+                    let mut p = json!({"ids": self.selected_walls()});
+                    p[field] = json!(id);
+                    if self.run("modify", p).is_some() {
+                        self.tool = Tool::Modify;
+                    }
+                }
+            }
             Tool::Column => match top_params(m, level, self.column_top, &self.column_height) {
                 Ok(mut p) => {
                     p["at"] = point(snap(m, level, v, at, &[], false));
@@ -915,6 +960,10 @@ impl BimApp {
     /// Bar's distance.
     fn offset_by(&mut self, m: &Model, id: Id, p: P2) -> Option<P2> {
         let w = m.wall(id)?;
+        if w.arc != 0.0 {
+            self.status = Status { text: t("offset: it offsets straight walls").into(), error: true };
+            return None;
+        }
         let Some(d) = m.units.parse(&self.offset).filter(|d| *d > 0.0) else {
             self.status = Status { text: tf("offset: `{}` is not a distance", &[&self.offset]), error: true };
             return None;
@@ -926,6 +975,23 @@ impl BimApp {
     /// The tool's next point: of a wall chain, a grid's ends, a move's or a copy's base point and
     /// destination.
     pub(crate) fn place(&mut self, level: Id, p: P2) {
+        // An arc: its start, its end, then a point it passes through, which makes it.
+        if self.wall_arc
+            && let Tool::Wall(chain) = &mut self.tool
+        {
+            match chain.as_slice() {
+                &[start, end] => {
+                    let arc = walls::sweep_through(start, p, end);
+                    if self.build_walls(level, &[start, end], false, arc) {
+                        let Tool::Wall(chain) = &mut self.tool else { return };
+                        *chain = if self.chain { vec![end] } else { Vec::new() };
+                    }
+                }
+                [start] if start.dist(p) <= TOL => {}
+                _ => chain.push(p),
+            }
+            return;
+        }
         match &mut self.tool {
             Tool::Wall(chain) => match chain.first() {
                 Some(&first) if chain.len() >= 3 && first.dist(p) <= TOL => self.finish_wall(level, true),
@@ -993,14 +1059,22 @@ impl BimApp {
         }
     }
 
-    /// Build the wall chain drawn so far: the tool's Enter.
+    /// Build the wall chain drawn so far: the tool's Enter. An arc not finished yet is dropped.
     pub(crate) fn finish_wall(&mut self, level: Id, closed: bool) {
         let Tool::Wall(chain) = &mut self.tool else { return };
         let chain = std::mem::take(chain);
-        if chain.len() < 2 {
-            return;
+        if chain.len() >= 2 && !self.wall_arc {
+            self.build_walls(level, &chain, closed, 0.0);
         }
-        let mut p = json!({"points": chain.iter().map(|q| point(*q)).collect::<Vec<_>>(), "level": level, "closed": closed});
+    }
+
+    /// Walls along `points`, each turning `arc` degrees, as the Options Bar says: their type,
+    /// their top, the line they stand on. Whether they were made.
+    fn build_walls(&mut self, level: Id, points: &[P2], closed: bool, arc: f64) -> bool {
+        let mut p = json!({
+            "points": points.iter().map(|q| point(*q)).collect::<Vec<_>>(), "level": level, "closed": closed,
+            "arc": arc, "location": self.wall_location.name(),
+        });
         if let Some(t) = self.types.get("wall") {
             p["type"] = json!(t);
         }
@@ -1010,10 +1084,10 @@ impl BimApp {
             Ok(_) => {}
             Err(e) => {
                 self.status = Status { text: tf("wall: {}", &[&e]), error: true };
-                return;
+                return false;
             }
         }
-        self.run("wall", p);
+        self.run("wall", p).is_some()
     }
 
     /// The selected wall's length as a temporary dimension beside it, as Revit shows one. A click
@@ -1036,15 +1110,31 @@ impl BimApp {
         let off = (m.thickness(w) / 2.0 * v.scale) as f32 + 18.0;
         let stroke = Stroke::new(1.0, pal().accent);
         let p = ui.painter_at(rect);
-        p.line_segment([a + n * off, b + n * off], stroke);
-        for e in [a, b] {
-            p.line_segment([e + n * (off - 10.0).max(2.0), e + n * (off + 4.0)], stroke);
-            p.line_segment([e + n * off - (u + n) * 3.0, e + n * off + (u + n) * 3.0], stroke);
-        }
-        let text = m.units.length(w.start.dist(w.end));
+        let axis = Axis::of(w);
+        let length = axis.length();
+        // Along a curved wall, an arc round its outside; its number at the arc's middle.
+        let middle = if axis.centre().is_some() {
+            // Turning left, its left is in toward the centre: outside, to its right.
+            let side = w.arc.signum();
+            let along_arc = |px: f32| axis.points(0.0, length, -side * f64::from(px) / v.scale).into_iter().map(|q| pos(rect.min, v.px(q)));
+            p.add(Shape::line(along_arc(off).collect(), stroke));
+            for s in [0.0, length] {
+                let (i, o) = (axis.at(s, -side * f64::from(off - 10.0) / v.scale), axis.at(s, -side * f64::from(off + 4.0) / v.scale));
+                p.line_segment([pos(rect.min, v.px(i)), pos(rect.min, v.px(o))], stroke);
+            }
+            pos(rect.min, v.px(axis.at(length / 2.0, -side * f64::from(off + 11.0) / v.scale)))
+        } else {
+            p.line_segment([a + n * off, b + n * off], stroke);
+            for e in [a, b] {
+                p.line_segment([e + n * (off - 10.0).max(2.0), e + n * (off + 4.0)], stroke);
+                p.line_segment([e + n * off - (u + n) * 3.0, e + n * off + (u + n) * 3.0], stroke);
+            }
+            a + along / 2.0 + n * (off + 11.0)
+        };
+        let text = m.units.length(length);
         let font = FontId::proportional(12.0);
         let size = p.layout_no_wrap(text.clone(), font.clone(), pal().accent).size() + vec2(10.0, 4.0);
-        let at = Rect::from_center_size(a + along / 2.0 + n * (off + 11.0), size);
+        let at = Rect::from_center_size(middle, size);
         let field = ui.id().with(("temporary dimension", id));
         let (mut done, mut start) = (None, false);
         match &mut self.dim_edit {
@@ -1070,8 +1160,9 @@ impl BimApp {
         if let Some(typed) = done {
             self.dim_edit = None;
             match typed.map(|t| (m.units.parse(&t), t)) {
+                // Its end moved along its chord: an arc keeps its turn, its length as typed.
                 Some((Some(len), _)) if len > 0.0 => {
-                    let by = (w.end - w.start).unit() * (len - w.start.dist(w.end));
+                    let by = (w.end - w.start) * (len / length - 1.0);
                     if by.length() > 1e-6 {
                         self.run("move", json!({"ids": [id], "by": point(by), "end": "end"}));
                     }
@@ -1169,7 +1260,7 @@ impl BimApp {
             }
             Tool::Offset => {
                 let d = m.units.parse(&self.offset).filter(|d| *d > 0.0);
-                if let (Some(w), Some(d)) = (hovered.and_then(|id| m.wall(id)), d) {
+                if let (Some(w), Some(d)) = (hovered.and_then(|id| m.wall(id)).filter(|w| w.arc == 0.0), d) {
                     let n = (w.end - w.start).unit().perp();
                     let by = n * if (v.mm(q) - w.start).dot(n) >= 0.0 { d } else { -d };
                     dashed(sc.screen(w.start + by), sc.screen(w.end + by));
@@ -1272,13 +1363,23 @@ impl BimApp {
         }
         let mut pts: Vec<Pos2> = chain.iter().map(|pt| sc.screen(*pt)).collect();
         pts.push(sc.screen(next));
+        // An arc waiting for its third point: the arc through the cursor.
+        if let (true, &[start, end]) = (self.wall_arc && matches!(self.tool, Tool::Wall(_)), chain) {
+            let axis = Axis::new(start, end, walls::sweep_through(start, next, end));
+            pts = axis.points(0.0, axis.length(), 0.0).into_iter().map(|pt| sc.screen(pt)).collect();
+        }
         p.add(Shape::line(pts, stroke));
         p.rect_stroke(Rect::from_center_size(sc.screen(next), vec2(8.0, 8.0)), 0.0, stroke, StrokeKind::Middle);
-        // The listening dimension: the length so far, or the one being typed.
-        match (chain.last(), self.typed_length.is_empty()) {
-            (Some(_), false) => label(sc.screen(next), format!("{} (Enter)", self.typed_length.trim())),
-            (Some(last), true) => label(sc.screen(next), m.units.with_unit(last.dist(next))),
-            (None, _) => {}
+        // The listening dimension: the length so far, or the one being typed; an arc's radius.
+        let arc = match (self.wall_arc && matches!(self.tool, Tool::Wall(_)), chain) {
+            (true, &[start, end]) => Axis::new(start, end, walls::sweep_through(start, next, end)).radius(),
+            _ => None,
+        };
+        match (chain.last(), self.typed_length.is_empty(), arc) {
+            (Some(_), false, _) => label(sc.screen(next), format!("{} (Enter)", self.typed_length.trim())),
+            (Some(_), true, Some(r)) => label(sc.screen(next), format!("R {}", m.units.with_unit(r))),
+            (Some(last), true, None) => label(sc.screen(next), m.units.with_unit(last.dist(next))),
+            (None, ..) => {}
         }
     }
 }

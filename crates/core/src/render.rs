@@ -16,9 +16,12 @@ use std::fmt::Write;
 use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash, Transform};
 
 use crate::geom::{self, P2};
-use crate::model::{DimKind, Dimension, Element, Id, Model, Note, Opening, PlanRange, Roof, Section, Stair, TOL, Tag, Wall, heading};
+use crate::model::{
+    DimKind, Dimension, Element, Function, Id, Model, Note, Opening, PlanRange, Roof, Section, Stair, TOL, Tag, Wall, heading,
+};
 use crate::units::Units;
 use crate::view3d::{self, Camera, Clip, Image, Scene};
+use crate::walls::{self, Axis};
 use crate::{font, sheet};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +30,8 @@ pub struct Rgb(pub u8, pub u8, pub u8);
 pub const PAPER: Rgb = Rgb(255, 255, 255);
 /// Wall poché, the grey of cut walls.
 pub const POCHE: Rgb = Rgb(168, 168, 168);
+/// A cut compound wall's layers that aren't its structure: lighter.
+pub const LIGHT_POCHE: Rgb = Rgb(212, 212, 212);
 const INK: Rgb = Rgb(25, 25, 25);
 const FAINT: Rgb = Rgb(120, 120, 120);
 const GRID: Rgb = Rgb(60, 100, 150);
@@ -171,11 +176,19 @@ impl Drawing {
         self.prims.push(p);
         self.owners.push(self.owner);
     }
+    /// `rings` filled, each turned the same way round, so where they overlap or meet they fill as one.
     pub(crate) fn fill(&mut self, rings: &[Vec<P2>], color: Rgb) {
         if rings.is_empty() {
             return;
         }
-        let rings = rings.iter().map(|r| r.iter().map(|p| self.view.px(*p)).collect()).collect();
+        let rings = rings
+            .iter()
+            .map(|r| {
+                let mut r: Vec<P2> = if geom::area(r) < 0.0 { r.iter().rev().copied().collect() } else { r.clone() };
+                r.dedup();
+                r.iter().map(|p| self.view.px(*p)).collect()
+            })
+            .collect();
         self.push(Prim::Fill { rings, color });
     }
     pub(crate) fn line(&mut self, pts: &[P2], width: f32, color: Rgb, closed: bool) {
@@ -301,7 +314,7 @@ fn cut_outlines(m: &Model, level: Id) -> Vec<(Id, Vec<P2>)> {
     m.elements
         .iter()
         .filter_map(|(&id, e)| match e {
-            Element::Wall(w) if m.cut_by(w, level) => Some((id, wall_outline(m, id, w))),
+            Element::Wall(w) if m.cut_by(w, level) => Some((id, walls::outline(m, id))),
             Element::Column(col) => {
                 let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
                 (bottom <= z && z < top).then(|| (id, m.column_outline(col)))
@@ -318,7 +331,7 @@ fn seen_below(m: &Model, r: &PlanRange) -> Vec<(Id, Vec<P2>, f64)> {
         .iter()
         .filter_map(|(&id, e)| {
             let (outline, top) = match e {
-                Element::Wall(w) => (wall_outline(m, id, w), m.top_z(w)),
+                Element::Wall(w) => (walls::outline(m, id), m.top_z(w)),
                 Element::Column(col) => (m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height).1),
                 _ => return None,
             };
@@ -488,7 +501,8 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     // Each element's cut pieces, filled as one so where they meet (a roof's slopes at its ridge)
     // leaves no seam.
     let mut cuts: std::collections::BTreeMap<Id, Vec<Vec<P2>>> = std::collections::BTreeMap::new();
-    for s in view3d::solids(m) {
+    let solids = view3d::solids(m);
+    for s in &solids {
         for (a, b) in s.across(v.start, u) {
             let (a, b) = (a.max(0.0), b.min(len));
             if b - a > 1e-6 {
@@ -498,16 +512,45 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
             }
         }
     }
-    // Outlines, then poché over their inner halves: joined walls show their union, as in plan.
+    // Outlines, then poché over their inner halves: joined walls show their union, as in plan,
+    // filled as one first so no seam shows where pieces meet.
     for (owner, rings) in &cuts {
         d.owner = Some(*owner);
         for r in rings {
             d.line(r, 3.0, INK, true);
         }
     }
+    d.owner = None;
+    d.fill(&cuts.values().flatten().cloned().collect::<Vec<_>>(), POCHE);
     for (owner, rings) in cuts {
         d.owner = Some(owner);
         d.fill(&rings, POCHE);
+    }
+    // A compound wall's layers where the line cuts it: a thin line up each boundary between two, as
+    // high as the wall stands there, around its openings.
+    for (&wall, e) in &m.elements {
+        let Element::Wall(w) = e else { continue };
+        if m.types.wall.get(&w.type_name).is_none_or(|t| t.layers.is_empty()) {
+            continue;
+        }
+        d.owner = Some(wall);
+        let lines = walls::layer_lines(m, wall);
+        for line in lines.iter().skip(1).take(lines.len().saturating_sub(2)) {
+            for seg in line.windows(2) {
+                let &[p, q] = seg else { continue };
+                let Some(x) = geom::line_intersection(v.start, v.end, p, q).filter(|x| geom::dist_to_segment(*x, p, q) < 1e-6) else {
+                    continue;
+                };
+                let along = (x - v.start).dot(u);
+                if !(0.0..=len).contains(&along) {
+                    continue;
+                }
+                for s in solids.iter().filter(|s| s.owner() == wall && s.over(x)) {
+                    let (z0, z1) = s.z_at(x);
+                    d.line(&[P2(along, z0), P2(along, z1)], 1.0, INK, false);
+                }
+            }
+        }
     }
     let (lo, hi) = shown_heights(m, v);
     if v.crop.is_some() {
@@ -582,15 +625,35 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
     }
     let outlines = cut_outlines(m, level);
     // Outlines first, then poché over them: each fill covers the inner half of the outlines, so
-    // where walls overlap at their joins only the edge of their union stays inked.
+    // where walls meet at their joins only the edge of their union stays inked. Their union is
+    // filled first, as one, so no seam shows where two fills meet.
     for (id, o) in &outlines {
         d.owner = Some(*id);
         d.line(o, 4.0, INK, true);
     }
+    d.owner = None;
+    d.fill(&outlines.iter().map(|(_, o)| o.clone()).collect::<Vec<_>>(), POCHE);
     // One fill per wall or column: in one even-odd fill, overlapping walls would cancel out.
     for (id, o) in outlines {
         d.owner = Some(id);
         d.fill(&[o], POCHE);
+    }
+    // A compound wall's layers: lighter where they aren't its structure, a thin line between each two.
+    for (&id, e) in &m.elements {
+        let Element::Wall(w) = e else { continue };
+        let Some(t) = m.types.wall.get(&w.type_name).filter(|t| !t.layers.is_empty() && m.cut_by(w, level)) else { continue };
+        d.owner = Some(id);
+        let lines = walls::layer_lines(m, id);
+        for (k, layer) in t.layers.iter().enumerate() {
+            if let (Function::Structure, _) | (_, None) = (layer.function, lines.get(k + 1)) {
+                continue;
+            }
+            let ring: Vec<P2> = lines.get(k).into_iter().flatten().chain(lines.get(k + 1).into_iter().flatten().rev()).copied().collect();
+            d.fill(&[ring], LIGHT_POCHE);
+        }
+        for line in lines.iter().skip(1).take(lines.len().saturating_sub(2)) {
+            d.line(line, 1.0, INK, false);
+        }
     }
     for (&id, e) in &m.elements {
         if let Element::Door(o) | Element::Window(o) = e
@@ -743,42 +806,37 @@ fn fit(pts: &[P2], width: u32, height: u32) -> View {
     View { scale, cx: (lo.0 + hi.0) / 2.0, cy: (lo.1 + hi.1) / 2.0, width, height }
 }
 
-/// A wall's rectangle in plan, reaching past the ends it shares with other walls so corners
-/// close (see [`Model::join_reach`]).
-fn wall_outline(m: &Model, id: Id, w: &Wall) -> Vec<P2> {
-    let u = (w.end - w.start).unit();
-    let n = u.perp() * (m.thickness(w) / 2.0);
-    let (a, b) = (w.start - u * m.join_reach(id, w.start), w.end + u * m.join_reach(id, w.end));
-    vec![a + n, b + n, b - n, a - n]
-}
-
 /// A door or window the cut plane at height `cut` passes through: a gap in the wall, jambs, and
 /// a leaf with its swing, or glass.
 fn opening(d: &mut Drawing, m: &Model, e: &Element, o: &Opening, w: &Wall, cut: f64) {
     let Some(t) = m.opening_type(e) else { return };
-    let bottom = m.base_z(w) + o.sill;
+    let bottom = m.own_base(w) + o.sill;
     if !(bottom <= cut && cut < bottom + t.height) {
         return;
     }
-    let (u, half) = ((w.end - w.start).unit(), m.thickness(w) / 2.0);
-    let at = |along: f64, across: f64| w.start + u * along + u.perp() * across;
+    let (axis, (ext, int)) = (Axis::of(w), walls::faces(m, w));
     let (s0, s1) = (o.offset - t.width / 2.0, o.offset + t.width / 2.0);
-    // Clear a little past the faces too, where the outlines' outer halves are.
+    // Clear a little past the faces too, where the outlines' outer halves are; along an arc, an arc.
     let past = 3.0 / d.view.scale;
-    d.fill(&[vec![at(s0, -half - past), at(s1, -half - past), at(s1, half + past), at(s0, half + past)]], PAPER);
+    let gap: Vec<P2> = axis.points(s0, s1, int - past).into_iter().chain(axis.points(s1, s0, ext + past)).collect();
+    d.fill(&[gap], PAPER);
     for s in [s0, s1] {
-        d.line(&[at(s, -half), at(s, half)], 2.0, INK, false);
+        d.line(&[axis.at(s, int), axis.at(s, ext)], 2.0, INK, false);
     }
     if matches!(e, Element::Door(_)) {
-        let side = if o.flip_facing { -half } else { half };
+        // Swinging to the wall's left (its exterior side), or flipped, its right; hung on the jamb
+        // toward its start, or flipped, its end.
+        let side = if o.flip_facing { int } else { ext };
         let (hinge, free) = if o.flip_hand { (s1, s0) } else { (s0, s1) };
-        let pivot = at(hinge, side);
-        let open = pivot + u.perp() * (side.signum() * t.width);
+        let pivot = axis.at(hinge, side);
+        let out = axis.tangent(hinge).perp() * if o.flip_facing { -1.0 } else { 1.0 };
+        let shut = axis.at(free, side);
+        let open = pivot + out * pivot.dist(shut);
         d.line(&[pivot, open], 1.5, INK, false);
-        d.line(&arc(pivot, open, at(free, side), 24), 1.0, INK, false);
+        d.line(&arc(pivot, open, shut, 24), 1.0, INK, false);
     } else {
-        for across in [-half, 0.0, half] {
-            d.line(&[at(s0, across), at(s1, across)], 1.0, INK, false);
+        for across in [int, (ext + int) / 2.0, ext] {
+            d.line(&axis.points(s0, s1, across), 1.0, INK, false);
         }
     }
 }
@@ -1113,7 +1171,7 @@ pub fn svg(d: &Drawing) -> String {
         let _ = match p {
             Prim::Fill { rings, color } => {
                 let data: Vec<String> = rings.iter().map(|r| path_data(r, true)).collect();
-                write!(s, r#"<path d="{}" fill="{}" fill-rule="evenodd"/>"#, data.join(" "), hex(*color))
+                write!(s, r#"<path d="{}" fill="{}"/>"#, data.join(" "), hex(*color))
             }
             Prim::Line { pts, width, color, dash, closed } => {
                 let dash = dash.map_or_else(String::new, |[a, b]| format!(r#" stroke-dasharray="{a} {b}""#));
@@ -1174,7 +1232,7 @@ fn paint(pm: &mut Pixmap, d: &Drawing) {
                 paint.set_color_rgba8(color.0, color.1, color.2, 255);
                 let rings: Vec<&[(f32, f32)]> = rings.iter().map(Vec::as_slice).collect();
                 if let Some(path) = path(&rings, true) {
-                    pm.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+                    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
                 }
             }
             Prim::Line { pts, width, color, dash, closed } => {
@@ -1248,6 +1306,27 @@ mod tests {
         // Where the top and right walls overlap, and the square their ends stretch over.
         assert_eq!(pixel(&png, d.view.px(P2(8000.0, 6000.0))), (POCHE.0, POCHE.1, POCHE.2));
         assert_eq!(pixel(&png, d.view.px(P2(8050.0, 6050.0))), (POCHE.0, POCHE.1, POCHE.2));
+    }
+
+    #[test]
+    fn walls_meet_at_any_angle_without_a_seam_and_show_their_layers_and_arcs() {
+        let mut s = Session::new();
+        s.script(
+            r#"type {"category": "wall", "name": "Cavity", "layers": [{"function": "finish", "thickness": 100}, {"function": "structure", "thickness": 200}]}
+               wall {"points": [[0, 0], [0, 4000], [4000, 6309.401]], "type": "Cavity"}
+               wall {"points": [[6000, 0], [10000, 0]], "arc": 90}"#,
+        )
+        .unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        let png = png(&d).unwrap();
+        let at = |x: f64, y: f64| pixel(&png, d.view.px(P2(x, y)));
+        // Where the two walls meet at 120°, solid: no seam down their mitre.
+        assert_eq!(at(0.0, 4000.0), (POCHE.0, POCHE.1, POCHE.2));
+        // Going north, its exterior is west: the finish there lighter than the structure, a line between.
+        assert_eq!((at(-100.0, 2000.0), at(50.0, 2000.0)), ((LIGHT_POCHE.0, LIGHT_POCHE.1, LIGHT_POCHE.2), (POCHE.0, POCHE.1, POCHE.2)));
+        assert!(at(-50.0, 2000.0).0 < 100);
+        // A quarter circle turning left from west to east bulges south: its crown solid, its chord's middle clear.
+        assert_eq!((at(8000.0, 2000.0 - 2828.427), at(8000.0, 0.0)), ((POCHE.0, POCHE.1, POCHE.2), (PAPER.0, PAPER.1, PAPER.2)));
     }
 
     #[test]
@@ -1325,11 +1404,12 @@ mod tests {
         assert!(dark(d.view.px(P2(1000.0, -1500.0))), "the dimension line");
         assert!(dark(d.view.px(P2(-100.0, -1000.0))), "a witness line, down from the left wall's outer face");
         assert_eq!(d.pick(d.view.px(P2(1000.0, -1500.0)), 4.0), Some(11));
-        // The door's tag, a box outside the wall (the door swings in); the window's, outside too.
+        // The door's tag, a box outside the wall (the door swings in). The window faces its wall's
+        // exterior side, its left: this house is drawn counter-clockwise, so that's in, and so is its tag.
         let (x, y) = d.view.px(P2(2000.0, -500.0));
         assert!(dark((x, y - 8.0)), "the top of the door tag's box");
         assert_eq!(d.pick((x, y), 2.0), Some(12));
-        assert_eq!(d.pick(d.view.px(P2(8500.0, 3000.0)), 2.0), Some(13));
+        assert_eq!(d.pick(d.view.px(P2(7500.0, 3000.0)), 2.0), Some(13));
     }
 
     /// The house with a section (11) across it, west to east at y = 3000 so it looks north, and

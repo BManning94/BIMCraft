@@ -88,6 +88,11 @@ const WORDS: &[[&str; 3]] = &[
     ["Wall Schedule", "Tabela de paredes", "Tabla de muros"],
     ["Floor Schedule", "Tabela de pisos", "Tabla de pisos"],
     ["Level Schedule", "Tabela de níveis", "Tabla de niveles"],
+    // Materials of the types a new project has.
+    ["Brick", "Tijolo", "Ladrillo"],
+    ["Insulation", "Isolamento", "Aislamiento"],
+    ["Concrete block", "Bloco de concreto", "Bloque de hormigón"],
+    ["Plaster", "Reboco", "Enlucido"],
     // What drawings print.
     ["UP", "SOBE", "SUBE"],
     ["DN", "DESCE", "BAJA"],

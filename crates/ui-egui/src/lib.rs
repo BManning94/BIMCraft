@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{Element, Id, Model, Reference, STAIR_WIDTH, heading};
+use bimcraft_core::model::{Element, Id, Location, Model, Reference, STAIR_WIDTH, heading};
 use bimcraft_core::schedule;
 use bimcraft_core::units::Units;
 use egui::containers::menu::{MenuButton, SubMenuButton};
@@ -112,6 +112,9 @@ pub enum Tool {
     /// A roof over the walls of the plan's level, on the level above: Revit's Roof by Footprint,
     /// with every wall picked at once.
     Roof,
+    /// Attach the selected walls' tops (or, as the Options Bar says, their bases) to the roof or
+    /// floor picked.
+    Attach,
 }
 
 /// Why the last command failed, shown in a box over the view.
@@ -206,6 +209,11 @@ pub struct BimApp {
     roof_gable: bool,
     /// Each click ends a wall and starts the next; off, two clicks make one wall.
     chain: bool,
+    /// The Wall tool draws arcs, by their ends and a point on them; the line its walls stand on.
+    wall_arc: bool,
+    wall_location: Location,
+    /// Attach Top/Base attaches bases.
+    attach_base: bool,
     /// Thin Lines: every line one pixel wide.
     thin: bool,
     /// Move and Copy keep to horizontal and vertical.
@@ -427,6 +435,9 @@ impl BimApp {
             roof_overhang: units.length(500.0),
             roof_gable: false,
             chain: true,
+            wall_arc: false,
+            wall_location: Location::Centre,
+            attach_base: false,
             thin: false,
             constrain: false,
             multiple: false,
@@ -496,7 +507,8 @@ impl BimApp {
             | Tool::Align(_)
             | Tool::Trim(_)
             | Tool::Split
-            | Tool::Offset => None,
+            | Tool::Offset
+            | Tool::Attach => None,
             Tool::Wall(_) => Some("Place Wall"),
             Tool::Door => Some("Place Door"),
             Tool::Window => Some("Place Window"),
@@ -698,6 +710,9 @@ impl BimApp {
         if pressed(Modifiers::NONE, Key::Delete) {
             self.delete();
         }
+        if self.tool == Tool::Modify && pressed(Modifiers::NONE, Key::Space) {
+            self.flip();
+        }
         let typed: String = ctx.input(|i| {
             i.events
                 .iter()
@@ -782,6 +797,10 @@ impl BimApp {
             self.status = Status { text: t("select what to move, copy, rotate or mirror first").into(), error: true };
             return;
         }
+        if tool == Tool::Attach && self.selected_walls().is_empty() {
+            self.status = Status { text: t("select the walls to attach first").into(), error: true };
+            return;
+        }
         if let Tool::Rotate { centre, .. } = &mut tool
             && let Some(middle) = self.middle()
         {
@@ -791,7 +810,7 @@ impl BimApp {
             let top = self.session.model.levels().last().map_or(0.0, |(_, l)| l.elevation);
             self.new_level = (self.session.model.units.length(top + 3000.0), String::new());
         }
-        if tool != Tool::Modify && !edits {
+        if tool != Tool::Modify && tool != Tool::Attach && !edits {
             self.selection.clear();
         }
         if tool != Tool::Modify && !picks {
@@ -800,6 +819,41 @@ impl BimApp {
         self.typed.clear();
         self.typed_length.clear();
         self.tool = tool;
+    }
+
+    /// The walls among the selection.
+    fn selected_walls(&self) -> Vec<Id> {
+        self.selection.iter().copied().filter(|id| self.session.model.wall(*id).is_some()).collect()
+    }
+
+    /// The selected walls turned round about their location lines: Revit's flip arrows, or Space.
+    fn flip(&mut self) {
+        let walls = self.selected_walls();
+        if !walls.is_empty() {
+            self.run("flip", json!({"ids": walls}));
+        }
+    }
+
+    /// The Wall tool's Draw panel: lines, or arcs. A chain of lines drawn so far is built, and the
+    /// next wall starts where it ended (an arc not finished yet, where it started).
+    fn draw_arc(&mut self, arc: bool) {
+        if arc == self.wall_arc {
+            return;
+        }
+        let keep = match &self.tool {
+            Tool::Wall(chain) if self.wall_arc => chain.first().copied(),
+            Tool::Wall(chain) => chain.last().copied(),
+            _ => None,
+        };
+        if let Sheet::Plan(level) = self.sheet
+            && !self.wall_arc
+        {
+            self.finish_wall(level, false);
+        }
+        self.wall_arc = arc;
+        if let Tool::Wall(chain) = &mut self.tool {
+            *chain = keep.into_iter().collect();
+        }
     }
 
     /// The middle of what's selected: where Rotate turns it about until told otherwise.
@@ -1440,6 +1494,37 @@ impl BimApp {
                 (Icon::Delete, "Delete", "Delete (DE) the selection", None, some),
             ],
         ];
+        // The Wall tool's Draw panel: lines, or arcs by their ends and a point on them.
+        if matches!(self.tool, Tool::Wall(_)) {
+            panel(ui, "Draw", |ui| {
+                if big_button(ui, Icon::Line, "Line", !self.wall_arc, "Line: a wall along each step between the points clicked").clicked() {
+                    self.draw_arc(false);
+                }
+                let tip = "Start-End-Radius Arc: click its start, its end, then a point it passes through";
+                if big_button(ui, Icon::Arc, "Start-End-Radius Arc", self.wall_arc, tip).clicked() {
+                    self.draw_arc(true);
+                }
+            });
+        }
+        // Walls selected: Revit's Modify Wall panel.
+        let walls = self.selected_walls();
+        if !walls.is_empty() && matches!(self.tool, Tool::Modify | Tool::Attach) {
+            panel(ui, "Modify Wall", |ui| {
+                let tip = "Flip (Space): the walls' exterior sides go to the other side of their location lines";
+                if big_button(ui, Icon::Flip, "Flip", false, tip).clicked() {
+                    self.flip();
+                }
+                let tip = "Attach Top/Base: pick a roof or a floor for the walls' tops, or bases, to follow";
+                if big_button(ui, Icon::Attach, "Attach Top/Base", self.tool == Tool::Attach, tip).clicked() {
+                    self.set_tool(Tool::Attach);
+                }
+                if big_button(ui, Icon::Detach, "Detach Top/Base", false, "Detach Top/Base: the walls' tops and bases their own again")
+                    .clicked()
+                {
+                    self.run("modify", json!({"ids": walls, "attach_top": null, "attach_base": null}));
+                }
+            });
+        }
         panel(ui, "Modify", |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -1512,6 +1597,15 @@ impl BimApp {
                     ui.add(TextEdit::singleline(&mut self.note_text).desired_width(240.0).hint_text(t("what the note says")))
                         .labelled_by(l.id);
                 }
+                Tool::Attach => {
+                    ui.label(t("Attach Wall:"));
+                    if ui.selectable_label(!self.attach_base, t("Top")).clicked() {
+                        self.attach_base = false;
+                    }
+                    if ui.selectable_label(self.attach_base, t("Base")).clicked() {
+                        self.attach_base = true;
+                    }
+                }
                 Tool::Offset => {
                     let l = ui.label(t("Offset:"));
                     let hint = self.session.model.units.name();
@@ -1526,6 +1620,16 @@ impl BimApp {
     fn wall_options(&mut self, ui: &mut Ui) {
         let Sheet::Plan(level) = self.sheet else { return };
         height_options(ui, &self.session.model, level, &mut self.wall_top, &mut self.wall_height, "wall-top");
+        let l = ui.label(t("Location Line:"));
+        let now = self.wall_location;
+        let c = ComboBox::from_id_salt("wall-location").selected_text(t(now.label())).width(150.0).show_ui(ui, |ui| {
+            for loc in Location::ALL {
+                if ui.selectable_label(loc == now, t(loc.label())).clicked() {
+                    self.wall_location = loc;
+                }
+            }
+        });
+        c.response.labelled_by(l.id);
         ui.checkbox(&mut self.chain, t("Chain"));
     }
 
@@ -1595,7 +1699,11 @@ impl BimApp {
         match &self.tool {
             Tool::Modify => "Click to select, Tab for what's underneath, Ctrl adds, Shift takes away; drag to box or to move.",
             Tool::Wall(chain) if chain.is_empty() => "Click to enter the wall's start point.",
+            Tool::Wall(chain) if self.wall_arc && chain.len() == 1 => "Click to enter the arc's end point.",
+            Tool::Wall(_) if self.wall_arc => "Click a point the arc passes through: it sets the radius. Esc cancels.",
             Tool::Wall(_) => "Click to enter the next point. Enter finishes, Esc cancels, Shift keeps it square.",
+            Tool::Attach if self.attach_base => "Pick a roof or a floor: the selected walls' bases stand on it.",
+            Tool::Attach => "Pick a roof or a floor: the selected walls' tops follow its underside.",
             Tool::Door => "Click a wall to place the door.",
             Tool::Window => "Click a wall to place the window.",
             Tool::Room => "Click inside walls to place a room; the outline shows the room you'd get.",

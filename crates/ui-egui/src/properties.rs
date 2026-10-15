@@ -8,11 +8,11 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bimcraft_core::element_json;
-use bimcraft_core::model::{Element, Id, Model};
+use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model};
 use bimcraft_core::units::Units;
 use egui::{
-    Align, Align2, Button, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText, Sense,
-    Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText,
+    Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -53,6 +53,10 @@ enum Kind {
     MetresShown,
     /// A dimension's values: lengths, or an angle's degrees.
     Values,
+    /// A wall's location line: a drop-down.
+    LocationLine,
+    /// Whether a roof or a floor is there (a wall's attachment); read only.
+    Attached,
 }
 
 use Kind::*;
@@ -74,11 +78,15 @@ fn nested(key: &str, val: Value) -> Value {
 fn rows(category: &str) -> &'static [Row] {
     match category {
         "wall" => &[
+            ("Constraints", "location", "Location Line", LocationLine),
             ("Constraints", "level", "Base Constraint", Level),
             ("Constraints", "base_offset", "Base Offset", Length),
+            ("Constraints", "attach_base", "Base is Attached", Attached),
             ("Constraints", "top_level", "Top Constraint", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
+            ("Constraints", "attach_top", "Top is Attached", Attached),
             ("Dimensions", "length", "Length", LengthShown),
+            ("Dimensions", "radius", "Radius", LengthShown),
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
         ],
@@ -286,16 +294,17 @@ fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
     }
 }
 
-/// A drop-down of `options`; the one picked, if it changed.
-fn combo(ui: &mut Ui, salt: (Id, &str), current: &str, options: &[String]) -> Option<String> {
+/// A drop-down of `options`, named by `label`; the one picked, if it changed.
+fn combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, options: &[String]) -> Option<String> {
     let mut picked = None;
-    ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).show_ui(ui, |ui| {
+    let c = ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).show_ui(ui, |ui| {
         for o in options {
             if ui.selectable_label(o == current, o).clicked() && o != current {
                 picked = Some(o.clone());
             }
         }
     });
+    c.response.labelled_by(label);
     picked
 }
 
@@ -333,7 +342,24 @@ enum Subject {
     Schedule,
 }
 
-/// The Type Properties dialog: a type of a category, and its parameters as typed.
+/// A wall type's layer as typed: what it does, what it's made of, how thick.
+type LayerRow = (Function, String, String);
+
+/// What a layer does, as the layer editor names it.
+const FUNCTIONS: [(Function, &str); 5] = [
+    (Function::Structure, "Structure"),
+    (Function::Substrate, "Substrate"),
+    (Function::Thermal, "Thermal"),
+    (Function::Membrane, "Membrane"),
+    (Function::Finish, "Finish"),
+];
+
+fn function_name(f: Function) -> &'static str {
+    FUNCTIONS.iter().find(|(g, _)| *g == f).map_or("Structure", |(_, n)| n)
+}
+
+/// The Type Properties dialog: a type of a category, and its parameters as typed; a wall type's
+/// layers, too.
 pub(crate) struct TypeDialog {
     category: &'static str,
     name: String,
@@ -342,18 +368,50 @@ pub(crate) struct TypeDialog {
     fields: Vec<(&'static str, &'static str, String)>,
     /// The name being typed for a duplicate.
     duplicate: Option<String>,
+    /// A wall type's layers, exterior first, as typed, and as they were: changed, they make it.
+    layers: Vec<LayerRow>,
+    layers_were: Vec<LayerRow>,
 }
 
 impl TypeDialog {
+    pub(crate) fn new(m: &Model, category: &'static str, name: String, elements: Vec<Id>) -> TypeDialog {
+        let (fields, layers) = (TypeDialog::fields(m, category, &name), TypeDialog::layers(m, category, &name));
+        TypeDialog { category, name, elements, fields, duplicate: None, layers_were: layers.clone(), layers }
+    }
+
+    /// The dialog showing type `name` as the model has it now.
+    fn show(&mut self, m: &Model, name: String) {
+        *self = TypeDialog::new(m, self.category, name, std::mem::take(&mut self.elements));
+    }
+
     /// A type's sizes, as typed: lengths in the project's units.
     fn fields(m: &Model, category: &str, name: &str) -> Vec<(&'static str, &'static str, String)> {
         let types = serde_json::to_value(&m.types).unwrap_or_default();
         type_rows(category).iter().map(|(k, l)| (*k, *l, shown(Length, &types[category][name][k], m.units))).collect()
     }
 
-    /// The `type` command's parameters for the type as typed, or why they aren't lengths.
+    /// A wall type's layers, as typed: one structure layer as thick as it, without any.
+    fn layers(m: &Model, category: &str, name: &str) -> Vec<LayerRow> {
+        let Some(t) = m.types.wall.get(name).filter(|_| category == "wall") else { return Vec::new() };
+        let typed = |l: &Layer| (l.function, l.material.clone(), m.units.length(l.thickness));
+        match t.layers.as_slice() {
+            [] => vec![(Function::Structure, String::new(), m.units.length(t.thickness))],
+            layers => layers.iter().map(typed).collect(),
+        }
+    }
+
+    /// The `type` command's parameters for the type as typed, or why they aren't lengths. Changed
+    /// layers make the type, and how thick it is.
     fn params(&self, name: &str, units: Units) -> Result<Value, String> {
         let mut p = json!({"category": self.category, "name": name});
+        if self.layers != self.layers_were {
+            let layers = self.layers.iter().map(|(function, material, typed)| {
+                let thickness = units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t("Thickness"), typed]))?;
+                Ok(json!({"function": function, "material": material.trim(), "thickness": thickness}))
+            });
+            p["layers"] = Value::Array(layers.collect::<Result<_, String>>()?);
+            return Ok(p);
+        }
         for (key, label, typed) in &self.fields {
             p[*key] = json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t(label), typed]))?);
         }
@@ -423,8 +481,7 @@ impl BimApp {
 
     pub(crate) fn edit_type(&mut self) {
         if let Some((category, name, elements)) = self.type_subject() {
-            let fields = TypeDialog::fields(&self.session.model, category, &name);
-            self.type_dialog = Some(TypeDialog { category, name, elements, fields, duplicate: None });
+            self.type_dialog = Some(TypeDialog::new(&self.session.model, category, name, elements));
         }
     }
 
@@ -583,6 +640,10 @@ impl BimApp {
                 Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(124.0).show(ui, |ui| {
                     for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
                         let val = &v[key];
+                        // A length one element hasn't got (a straight wall's radius): no row.
+                        if ids.len() == 1 && kind == LengthShown && val.is_null() {
+                            continue;
+                        }
                         let kind = match kind {
                             Height if !v["top_level"].is_null() => LengthShown,
                             Point if paper => PaperPoint,
@@ -622,7 +683,7 @@ impl BimApp {
                                 }
                             }
                             Level => {
-                                if let Some(l) = combo(ui, (id, key), &level_name(val), &levels) {
+                                if let Some(l) = combo(ui, (id, key), name.id, &level_name(val), &levels) {
                                     change = Some((key, Ok(json!(l))));
                                 }
                             }
@@ -630,9 +691,26 @@ impl BimApp {
                                 let none = t("Unconnected");
                                 let options: Vec<String> = std::iter::once(none.to_string()).chain(levels.iter().cloned()).collect();
                                 let current = if val.is_null() { none.to_string() } else { level_name(val) };
-                                if let Some(l) = combo(ui, (id, key), &current, &options) {
+                                if let Some(l) = combo(ui, (id, key), name.id, &current, &options) {
                                     change = Some((key, Ok(if l == none { Value::Null } else { json!(l) })));
                                 }
+                            }
+                            // Shown by its label; a centre line by default, which the wall's JSON leaves out.
+                            LocationLine => {
+                                let now = val.as_str().and_then(Location::from_name).unwrap_or_default();
+                                let options: Vec<String> = Location::ALL.iter().map(|l| t(l.label()).to_string()).collect();
+                                if let Some(l) = combo(ui, (id, key), name.id, t(now.label()), &options)
+                                    && let Some(loc) = Location::ALL.iter().find(|loc| t(loc.label()) == l)
+                                {
+                                    change = Some((key, Ok(json!(loc.name()))));
+                                }
+                            }
+                            // Revit's greyed checkbox: Attach Top/Base and Detach Top/Base change it.
+                            Attached => {
+                                let mut on = !val.is_null();
+                                let r = ui.add_enabled(false, Checkbox::new(&mut on, ""));
+                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, false, on, label));
+                                r.labelled_by(name.id);
                             }
                             Text | Number | Length | Point | PaperPoint | Height | Limit => {
                                 let hint = if kind == Limit { t("Level Above") } else { "" };
@@ -695,7 +773,8 @@ impl BimApp {
         let names: Vec<String> = model.type_names(d.category).into_iter().map(String::from).collect();
         let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
         let r = Modal::new(UiId::new("type-properties")).show(ctx, |ui| {
-            ui.set_width(400.0);
+            // Wider for a wall type's layers.
+            ui.set_width(if d.category == "wall" { 560.0 } else { 400.0 });
             ui.label(RichText::new(t("Type Properties")).heading());
             ui.add_space(6.0);
             Grid::new("type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
@@ -738,6 +817,10 @@ impl BimApp {
                     ui.end_row();
                 }
             });
+            if d.category == "wall" {
+                ui.add_space(6.0);
+                layer_editor(ui, &mut d.layers, model.units);
+            }
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                 apply = ui.button(t("Apply")).clicked();
@@ -746,9 +829,7 @@ impl BimApp {
             });
         });
         if let Some(n) = switch {
-            d.fields = TypeDialog::fields(&model, d.category, &n);
-            d.name = n;
-            d.duplicate = None;
+            d.show(&model, n);
         }
         if create && let Some(new) = d.duplicate.clone() {
             let made = match d.params(new.trim(), model.units) {
@@ -759,9 +840,7 @@ impl BimApp {
                 }
             };
             if made {
-                d.name = new.trim().to_string();
-                d.fields = TypeDialog::fields(&self.session.model, d.category, &d.name);
-                d.duplicate = None;
+                d.show(&self.session.model, new.trim().to_string());
             }
         }
         if apply || ok {
@@ -773,6 +852,10 @@ impl BimApp {
                 }
             };
             ok &= applied;
+            if applied {
+                let name = d.name.clone();
+                d.show(&Arc::clone(&self.session.model), name);
+            }
         }
         if ok {
             let m = &self.session.model;
@@ -785,5 +868,57 @@ impl BimApp {
         if !(ok || cancel || r.should_close()) {
             self.type_dialog = Some(d);
         }
+    }
+}
+
+/// A wall type's layers, exterior first: what each does, what it's made of, how thick; a new one
+/// on the outside, and each moved in or out, or taken away.
+fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units) {
+    ui.label(RichText::new(t("Layers")).strong());
+    let mut action: Option<(usize, i8)> = None;
+    Grid::new("type-layers").num_columns(4).striped(true).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
+        let function = ui.label(RichText::new(t("Function")).color(pal().muted));
+        let material = ui.label(RichText::new(t("Material")).color(pal().muted));
+        let thickness = ui.label(RichText::new(t("Thickness")).color(pal().muted));
+        ui.label("");
+        ui.end_row();
+        let last = layers.len().saturating_sub(1);
+        for (k, (f, mat, typed)) in layers.iter_mut().enumerate() {
+            let c = ComboBox::from_id_salt(("layer-function", k)).selected_text(t(function_name(*f))).width(110.0).show_ui(ui, |ui| {
+                for (g, n) in FUNCTIONS {
+                    if ui.selectable_label(*f == g, t(n)).clicked() {
+                        *f = g;
+                    }
+                }
+            });
+            c.response.labelled_by(function.id);
+            // Sized: in a grid, a field keeps to its column's width from the frame before.
+            ui.add_sized([150.0, 20.0], TextEdit::singleline(mat)).labelled_by(material.id);
+            ui.add_sized([70.0, 20.0], TextEdit::singleline(typed).hint_text(units.name())).labelled_by(thickness.id);
+            ui.horizontal(|ui| {
+                if ui.add_enabled(k > 0, Button::new(t("Out")).small()).clicked() {
+                    action = Some((k, -1));
+                }
+                if ui.add_enabled(k < last, Button::new(t("In")).small()).clicked() {
+                    action = Some((k, 1));
+                }
+                if ui.add_enabled(last > 0, Button::new(t("Delete")).small()).clicked() {
+                    action = Some((k, 0));
+                }
+            });
+            ui.end_row();
+        }
+    });
+    match action {
+        Some((k, 0)) if k < layers.len() => {
+            layers.remove(k);
+        }
+        Some((k, -1)) if k > 0 => layers.swap(k, k - 1),
+        Some((k, _)) if k + 1 < layers.len() => layers.swap(k, k + 1),
+        _ => {}
+    }
+    // A finish 10 mm thick, on the exterior side.
+    if ui.button(t("Insert Layer")).clicked() {
+        layers.insert(0, (Function::Finish, String::new(), units.length(10.0)));
     }
 }

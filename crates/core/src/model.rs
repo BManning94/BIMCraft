@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::geom::{self, P2, Region};
 use crate::language::Language;
 use crate::units::Units;
+use crate::walls;
 
 pub type Id = u64;
 
@@ -93,6 +94,9 @@ pub struct Grid {
     pub end: P2,
 }
 
+/// A wall: its location line from `start` to `end`, straight or, turning `arc` degrees, an arc;
+/// which line of the wall that is (its `location`); its exterior side to the left of start to end,
+/// as Revit's, so walls drawn clockwise face out.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Wall {
@@ -100,7 +104,7 @@ pub struct Wall {
     pub type_name: String,
     /// Base level.
     pub level: Id,
-    /// Ends of the location line, which is the wall's centre line.
+    /// Ends of the location line.
     pub start: P2,
     pub end: P2,
     /// Top constraint: a level, or none for an unconnected wall `height` tall.
@@ -110,7 +114,110 @@ pub struct Wall {
     pub height: f64,
     #[serde(default)]
     pub base_offset: f64,
+    /// How far it turns from its start to its end, degrees counter-clockwise: 0 straight, 180 a
+    /// half circle bulging to its right.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub arc: f64,
+    #[serde(default, skip_serializing_if = "is_centre")]
+    pub location: Location,
+    /// The roof or floor its top follows, from below, instead of its top constraint; and the one its
+    /// base stands on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_top: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attach_base: Option<Id>,
 }
+
+fn is_zero(x: &f64) -> bool {
+    *x == 0.0
+}
+
+fn is_centre(l: &Location) -> bool {
+    *l == Location::Centre
+}
+
+/// The line of a wall its ends lie on, as Revit's location line: its centre, its core's centre, or
+/// a face, of its finish or of its core, on its exterior or its interior side.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Location {
+    #[default]
+    #[serde(alias = "center")]
+    Centre,
+    #[serde(alias = "core-center")]
+    CoreCentre,
+    ExteriorFinish,
+    InteriorFinish,
+    ExteriorCore,
+    InteriorCore,
+}
+
+impl Location {
+    pub const ALL: [Location; 6] = [
+        Location::Centre,
+        Location::CoreCentre,
+        Location::ExteriorFinish,
+        Location::InteriorFinish,
+        Location::ExteriorCore,
+        Location::InteriorCore,
+    ];
+
+    /// Its name in commands and files.
+    pub fn name(self) -> &'static str {
+        match self {
+            Location::Centre => "centre",
+            Location::CoreCentre => "core-centre",
+            Location::ExteriorFinish => "exterior-finish",
+            Location::InteriorFinish => "interior-finish",
+            Location::ExteriorCore => "exterior-core",
+            Location::InteriorCore => "interior-core",
+        }
+    }
+
+    /// As a menu names it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Location::Centre => "Wall Centreline",
+            Location::CoreCentre => "Core Centreline",
+            Location::ExteriorFinish => "Finish Face: Exterior",
+            Location::InteriorFinish => "Finish Face: Interior",
+            Location::ExteriorCore => "Core Face: Exterior",
+            Location::InteriorCore => "Core Face: Interior",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Location> {
+        let n = name.trim().to_ascii_lowercase().replace("center", "centre");
+        Location::ALL.into_iter().find(|l| l.name() == n)
+    }
+}
+
+/// What a layer of a wall does: carries it (structure, its core), backs another (substrate),
+/// insulates (thermal), seals it (a membrane, which may be as thin as nothing), or finishes a face.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Function {
+    #[default]
+    Structure,
+    Substrate,
+    Thermal,
+    Membrane,
+    Finish,
+}
+
+/// A layer of a compound wall type.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layer {
+    #[serde(default)]
+    pub function: Function,
+    #[serde(default)]
+    pub material: String,
+    pub thickness: f64,
+}
+
+/// Layers a wall type may have.
+pub const MAX_LAYERS: usize = 32;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -170,12 +277,23 @@ pub enum Face {
 }
 
 impl Face {
-    /// The same face of a mirrored wall: a mirror image swaps left and right.
+    /// The same line of a mirrored wall, which runs back the other way: its start and end swap
+    /// (a door's or a window's jambs too), its exterior and interior faces stay its left and right.
     pub fn mirrored(self) -> Face {
+        match self {
+            Face::Start => Face::End,
+            Face::End => Face::Start,
+            other => other,
+        }
+    }
+
+    /// The same line of a flipped wall, which runs the other way about the same line: its left and
+    /// right swap, and its start and end.
+    pub fn flipped(self) -> Face {
         match self {
             Face::Left => Face::Right,
             Face::Right => Face::Left,
-            other => other,
+            other => other.mirrored(),
         }
     }
 
@@ -493,10 +611,15 @@ impl Element {
     }
 }
 
+/// A wall type: how thick its walls are and, a compound one, its layers from the exterior side in,
+/// which make up that thickness. Its core runs from its first structure layer to its last (all of
+/// it, without one).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WallType {
     pub thickness: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -578,9 +701,18 @@ impl Model {
             types: Types::default(),
             elements: BTreeMap::new(),
         };
-        for (n, t) in [("Generic - 200mm", 200.0), ("Interior - 100mm", 100.0), ("Exterior - 300mm", 300.0)] {
-            m.types.wall.insert(n.into(), WallType { thickness: t });
+        for (n, t) in [("Generic - 200mm", 200.0), ("Interior - 100mm", 100.0)] {
+            m.types.wall.insert(n.into(), WallType { thickness: t, layers: Vec::new() });
         }
+        // An exterior wall's layers, outside in: brick, insulation, a block core, plaster.
+        let layer = |function, material: &str, thickness| Layer { function, material: language.word(material).into(), thickness };
+        let layers = vec![
+            layer(Function::Finish, "Brick", 100.0),
+            layer(Function::Thermal, "Insulation", 50.0),
+            layer(Function::Structure, "Concrete block", 140.0),
+            layer(Function::Finish, "Plaster", 10.0),
+        ];
+        m.types.wall.insert("Exterior - 300mm".into(), WallType { thickness: 300.0, layers });
         m.types.floor.insert("Generic - 200mm".into(), FloorType { thickness: 200.0 });
         for (n, w) in [("Single 900 x 2100", 900.0), ("Single 800 x 2100", 800.0)] {
             m.types.door.insert(n.into(), OpeningType { width: w, height: 2100.0, sill: 0.0 });
@@ -648,15 +780,28 @@ impl Model {
         self.types.wall.get(&w.type_name).map_or(0.0, |t| t.thickness)
     }
 
-    pub fn base_z(&self, w: &Wall) -> f64 {
+    /// Its base by its level and offset, whatever it's attached to: where its doors' and windows'
+    /// sills are measured from.
+    pub fn own_base(&self, w: &Wall) -> f64 {
         self.elevation(w.level) + w.base_offset
     }
 
-    pub fn top_z(&self, w: &Wall) -> f64 {
+    /// Its top by its top constraint, whatever it's attached to.
+    pub fn own_top(&self, w: &Wall) -> f64 {
         match w.top_level {
             Some(t) => self.elevation(t),
-            None => self.base_z(w) + w.height,
+            None => self.own_base(w) + w.height,
         }
+    }
+
+    /// Its lowest base: on what its base is attached to, or by its level and offset.
+    pub fn base_z(&self, w: &Wall) -> f64 {
+        crate::walls::heights(self, w).0
+    }
+
+    /// Its highest top: under what its top is attached to, or by its top constraint.
+    pub fn top_z(&self, w: &Wall) -> f64 {
+        crate::walls::heights(self, w).1
     }
 
     /// Whether a plan of `level` cuts the wall: the wall spans the plan's cut plane.
@@ -681,30 +826,6 @@ impl Model {
         let r = self.level(level).map_or_else(ViewRange::default, |l| l.view_range);
         let above = || self.level_above(level).map_or(f64::INFINITY, |a| self.elevation(a));
         PlanRange { top: r.top.map_or_else(above, |t| z + t).max(z + r.cut), cut: z + r.cut, bottom: z + r.bottom, depth: z + r.depth }
-    }
-
-    /// How far wall `id` reaches past its end at `p` so a corner closes: the half thickness of the
-    /// thickest other wall ending there that it overlaps in height. Joined walls overlap at the
-    /// corner; plans draw their union. A wall in line with it (a split one) needs no reach.
-    pub fn join_reach(&self, id: Id, p: P2) -> f64 {
-        let Some(w) = self.wall(id) else { return 0.0 };
-        let (lo, hi) = (self.base_z(w), self.top_z(w));
-        // ponytail: scans every wall per end, O(n²) per view; index wall ends when models grow large.
-        self.elements
-            .iter()
-            .filter_map(|(&other, e)| match e {
-                Element::Wall(o)
-                    if other != id
-                        && (o.start.dist(p) <= TOL || o.end.dist(p) <= TOL)
-                        && self.base_z(o) < hi
-                        && lo < self.top_z(o)
-                        && (o.end - o.start).unit().cross((w.end - w.start).unit()).abs() > 1e-9 =>
-                {
-                    Some(self.thickness(o) / 2.0)
-                }
-                _ => None,
-            })
-            .fold(0.0, f64::max)
     }
 
     /// The names of a category's types (wall, floor, door or window, in any case, singular or
@@ -891,11 +1012,8 @@ impl Model {
 
     /// The box around the walls (faces included) and floors in plan.
     pub fn footprint(&self) -> Option<(P2, P2)> {
-        let mut pts = self.elements.values().flat_map(|e| match e {
-            Element::Wall(w) => {
-                let t = self.thickness(w) / 2.0;
-                vec![w.start - P2(t, t), w.start + P2(t, t), w.end - P2(t, t), w.end + P2(t, t)]
-            }
+        let mut pts = self.elements.iter().flat_map(|(&id, e)| match e {
+            Element::Wall(_) => walls::outline(self, id),
             Element::Floor(f) => f.boundary.clone(),
             _ => Vec::new(),
         });
@@ -930,19 +1048,21 @@ impl Model {
     /// A door's or window's centre, on its wall's centre line.
     pub fn anchor(&self, id: Id) -> Option<P2> {
         match self.elements.get(&id) {
-            Some(Element::Door(o) | Element::Window(o)) => self.wall(o.host).map(|w| w.start + (w.end - w.start).unit() * o.offset),
+            Some(Element::Door(o) | Element::Window(o)) => self.wall(o.host).map(|w| walls::Axis::of(w).at(o.offset, 0.0)),
             _ => None,
         }
     }
 
     /// Where a new tag of door or window `host` goes from its centre: beside the wall, 400 mm
-    /// past its face, on the side the door doesn't swing to (the window doesn't face).
+    /// past its face, on the side the door doesn't swing to, or the window faces (its wall's
+    /// exterior, unless flipped).
     pub fn tag_offset(&self, host: Id) -> P2 {
-        let (Some(Element::Door(o) | Element::Window(o)), Some(w)) = (self.elements.get(&host), self.wall_of(host)) else {
+        let (Some(e @ (Element::Door(o) | Element::Window(o))), Some(w)) = (self.elements.get(&host), self.wall_of(host)) else {
             return P2(0.0, 0.0);
         };
-        let away = if o.flip_facing { 1.0 } else { -1.0 };
-        let p = (w.end - w.start).unit().perp() * (away * (self.thickness(w) / 2.0 + 400.0));
+        let (ext, int) = walls::faces(self, w);
+        let outside = o.flip_facing == matches!(e, Element::Door(_));
+        let p = walls::Axis::of(w).tangent(o.offset).perp() * if outside { ext + 400.0 } else { int - 400.0 };
         // `+ 0.0`: no `-0` in files.
         P2(p.0 + 0.0, p.1 + 0.0)
     }
@@ -962,23 +1082,33 @@ impl Model {
         }
     }
 
-    /// The line `r` measures to, or why there is none. A wall's lines reach as far as its plan
-    /// outline does, past the ends it shares; its ends, and a door's or a window's centre and
-    /// jambs, run across it from face to face.
+    /// The line `r` measures to, or why there is none. A straight wall's lines reach as far as its
+    /// plan outline does, past the ends it shares; its ends, a curved wall's too, and a door's or a
+    /// window's centre and jambs, run across it from face to face. Its centre is its centre line,
+    /// wherever its location line is.
     pub fn reference_line(&self, r: &Reference) -> Result<Line, String> {
         match (self.elements.get(&r.id), r.face) {
             (Some(Element::Grid(g)), Face::Centre) => Ok((g.start, g.end)),
             (Some(Element::Grid(_)), _) => Err(format!("grid {} has no faces; measure to its line", r.id)),
             (Some(Element::Wall(w)), face) => {
-                let u = (w.end - w.start).unit();
-                let (a, b) = (w.start - u * self.join_reach(r.id, w.start), w.end + u * self.join_reach(r.id, w.end));
-                let half = u.perp() * (self.thickness(w) / 2.0);
+                let axis = walls::Axis::of(w);
+                let (ext, int) = walls::faces(self, w);
+                let (a, b) = match axis.radius() {
+                    Some(_) if !matches!(face, Face::Start | Face::End) => {
+                        return Err(format!("wall {}'s faces are arcs; measure to its start or its end, or its radius", r.id));
+                    }
+                    Some(_) => (0.0, axis.length()),
+                    None => {
+                        let along: Vec<f64> = walls::outline(self, r.id).iter().map(|p| (*p - w.start).dot(axis.tangent(0.0))).collect();
+                        (along.iter().copied().fold(0.0, f64::min), along.iter().copied().fold(axis.length(), f64::max))
+                    }
+                };
                 Ok(match face {
-                    Face::Centre => (a, b),
-                    Face::Left => (a + half, b + half),
-                    Face::Right => (a - half, b - half),
-                    Face::Start => (a - half, a + half),
-                    Face::End => (b - half, b + half),
+                    Face::Centre => (axis.at(a, (ext + int) / 2.0), axis.at(b, (ext + int) / 2.0)),
+                    Face::Left => (axis.at(a, ext), axis.at(b, ext)),
+                    Face::Right => (axis.at(a, int), axis.at(b, int)),
+                    Face::Start => (axis.at(a, int), axis.at(a, ext)),
+                    Face::End => (axis.at(b, int), axis.at(b, ext)),
                 })
             }
             (Some(e @ (Element::Door(o) | Element::Window(o))), face) => {
@@ -994,9 +1124,8 @@ impl Model {
                         return Err(format!("{what} has a centre and two jambs, start and end; measure to one of those"));
                     }
                 };
-                let u = (w.end - w.start).unit();
-                let (p, half) = (w.start + u * along, u.perp() * (self.thickness(w) / 2.0));
-                Ok((p - half, p + half))
+                let (axis, (ext, int)) = (walls::Axis::of(w), walls::faces(self, w));
+                Ok((axis.at(along, int), axis.at(along, ext)))
             }
             (Some(e), _) => Err(format!("{} {} isn't a wall, a door, a window or a grid", e.category(), r.id)),
             (None, _) => Err(format!("element {} doesn't exist", r.id)),
@@ -1030,14 +1159,26 @@ impl Model {
             .min_by(|x, y| x.1.total_cmp(&y.1))
     }
 
-    /// The circle a radial dimension measures on `r`: a round column's centre and radius.
+    /// The circle a radial dimension measures on `r`: a round column's centre and radius, or a
+    /// curved wall's, of its centre line or one of its faces.
     pub fn reference_arc(&self, r: &Reference) -> Result<(P2, f64), String> {
+        let what = "a radial dimension measures round columns and curved walls";
         match self.elements.get(&r.id) {
             Some(Element::Column(c)) => match self.types.column.get(&c.type_name) {
                 Some(t) if t.round => Ok((c.at, t.width / 2.0)),
-                _ => Err(format!("column {} isn't round; a radial dimension measures round columns", r.id)),
+                _ => Err(format!("column {} isn't round; {what}", r.id)),
             },
-            Some(e) => Err(format!("{} {} isn't round; a radial dimension measures round columns", e.category(), r.id)),
+            Some(Element::Wall(w)) => {
+                let (axis, (ext, int)) = (walls::Axis::of(w), walls::faces(self, w));
+                let off = match r.face {
+                    Face::Left => ext,
+                    Face::Right => int,
+                    _ => (ext + int) / 2.0,
+                };
+                let c = axis.centre().ok_or_else(|| format!("wall {} is straight; {what}", r.id))?;
+                Ok((c, axis.at(0.0, off).dist(c)))
+            }
+            Some(e) => Err(format!("{} {} isn't round; {what}", e.category(), r.id)),
             None => Err(format!("element {} doesn't exist", r.id)),
         }
     }
@@ -1123,13 +1264,14 @@ impl Model {
         }
     }
 
-    /// Centre lines of the walls that bound the rooms of `level`.
+    /// Centre lines of the walls that bound the rooms of `level`, arcs as chords.
     pub fn bounding_lines(&self, level: Id) -> Vec<(P2, P2)> {
         self.elements
-            .values()
-            .filter_map(|e| match e {
-                Element::Wall(w) if self.bounding(w, level) => Some((w.start, w.end)),
-                _ => None,
+            .iter()
+            .filter(|(_, e)| matches!(e, Element::Wall(w) if self.bounding(w, level)))
+            .flat_map(|(&id, _)| {
+                let line = walls::centre_line(self, id);
+                line.windows(2).filter_map(|s| s.first().zip(s.get(1)).map(|(a, b)| (*a, *b))).collect::<Vec<_>>()
             })
             .collect()
     }
@@ -1152,6 +1294,21 @@ impl Model {
         }
         for (n, t) in &self.types.wall {
             size(&format!("wall type `{n}` thickness"), t.thickness)?;
+            if t.layers.len() > MAX_LAYERS {
+                return Err(format!("wall type `{n}`: more than {MAX_LAYERS} layers"));
+            }
+            for (i, l) in t.layers.iter().enumerate() {
+                let what = format!("wall type `{n}` layer {}", i + 1);
+                text(&what, "material", &l.material)?;
+                match l.function {
+                    Function::Membrane if l.thickness == 0.0 => {}
+                    _ => size(&format!("{what} thickness"), l.thickness)?,
+                }
+            }
+            let sum: f64 = t.layers.iter().map(|l| l.thickness).sum();
+            if !t.layers.is_empty() && (sum - t.thickness).abs() > 1e-6 {
+                return Err(format!("wall type `{n}`: its layers add up to {sum} mm, not its thickness, {} mm", t.thickness));
+            }
         }
         for (n, t) in &self.types.floor {
             size(&format!("floor type `{n}` thickness"), t.thickness)?;
@@ -1223,14 +1380,25 @@ impl Model {
                     level_ok(w.level)?;
                     line(&who, w.start, w.end)?;
                     coord(&format!("{who} base_offset"), w.base_offset)?;
-                    match w.top_level {
-                        Some(t) => {
-                            level_ok(t)?;
-                            if self.top_z(w) <= self.base_z(w) + TOL {
-                                return Err(format!("{who}: its top level must be above its base"));
-                            }
+                    // An arc within reach: all of its circle inside the model's limits.
+                    let axis = walls::Axis::of(w);
+                    let reach = axis.centre().zip(axis.radius()).is_none_or(|(c, r)| c.0.abs().max(c.1.abs()) + r <= MAX_COORD);
+                    if !(w.arc.is_finite() && w.arc.abs() < 360.0 && reach) {
+                        return Err(format!("{who}: arc {}° isn't between -360° and 360°, reaching no farther than 1000 km", w.arc));
+                    }
+                    for (what, at) in [("attach_top", w.attach_top), ("attach_base", w.attach_base)] {
+                        if let Some(a) = at
+                            && !matches!(self.elements.get(&a), Some(Element::Roof(_) | Element::Floor(_)))
+                        {
+                            return Err(format!("{who}: {what} {a} isn't a roof or a floor"));
                         }
+                    }
+                    match w.top_level {
+                        Some(t) => level_ok(t)?,
                         None => size(&format!("{who} height"), w.height)?,
+                    }
+                    if self.top_z(w) <= self.base_z(w) + TOL {
+                        return Err(format!("{who}: its top must be above its base"));
                     }
                 }
                 Element::Floor(f) => {
@@ -1254,16 +1422,16 @@ impl Model {
                     coord(&format!("{who} sill"), o.sill)?;
                     text(&who, "mark", &o.mark)?;
                     let (a, b) = (o.offset - t.width / 2.0, o.offset + t.width / 2.0);
-                    if a < -TOL || b > w.start.dist(w.end) + TOL {
+                    let length = crate::walls::Axis::of(w).length();
+                    if a < -TOL || b > length + TOL {
                         return Err(format!(
-                            "{who}: {} mm wide at offset {} doesn't fit wall {}, {} mm long",
-                            t.width,
-                            o.offset,
-                            o.host,
-                            w.start.dist(w.end)
+                            "{who}: {} mm wide at offset {} doesn't fit wall {}, {length} mm long",
+                            t.width, o.offset, o.host
                         ));
                     }
-                    if o.sill < 0.0 || o.sill + t.height > self.top_z(w) - self.base_z(w) + TOL {
+                    // Up to the wall's top over it, which a roof it's attached to may raise.
+                    let top = [a, o.offset, b].map(|s| crate::walls::top_at(self, w, s)).into_iter().fold(f64::INFINITY, f64::min);
+                    if o.sill < 0.0 || self.own_base(w) + o.sill + t.height > top + TOL {
                         return Err(format!("{who}: sill {} + height {} doesn't fit wall {}'s height", o.sill, t.height, o.host));
                     }
                     spans.entry(o.host).or_default().push((a, b, id));
@@ -1574,6 +1742,10 @@ mod tests {
             top_level: None,
             height: 3000.0,
             base_offset: 0.0,
+            arc: 0.0,
+            location: Location::Centre,
+            attach_top: None,
+            attach_base: None,
         })
     }
 
@@ -1633,16 +1805,17 @@ mod tests {
     }
 
     #[test]
-    fn walls_reach_past_ends_they_share_to_close_the_corner() {
+    fn walls_join_where_they_meet_but_not_across_levels() {
         let mut m = Model::new("t");
         let bottom = boxed(&mut m);
-        // A partition ending mid-span on the bottom wall: a T, not a corner.
+        // Mitred at the corners: the outer corner where the outer faces cross.
+        assert!(walls::cap(&m, bottom, false).contains(&P2(-100.0, -100.0)));
+        // A partition ending mid-span on the bottom wall stops at its face.
         let t = m.insert(wall(1, P2(3000.0, 0.0), P2(3000.0, 4000.0)));
-        assert_eq!((m.join_reach(bottom, P2(0.0, 0.0)), m.join_reach(bottom, P2(6000.0, 0.0))), (100.0, 100.0));
-        assert_eq!(m.join_reach(t, P2(3000.0, 0.0)), 0.0);
+        assert_eq!(walls::cap(&m, t, false), [P2(3100.0, 100.0), P2(2900.0, 100.0)]);
         // A wall upstairs meeting the same corner doesn't join walls downstairs.
         let up = m.insert(wall(2, P2(0.0, 0.0), P2(0.0, -3000.0)));
-        assert_eq!(m.join_reach(up, P2(0.0, 0.0)), 0.0);
+        assert_eq!(walls::cap(&m, up, false), [P2(-100.0, 0.0), P2(100.0, 0.0)]);
     }
 
     #[test]

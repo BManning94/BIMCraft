@@ -136,6 +136,22 @@ pub fn triangulate(ring: &[P2]) -> Vec<[usize; 3]> {
     out
 }
 
+/// The part of a ring where `f` is zero or more, side by side (Sutherland-Hodgman): exact for an
+/// `f` that's linear, which cuts it along a line.
+pub fn clip(ring: &[P2], f: impl Fn(P2) -> f64) -> Vec<P2> {
+    let mut kept = Vec::with_capacity(ring.len() + 2);
+    for (a, b) in ring_edges(ring) {
+        let (fa, fb) = (f(a), f(b));
+        if fa >= 0.0 {
+            kept.push(a);
+        }
+        if (fa >= 0.0) != (fb >= 0.0) {
+            kept.push(a + (b - a) * (fa / (fa - fb)));
+        }
+    }
+    kept
+}
+
 /// How far along `a`→`b` the point nearest `p` lies, from 0 at `a` to 1 at `b`.
 pub fn param_on_segment(p: P2, a: P2, b: P2) -> f64 {
     let d = b - a;
@@ -295,6 +311,15 @@ mod tests {
         assert_eq!(g[3], P2(2100.0, 2100.0), "an inner corner moves out too");
         // d times the perimeter, and d² for each outer corner less each inner one: five less one.
         assert!((area(&g) - area(&l) - 100.0 * perimeter(&l) - 4.0 * 100.0 * 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn rings_clip_to_where_a_linear_function_is_not_negative() {
+        let sq = [P2(0.0, 0.0), P2(4.0, 0.0), P2(4.0, 4.0), P2(0.0, 4.0)];
+        let left = clip(&sq, |p| 1.0 - p.0);
+        assert_eq!(area(&left), 4.0);
+        assert!(clip(&sq, |p| -1.0 - p.0).is_empty());
+        assert_eq!(clip(&sq, |p| 9.0 - p.0), sq);
     }
 
     #[test]

@@ -8,7 +8,8 @@ grid {"start": [6000, -1500], "end": [6000, 8500]}
 grid {"start": [10000, -1500], "end": [10000, 8500]}
 grid {"start": [-1500, 0], "end": [11500, 0], "name": "A"}
 grid {"start": [-1500, 7000], "end": [11500, 7000]}
-wall {"points": [[0, 0], [10000, 0], [10000, 7000], [0, 7000]], "closed": true, "type": "Exterior - 300mm"}
+# Outer walls drawn clockwise, their brick outside; their tops follow the roof once it's on.
+wall {"points": [[0, 0], [0, 7000], [10000, 7000], [10000, 0]], "closed": true, "type": "Exterior - 300mm"}
 wall {"points": [[6000, 0], [6000, 7000]], "type": "Interior - 100mm"}
 wall {"points": [[0, 4000], [6000, 4000]], "type": "Interior - 100mm"}
 wall {"points": [[6000, 3500], [10000, 3500]], "type": "Interior - 100mm"}
@@ -23,6 +24,7 @@ window {"at": [10000, 5250], "type": "Fixed 600 x 900"}
 window {"at": [8000, 0]}
 floor {}
 roof {}
+modify {"ids": [8, 9, 10, 11], "attach_top": 25}
 room {"point": [3000, 2000], "name": "Living"}
 room {"point": [3000, 5500], "name": "Kitchen"}
 room {"point": [8000, 5250], "name": "Bedroom"}

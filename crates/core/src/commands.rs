@@ -11,12 +11,13 @@ use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
 use crate::language::Language;
 use crate::model::{
-    Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType, Grid, Id, Level, Line, MAX_COORD,
-    MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule,
-    Section, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType, Grid, Id, Layer, Level, Line,
+    Location, MAX_COORD, MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER, Reference, Roof, RoofType, Room,
+    STAIR_WIDTH, Schedule, Section, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
 use crate::units::Units;
+use crate::walls::{self, Axis, stacked};
 use crate::{pdf, render, schedule, sheet, view3d};
 
 type R = Result<Value, String>;
@@ -54,8 +55,13 @@ pub static ALL: &[Command] = &[
         "wall",
         "Wall",
         &["WA"],
-        "{points: [[x,y],…], closed?, type?, level?, top_level?, height?, base_offset?} one wall per segment of its centre line; \
-         up to the next level, or `height` mm tall (unconnected), or up to `top_level`",
+        "{points: [[x,y],…], closed?, type?, level?, top_level?, height?, base_offset?, arc?, location?, attach_top?, \
+         attach_base?} one wall per segment of its location line; up to the next level, or `height` mm tall (unconnected), or up \
+         to `top_level`. `arc`: degrees each turns from its start to its end, counter-clockwise (180, a half circle bulging to \
+         its right). `location`: the line of it the points are on: centre (the default), core-centre, exterior-finish, \
+         interior-finish, exterior-core or interior-core; its exterior side is to the left of its start to its end, so walls \
+         drawn clockwise face out. `attach_top`, `attach_base`: a roof or floor its top follows from below, or its base stands \
+         on",
         wall,
     ),
     edit(
@@ -197,8 +203,18 @@ pub static ALL: &[Command] = &[
         "Edit Type",
         &[],
         "{category: wall|floor|door|window|column|roof, name, thickness? | width?, height?, sill? | width?, depth?, round?} creates \
-         the type, or changes it everywhere it's used",
+         the type, or changes it everywhere it's used. A wall type may have `layers` [{function?: structure|substrate|thermal|\
+         membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, its core from its \
+         first structure layer to its last, and a new `thickness` goes to its structure",
         edit_type,
+    ),
+    edit(
+        "flip",
+        "Flip",
+        &[],
+        "{ids: [wall,…]} turns walls round about their location lines, as Revit's flip arrows do: their exterior sides go to the \
+         other side, their doors and windows stay where they are",
+        flip,
     ),
     edit(
         "modify",
@@ -460,18 +476,23 @@ fn level_name(m: &Model, id: Id) -> String {
     m.level(id).map_or_else(|| format!("level {id}"), |l| l.name.clone())
 }
 
-/// How far along a wall's centre line the point nearest `p` lies, in mm.
+/// How far along a wall's location line the point nearest `p` lies, in mm.
 fn along(w: &Wall, p: P2) -> f64 {
-    geom::param_on_segment(p, w.start, w.end) * w.start.dist(w.end)
+    Axis::of(w).project(p).0
 }
 
-/// The wall a plan of `level` cuts nearest `at`, within its half thickness plus 100 mm, and how
-/// far along it `at` lies.
+/// How far `p` is from a wall's centre line.
+fn off_centre(m: &Model, w: &Wall, p: P2) -> f64 {
+    Axis::of(w).distance(p, walls::centre(m, w))
+}
+
+/// The wall a plan of `level` cuts nearest `at`, within its half thickness plus 100 mm of its centre
+/// line, and how far along it `at` lies.
 fn wall_at(m: &Model, level: Id, at: P2) -> Option<(Id, f64)> {
     m.elements
         .iter()
         .filter_map(|(&id, e)| match e {
-            Element::Wall(w) if m.cut_by(w, level) => Some((id, w, geom::dist_to_segment(at, w.start, w.end))),
+            Element::Wall(w) if m.cut_by(w, level) => Some((id, w, off_centre(m, w, at))),
             _ => None,
         })
         .filter(|(_, w, d)| *d <= m.thickness(w) / 2.0 + 100.0)
@@ -521,9 +542,13 @@ pub fn element_json(m: &Model, id: Id) -> Value {
     extra.insert("id".into(), json!(id));
     match e {
         Element::Wall(w) => {
-            extra.insert("length".into(), json!(w.start.dist(w.end)));
-            extra.insert("height".into(), json!(m.top_z(w) - m.base_z(w)));
+            let axis = Axis::of(w);
+            extra.insert("length".into(), json!(hundredth(axis.length() * 1e4) / 1e4));
+            extra.insert("height".into(), json!(hundredth(m.top_z(w) - m.base_z(w))));
             extra.insert("thickness".into(), json!(m.thickness(w)));
+            if let Some(r) = axis.radius() {
+                extra.insert("radius".into(), json!(hundredth(r)));
+            }
         }
         Element::Door(o) | Element::Window(o) => {
             if let (Some(t), Some(w)) = (m.opening_type(e), m.wall(o.host)) {
@@ -878,6 +903,12 @@ fn wall(s: &mut Session, p: &Value) -> R {
     };
     let base_offset = num(c, p, "base_offset")?.unwrap_or(0.0);
     let height = height.unwrap_or(DEFAULT_HEIGHT);
+    let arc = num(c, p, "arc")?.unwrap_or(0.0);
+    let location = match string(c, p, "location")? {
+        Some(n) => Location::from_name(&n).ok_or_else(|| bad(c, location_names(&n)))?,
+        None => Location::Centre,
+    };
+    let (attach_top, attach_base) = (id_opt(c, p, "attach_top")?, id_opt(c, p, "attach_base")?);
     let m = s.model_mut();
     let ids: Vec<Id> = pts
         .windows(2)
@@ -890,11 +921,67 @@ fn wall(s: &mut Session, p: &Value) -> R {
                 top_level,
                 height,
                 base_offset,
+                arc,
+                location,
+                attach_top,
+                attach_base,
             }))),
             _ => None,
         })
         .collect();
     Ok(json!({"ids": ids}))
+}
+
+fn location_names(n: &str) -> String {
+    let names: Vec<&str> = Location::ALL.iter().map(|l| l.name()).collect();
+    format!("`location` is one of {}, not `{n}`", names.join(", "))
+}
+
+/// Walls turned round about their location lines: they run the other way, so their exterior sides
+/// go to the other side; their doors and windows stay where they are, swinging and hinged as they were.
+fn flip(s: &mut Session, p: &Value) -> R {
+    let c = "flip";
+    let m = &s.model;
+    let ids = ids_param(c, m, p)?;
+    if let Some(id) = ids.iter().find(|id| m.wall(**id).is_none()) {
+        return Err(bad(c, format!("{} {id} isn't a wall", m.elements.get(id).map_or("element", Element::category))));
+    }
+    let m = s.model_mut();
+    let lengths: BTreeMap<Id, f64> = ids.iter().filter_map(|id| Some((*id, Axis::of(m.wall(*id)?).length()))).collect();
+    for (id, e) in m.elements.iter_mut() {
+        match e {
+            Element::Wall(w) if lengths.contains_key(id) => {
+                std::mem::swap(&mut w.start, &mut w.end);
+                w.arc = -w.arc + 0.0;
+            }
+            Element::Door(o) | Element::Window(o) if lengths.contains_key(&o.host) => {
+                o.offset = lengths.get(&o.host).copied().unwrap_or_default() - o.offset;
+                (o.flip_facing, o.flip_hand) = (!o.flip_facing, !o.flip_hand);
+            }
+            _ => {}
+        }
+    }
+    let hosts: BTreeMap<Id, Id> = m
+        .elements
+        .iter()
+        .filter_map(|(id, e)| match e {
+            Element::Door(o) | Element::Window(o) => Some((*id, o.host)),
+            _ => None,
+        })
+        .collect();
+    // Dimensions keep to the same lines: a flipped wall's left and right swap, and its start and end, and its doors' jambs'.
+    for e in m.elements.values_mut() {
+        if let Element::Dimension(d) = e {
+            for r in &mut d.refs {
+                if lengths.contains_key(&r.id) {
+                    r.face = r.face.flipped();
+                } else if hosts.get(&r.id).is_some_and(|h| lengths.contains_key(h)) {
+                    r.face = r.face.mirrored();
+                }
+            }
+        }
+    }
+    Ok(json!({"flipped": ids}))
 }
 
 fn door(s: &mut Session, p: &Value) -> R {
@@ -1462,7 +1549,7 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
     let m = s.model_mut();
     let t = match cat.as_str() {
         "wall" => {
-            let t = WallType { thickness: thickness.or(m.types.wall.get(&name).map(|t| t.thickness)).ok_or_else(|| need("thickness"))? };
+            let t = wall_type(c, p, m.types.wall.get(&name), thickness, &need)?;
             m.types.wall.insert(name.clone(), t.clone());
             json!(t)
         }
@@ -1504,12 +1591,57 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
     Ok(json!({"category": cat, "name": name, "type": t}))
 }
 
+/// A wall type from `type`'s params, over the one named that way already (`old`). With layers, it's
+/// as thick as they are; a new thickness alone goes to its first structure layer (else its thickest).
+fn wall_type(
+    c: &str,
+    p: &Value,
+    old: Option<&WallType>,
+    thickness: Option<f64>,
+    need: &dyn Fn(&str) -> String,
+) -> Result<WallType, String> {
+    let layers: Option<Vec<Layer>> = match p.get("layers") {
+        v if absent(v) => None,
+        Some(v @ Value::Array(a)) if a.len() <= crate::model::MAX_LAYERS => {
+            Some(serde_json::from_value(v.clone()).map_err(|e| bad(c, format!("`layers`: {e}")))?)
+        }
+        Some(_) => return Err(bad(c, format!("`layers` is a list of at most {} layers", crate::model::MAX_LAYERS))),
+        None => None,
+    };
+    match (layers, thickness) {
+        (Some(layers), given) if !layers.is_empty() => {
+            let sum: f64 = layers.iter().map(|l| l.thickness).sum();
+            if let Some(t) = given.filter(|t| (t - sum).abs() > 1e-6) {
+                return Err(bad(c, format!("its layers add up to {sum} mm, not the {t} mm given")));
+            }
+            Ok(WallType { thickness: sum, layers })
+        }
+        (Some(_), None) => Err(need("thickness")),
+        (Some(_), Some(t)) => Ok(WallType { thickness: t, layers: Vec::new() }),
+        (None, Some(t)) => {
+            let mut layers = old.map(|o| o.layers.clone()).unwrap_or_default();
+            if let Some(o) = old.filter(|o| !o.layers.is_empty()) {
+                let core = layers.iter().position(|l| l.function == crate::model::Function::Structure);
+                let k = core.or_else(|| (0..layers.len()).max_by(|a, b| layers[*a].thickness.total_cmp(&layers[*b].thickness)));
+                if let Some(l) = k.and_then(|k| layers.get_mut(k)) {
+                    l.thickness += t - o.thickness;
+                    if l.thickness <= 0.0 {
+                        return Err(bad(c, format!("at {t} mm its structure would be {} mm thick; change its layers", l.thickness)));
+                    }
+                }
+            }
+            Ok(WallType { thickness: t, layers })
+        }
+        (None, None) => old.cloned().ok_or_else(|| need("thickness")),
+    }
+}
+
 fn modify(s: &mut Session, p: &Value) -> R {
     let c = "modify";
     let fields = p.as_object().ok_or_else(|| bad(c, "params must be {id | ids, …fields}"))?;
     let m = &s.model;
     let ids = ids_param(c, m, p)?;
-    let mut edited = Vec::new();
+    let (mut edited, mut rescaled) = (Vec::new(), Vec::new());
     for &id in &ids {
         let e = m.elements.get(&id).ok_or_else(|| bad(c, format!("no element {id}")))?;
         let mut v = serde_json::to_value(e).map_err(|e| bad(c, e))?;
@@ -1530,8 +1662,34 @@ fn modify(s: &mut Session, p: &Value) -> R {
                 }
             }
         }
-        edited.push((id, serde_json::from_value::<Element>(v).map_err(|e| bad(c, format!("element {id}: {e}")))?));
+        let mut e2 = serde_json::from_value::<Element>(v).map_err(|e| bad(c, format!("element {id}: {e}")))?;
+        // A wall put on another of its lines stays where it is: its line moves across it instead.
+        if let (Element::Wall(old), Element::Wall(w)) = (e, &mut e2)
+            && old.location != w.location
+            && !fields.contains_key("start")
+            && !fields.contains_key("end")
+        {
+            let (before, after) = (walls::faces(m, &Wall { location: old.location, ..w.clone() }).0, walls::faces(m, w).0);
+            let axis = Axis::of(w);
+            let length = axis.length();
+            (w.start, w.end) = (micron(axis.at(0.0, before - after)), micron(axis.at(length, before - after)));
+            // Along an arc, its doors' and windows' offsets grow or shrink with it.
+            let k = Axis::of(w).length() / length.max(1e-9);
+            if (k - 1.0).abs() > 1e-12 {
+                for (oid, oe) in &m.elements {
+                    if let Element::Door(o) | Element::Window(o) = oe
+                        && o.host == id
+                    {
+                        let mut o = o.clone();
+                        o.offset *= k;
+                        rescaled.push((*oid, if matches!(oe, Element::Door(_)) { Element::Door(o) } else { Element::Window(o) }));
+                    }
+                }
+            }
+        }
+        edited.push((id, e2));
     }
+    edited.extend(rescaled);
     let m = s.model_mut();
     for (id, e) in edited {
         m.elements.insert(id, e);
@@ -1561,7 +1719,8 @@ fn merge(into: &mut Value, patch: &Value) {
 
 /// `p` to the micron: what a point meant to be exact is, without float noise.
 pub(crate) fn micron(p: P2) -> P2 {
-    P2((p.0 * 1e3).round() / 1e3, (p.1 * 1e3).round() / 1e3)
+    // `+ 0.0`: no `-0` in files.
+    P2((p.0 * 1e3).round() / 1e3 + 0.0, (p.1 * 1e3).round() / 1e3 + 0.0)
 }
 
 /// How a command takes elements: through `map`, a translation, a turn or a mirror. A translation
@@ -1601,7 +1760,8 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
                 r.boundary.reverse();
             }
         }
-        Element::Wall(w) => (w.start, w.end) = (f(w.start), f(w.end)),
+        // A mirror image runs back the other way, so its exterior side is the mirror image of the old one.
+        Element::Wall(w) => (w.start, w.end) = if mo.mirror { (f(w.end), f(w.start)) } else { (f(w.start), f(w.end)) },
         Element::Grid(g) => (g.start, g.end) = (f(g.start), f(g.end)),
         Element::Floor(fl) => {
             fl.boundary.iter_mut().for_each(|q| *q = f(*q));
@@ -1655,11 +1815,6 @@ fn place_tag(m: &mut Model, id: Id, head: P2) {
     }
 }
 
-/// Whether two walls overlap in height, so they can join (see [`Model::join_reach`]).
-fn stacked(m: &Model, a: &Wall, b: &Wall) -> bool {
-    m.base_z(a) < m.top_z(b) && m.base_z(b) < m.top_z(a)
-}
-
 /// Take elements by `mo`, keeping walls joined: walls joined to a taken wall stretch to stay
 /// joined, and doors and windows in walls that changed keep their place or go with their wall.
 /// With `end` (`Some(true)` the start, `Some(false)` the end), only that end of one wall goes.
@@ -1690,12 +1845,15 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
     // A taken wall's end that was on a wall staying put slides back onto it, along the taken wall.
     // (A wall's end taken on its own goes where it's told.)
     for (id, w) in walls.iter_mut().filter(|_| end.is_none()) {
-        let Some(before) = old(id) else { continue };
+        let Some(before) = old(id).filter(|b| b.arc == 0.0) else { continue };
         let line = (w.start, w.end);
         for (end, was) in [(&mut w.start, before.start), (&mut w.end, before.end)] {
             let host = m.elements.iter().find_map(|(other, e)| match e {
                 Element::Wall(o)
-                    if !moving.contains(other) && stacked(m, o, before) && geom::dist_to_segment(was, o.start, o.end) <= TOL =>
+                    if !moving.contains(other)
+                        && o.arc == 0.0
+                        && stacked(m, o, before)
+                        && geom::dist_to_segment(was, o.start, o.end) <= TOL =>
                 {
                     Some((o.start, o.end))
                 }
@@ -1721,8 +1879,10 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
                     *end = if at.dist(before.start) <= TOL { after.start } else { after.end };
                     break;
                 }
-                if geom::dist_to_segment(at, before.start, before.end) <= TOL {
-                    *end = geom::line_intersection(w.start, w.end, after.start, after.end).map_or_else(|| f(at), micron);
+                if Axis::of(before).distance(at, 0.0) <= TOL {
+                    let straight = w.arc == 0.0 && after.arc == 0.0;
+                    *end =
+                        geom::line_intersection(w.start, w.end, after.start, after.end).filter(|_| straight).map_or_else(|| f(at), micron);
                     break;
                 }
             }
@@ -1736,12 +1896,14 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
         let (Element::Door(o) | Element::Window(o)) = e else { continue };
         let (Some(before), Some(after)) = (old(&o.host), walls.get(&o.host)) else { continue };
         let along = carried(&o.host) || moving.contains(&id);
-        let spot = before.start + (before.end - before.start).unit() * o.offset;
+        let spot = Axis::of(before).at(o.offset, 0.0);
         let at = if along { f(spot) } else { spot };
         let mut o = o.clone();
-        o.offset = (at - after.start).dot((after.end - after.start).unit());
+        let (axis, straight) = (Axis::of(after), after.arc == 0.0);
+        o.offset = if straight { (at - after.start).dot(axis.tangent(0.0)) } else { axis.project(at).0 };
+        // Its mirror image runs back the other way: the door hangs on the other jamb, toward the same side.
         if mo.mirror && carried(&o.host) {
-            o.flip_facing = !o.flip_facing;
+            o.flip_hand = !o.flip_hand;
         }
         others.retain(|(other, _)| *other != id);
         others.push((id, if matches!(e, Element::Door(_)) { Element::Door(o) } else { Element::Window(o) }));
@@ -1753,11 +1915,21 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
     for (id, e) in others {
         m.elements.insert(id, e);
     }
-    // Dimensions keep to the same faces of mirrored walls, whose left and right a mirror swaps.
+    // Dimensions keep to the same lines of mirrored walls, which run the other way: their starts
+    // and ends swap, and their doors' and windows' jambs.
     if mo.mirror && end.is_none() {
+        let hosts: BTreeMap<Id, Id> = m
+            .elements
+            .iter()
+            .filter_map(|(id, e)| match e {
+                Element::Door(o) | Element::Window(o) => Some((*id, o.host)),
+                _ => None,
+            })
+            .collect();
+        let turned = |id: &Id| moving.contains(id) || hosts.get(id).is_some_and(|h| moving.contains(h));
         for e in m.elements.values_mut() {
             if let Element::Dimension(d) = e {
-                d.refs.iter_mut().filter(|r| moving.contains(&r.id)).for_each(|r| r.face = r.face.mirrored());
+                d.refs.iter_mut().filter(|r| turned(&r.id)).for_each(|r| r.face = r.face.mirrored());
             }
         }
     }
@@ -1790,10 +1962,12 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
         .filter(|(_, e)| matches!(e, Element::Door(o) | Element::Window(o) if copying.contains(&o.host)))
         .map(|(&id, e)| {
             let mut e = e.clone();
+            // On a mirrored copy, which runs back the other way: from its other end, on the other jamb.
             if let Element::Door(o) | Element::Window(o) = &mut e
                 && mo.mirror
             {
-                o.flip_facing = !o.flip_facing;
+                o.offset = m.wall(o.host).map_or(o.offset, |w| Axis::of(w).length() - o.offset);
+                o.flip_hand = !o.flip_hand;
             }
             (id, e)
         })
@@ -1827,6 +2001,14 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
         let id = m.insert(e);
         hosts.insert(from, id);
         made.push(id);
+    }
+    // Copied walls attached to roofs or floors copied with them attach to the copies.
+    for id in &made {
+        if let Some(Element::Wall(w)) = m.elements.get_mut(id) {
+            for at in [&mut w.attach_top, &mut w.attach_base] {
+                *at = at.map(|a| hosts.get(&a).copied().unwrap_or(a));
+            }
+        }
     }
     for (from, mut e) in notes {
         match &mut e {
@@ -1923,6 +2105,9 @@ fn corner(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let [a, b] = ids.as_slice() else { return Err(bad(c, "`ids` takes two walls")) };
     let (Some(wa), Some(wb)) = (m.wall(*a), m.wall(*b)) else { return Err(bad(c, "`ids` takes two walls")) };
+    if wa.arc != 0.0 || wb.arc != 0.0 {
+        return Err(bad(c, "it trims and extends straight walls; a curved one changes by its ends or its `arc`"));
+    }
     let keep = if absent(p.get("keep")) { Vec::new() } else { points(c, p, "keep")? };
     if !keep.is_empty() && keep.len() != 2 {
         return Err(bad(c, "`keep` is a point on each wall, [[x, y], [x, y]]"));
@@ -1953,15 +2138,17 @@ fn split(s: &mut Session, p: &Value) -> R {
     let id = id_opt(c, p, "id")?.ok_or_else(|| bad(c, "`id`, a wall, is required"))?;
     let w = m.wall(id).cloned().ok_or_else(|| bad(c, format!("{id} is not a wall")))?;
     let at = point_req(c, p, "at")?;
-    if geom::dist_to_segment(at, w.start, w.end) > m.thickness(&w) / 2.0 + 100.0 {
+    if off_centre(m, &w, at) > m.thickness(&w) / 2.0 + 100.0 {
         return Err(bad(c, format!("[{}, {}] isn't on wall {id}", at.0, at.1)));
     }
-    let len = w.start.dist(w.end);
-    let along = (geom::param_on_segment(at, w.start, w.end) * len * 1e3).round() / 1e3;
+    let axis = Axis::of(&w);
+    let len = axis.length();
+    // Along a straight wall, to the micron; an arc keeps its exact share.
+    let along = if w.arc == 0.0 { (axis.project(at).0 * 1e3).round() / 1e3 } else { axis.project(at).0 };
     if along <= TOL || along >= len - TOL {
         return Err(bad(c, "split between the wall's ends"));
     }
-    let cut = micron(w.start + (w.end - w.start).unit() * along);
+    let cut = micron(axis.at(along, 0.0));
     // Doors and windows go with the part they're in; one across the cut is in the way.
     let mut later = Vec::new();
     for (&oid, e) in &m.elements {
@@ -1980,6 +2167,9 @@ fn split(s: &mut Session, p: &Value) -> R {
     }
     let (mut first, mut second) = (w.clone(), w);
     (first.end, second.start) = (cut, cut);
+    // An arc's turn shared out as its length is.
+    first.arc = degrees(first.arc * along / len);
+    second.arc = degrees(second.arc - first.arc);
     let m = s.model_mut();
     m.elements.insert(id, Element::Wall(first));
     let new = m.insert(Element::Wall(second));
@@ -2042,6 +2232,16 @@ fn delete(s: &mut Session, p: &Value) -> R {
     }
     for (id, d) in kept {
         m.elements.insert(id, Element::Dimension(d));
+    }
+    // Walls attached to a roof or a floor that goes come loose.
+    for e in m.elements.values_mut() {
+        if let Element::Wall(w) = e {
+            for at in [&mut w.attach_top, &mut w.attach_base] {
+                if at.is_some_and(|a| gone.contains(&a)) {
+                    *at = None;
+                }
+            }
+        }
     }
     Ok(json!({"deleted": gone}))
 }

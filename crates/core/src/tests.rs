@@ -204,10 +204,12 @@ fn mirror_copies_with_doors_swinging_the_mirrored_way() {
     let door = run(&mut s, "door", json!({"at": [2000, 0]}))["id"].as_u64().unwrap();
     let made = run(&mut s, "MM", json!({"ids": [ids[0]], "axis": [[10000, -5000], [10000, 5000]], "copy": true}))["ids"].clone();
     let (wall, twin) = (made[0].as_u64().unwrap(), made[1].as_u64().unwrap());
-    assert_eq!(ends(&mut s, wall), (json!([20000.0, 0.0]), json!([12000.0, 0.0])));
+    // A mirror image runs back the other way, so its exterior side mirrors the original's.
+    assert_eq!(ends(&mut s, wall), (json!([12000.0, 0.0]), json!([20000.0, 0.0])));
     let (d, t) = (element(&mut s, door), element(&mut s, twin));
     assert_eq!((t["host"].as_u64(), t["at"].clone()), (Some(wall), json!([18000.0, 0.0])));
-    assert_eq!((d["flip_facing"].as_bool(), t["flip_facing"].as_bool()), (Some(false), Some(true)), "a mirror image swings the other way");
+    // Hung on the mirrored jamb, swinging to the same side: a mirror image.
+    assert_eq!((&t["flip_facing"], &d["flip_hand"], &t["flip_hand"]), (&d["flip_facing"], &json!(false), &json!(true)));
     let grid = run(&mut s, "grid", json!({"start": [0, -1000], "end": [0, 7000]}))["id"].as_u64().unwrap();
     run(&mut s, "mirror", json!({"ids": [grid], "axis": [[4000, 0], [4000, 1000]]}));
     assert_eq!(element(&mut s, grid)["start"], json!([8000.0, -1000.0]), "without copy, the grid itself goes");
@@ -245,7 +247,7 @@ fn split_cuts_a_wall_in_two_and_its_doors_go_with_their_part() {
     assert_eq!((element(&mut s, door)["host"].as_u64(), element(&mut s, window)["host"].as_u64()), (Some(ids[0]), Some(new)));
     assert_eq!(element(&mut s, window)["at"], json!([6000.0, 0.0]));
     assert_eq!(element(&mut s, room)["area_m2"], 48.0);
-    assert_eq!(s.model.join_reach(ids[0], P2(4000.0, 0.0)), 0.0, "pieces in line don't overlap");
+    assert!(crate::walls::cap(&s.model, ids[0], true).iter().all(|p| p.0 == 4000.0), "pieces in line meet square, not overlapping");
     assert!(s.execute("split", &json!({"id": ids[0], "at": [2000, 0]})).unwrap_err().contains("in the way"));
     assert!(s.execute("split", &json!({"id": ids[0], "at": [2000, 3000]})).unwrap_err().contains("isn't on"));
 }
@@ -376,10 +378,11 @@ fn mirrored_walls_keep_their_dimensions_on_the_same_faces() {
     // The bottom wall's outer face (its right, going east) to the top wall's centre line.
     let dim = run(&mut s, "DI", json!({"refs": [[4000, -100], [4000, 6000]], "at": [-1000, 0]}))["id"].as_u64().unwrap();
     assert_eq!(element(&mut s, dim)["values"], json!([6100.0]));
-    // The whole box mirrored across x = 10000: the bottom wall now runs west, its outer face on its left.
+    // The whole box mirrored across x = 10000: each wall runs back the other way, so the bottom one
+    // still runs east, its outer face on its right.
     run(&mut s, "mirror", json!({"ids": [ids[0], ids[1], ids[2], ids[3], dim], "axis": [[10000, 0], [10000, 1000]]}));
     assert_eq!(element(&mut s, dim)["values"], json!([6100.0]));
-    assert_eq!(element(&mut s, dim)["refs"][0], json!({"id": ids[0], "face": "left"}));
+    assert_eq!(element(&mut s, dim)["refs"][0], json!({"id": ids[0], "face": "right"}));
 }
 
 #[test]
@@ -495,6 +498,16 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"code": 5}),
         json!({"code": "klingon"}),
         json!({"language": "xx", "name": ""}),
+        json!({"points": [[0, 0], [1000, 0]], "arc": 359.9999}),
+        json!({"points": [[0, 0], [1000, 0]], "arc": -1e300, "location": 5}),
+        json!({"points": [[0, 0], [1000, 0]], "attach_top": 3, "attach_base": u64::MAX}),
+        json!({"category": "wall", "name": "L", "layers": [{"thickness": 1e300}, {"thickness": 0, "function": "membrane"}]}),
+        json!({"category": "wall", "name": "L", "layers": "x"}),
+        json!({"category": "wall", "name": "Generic - 200mm", "layers": [{"thickness": 5, "material": "x", "extra": 1}]}),
+        json!({"ids": [3, 4], "arc": 1e300}),
+        json!({"id": 3, "location": "exterior-core", "arc": 179.99}),
+        json!({"id": 3, "attach_top": 3}),
+        json!({"id": 3, "arc": 90, "location": "interior-finish", "start": [0, 0]}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -938,7 +951,7 @@ fn mm(v: &Value) -> String {
 fn describe(m: &Model, id: u64) -> String {
     let e = crate::element_json(m, id);
     let keys: &[&str] = match e["category"].as_str() {
-        Some("wall") => &["start", "end", "thickness", "base_offset", "height", "level", "top_level"],
+        Some("wall") => &["start", "end", "arc", "thickness", "base_offset", "height", "level", "top_level", "attach_top"],
         Some("door" | "window") => &["host", "offset", "width", "height", "sill"],
         Some("floor") => &["level", "area_m2"],
         Some("room") => &["level", "name", "number", "area_m2"],
@@ -957,9 +970,14 @@ fn describe(m: &Model, id: u64) -> String {
             pts.join(" ")
         }
         "area_m2" | "riser_height" | "slope" | "name" | "number" | "round" | "gable" => v.to_string(),
+        // Attached to what: a roof or a floor, whatever its id.
+        "attach_top" => m.elements.get(&v.as_u64().unwrap_or_default()).map_or("-", |e| e.category()).to_string(),
         _ => mm(v),
     };
-    keys.iter().map(|k| format!("{k}={}", text(k, &e[*k]))).collect::<Vec<_>>().join(" ")
+    // A straight wall has no arc to tell; an attached one's top follows the roof, whatever its top
+    // constraint (which IFC doesn't carry).
+    let untold = |k: &str| (matches!(k, "arc" | "attach_top") && e[k].is_null()) || (k == "top_level" && !e["attach_top"].is_null());
+    keys.iter().filter(|k| !untold(k)).map(|k| format!("{k}={}", text(k, &e[*k]))).collect::<Vec<_>>().join(" ")
 }
 
 /// Every element of a category, described, in order.
@@ -977,6 +995,7 @@ fn ifc_files_open_as_the_building_they_describe() {
     run(&mut s, "column", json!({"at": [3000, 5500], "type": "Round 300"}));
     run(&mut s, "column", json!({"at": [8000, 5000], "angle": 30}));
     run(&mut s, "stair", json!({"start": [1000, 2000], "end": [2000, 2000], "width": 900}));
+    run(&mut s, "wall", json!({"points": [[14000, 0], [18000, 0]], "arc": 90, "type": "Exterior - 300mm"}));
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -1259,4 +1278,142 @@ fn a_project_in_spanish_names_what_it_makes_in_spanish() {
         [Facing::parse("Sur"), Facing::parse("leste"), Facing::parse("West")],
         [Some(Facing::South), Some(Facing::East), Some(Facing::West)]
     );
+}
+
+/// A cavity wall type, outside in: brick, insulation, block and plaster, 300 mm in all.
+fn cavity(s: &mut Session) {
+    let layers = json!([
+        {"function": "finish", "material": "Brick", "thickness": 100},
+        {"function": "thermal", "material": "Mineral wool", "thickness": 50},
+        {"function": "structure", "material": "Concrete block", "thickness": 140},
+        {"function": "finish", "material": "Plaster", "thickness": 10}
+    ]);
+    run(s, "type", json!({"category": "wall", "name": "Cavity 300", "layers": layers}));
+}
+
+#[test]
+fn compound_wall_types_are_as_thick_as_their_layers() {
+    let mut s = Session::new();
+    cavity(&mut s);
+    let t = run(&mut s, "inspect", json!({}))["types"]["wall"]["Cavity 300"].clone();
+    assert_eq!(t["thickness"], 300.0);
+    assert_eq!(t["layers"][0], json!({"function": "finish", "material": "Brick", "thickness": 100.0}));
+    // A new thickness goes to its structure.
+    let t = run(&mut s, "type", json!({"category": "wall", "name": "Cavity 300", "thickness": 320}))["type"].clone();
+    assert_eq!((&t["thickness"], &t["layers"][2]["thickness"]), (&json!(320.0), &json!(160.0)));
+    for (bad, says) in [
+        (json!({"category": "wall", "name": "Cavity 300", "thickness": 100}), "structure"),
+        (json!({"category": "wall", "name": "Thin", "layers": [{"thickness": -5}]}), "thickness"),
+        (json!({"category": "wall", "name": "Odd", "layers": [{"function": "rubber", "thickness": 5}]}), "rubber"),
+        (json!({"category": "wall", "name": "None", "layers": []}), "thickness"),
+        (json!({"category": "wall", "name": "Both", "thickness": 200, "layers": [{"thickness": 100}]}), "200"),
+    ] {
+        let e = s.execute("type", &bad).unwrap_err();
+        assert!(e.contains(says), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn walls_stand_on_their_location_line_with_their_exterior_to_the_left() {
+    use crate::model::{Face, Reference};
+    let mut s = Session::new();
+    cavity(&mut s);
+    // Drawn west to east, its exterior side is north, to its left: walls drawn clockwise face out, as in Revit.
+    let w = run(&mut s, "wall", json!({"points": [[0, 0], [5000, 0]], "type": "Cavity 300", "location": "exterior-finish"}))["ids"][0]
+        .as_u64()
+        .unwrap();
+    let y = |s: &Session, face: Face| s.model.reference_line(&Reference { id: w, face }).unwrap().0.1;
+    assert_eq!([y(&s, Face::Left), y(&s, Face::Centre), y(&s, Face::Right)], [0.0, -150.0, -300.0]);
+    // Put on its core's interior face, it stays where it is.
+    run(&mut s, "modify", json!({"id": w, "location": "interior-core"}));
+    let e = element(&mut s, w);
+    assert_eq!((&e["start"], &e["end"]), (&json!([0.0, -290.0]), &json!([5000.0, -290.0])));
+    assert_eq!([y(&s, Face::Left), y(&s, Face::Right)], [0.0, -300.0]);
+    // Flipped, its exterior goes to the other side of its line; a door in it stays where it is.
+    let door = run(&mut s, "door", json!({"wall": w, "offset": 1000}))["id"].as_u64().unwrap();
+    let at = element(&mut s, door)["at"].clone();
+    run(&mut s, "flip", json!({"ids": [w]}));
+    let e = element(&mut s, w);
+    assert_eq!((&e["start"], &e["end"]), (&json!([5000.0, -290.0]), &json!([0.0, -290.0])));
+    assert_eq!([y(&s, Face::Left), y(&s, Face::Right)], [-580.0, -280.0]);
+    let d = element(&mut s, door);
+    assert_eq!((&d["at"], &d["flip_facing"], &d["flip_hand"]), (&at, &json!(true), &json!(true)));
+    assert!(s.execute("wall", &json!({"points": [[0, 0], [1, 1000]], "location": "middle"})).unwrap_err().contains("middle"));
+}
+
+#[test]
+fn curved_walls_bound_rooms_and_carry_openings_along_their_arc() {
+    let mut s = Session::new();
+    // A room closed on the east by a half circle 3 m across: turning left from south to north, it bulges east.
+    run(&mut s, "wall", json!({"points": [[4000, 3000], [0, 3000], [0, 0], [4000, 0]]}));
+    let arc = run(&mut s, "wall", json!({"points": [[4000, 0], [4000, 3000]], "arc": 180}))["ids"][0].as_u64().unwrap();
+    let e = element(&mut s, arc);
+    assert_eq!((&e["arc"], &e["radius"]), (&json!(180.0), &json!(1500.0)));
+    assert!((e["length"].as_f64().unwrap() - 1500.0 * std::f64::consts::PI).abs() < 0.01, "{e}");
+    let room = run(&mut s, "room", json!({"point": [4500, 1500]}));
+    assert_eq!(room["area_m2"], 15.53, "12 m² and half a circle");
+    // A window at the crown: halfway along the arc.
+    let win = run(&mut s, "window", json!({"at": [5500, 1500]}));
+    assert_eq!((win["host"].as_u64(), win["offset"].as_f64().map(f64::round)), (Some(arc), Some(2356.0)));
+    let at = element(&mut s, win["id"].as_u64().unwrap())["at"].clone();
+    assert!((at[0].as_f64().unwrap() - 5500.0).abs() < 1e-6 && (at[1].as_f64().unwrap() - 1500.0).abs() < 1e-6, "{at}");
+    for bad in [json!(360), json!(1e300), json!("x")] {
+        assert!(s.execute("wall", &json!({"points": [[0, 0], [1000, 0]], "arc": bad})).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn curved_walls_split_mirror_and_flip_as_arcs() {
+    let mut s = Session::new();
+    // Turning left from west to east, it bulges south: its crown at [2000, -2000].
+    let w = run(&mut s, "wall", json!({"points": [[0, 0], [4000, 0]], "arc": 180}))["ids"][0].as_u64().unwrap();
+    let ids = run(&mut s, "split", json!({"id": w, "at": [2000, -2000]}))["ids"].clone();
+    let new = ids[1].as_u64().unwrap();
+    let (a, b) = (element(&mut s, w), element(&mut s, new));
+    assert_eq!((&a["arc"], &b["arc"], &b["end"]), (&json!(90.0), &json!(90.0), &json!([4000.0, 0.0])));
+    assert_eq!(a["end"], json!([2000.0, -2000.0]));
+    // Mirrored across y = 1000, they bulge north; running back the other way, they still turn left.
+    run(&mut s, "mirror", json!({"ids": [w, new], "axis": [[0, 1000], [1000, 1000]]}));
+    let a = element(&mut s, w);
+    assert_eq!((&a["start"], &a["end"], &a["arc"]), (&json!([2000.0, 4000.0]), &json!([0.0, 2000.0]), &json!(90.0)));
+    // Flipped, it runs back the way it came, turning right.
+    run(&mut s, "flip", json!({"ids": [new]}));
+    let b = element(&mut s, new);
+    assert_eq!((&b["start"], &b["end"], &b["arc"]), (&json!([2000.0, 4000.0]), &json!([4000.0, 2000.0]), &json!(-90.0)));
+    // Trim/Extend to Corner works on straight walls.
+    let line = run(&mut s, "wall", json!({"points": [[0, 6000], [1000, 6000]]}))["ids"][0].as_u64().unwrap();
+    assert!(s.execute("corner", &json!({"ids": [w, line]})).unwrap_err().contains("straight"));
+}
+
+#[test]
+fn walls_attached_to_a_roof_follow_its_underside() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    // Gabled over the 8 x 6 m box: its slopes face south and north, the ridge runs east and west.
+    let roof = run(&mut s, "roof", json!({"gable": true}))["id"].as_u64().unwrap();
+    // A window above the walls' tops doesn't fit the east wall, until it rises into the gable.
+    assert!(s.execute("window", &json!({"at": [8000, 3000], "sill": 2000})).unwrap_err().contains("fit"));
+    run(&mut s, "modify", json!({"ids": ids, "attach_top": roof}));
+    let tan = 30f64.to_radians().tan();
+    let top = |s: &Session, id: u64, p: P2| crate::view3d::tops_at(&s.model, p)[&id];
+    assert!((top(&s, ids[1], P2(8000.0, 3000.0)) - (3000.0 + 3100.0 * tan)).abs() < 1.0, "the east wall reaches the ridge");
+    assert!((top(&s, ids[0], P2(4000.0, 0.0)) - (3000.0 + 100.0 * tan)).abs() < 1.0, "the south wall keeps under its slope");
+    run(&mut s, "window", json!({"at": [8000, 3000], "sill": 2000}));
+    assert!((element(&mut s, ids[1])["height"].as_f64().unwrap() - (3000.0 + 3100.0 * tan)).abs() < 1.0);
+    // Detached, the wall wouldn't hold the window.
+    assert!(s.execute("modify", &json!({"id": ids[1], "attach_top": null})).unwrap_err().contains("fit"));
+    // A wall attached to a floor stops under it; its base attached to one stands on it.
+    let floor = run(&mut s, "floor", json!({"level": 2, "boundary": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]]}))["id"].as_u64().unwrap();
+    let part = run(&mut s, "wall", json!({"points": [[4000, 0], [4000, 6000]], "base_offset": 500, "attach_top": floor}))["ids"][0]
+        .as_u64()
+        .unwrap();
+    assert!((top(&s, part, P2(4000.0, 3000.0)) - 2800.0).abs() < 1e-6, "under the 200 mm slab");
+    let low = run(&mut s, "floor", json!({}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, part)["height"], 2300.0);
+    run(&mut s, "modify", json!({"id": part, "attach_base": low}));
+    assert_eq!(element(&mut s, part)["height"], 2800.0);
+    // A roof or floor going takes no wall with it: they come loose.
+    run(&mut s, "delete", json!({"ids": [low]}));
+    assert_eq!(element(&mut s, part).get("attach_base"), None);
+    assert!(s.execute("modify", &json!({"id": part, "attach_top": ids[0]})).unwrap_err().contains("roof or a floor"));
 }

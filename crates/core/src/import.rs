@@ -1,8 +1,9 @@
 //! IFC import: an IFC2x3 or IFC4 file, as Revit, other BIM tools and BIMCraft itself write them,
-//! read into a model. Storeys become levels. Straight walls and the doors and windows in them,
-//! floors, rooms, columns, grids, single straight stairs, and roofs (flat, or pitched over a
-//! rectangle) come in as BIMCraft elements, each measured from its geometry: an extruded
-//! profile, a Brep or a triangle mesh alike, so how a file describes an element doesn't matter.
+//! read into a model. Storeys become levels. Walls, straight or curved, and the doors and windows
+//! in them, floors, rooms, columns, grids, single straight stairs, and roofs (flat, or pitched
+//! over a rectangle) come in as BIMCraft elements, each measured from its geometry: an extruded
+//! profile, a Brep or a triangle mesh alike, so how a file describes an element doesn't matter. A
+//! wall cut to a roof over it comes in attached to it.
 //! What BIMCraft has no element for, or what breaks one of its rules, is left out and listed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -16,6 +17,7 @@ use crate::model::{
 };
 use crate::step::{self, Entity, File, V};
 use crate::view3d::{P3, add, cross, dot, mul, sub, unit};
+use crate::walls::{self, Axis};
 
 /// A model read from an IFC file: its schema, what was left out and why, and how far it was moved
 /// to bring it near the origin.
@@ -702,13 +704,32 @@ impl Links {
     }
 }
 
+/// A curved wall's faces from how far its body's points are from its centre: the middle one of the
+/// points inside its middle, and of those outside it, so a corner where it joins another (cut a
+/// little past the arc) doesn't count.
+fn arc_faces(radii: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    let mut all: Vec<f64> = radii.filter(|r| r.is_finite()).collect();
+    all.sort_by(f64::total_cmp);
+    let (lo, hi) = (*all.first()?, *all.last()?);
+    let (inner, outer): (Vec<f64>, Vec<f64>) = all.iter().partition(|r| **r < (lo + hi) / 2.0);
+    Some((*inner.get(inner.len() / 2)?, *outer.get(outer.len() / 2)?))
+}
+
+/// A body's highest point.
+fn highest(pts: &[P3]) -> P3 {
+    pts.iter().copied().max_by(|a, b| a[2].total_cmp(&b[2])).unwrap_or_default()
+}
+
 /// A wall as the file has it, before walls that nearly meet are made to meet.
 struct RawWall {
     ifc: u64,
     start: P2,
     end: P2,
+    arc: f64,
     t: f64,
     z: (f64, f64),
+    /// Where its body is highest, in plan.
+    peak: P2,
     level: Id,
     type_name: String,
 }
@@ -718,13 +739,14 @@ struct RawWall {
 fn meet(walls: &mut [RawWall]) {
     for i in 0..walls.len() {
         for at_end in [false, true] {
-            let Some(w) = walls.get(i) else { continue };
+            // Curved walls stay as the file has them.
+            let Some(w) = walls.get(i).filter(|w| w.arc == 0.0) else { continue };
             let (a, b, p, t, z) = (w.start, w.end, if at_end { w.end } else { w.start }, w.t, w.z);
             if walls.iter().enumerate().any(|(j, o)| j != i && (o.start.dist(p) <= TOL || o.end.dist(p) <= TOL)) {
                 continue;
             }
             let mut best: Option<(f64, P2)> = None;
-            for o in walls.iter().enumerate().filter(|(j, o)| *j != i && o.z.0 < z.1 && z.0 < o.z.1).map(|(_, o)| o) {
+            for o in walls.iter().enumerate().filter(|(j, o)| *j != i && o.arc == 0.0 && o.z.0 < z.1 && z.0 < o.z.1).map(|(_, o)| o) {
                 if geom::parallel(a, b, o.start, o.end) {
                     continue;
                 }
@@ -886,11 +908,36 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let faces = r.body(w);
         let pts: Vec<P3> = faces.iter().flatten().copied().collect();
         let axis = r.axis(w);
-        if axis.as_ref().is_some_and(|a| {
-            let (p, q) = (a.first().copied().unwrap_or_default(), a.last().copied().unwrap_or_default());
-            a.iter().any(|x| geom::dist_to_segment(r.flat(*x), r.flat(p), r.flat(q)) > 1.0)
-        }) {
-            leave(&mut skipped, &mut seen, id, "curved walls aren't supported");
+        // A curved axis: the arc through its ends and its middle; the wall's line, the middle of its
+        // body round the arc's centre, as thick as the body spreads.
+        let bent: Vec<P2> = axis.iter().flatten().map(|x| r.flat(*x)).collect();
+        if let [p, .., q] = bent.as_slice()
+            && bent.iter().any(|x| geom::dist_to_segment(*x, *p, *q) > 1.0)
+        {
+            let mid = bent.get(bent.len() / 2).copied().unwrap_or(*p);
+            let arc = walls::sweep_through(*p, mid, *q);
+            let radii = Axis::new(*p, *q, arc).centre().and_then(|c| Some((c, arc_faces(pts.iter().map(|x| r.flat(*x).dist(c)))?)));
+            let (Some((c, (r0, r1))), Some((z0, z1))) = (radii, span(pts.iter().map(|x| x[2]))) else {
+                leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
+                continue;
+            };
+            let t = ((r1 - r0) * 100.0).round() / 100.0;
+            let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
+            let type_name =
+                kind(&mut m.types.wall, &base, |k| (k.thickness - t).abs() < 0.05, WallType { thickness: t, layers: Vec::new() });
+            let on = |x: P2| micron(c + (x - c).unit() * ((r0 + r1) / 2.0));
+            let arc = (arc * 1e6).round() / 1e6;
+            raw.push(RawWall {
+                ifc: id,
+                start: on(*p),
+                end: on(*q),
+                arc,
+                t,
+                z: (z0, z1),
+                peak: r.flat(highest(&pts)),
+                level: level_for(id, z0),
+                type_name,
+            });
             continue;
         }
         let f = r.frame(w);
@@ -919,12 +966,23 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let t = (c1 - c0) * 100.0;
         let t = t.round() / 100.0;
         let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-        let type_name = kind(&mut m.types.wall, &base, |k| (k.thickness - t).abs() < 0.05, WallType { thickness: t });
-        raw.push(RawWall { ifc: id, start: micron(a + mid), end: micron(b + mid), t, z: (z0, z1), level: level_for(id, z0), type_name });
+        let type_name = kind(&mut m.types.wall, &base, |k| (k.thickness - t).abs() < 0.05, WallType { thickness: t, layers: Vec::new() });
+        raw.push(RawWall {
+            ifc: id,
+            start: micron(a + mid),
+            end: micron(b + mid),
+            arc: 0.0,
+            t,
+            z: (z0, z1),
+            peak: r.flat(highest(&pts)),
+            level: level_for(id, z0),
+            type_name,
+        });
     }
     meet(&mut raw);
-    // Each wall made: its id, its line, and the height of its base.
+    // Each wall made: its id, its line, and the height of its base; and where it's highest.
     let mut walls: HashMap<u64, (Id, P2, P2, f64)> = HashMap::new();
+    let mut peaks: Vec<(Id, P2, f64)> = Vec::new();
     for w in raw {
         let (top_level, height) = topped(w.level, w.z.0, w.z.1);
         let wall = Wall {
@@ -935,10 +993,15 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             top_level,
             height: (height * 1000.0).round() / 1000.0,
             base_offset: ((w.z.0 - elevation(w.level)) * 1000.0).round() / 1000.0,
+            arc: w.arc,
+            location: Default::default(),
+            attach_top: None,
+            attach_base: None,
         };
         let id = m.insert(Element::Wall(wall));
         from.insert(id, who(w.ifc));
         walls.insert(w.ifc, (id, w.start, w.end, w.z.0));
+        peaks.push((id, w.peak, w.z.1));
         seen.insert(w.ifc);
     }
 
@@ -1008,6 +1071,25 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
                 from.insert(rid, who(id));
             }
             Err(why) => leave(&mut skipped, &mut seen, id, &why),
+        }
+    }
+
+    // A wall whose top follows a roof, as Revit writes attached walls (cut to the roof): its highest
+    // point under the roof, and the roof lower than that somewhere over the wall. One rising
+    // through a roof is higher than it; one only touching it, along an edge, doesn't reach above it.
+    let roofs: Vec<Id> = m.elements.iter().filter(|(_, e)| matches!(e, Element::Roof(_))).map(|(id, _)| *id).collect();
+    for (wid, q, top) in peaks {
+        let Some(w) = m.wall(wid).cloned() else { continue };
+        let axis = Axis::of(&w);
+        let along: Vec<P2> = (0..=8).map(|i| axis.at(axis.length() * f64::from(i) / 8.0, 0.0)).collect();
+        let under = |rid: Id| {
+            walls::underside(&m, rid, q).is_some_and(|z| (z - top).abs() <= 5.0)
+                && along.iter().any(|p| walls::underside(&m, rid, *p).is_some_and(|z| z < top - 5.0))
+        };
+        if let Some(rid) = roofs.iter().copied().find(|rid| under(*rid))
+            && let Some(Element::Wall(w)) = m.elements.get_mut(&wid)
+        {
+            w.attach_top = Some(rid);
         }
     }
 

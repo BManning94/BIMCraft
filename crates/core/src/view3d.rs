@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 
 use crate::geom::{self, P2};
-use crate::model::{Element, Id, Model, Wall, heading};
+use crate::model::{Element, Id, Model, heading};
 use crate::render::{PAPER, Rgb};
+use crate::walls::{self, Axis, Plane};
 
 /// A model point in mm: x east, y north, z up.
 pub type P3 = [f64; 3];
@@ -50,11 +51,13 @@ pub(crate) fn unit(a: P3) -> P3 {
     if l > 0.0 { mul(a, 1.0 / l) } else { [0.0; 3] }
 }
 
-/// A triangle of an element's surface.
+/// A triangle of an element's surface; on a curved one, which (its element's, inside or outside),
+/// so the facets read as one.
 struct Tri {
     p: [P3; 3],
     owner: Id,
     color: Rgb,
+    curve: Option<(Id, bool)>,
 }
 
 /// A wall's plan frame: its start, along it, and square to it.
@@ -66,11 +69,6 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    fn of(w: &Wall) -> Frame {
-        let u = (w.end - w.start).unit();
-        Frame { o: w.start, u, n: u.perp() }
-    }
-
     /// A box from `a.0` to `a.1` along, `c.0` to `c.1` across and `z.0` to `z.1` up.
     fn cuboid(&self, out: &mut Vec<Tri>, owner: Id, color: Rgb, a: (f64, f64), c: (f64, f64), z: (f64, f64)) {
         let at = |a: f64, c: f64, z: f64| {
@@ -88,18 +86,20 @@ impl Frame {
             at(a.0, c.1, z.1),
         ];
         for [i, j, k, l] in [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]] {
-            out.push(Tri { p: [v[i], v[j], v[k]], owner, color });
-            out.push(Tri { p: [v[i], v[k], v[l]], owner, color });
+            out.push(Tri { p: [v[i], v[j], v[k]], owner, color, curve: None });
+            out.push(Tri { p: [v[i], v[k], v[l]], owner, color, curve: None });
         }
     }
 }
 
-/// A solid of the model: a box (a wall's part between its openings, a door's leaf, a window's
-/// glass, a stair's step) or a slab: a flat face, level or sloped, and what lies up to `rise` mm
-/// above it (a floor, a column, a roof's slope).
+/// A solid of the model: a box (a door's leaf, a window's glass, a stair's step); a slab: a flat
+/// face, level or sloped, and what lies up to `rise` mm above it (a floor, a column, a roof's
+/// slope); or a prism: a ring in plan from one plane up to another (a wall's part; of a curved
+/// wall, with its centre and its centre line's radius, its faces being one surface each).
 pub(crate) enum Solid {
     Box { owner: Id, color: Rgb, frame: Frame, a: (f64, f64), c: (f64, f64), z: (f64, f64) },
     Slab { owner: Id, color: Rgb, face: Vec<P3>, rise: f64 },
+    Prism { owner: Id, color: Rgb, ring: Vec<P2>, bottom: Plane, top: Plane, curve: Option<(P2, f64)> },
 }
 
 /// A level slab: `ring` from `z.0` up to `z.1`.
@@ -114,7 +114,7 @@ fn plan(face: &[P3]) -> Vec<P2> {
 impl Solid {
     pub(crate) fn owner(&self) -> Id {
         match self {
-            Solid::Box { owner, .. } | Solid::Slab { owner, .. } => *owner,
+            Solid::Box { owner, .. } | Solid::Slab { owner, .. } | Solid::Prism { owner, .. } => *owner,
         }
     }
 
@@ -125,6 +125,9 @@ impl Solid {
             Solid::Slab { face, rise, .. } => {
                 let (lo, hi) = face.iter().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])));
                 (lo, hi + rise)
+            }
+            Solid::Prism { ring, bottom, top, .. } => {
+                ring.iter().fold((f64::MAX, f64::MIN), |(lo, hi), q| (lo.min(bottom.at(*q)), hi.max(top.at(*q))))
             }
         }
     }
@@ -140,17 +143,19 @@ impl Solid {
                 let z = if n[2].abs() > 1e-9 { o[2] - (n[0] * (q.0 - o[0]) + n[1] * (q.1 - o[1])) / n[2] } else { o[2] };
                 (z, z + rise)
             }
+            Solid::Prism { bottom, top, .. } => (bottom.at(q), top.at(q)),
         }
     }
 
     /// Whether plan point `q` lies within its footprint.
-    fn over(&self, q: P2) -> bool {
+    pub(crate) fn over(&self, q: P2) -> bool {
         match self {
             Solid::Box { frame, a, c, .. } => {
                 let (s, t) = ((q - frame.o).dot(frame.u), (q - frame.o).dot(frame.n));
                 (a.0..=a.1).contains(&s) && (c.0..=c.1).contains(&t)
             }
             Solid::Slab { face, .. } => geom::contains(&plan(face), q),
+            Solid::Prism { ring, .. } => geom::contains(ring, q),
         }
     }
 
@@ -165,6 +170,9 @@ impl Solid {
                 }
             }
             Solid::Slab { face, rise, .. } => out.extend(face.iter().flat_map(|p| [*p, [p[0], p[1], p[2] + rise]])),
+            Solid::Prism { ring, bottom, top, .. } => {
+                out.extend(ring.iter().flat_map(|q| [[q.0, q.1, bottom.at(*q)], [q.0, q.1, top.at(*q)]]))
+            }
         }
         out
     }
@@ -187,18 +195,8 @@ impl Solid {
                     _ => Vec::new(),
                 }
             }
-            Solid::Slab { face, .. } => {
-                // Where the line crosses the outline, paired off: in, out, in, out.
-                // ponytail: a line through a corner it only touches unpairs the rest; nudge it if slabs show gaps.
-                let mut cross: Vec<f64> = geom::ring_edges(&plan(face))
-                    .filter_map(|(a, b)| {
-                        let (e, den) = (b - a, u.cross(b - a));
-                        (den.abs() > 1e-12 && (0.0..1.0).contains(&((a - p).cross(u) / den))).then(|| (a - p).cross(e) / den)
-                    })
-                    .collect();
-                cross.sort_by(f64::total_cmp);
-                cross.as_chunks::<2>().0.iter().map(|[s0, s1]| (*s0, *s1)).collect()
-            }
+            Solid::Slab { face, .. } => crossings(&plan(face), p, u),
+            Solid::Prism { ring, .. } => crossings(ring, p, u),
         }
     }
 
@@ -206,8 +204,40 @@ impl Solid {
         match self {
             Solid::Box { owner, color, frame, a, c, z } => frame.cuboid(out, *owner, *color, *a, *c, *z),
             Solid::Slab { owner, color, face, rise } => prism(out, *owner, *color, face, *rise),
+            Solid::Prism { owner, color, ring, bottom, top, curve } => {
+                let (owner, color) = (*owner, *color);
+                let at = |q: P2, p: &Plane| [q.0, q.1, p.at(q)];
+                for [a, b, c] in geom::triangulate(ring) {
+                    let pt = |i: usize| ring.get(i).copied().unwrap_or_default();
+                    out.push(Tri { p: [at(pt(a), top), at(pt(b), top), at(pt(c), top)], owner, color, curve: None });
+                    out.push(Tri { p: [at(pt(a), bottom), at(pt(c), bottom), at(pt(b), bottom)], owner, color, curve: None });
+                }
+                for (a, b) in geom::ring_edges(ring) {
+                    let (a0, b0, a1, b1) = (at(a, bottom), at(b, bottom), at(a, top), at(b, top));
+                    // Along a curved wall's face (not across it, where it's cut), which face.
+                    let curve = curve
+                        .filter(|(c, _)| (b - a).unit().cross((a - *c).unit()).abs() > 0.5)
+                        .map(|(c, r)| (owner, ((a + b) * 0.5).dist(c) > r));
+                    out.push(Tri { p: [a0, b0, b1], owner, color, curve });
+                    out.push(Tri { p: [a0, b1, a1], owner, color, curve });
+                }
+            }
         }
     }
+}
+
+/// The stretches of the line from `p` along unit `u` that lie over `ring`, as distances from `p`:
+/// where it crosses the ring's edges, paired off, in and out.
+fn crossings(ring: &[P2], p: P2, u: P2) -> Vec<(f64, f64)> {
+    // ponytail: a line through a corner it only touches unpairs the rest; nudge it if slabs show gaps.
+    let mut cross: Vec<f64> = geom::ring_edges(ring)
+        .filter_map(|(a, b)| {
+            let (e, den) = (b - a, u.cross(b - a));
+            (den.abs() > 1e-12 && (0.0..1.0).contains(&((a - p).cross(u) / den))).then(|| (a - p).cross(e) / den)
+        })
+        .collect();
+    cross.sort_by(f64::total_cmp);
+    cross.as_chunks::<2>().0.iter().map(|[s0, s1]| (*s0, *s1)).collect()
 }
 
 /// The model's solids: walls cut around their openings, door leaves and glass, floor slabs,
@@ -216,7 +246,14 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
     let mut out = Vec::new();
     for (&id, e) in &m.elements {
         match e {
-            Element::Wall(w) => wall(&mut out, m, id, w),
+            Element::Wall(_) => out.extend(walls::prisms(m, id, true).into_iter().map(|p| Solid::Prism {
+                owner: id,
+                color: WALL,
+                ring: p.ring,
+                bottom: p.bottom,
+                top: p.top,
+                curve: p.curve,
+            })),
             Element::Floor(f) => {
                 let (top, t) = (m.elevation(f.level), m.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness));
                 out.push(slab(id, SLAB, &f.boundary, (top - t, top)));
@@ -240,13 +277,16 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                     out.extend(pieces.into_iter().map(|face| Solid::Slab { owner: id, color: ROOF, face, rise }));
                 }
             }
-            // A door's leaf or a window's glass: a 50 mm panel in the middle of the wall.
+            // A door's leaf or a window's glass: a 50 mm panel in the middle of the wall, square to it.
             Element::Door(o) | Element::Window(o) => {
                 if let (Some(t), Some(w)) = (m.opening_type(e), m.wall(o.host)) {
                     let color = if matches!(e, Element::Door(_)) { DOOR } else { GLASS };
-                    let z = m.base_z(w) + o.sill;
-                    let a = (o.offset - t.width / 2.0, o.offset + t.width / 2.0);
-                    out.push(Solid::Box { owner: id, color, frame: Frame::of(w), a, c: (-25.0, 25.0), z: (z, z + t.height) });
+                    let z = m.own_base(w) + o.sill;
+                    let axis = Axis::of(w);
+                    let u = axis.tangent(o.offset);
+                    let frame = Frame { o: axis.at(o.offset, walls::centre(m, w)), u, n: u.perp() };
+                    let a = (-t.width / 2.0, t.width / 2.0);
+                    out.push(Solid::Box { owner: id, color, frame, a, c: (-25.0, 25.0), z: (z, z + t.height) });
                 }
             }
             _ => {}
@@ -255,62 +295,31 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
     out
 }
 
-/// A wall as boxes: its length cut where its doors and windows start and end, and each stretch
-/// cut around the openings over it. Its ends reach past the walls they join, as in plan.
-fn wall(out: &mut Vec<Solid>, m: &Model, id: Id, w: &Wall) {
-    let f = Frame::of(w);
-    let half = m.thickness(w) / 2.0;
-    let (a0, a1) = (-m.join_reach(id, w.start), w.start.dist(w.end) + m.join_reach(id, w.end));
-    let (z0, z1) = (m.base_z(w), m.top_z(w));
-    // The openings: along the wall, and up it.
-    let holes: Vec<((f64, f64), (f64, f64))> = m
-        .elements
-        .values()
-        .filter_map(|e| match e {
-            Element::Door(o) | Element::Window(o) if o.host == id => {
-                let t = m.opening_type(e)?;
-                Some(((o.offset - t.width / 2.0, o.offset + t.width / 2.0), (z0 + o.sill, z0 + o.sill + t.height)))
-            }
-            _ => None,
-        })
-        .collect();
-    let mut cuts: Vec<f64> = holes.iter().flat_map(|((s0, s1), _)| [*s0, *s1]).chain([a0, a1]).filter(|x| (a0..=a1).contains(x)).collect();
-    cuts.sort_by(f64::total_cmp);
-    cuts.dedup();
-    for pair in cuts.windows(2) {
-        let [x0, x1] = pair else { continue };
-        let mid = (x0 + x1) / 2.0;
-        let mut gaps: Vec<(f64, f64)> = holes.iter().filter(|((s0, s1), _)| *s0 <= mid && mid <= *s1).map(|(_, z)| *z).collect();
-        gaps.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut z = z0;
-        for (g0, g1) in gaps.into_iter().chain([(z1, z1)]) {
-            if g0.min(z1) > z + 1e-6 {
-                out.push(Solid::Box { owner: id, color: WALL, frame: f, a: (*x0, *x1), c: (-half, half), z: (z, g0.min(z1)) });
-            }
-            z = z.max(g1);
-        }
-    }
-}
-
 /// A slab: `face`, its copy `rise` above, and the sides between them.
 fn prism(out: &mut Vec<Tri>, owner: Id, color: Rgb, face: &[P3], rise: f64) {
     let up = |p: P3| [p[0], p[1], p[2] + rise];
     let pt = |i: usize| face.get(i).copied().unwrap_or_default();
     for [a, b, c] in geom::triangulate(&plan(face)) {
-        out.push(Tri { p: [up(pt(a)), up(pt(b)), up(pt(c))], owner, color });
-        out.push(Tri { p: [pt(a), pt(c), pt(b)], owner, color });
+        out.push(Tri { p: [up(pt(a)), up(pt(b)), up(pt(c))], owner, color, curve: None });
+        out.push(Tri { p: [pt(a), pt(c), pt(b)], owner, color, curve: None });
     }
     for (a, b) in face.iter().zip(face.iter().cycle().skip(1)) {
-        out.push(Tri { p: [*a, *b, up(*b)], owner, color });
-        out.push(Tri { p: [*a, up(*b), up(*a)], owner, color });
+        out.push(Tri { p: [*a, *b, up(*b)], owner, color, curve: None });
+        out.push(Tri { p: [*a, up(*b), up(*a)], owner, color, curve: None });
     }
 }
 
-/// Each triangle's plane, as an index the triangles lying in it (within half a millimetre) share.
+/// Each triangle's plane, as an index the triangles lying in it (within half a millimetre) share;
+/// the facets of one face of a curved wall share one too.
 fn planes(tris: &[Tri]) -> Vec<usize> {
     let mut found: Vec<(P3, f64)> = Vec::new();
+    let mut curves: BTreeMap<(Id, bool), usize> = BTreeMap::new();
     tris.iter()
         .map(|t| {
+            if let Some(c) = t.curve {
+                let next = tris.len() + curves.len();
+                return *curves.entry(c).or_insert(next);
+            }
             let n = unit(cross(sub(t.p[1], t.p[0]), sub(t.p[2], t.p[0])));
             let d = dot(n, t.p[0]);
             // ponytail: a linear search per triangle; hash planes if models reach tens of thousands of faces.

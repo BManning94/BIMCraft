@@ -40,7 +40,7 @@ fn contents(d: &Drawing, paper: P2) -> (String, Vec<(u32, u32, Vec<u8>)>) {
                 for r in rings {
                     path(&mut s, r, true);
                 }
-                s.push_str("f*\n");
+                s.push_str("f\n");
             }
             Prim::Line { pts, width, color: c, dash, closed } => {
                 let dash = dash.map_or_else(|| "[] 0 d".to_string(), |[a, b]| format!("[{a} {b}] 0 d"));
