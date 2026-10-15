@@ -1451,9 +1451,9 @@ impl BimApp {
             Tool::GableEdge => {
                 if let Some((id, i)) = m.roof_edge(level, v.mm(q), f64::from(PICK) / v.scale)
                     && let Some(Element::Roof(r)) = m.elements.get(&id)
-                    && let (Some(a), Some(b)) = (r.boundary.get(i), r.boundary.get((i + 1) % r.boundary.len()))
+                    && let Some((a, b)) = r.edges().nth(i)
                 {
-                    p.line_segment([sc.screen(*a), sc.screen(*b)], Stroke::new(4.0, pal().accent));
+                    p.line_segment([sc.screen(a), sc.screen(b)], Stroke::new(4.0, pal().accent));
                 }
                 return;
             }

@@ -537,6 +537,10 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"host": 3, "at": [4000, 3000], "width": -1, "height": 1e300, "slope": 89.9}),
         json!({"host": u64::MAX, "at": [1e300, 0], "window": "nowhere"}),
         json!({"id": 3, "openings": [[[0, 0], [1e9, 0], [0, 1e9]]], "gables": [0, 0, 1]}),
+        json!({"courtyards": [[[0, 0], [1e9, 0], [0, 1e9]]], "gables": [7]}),
+        json!({"id": 3, "courtyards": [[[1000, 1000], [2000, 1000], [2000, 2000]], [[1000, 1000], [2000, 1000], [2000, 2000]]]}),
+        json!({"courtyards": [[[1, 1]]], "slope": 1e-300}),
+        json!({"courtyards": "x", "extrusion": {"line": [[0, 0], [1000, 0]], "profile": [[0, 0], [1000, 500]], "to": 1000}}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -991,7 +995,7 @@ fn describe(m: &Model, id: u64) -> String {
         Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length", "landings"],
         Some("ramp") => &["level", "start", "angle", "width", "slope", "height", "length", "landings"],
         Some("railing") => &["level", "host", "side", "path", "height"],
-        Some("roof") => &["level", "slope", "ridge", "area_m2", "outline", "gables", "openings"],
+        Some("roof") => &["level", "slope", "ridge", "area_m2", "outline", "gables", "openings", "courtyards"],
         Some("grid") => &["name", "start", "end"],
         _ => &[],
     };
@@ -1006,7 +1010,7 @@ fn describe(m: &Model, id: u64) -> String {
             pts.sort();
             pts.join(" ")
         }
-        "openings" => {
+        "openings" | "courtyards" => {
             let sorted = |h: &Value| {
                 let mut pts: Vec<String> = h.as_array().into_iter().flatten().map(mm).collect();
                 pts.sort();
@@ -1016,11 +1020,18 @@ fn describe(m: &Model, id: u64) -> String {
             holes.sort();
             holes.join(" | ")
         }
-        // A roof's gables, by where they are: the middle of each edge left upright.
+        // A roof's gables, by where they are: the middle of each edge left upright, the courtyards'
+        // edges numbered on after the outline's.
         "gables" => {
-            let ring: Vec<&Value> = e["boundary"].as_array().into_iter().flatten().collect();
+            let rings = std::iter::once(&e["boundary"]).chain(e["courtyards"].as_array().into_iter().flatten());
+            let edges: Vec<(&Value, &Value)> = rings
+                .flat_map(|r| {
+                    let ring: Vec<&Value> = r.as_array().into_iter().flatten().collect();
+                    (0..ring.len()).map(move |i| (ring[i], ring[(i + 1) % ring.len()]))
+                })
+                .collect();
             let mid = |i: usize| -> Option<String> {
-                let (a, b) = (ring.get(i)?, ring.get((i + 1) % ring.len())?);
+                let (a, b) = edges.get(i)?;
                 Some(mm(&json!([(a[0].as_f64()? + b[0].as_f64()?) / 2.0, (a[1].as_f64()? + b[1].as_f64()?) / 2.0])))
             };
             let mut mids: Vec<String> = v.as_array().into_iter().flatten().filter_map(|i| mid(i.as_u64()? as usize)).collect();
@@ -1036,7 +1047,8 @@ fn describe(m: &Model, id: u64) -> String {
     // A straight wall has no arc to tell; an attached one's top follows the roof, whatever its top
     // constraint (which IFC doesn't carry).
     let untold = |k: &str| {
-        (matches!(k, "arc" | "attach_top" | "slope" | "host" | "side" | "landings" | "gables" | "openings") && e[k].is_null())
+        (matches!(k, "arc" | "attach_top" | "slope" | "host" | "side" | "landings" | "gables" | "openings" | "courtyards")
+            && e[k].is_null())
             || (k == "top_level" && !e["attach_top"].is_null())
     };
     keys.iter().filter(|k| !untold(k)).map(|k| format!("{k}={}", text(k, &e[*k]))).collect::<Vec<_>>().join(" ")
@@ -1083,6 +1095,10 @@ fn ifc_files_open_as_the_building_they_describe() {
     run(&mut s, "roof", json!({"level": "Level 2", "boundary": l, "slope": 25, "gables": [1], "openings": skylight}));
     let profile = json!({"line": [[50000, 0], [58000, 0]], "profile": [[0, 0], [3000, 2000], [8000, 0]], "to": 6000});
     run(&mut s, "roof", json!({"level": "Level 2", "extrusion": profile}));
+    // A roof round a courtyard, the courtyard's east side a gable.
+    let square = json!([[60000, 0], [76000, 0], [76000, 16000], [60000, 16000]]);
+    let court = json!([[[66000, 6000], [70000, 6000], [70000, 10000], [66000, 10000]]]);
+    run(&mut s, "roof", json!({"level": "Level 2", "boundary": square, "courtyards": court, "gables": [5]}));
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -1815,4 +1831,60 @@ fn walls_under_a_trimmed_roof_stop_at_its_underside() {
             }
         }
     }
+}
+
+#[test]
+fn roofs_slope_round_a_courtyard_up_to_a_ring_of_ridges() {
+    let mut s = Session::new();
+    // A 16 m square round a 4 m courtyard: four 6 m wings, roofed on Level 2 at 30°.
+    let outline = json!([[0, 0], [16000, 0], [16000, 16000], [0, 16000]]);
+    let court = json!([[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]]);
+    let roof = run(&mut s, "roof", json!({"boundary": outline, "courtyards": [court]}))["id"].as_u64().unwrap();
+    let (tan, rise) = (30f64.to_radians().tan(), 300.0 / 30f64.to_radians().cos());
+    let top = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&roof).copied();
+    // Each wing's ridge 3 m in from both its eaves: a ring of ridges round the courtyard, open over it.
+    let ridge = 3000.0 + 3000.0 * tan;
+    for (x, y) in [(8000.0, 3000.0), (13000.0, 8000.0), (8000.0, 13000.0), (3000.0, 8000.0), (3000.0, 3000.0), (13000.0, 13000.0)] {
+        assert!((top(&s, x, y).unwrap() - (ridge + rise)).abs() < 1e-6, "({x}, {y}): {:?}", top(&s, x, y));
+    }
+    assert_eq!(top(&s, 8000.0, 8000.0), None, "the courtyard is open");
+    // Its slopes rise from the courtyard's eaves as from the outline's.
+    for y in [5000.0, 1000.0] {
+        assert!((top(&s, 8000.0, y).unwrap() - (3000.0 + 1000.0 * tan + rise)).abs() < 1e-6, "{y}");
+    }
+    let e = element(&mut s, roof);
+    assert_eq!((e["ridge"].as_f64(), e["area_m2"].as_f64()), (Some(4732.05), Some(240.0)), "{e}");
+    // In plan, its eaves round the courtyard; from Level 1, they're dashed overhead.
+    let d = crate::render::plan(&s.model, 2, 800, 600);
+    assert_eq!(d.pick(d.view.px(P2(8000.0, 6000.0)), 2.0), Some(roof));
+    let below = crate::render::plan(&s.model, 1, 800, 600);
+    assert_eq!(below.pick(below.view.px(P2(6000.0, 8000.0)), 2.0), Some(roof), "the courtyard's edge, overhead");
+    // A section across it cuts both wings at their ridges, and nothing over the courtyard.
+    let sec = run(&mut s, "section", json!({"start": [8000, -2000], "end": [8000, 18000]}))["id"].as_u64().unwrap();
+    let view = crate::render::section_fit(&s.model, sec, 800, 600);
+    let d = crate::render::section(&s.model, sec, view);
+    let cut = |y: f64, z: f64| d.pick(view.px(P2(y + 2000.0, z)), 2.0);
+    assert_eq!((cut(3000.0, ridge + 100.0), cut(13000.0, ridge + 100.0), cut(8000.0, 4000.0)), (Some(roof), Some(roof), None));
+    // A courtyard's edges number on after the outline's, and stand upright from the desktop too:
+    // its south side (4) a gable, the south wing's slope runs up to it, 6 m in.
+    assert_eq!(s.model.roof_edge(2, P2(8000.0, 6010.0), 50.0), Some((roof, 4)));
+    run(&mut s, "modify", json!({"id": roof, "gables": [4]}));
+    assert!((top(&s, 8000.0, 5900.0).unwrap() - (3000.0 + 5900.0 * tan + rise)).abs() < 1e-6, "{:?}", top(&s, 8000.0, 5900.0));
+    assert!(s.execute("modify", &json!({"id": roof, "gables": [8]})).unwrap_err().contains("edge 8"));
+    // A courtyard lies inside the outline, apart from the others; an extrusion roof has none.
+    for (bad, why) in [
+        (json!([[[20000, 0], [22000, 0], [22000, 2000]]]), "inside"),
+        (json!([[[-1000, 6000], [2000, 6000], [2000, 8000], [-1000, 8000]]]), "inside"),
+        (json!([court, [[7000, 7000], [12000, 7000], [12000, 12000]]]), "overlap"),
+    ] {
+        let e = s.execute("modify", &json!({"id": roof, "courtyards": bad})).unwrap_err();
+        assert!(e.contains(why), "{e}");
+    }
+    let profile = json!({"line": [[0, 0], [16000, 0]], "profile": [[0, 0], [8000, 3000], [16000, 0]], "to": 16000});
+    let e = s.execute("roof", &json!({"extrusion": profile, "courtyards": [court]})).unwrap_err();
+    assert!(e.contains("footprint"), "{e}");
+    // Flat, it's a hole through it.
+    run(&mut s, "modify", json!({"id": roof, "slope": 0, "gables": []}));
+    assert_eq!((top(&s, 8000.0, 8000.0), element(&mut s, roof)["area_m2"].as_f64()), (None, Some(240.0)));
+    assert!(top(&s, 8000.0, 5000.0).is_some());
 }

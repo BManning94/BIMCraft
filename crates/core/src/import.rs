@@ -1149,6 +1149,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
                     type_name,
                     level,
                     boundary: rd.boundary,
+                    courtyards: rd.courtyards,
                     slope: rd.slope,
                     overhang: (overhang * 1000.0).round() / 1000.0,
                     gable: false,
@@ -1586,11 +1587,12 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     Ok(Imported { model: m, schema: file.schema.clone(), skipped, moved })
 }
 
-/// A roof as `roof_from` reads it: over its footprint, less its openings, flat or each edge but its
-/// gables sloping at `slope`; or a profile swept across, its heights up from `z`. Its thickness,
-/// and `z`: how high its underside is at its eaves, or its profile's 0.
+/// A roof as `roof_from` reads it: over its footprint, round its courtyards, less its openings,
+/// flat or each edge but its gables sloping at `slope`; or a profile swept across, its heights up
+/// from `z`. Its thickness, and `z`: how high its underside is at its eaves, or its profile's 0.
 struct RoofRead {
     boundary: Vec<P2>,
+    courtyards: Vec<Vec<P2>>,
     openings: Vec<Vec<P2>>,
     slope: f64,
     gables: Vec<usize>,
@@ -1640,7 +1642,16 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
     openings.sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
     let sloped: Vec<&(&Vec<P3>, Plane)> = up.iter().filter(|(_, p)| p.g.length() > 0.02).collect();
     let Some(&&(main, along)) = sloped.iter().max_by(|a, b| area3(a.0).total_cmp(&area3(b.0))) else {
-        return Ok(RoofRead { boundary, openings, slope: 0.0, gables: Vec::new(), extrusion: None, t: round(z1 - z0), z: z0 });
+        return Ok(RoofRead {
+            boundary,
+            courtyards: Vec::new(),
+            openings,
+            slope: 0.0,
+            gables: Vec::new(),
+            extrusion: None,
+            t: round(z1 - z0),
+            z: z0,
+        });
     };
     // Its thickness: from its largest slope's top to the underside parallel to it.
     let n = normal(main);
@@ -1665,8 +1676,23 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
         let ring: Vec<P2> = f.iter().map(|p| P2(p[0], p[1])).collect();
         geom::contains(&ring, q) || geom::ring_edges(&ring).any(|(a, b)| geom::dist_to_segment(q, a, b) < 1.0)
     };
-    let edges: Vec<(P2, P2)> = geom::ring_edges(&boundary).collect();
     let top_at = |q: P2| up.iter().filter(|(f, _)| touches(f, q)).map(|(_, p)| p.at(q)).fold(f64::INFINITY, f64::min);
+    // A hole with eaves along it is a courtyard, clockwise as the slopes round it rise from it; one
+    // cut through the slopes, an opening.
+    let (courtyards, openings): (Vec<Vec<P2>>, Vec<Vec<P2>>) =
+        openings.into_iter().partition(|h| geom::ring_edges(h).any(|(a, b)| top_at((a + b) * 0.5) <= lowest + 1.0));
+    let courtyards: Vec<Vec<P2>> = courtyards
+        .into_iter()
+        .map(|mut c| {
+            if geom::area(&c) > 0.0 {
+                c.reverse();
+                c.rotate_right(1);
+            }
+            c
+        })
+        .collect();
+    let rings: Vec<&Vec<P2>> = std::iter::once(&boundary).chain(&courtyards).collect();
+    let edges: Vec<(P2, P2)> = rings.iter().flat_map(|r| geom::ring_edges(r)).collect();
     let gables: Vec<usize> =
         (0..edges.len()).filter(|i| edges.get(*i).is_some_and(|(a, b)| top_at((*a + *b) * 0.5) > lowest + 1.0)).collect();
     let eave = |(a, b): &(P2, P2)| {
@@ -1679,11 +1705,11 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
         eaves.iter().any(|e| e.g.dist(p.g) < 1e-4 && (e.at(q) - p.at(q)).abs() < 1.0)
     };
     let speeds: Vec<f64> = (0..edges.len()).map(|i| if gables.contains(&i) { 0.0 } else { 1.0 }).collect();
-    let ridge = crate::skeleton::faces(&boundary, &speeds)
+    let ridge = crate::skeleton::faces(&rings, &speeds)
         .map(|f| f.into_iter().flatten().flatten().map(|(_, k)| lowest + k * tan).fold(lowest, f64::max))
         .unwrap_or(f64::NAN);
     if sloped.iter().all(|(_, p)| (p.g.length() - tan).abs() < 1e-4) && sloped.iter().all(fits) && (ridge - z1).abs() < 1.0 {
-        return Ok(RoofRead { boundary, openings, slope, gables, extrusion: None, t, z: lowest - rise(&along) });
+        return Ok(RoofRead { boundary, courtyards, openings, slope, gables, extrusion: None, t, z: lowest - rise(&along) });
     }
     // Else one profile swept across: its slopes all one way, its underside's heights along it.
     let u = along.g.unit();
@@ -1727,7 +1753,10 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
     let (Some((c0, c1)), Some(first), Some(last)) = (span(across.into_iter()), profile.first().copied(), profile.last().copied()) else {
         return Err("it has no body BIMCraft can read".into());
     };
-    if ((last.0 - first.0) * (c1 - c0) - geom::area(&boundary)).abs() > 0.01 * geom::area(&boundary) || !openings.is_empty() {
+    if ((last.0 - first.0) * (c1 - c0) - geom::area(&boundary)).abs() > 0.01 * geom::area(&boundary)
+        || !openings.is_empty()
+        || !courtyards.is_empty()
+    {
         return Err("its outline isn't the rectangle its profile sweeps".into());
     }
     let z = profile.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
@@ -1736,6 +1765,7 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
     let profile = profile.into_iter().map(|p| P2(round(p.0 - first.0), round(p.1 - z))).collect();
     Ok(RoofRead {
         boundary: Vec::new(),
+        courtyards: Vec::new(),
         openings,
         slope: 0.0,
         gables: Vec::new(),

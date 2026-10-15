@@ -1458,4 +1458,12 @@ fn gable_edge_stands_a_roof_edge_upright_and_slopes_it_again() {
     click(&mut h, P2(8600.0, 3000.0));
     assert_eq!(field(&h, roof, "gables"), json!([3]));
     assert_eq!((h.state().selection.as_slice(), &h.state().tool), (&[roof][..], &Tool::GableEdge), "the roof stays selected");
+    // A courtyard's edges are the roof's too, numbered on after the outline's.
+    let court = r#"roof {"boundary": [[20000, 0], [30000, 0], [30000, 8000], [20000, 8000]], "courtyards": [[[23000, 3000], [27000, 3000], [27000, 5000], [23000, 5000]]]}"#;
+    let mut h = app(&format!("{BOX}\n{court}"));
+    click(&mut h, P2(20000.0, 4000.0));
+    let roof = ids(&h, "roof")[0];
+    press(&mut h, "Gable Edge");
+    click(&mut h, P2(25000.0, 3000.0));
+    assert_eq!(field(&h, roof, "gables"), json!([4]));
 }

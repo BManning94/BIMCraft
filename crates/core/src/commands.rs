@@ -150,15 +150,16 @@ pub static ALL: &[Command] = &[
         "roof",
         "Roof",
         &[],
-        "{level?, boundary?: [[x,y],…], slope?, overhang?, gables?: [edge, …], gable?, offset?, extrusion?, openings?: \
-         [[[x,y],…],…], join?, type?} a roof on `level` (by default the one above the lowest), its base `offset` mm above it. \
-         Over `boundary` or else the walls of the level below, `overhang` mm (500) past their faces: flat at `slope` 0, else \
+        "{level?, boundary?: [[x,y],…], courtyards?: [[[x,y],…],…], slope?, overhang?, gables?: [edge, …], gable?, offset?, \
+         extrusion?, openings?: [[[x,y],…],…], join?, type?} a roof on `level` (by default the one above the lowest), its \
+         base `offset` mm above it. Over `boundary` or else the walls of the level below, `overhang` mm (500) past their \
+         faces, round any `courtyards` (holes in it, inside it and apart, with eaves of their own): flat at `slope` 0, else \
          every edge sloping up at `slope` degrees (30), hips, valleys and ridges where the slopes meet, but the edges in \
-         `gables` (edge i runs from point i to the next) left upright, gable ends; `gable` leaves a rectangle's short ends \
-         upright. Or with `extrusion` {line: [[x,y],[x,y]], profile: [[along, up],…], from?, to}: its underside's profile in \
-         the upright plane through `line`, along it from its start and up from the base, swept square to it from `from` (0) \
-         to `to` mm to its left. `openings` are holes through it in plan; with `join`, a roof it runs into, it ends where \
-         it meets that one's top",
+         `gables` (edge i runs from point i to the next, the courtyards' edges numbered on after the boundary's) left \
+         upright, gable ends; `gable` leaves a rectangle's short ends upright. Or with `extrusion` {line: [[x,y],[x,y]], \
+         profile: [[along, up],…], from?, to}: its underside's profile in the upright plane through `line`, along it from \
+         its start and up from the base, swept square to it from `from` (0) to `to` mm to its left. `openings` are holes \
+         through it in plan; with `join`, a roof it runs into, it ends where it meets that one's top",
         roof,
     ),
     edit(
@@ -667,10 +668,14 @@ pub fn element_json(m: &Model, id: Id) -> Value {
         }
         Element::Roof(r) => {
             let faces = m.roof_faces(r).unwrap_or_default();
-            let ridge = faces.iter().flat_map(|(ring, p)| ring.iter().map(|q| p.at(*q))).fold(m.elevation(r.level) + r.offset, f64::max);
+            let ridge = faces
+                .iter()
+                .flat_map(|(loops, p)| loops.iter().flatten().map(|q| p.at(*q)))
+                .fold(m.elevation(r.level) + r.offset, f64::max);
             let outline = m.roof_outline(r);
+            let courtyards: f64 = r.courtyards.iter().map(|c| geom::area(c).abs()).sum();
             extra.insert("ridge".into(), json!(hundredth(ridge)));
-            extra.insert("area_m2".into(), json!(m2(geom::area(&outline).abs())));
+            extra.insert("area_m2".into(), json!(m2(geom::area(&outline).abs() - courtyards)));
             extra.insert("outline".into(), json!(outline.into_iter().map(micron).collect::<Vec<_>>()));
         }
         Element::Sheet(sh) => {
@@ -1543,6 +1548,7 @@ fn roof(s: &mut Session, p: &Value) -> R {
         type_name,
         level,
         boundary,
+        courtyards: shaped(c, p, "courtyards", "a list of outlines [[[x,y],…],…]")?.unwrap_or_default(),
         slope: if extrusion.is_some() { 0.0 } else { num(c, p, "slope")?.unwrap_or(30.0) },
         overhang,
         gable: flag(c, p, "gable")?,
@@ -1579,9 +1585,11 @@ fn dormer(s: &mut Session, p: &Value) -> R {
         ));
     }
     let faces = m.roof_faces(&hr).map_err(|e| bad(c, e))?;
-    let (ring, under) = faces
+    // Over a slope: inside its outline, and not in a hole in it.
+    let over = |loops: &[Vec<P2>], q: P2| loops.iter().filter(|l| geom::contains(l, q)).count() % 2 == 1;
+    let (loops, under) = faces
         .into_iter()
-        .find(|(ring, _)| geom::contains(ring, at))
+        .find(|(loops, _)| over(loops, at))
         .ok_or_else(|| bad(c, format!("[{}, {}] isn't over roof {host}", at.0, at.1)))?;
     let tan_h = under.g.length();
     if tan_h < 1e-6 {
@@ -1594,7 +1602,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
     let (eave, ridge) = (front + height, front + height + w / 2.0 * tan);
     // How far up the slope the host rises to its walls' tops, and to its roof's ridge, top and underside.
     let (cheek, back) = (height / tan_h, (ridge + rise - front) / tan_h);
-    if !geom::contains(&ring, at + u * back) {
+    if !over(&loops, at + u * back) {
         return Err(bad(c, format!("it runs back over roof {host}'s ridge; set it lower down the slope, or make it lower or narrower")));
     }
     let level = hr.level;
@@ -1606,6 +1614,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
         type_name: hr.type_name.clone(),
         level,
         boundary,
+        courtyards: Vec::new(),
         slope,
         overhang: f,
         gable: false,
@@ -2142,7 +2151,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         },
         // Its edges keep their numbers, its gables with them; a mirror image sweeps the other way.
         Element::Roof(r) => {
-            r.boundary.iter_mut().chain(r.openings.iter_mut().flatten()).for_each(|q| *q = f(*q));
+            r.boundary.iter_mut().chain(r.courtyards.iter_mut().flatten()).chain(r.openings.iter_mut().flatten()).for_each(|q| *q = f(*q));
             if let Some(x) = &mut r.extrusion {
                 x.line = x.line.map(&f);
                 if mo.mirror {

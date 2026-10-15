@@ -752,17 +752,20 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             Element::Ramp(r) => ramp(&mut d, m, r, level),
             Element::Railing(rl) if m.level_of(e) == Some(level) => railing(&mut d, m, rl, range.cut),
             Element::Roof(r) if r.level == level => roof(&mut d, m, r),
-            // Overhead, from below: its edge, dashed, while its eaves are under the view range's top.
+            // Overhead, from below: its edges, round its courtyards too, dashed, while its eaves are under
+            // the view range's top.
             Element::Roof(r) => {
                 let eave = m
                     .roof_faces(r)
                     .into_iter()
                     .flatten()
-                    .flat_map(|(ring, p)| ring.into_iter().map(move |q| p.at(q)))
+                    .flat_map(|(loops, p)| loops.into_iter().flatten().map(move |q| p.at(q)))
                     .fold(f64::INFINITY, f64::min);
                 if range.cut < eave && eave <= range.top {
-                    let pts = m.roof_outline(r).iter().map(|p| d.view.px(*p)).collect();
-                    d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
+                    for ring in std::iter::once(&m.roof_outline(r)).chain(&r.courtyards) {
+                        let pts = ring.iter().map(|p| d.view.px(*p)).collect();
+                        d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
+                    }
                 }
             }
             _ => {}
@@ -1097,7 +1100,7 @@ fn arrow(d: &mut Drawing, a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
 /// valleys.
 // ponytail: openings aren't drawn; a dormer's roof covers its own. Draw them for skylights.
 fn roof(d: &mut Drawing, m: &Model, r: &Roof) {
-    let faces = m.roof_faces(r).map_or_else(|_| vec![m.roof_outline(r)], |f| f.into_iter().map(|(ring, _)| ring).collect());
+    let faces = m.roof_faces(r).map_or_else(|_| vec![m.roof_outline(r)], |f| f.into_iter().flat_map(|(loops, _)| loops).collect());
     for f in faces {
         d.line(&f, 1.0, INK, true);
     }

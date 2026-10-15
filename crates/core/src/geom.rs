@@ -179,7 +179,7 @@ pub fn line_intersection(a: P2, b: P2, c: P2, d: P2) -> Option<P2> {
 }
 
 /// Where `a`→`b` properly crosses `c`→`d`, as a parameter along `a`→`b` strictly inside (0, 1).
-fn crossing(a: P2, b: P2, c: P2, d: P2) -> Option<f64> {
+pub(crate) fn crossing(a: P2, b: P2, c: P2, d: P2) -> Option<f64> {
     let (r, s) = (b - a, d - c);
     let den = r.cross(s);
     if den.abs() <= 1e-12 * r.length() * s.length() {
