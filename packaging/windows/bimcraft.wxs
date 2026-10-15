@@ -40,9 +40,11 @@
       <Component Id="Cli" Directory="INSTALLFOLDER">
         <File Id="BimcraftCliExe" Source="target\release\bimcraft-cli.exe" KeyPath="yes" />
       </Component>
-      <Component Id="Licences" Directory="INSTALLFOLDER">
+      <Component Id="LicenceMit" Directory="INSTALLFOLDER">
         <File Id="LicenseMit" Source="LICENSE-MIT" KeyPath="yes" />
-        <File Id="LicenseApache" Source="LICENSE-APACHE" />
+      </Component>
+      <Component Id="LicenceApache" Directory="INSTALLFOLDER">
+        <File Id="LicenseApache" Source="LICENSE-APACHE" KeyPath="yes" />
       </Component>
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = 1">
         <Shortcut Id="DesktopShortcut" Name="BIMCraft" Target="[INSTALLFOLDER]bimcraft.exe" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" />
