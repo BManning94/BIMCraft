@@ -1,11 +1,14 @@
 //! Plan views: what a level's plan shows, as a display list of filled rings and polylines in
 //! pixels, drawn to SVG or PNG. Drafting conventions: walls and columns the cut plane passes
-//! through get a heavy outline and grey poché, doors a leaf and swing, windows glass lines, stairs
-//! their risers up to the cut line and a walk line, roofs their ridge and hips (dashed overhead
-//! from the level below), rooms a tag, grids a dashed line with a bubble at each end, dimensions witness lines and ticks, door and window
-//! tags their mark in a box, sections their line and head, elevations a marker. Sections and
-//! elevations draw the same way along their line and up: the cut in poché, levels and grids,
-//! over the 3D view's hidden-line picture of what lies beyond.
+//! through get a heavy outline and grey poché, and below it a thin one (faint past the view
+//! range's bottom); doors a leaf and swing, windows glass lines, stairs their risers up to the cut
+//! line and a walk line, roofs their ridge and hips (dashed overhead, below the view range's top),
+//! rooms a tag, grids a dashed line with a bubble at each end, dimensions witness lines and ticks
+//! (an arc for an angle, an arrow for a radius), door and window tags their mark in a box, text
+//! notes their lines, spot elevations a triangle and their height, sections their line and head,
+//! elevations a marker; all of it inside the plan's crop region. Sections and elevations draw the
+//! same way along their line and up: the cut in poché, levels and grids, notes and spot
+//! elevations, over the 3D view's hidden-line picture of what lies beyond.
 
 use std::f64::consts::PI;
 use std::fmt::Write;
@@ -13,10 +16,10 @@ use std::fmt::Write;
 use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash, Transform};
 
 use crate::commands::m2;
-use crate::font;
 use crate::geom::{self, P2};
-use crate::model::{CUT_HEIGHT, Dimension, Element, Id, Model, Opening, Roof, Section, Stair, TOL, Tag, Wall, heading};
+use crate::model::{DimKind, Dimension, Element, Id, Model, Note, Opening, PlanRange, Roof, Section, Stair, TOL, Tag, Wall, heading};
 use crate::view3d::{self, Camera, Clip, Image, Scene};
+use crate::{font, sheet};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -67,6 +70,53 @@ impl Prim {
     fn corners(at: (f32, f32), width: u32, height: u32) -> Vec<(f32, f32)> {
         let (w, h) = (width as f32, height as f32);
         vec![at, (at.0 + w, at.1), (at.0 + w, at.1 + h), (at.0, at.1 + h)]
+    }
+
+    /// What of it lies inside the box from pixel `lo` to `hi`: a fill's rings clipped, a line in
+    /// the pieces inside, a picture's whole pixels inside.
+    fn cropped(self, lo: (f32, f32), hi: (f32, f32)) -> Vec<Prim> {
+        let mm = |p: (f32, f32)| P2(f64::from(p.0), f64::from(p.1));
+        let px = |p: P2| (p.0 as f32, p.1 as f32);
+        match self {
+            Prim::Fill { rings, color } => {
+                let rings: Vec<Vec<(f32, f32)>> = rings.iter().map(|r| clip_ring(r, lo, hi)).filter(|r| r.len() >= 3).collect();
+                if rings.is_empty() { Vec::new() } else { vec![Prim::Fill { rings, color }] }
+            }
+            Prim::Line { pts, width, color, dash, closed } => {
+                let inside = |p: &(f32, f32)| (lo.0..=hi.0).contains(&p.0) && (lo.1..=hi.1).contains(&p.1);
+                if pts.iter().all(inside) {
+                    return vec![Prim::Line { pts, width, color, dash, closed }];
+                }
+                let close = closed.then(|| pts.last().copied().zip(pts.first().copied())).flatten();
+                let mut runs: Vec<Vec<(f32, f32)>> = Vec::new();
+                for (a, b) in pts.iter().copied().zip(pts.iter().copied().skip(1)).chain(close) {
+                    let Some((p, q)) = clip(mm(a), mm(b), mm(lo), mm(hi)) else { continue };
+                    let (p, q) = (px(p), px(q));
+                    match runs.last_mut() {
+                        Some(run) if run.last() == Some(&p) => run.push(q),
+                        _ => runs.push(vec![p, q]),
+                    }
+                }
+                runs.into_iter().map(|pts| Prim::Line { pts, width, color, dash, closed: false }).collect()
+            }
+            Prim::Image { at, width, height, rgba } => {
+                let side = |lo: f32, hi: f32, from: f32, n: u32| {
+                    let first = (lo - from).ceil().clamp(0.0, n as f32) as u32;
+                    (first, ((hi - from).floor().clamp(0.0, n as f32) as u32).max(first))
+                };
+                let ((x0, x1), (y0, y1)) = (side(lo.0, hi.0, at.0, width), side(lo.1, hi.1, at.1, height));
+                if x1 == x0 || y1 == y0 {
+                    return Vec::new();
+                }
+                let row = (x1 - x0) as usize * 4;
+                let mut kept = Vec::with_capacity(row * (y1 - y0) as usize);
+                for y in y0..y1 {
+                    let from = (y as usize * width as usize + x0 as usize) * 4;
+                    kept.extend_from_slice(rgba.get(from..from + row).unwrap_or_default());
+                }
+                vec![Prim::Image { at: (at.0 + x0 as f32, at.1 + y0 as f32), width: x1 - x0, height: y1 - y0, rgba: kept }]
+            }
+        }
     }
 }
 
@@ -135,6 +185,18 @@ impl Drawing {
     /// `text` centred on `at` px, capitals `height` px tall.
     pub(crate) fn text(&mut self, text: &str, at: (f32, f32), height: f32, color: Rgb) {
         self.text_turned(text, at, height, 0.0, color);
+    }
+
+    /// What's drawn cropped to the box from pixel `lo` to `hi`, but for the primitives of the
+    /// elements `keep` takes.
+    pub(crate) fn crop(&mut self, lo: (f32, f32), hi: (f32, f32), keep: impl Fn(Option<Id>) -> bool) {
+        let (prims, owners) = (std::mem::take(&mut self.prims), std::mem::take(&mut self.owners));
+        for (prim, owner) in prims.into_iter().zip(owners) {
+            for part in if keep(owner) { vec![prim] } else { prim.cropped(lo, hi) } {
+                self.prims.push(part);
+                self.owners.push(owner);
+            }
+        }
     }
 
     /// `text` centred on `(x, y)` px, capitals `height` px tall, turned `angle` radians clockwise
@@ -235,7 +297,7 @@ impl Drawing {
 
 /// The outlines of the walls and columns a plan of `level` cuts.
 fn cut_outlines(m: &Model, level: Id) -> Vec<(Id, Vec<P2>)> {
-    let z = m.elevation(level) + CUT_HEIGHT;
+    let z = m.plan_range(level).cut;
     m.elements
         .iter()
         .filter_map(|(&id, e)| match e {
@@ -249,15 +311,48 @@ fn cut_outlines(m: &Model, level: Id) -> Vec<(Id, Vec<P2>)> {
         .collect()
 }
 
+/// The walls and columns a plan sees below its cut plane, down to its view depth: their outlines,
+/// and their tops.
+fn seen_below(m: &Model, r: &PlanRange) -> Vec<(Id, Vec<P2>, f64)> {
+    m.elements
+        .iter()
+        .filter_map(|(&id, e)| {
+            let (outline, top) = match e {
+                Element::Wall(w) => (wall_outline(m, id, w), m.top_z(w)),
+                Element::Column(col) => (m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height).1),
+                _ => return None,
+            };
+            (r.depth < top && top <= r.cut).then_some((id, outline, top))
+        })
+        .collect()
+}
+
 /// The plan of `level` fitted into `width` x `height` px.
 pub fn plan(m: &Model, level: Id, width: u32, height: u32) -> Drawing {
     draw(m, level, fit(&plan_extent(m, level), width, height))
 }
 
-/// What a plan of `level` shows: its walls, floors, rooms, dimensions and tags, the grids, and
-/// the marks of the sections and elevations.
+/// What a plan of `level` takes on paper: all it shows, or cropped, its crop region and the grids'
+/// ends at its edges.
 pub(crate) fn plan_extent(m: &Model, level: Id) -> Vec<P2> {
+    match m.level(level).and_then(|l| l.crop) {
+        None => plan_shows(m, level),
+        Some([lo, hi]) => {
+            let grids = m.elements.values().filter_map(|e| match e {
+                Element::Grid(g) => clip(g.start, g.end, lo, hi),
+                _ => None,
+            });
+            [lo, hi].into_iter().chain(grids.flat_map(|(a, b)| [a, b])).collect()
+        }
+    }
+}
+
+/// Everything a plan of `level` shows, uncropped: its walls, floors, rooms, dimensions, tags,
+/// notes and spot elevations, the grids, and the marks of the sections and elevations.
+pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
+    let r = m.plan_range(level);
     let mut extent: Vec<P2> = cut_outlines(m, level).into_iter().flat_map(|(_, o)| o).collect();
+    extent.extend(seen_below(m, &r).into_iter().flat_map(|(_, o, _)| o));
     for e in m.elements.values() {
         match e {
             Element::Floor(f) if f.level == level => extent.extend(&f.boundary),
@@ -270,6 +365,8 @@ pub(crate) fn plan_extent(m: &Model, level: Id) -> Vec<P2> {
                 extent.extend([st.start, st.start + heading(st.angle) * m.flight(st).2]);
             }
             Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(&r.boundary),
+            Element::Text(n) if n.view == level => extent.extend([Some(n.at), n.leader].into_iter().flatten()),
+            Element::Spot(sp) if sp.view == level => extent.push(sp.at),
             _ => {}
         }
     }
@@ -283,6 +380,8 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
     match e {
         Element::Dimension(dm) => dimension(&mut d, m, dm),
         Element::Tag(t) => tag(&mut d, m, t),
+        Element::Text(n) => note(&mut d, n),
+        Element::Spot(sp) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp)),
         Element::Section(v) => section_mark(&mut d, v),
         Element::Elevation(v) => elevation_mark(&mut d, v),
         Element::Column(col) => d.line(&m.column_outline(col), 2.0, INK, true),
@@ -307,6 +406,31 @@ fn heights(m: &Model) -> (f64, f64) {
     if lo <= hi { (lo, hi) } else { (0.0, 3000.0) }
 }
 
+/// The crop region of view `id` as it shows: a cropped plan's corners; a section's or an
+/// elevation's line, along it, and its crop's heights (without one, all of the model's, as far as
+/// its grids reach past them). None for a plan that isn't cropped, or another element.
+pub fn crop_region(m: &Model, id: Id) -> Option<[P2; 2]> {
+    match m.elements.get(&id)? {
+        Element::Level(l) => l.crop,
+        Element::Section(v) | Element::Elevation(v) => {
+            let (lo, hi) = v.crop.map_or_else(
+                || {
+                    let (lo, hi) = heights(m);
+                    (lo - GRID_PAST, hi + GRID_PAST)
+                },
+                |[bottom, top]| (bottom, top),
+            );
+            Some([P2(0.0, lo), P2(v.start.dist(v.end), hi)])
+        }
+        _ => None,
+    }
+}
+
+/// The heights a section or elevation shows: its crop's, else all of the model's.
+fn shown_heights(m: &Model, v: &Section) -> (f64, f64) {
+    v.crop.map_or_else(|| heights(m), |[bottom, top]| (bottom, top))
+}
+
 /// The view section or elevation `id` fits into `width` x `height` px: along its line from its
 /// start, and up, with room for its levels' names and its grids' bubbles.
 pub fn section_fit(m: &Model, id: Id, width: u32, height: u32) -> View {
@@ -320,7 +444,7 @@ pub fn section_fit(m: &Model, id: Id, width: u32, height: u32) -> View {
 /// level name.
 pub(crate) fn section_extent(m: &Model, id: Id, scale: f64) -> Option<[P2; 2]> {
     let v = m.section(id)?;
-    let ((lo, hi), len) = (heights(m), v.start.dist(v.end));
+    let ((lo, hi), len) = (shown_heights(m, v), v.start.dist(v.end));
     let head = m.levels().iter().map(|(_, l)| font::width(&l.name, 10.0)).fold(0.0, f32::max) + 12.0;
     Some([P2(0.0, lo - GRID_PAST), P2(len + f64::from(head) / scale, hi + GRID_PAST)])
 }
@@ -339,7 +463,9 @@ pub fn section_camera(m: &Model, id: Id, view: View) -> Option<(Camera, Clip)> {
         height: view.height,
     };
     let column = |s: f64| f64::from(view.width) / 2.0 + (s - view.cx) * view.scale;
-    Some((cam, Clip { near: 0.0, far: v.depth, x: (column(0.0), column(v.start.dist(v.end))) }))
+    let row = |z: f64| f64::from(view.height) / 2.0 - (z - view.cy) * view.scale;
+    let rows = v.crop.map_or((f64::NEG_INFINITY, f64::INFINITY), |[bottom, top]| (row(top), row(bottom)));
+    Some((cam, Clip { near: 0.0, far: v.depth, x: (column(0.0), column(v.start.dist(v.end))), y: rows }))
 }
 
 /// What section or elevation `id` sees past its line through `view`, in hidden line: the
@@ -350,7 +476,8 @@ pub fn section_image(m: &Model, scene: &Scene, id: Id, view: View, tints: &[(Id,
 }
 
 /// What section or elevation `id` draws over its picture through `view`: where its line cuts
-/// the solids, in poché; its levels, named past its end; the grids it crosses; and its name.
+/// the solids, in poché; its levels, named past its end; the grids it crosses; its notes and spot
+/// elevations; and its name. Cropped, only what lies between its crop's heights.
 pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     let mut d = Drawing { view, prims: Vec::new(), owners: Vec::new(), owner: None };
     let Some(v) = m.section(id) else { return d };
@@ -379,7 +506,12 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
         d.owner = Some(owner);
         d.fill(&rings, POCHE);
     }
-    for (level, l) in m.levels() {
+    let (lo, hi) = shown_heights(m, v);
+    if v.crop.is_some() {
+        let (a, b) = (d.view.px(P2(0.0, hi)), d.view.px(P2(len, lo)));
+        d.crop(a, b, |_| false);
+    }
+    for (level, l) in m.levels().into_iter().filter(|(_, l)| (lo..=hi).contains(&l.elevation) || v.crop.is_none()) {
         d.owner = Some(level);
         let (a, b) = (d.view.px(P2(0.0, l.elevation)), d.view.px(P2(len, l.elevation)));
         d.push(Prim::Line { pts: vec![a, b], width: 1.0, color: INK, dash: Some([12.0, 4.0]), closed: false });
@@ -388,7 +520,6 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
         }
     }
     // Grids running into what it sees: across its line, reaching past it (within its depth).
-    let (lo, hi) = heights(m);
     let past = |q: P2| (q - v.start).dot(v.looking());
     for (&grid_id, e) in &m.elements {
         if let Element::Grid(g) = e
@@ -400,6 +531,17 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
             let along = (x - v.start).dot(u);
             d.owner = Some(grid_id);
             grid(&mut d, P2(along, lo - GRID_PAST), P2(along, hi + GRID_PAST), &g.name);
+        }
+    }
+    for (&nid, e) in &m.elements {
+        d.owner = Some(nid);
+        match e {
+            Element::Text(n) if n.view == id => note(&mut d, n),
+            Element::Spot(sp) if sp.view == id => {
+                let z = m.spot_value(sp).unwrap_or(sp.at.1);
+                spot_mark(&mut d, view.px(P2(sp.at.0, z)), Some(z));
+            }
+            _ => {}
         }
     }
     d.owner = None;
@@ -420,13 +562,20 @@ pub fn section_png(m: &Model, id: Id, view: View) -> Result<Vec<u8>, String> {
 /// The plan of `level` as `view` shows it: what a canvas that pans and zooms draws.
 pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
     let mut d = Drawing { view, prims: Vec::new(), owners: Vec::new(), owner: None };
+    let range = m.plan_range(level);
+    // Floors whose tops it sees, from the cut plane down to the view depth.
     for (&id, e) in &m.elements {
         if let Element::Floor(f) = e
-            && f.level == level
+            && (range.depth..=range.cut).contains(&m.elevation(f.level))
         {
             d.owner = Some(id);
             d.line(&f.boundary, 1.0, FAINT, true);
         }
+    }
+    // Walls and columns below the cut plane, as seen from it; past the bottom, faint.
+    for (id, o, top) in seen_below(m, &range) {
+        d.owner = Some(id);
+        d.line(&o, 1.0, if top > range.bottom { INK } else { FAINT }, true);
     }
     let outlines = cut_outlines(m, level);
     // Outlines first, then poché over them: each fill covers the inner half of the outlines, so
@@ -446,14 +595,22 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
             && m.cut_by(w, level)
         {
             d.owner = Some(id);
-            opening(&mut d, m, e, o, w, m.elevation(level) + CUT_HEIGHT);
+            opening(&mut d, m, e, o, w, range.cut);
         }
     }
+    let crop = m.level(level).and_then(|l| l.crop);
+    // Cropped, annotation shows whole while its anchor is inside the crop, and not at all outside it.
+    let inside = |p: P2| crop.is_none_or(|[lo, hi]| (lo.0..=hi.0).contains(&p.0) && (lo.1..=hi.1).contains(&p.1));
     for (&id, e) in &m.elements {
         d.owner = Some(id);
         match e {
-            Element::Grid(g) => grid(&mut d, g.start, g.end, &g.name),
-            Element::Room(r) if r.level == level => {
+            // Cropped, a grid stops at the crop's edge, with its bubbles there.
+            Element::Grid(g) => {
+                if let Some((a, b)) = crop.map_or(Some((g.start, g.end)), |[lo, hi]| clip(g.start, g.end, lo, hi)) {
+                    grid(&mut d, a, b, &g.name);
+                }
+            }
+            Element::Room(r) if r.level == level && inside(r.point) => {
                 let area = m.room_region(r).map_or_else(|| "NOT ENCLOSED".to_string(), |g| format!("{:.2} m²", m2(g.area())));
                 let (x, y) = d.view.px(r.point);
                 d.text(&r.name, (x, y - 16.0), 13.0, INK);
@@ -462,10 +619,15 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
             }
             Element::Stair(st) => stair(&mut d, m, st, level),
             Element::Roof(r) if r.level == level => roof(&mut d, m, r),
-            // Overhead, from the level below: its edge, dashed.
-            Element::Roof(r) if m.level_above(level) == Some(r.level) => {
-                let pts = r.boundary.iter().map(|p| d.view.px(*p)).collect();
-                d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
+            // Overhead, from below: its edge, dashed, while its eaves are under the view range's top.
+            Element::Roof(r) => {
+                let eave = m
+                    .roof_pieces(r)
+                    .map_or(f64::INFINITY, |(pieces, _)| pieces.iter().flatten().map(|p| p[2]).fold(f64::INFINITY, f64::min));
+                if range.cut < eave && eave <= range.top {
+                    let pts = r.boundary.iter().map(|p| d.view.px(*p)).collect();
+                    d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
+                }
             }
             _ => {}
         }
@@ -474,12 +636,33 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
     for (&id, e) in &m.elements {
         d.owner = Some(id);
         match e {
-            Element::Dimension(dm) if dm.level == level => dimension(&mut d, m, dm),
-            Element::Tag(t) if m.level_of(e) == Some(level) => tag(&mut d, m, t),
+            Element::Dimension(dm) if dm.level == level && inside(dm.at) => dimension(&mut d, m, dm),
+            Element::Tag(t) if m.level_of(e) == Some(level) && m.anchor(t.host).is_some_and(|a| inside(a + t.offset)) => tag(&mut d, m, t),
+            Element::Text(n) if n.view == level && inside(n.at) => note(&mut d, n),
+            Element::Spot(sp) if sp.view == level && inside(sp.at) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp)),
+            // A section's line is cropped as a line is.
             Element::Section(v) => section_mark(&mut d, v),
-            Element::Elevation(v) => elevation_mark(&mut d, v),
+            Element::Elevation(v) if inside(v.start + (v.end - v.start) * 0.5) => elevation_mark(&mut d, v),
             _ => {}
         }
+    }
+    // Grids stop at the crop's edge on their own, and annotation is whole or not there: the rest is cut.
+    if let Some([lo, hi]) = crop {
+        let (a, b) = (d.view.px(lo), d.view.px(hi));
+        d.crop((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)), |o| {
+            o.and_then(|id| m.elements.get(&id)).is_some_and(|e| {
+                matches!(
+                    e,
+                    Element::Grid(_)
+                        | Element::Room(_)
+                        | Element::Dimension(_)
+                        | Element::Tag(_)
+                        | Element::Text(_)
+                        | Element::Spot(_)
+                        | Element::Elevation(_)
+                )
+            })
+        });
     }
     d.owner = None;
     let title = m.level(level).map_or_else(String::new, |l| l.name.clone());
@@ -488,14 +671,15 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
     d
 }
 
-/// Whether the segment from `p` to `q` passes through the box from `lo` to `hi` (Liang-Barsky).
-fn clips(p: (f32, f32), q: (f32, f32), lo: (f32, f32), hi: (f32, f32)) -> bool {
-    let d = (q.0 - p.0, q.1 - p.1);
-    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+/// The part of the segment from `p` to `q` inside the box from `lo` to `hi` (Liang-Barsky); its
+/// ends as they were where they're inside.
+pub(crate) fn clip(p: P2, q: P2, lo: P2, hi: P2) -> Option<(P2, P2)> {
+    let d = q - p;
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
     for (pk, qk) in [(-d.0, p.0 - lo.0), (d.0, hi.0 - p.0), (-d.1, p.1 - lo.1), (d.1, hi.1 - p.1)] {
         if pk == 0.0 {
             if qk < 0.0 {
-                return false;
+                return None;
             }
         } else if pk < 0.0 {
             t0 = t0.max(qk / pk);
@@ -503,7 +687,41 @@ fn clips(p: (f32, f32), q: (f32, f32), lo: (f32, f32), hi: (f32, f32)) -> bool {
             t1 = t1.min(qk / pk);
         }
     }
-    t0 <= t1
+    (t0 <= t1).then(|| (if t0 > 0.0 { p + d * t0 } else { p }, if t1 < 1.0 { p + d * t1 } else { q }))
+}
+
+/// Whether the segment from `p` to `q` passes through the box from `lo` to `hi`.
+fn clips(p: (f32, f32), q: (f32, f32), lo: (f32, f32), hi: (f32, f32)) -> bool {
+    let mm = |p: (f32, f32)| P2(f64::from(p.0), f64::from(p.1));
+    clip(mm(p), mm(q), mm(lo), mm(hi)).is_some()
+}
+
+/// The part of a ring inside the box from `lo` to `hi`, side by side (Sutherland-Hodgman): exact
+/// for the convex rings plans fill.
+fn clip_ring(ring: &[(f32, f32)], lo: (f32, f32), hi: (f32, f32)) -> Vec<(f32, f32)> {
+    let mut pts = ring.to_vec();
+    // Each side of the box: which coordinate, where, and whether inside lies above it.
+    for (x, bound, above) in [(true, lo.0, true), (true, hi.0, false), (false, lo.1, true), (false, hi.1, false)] {
+        let at = |p: (f32, f32)| if x { p.0 } else { p.1 };
+        let inside = |p: (f32, f32)| if above { at(p) >= bound } else { at(p) <= bound };
+        let cross = |a: (f32, f32), b: (f32, f32)| {
+            let t = (bound - at(a)) / (at(b) - at(a));
+            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+        };
+        let n = pts.len();
+        let mut kept = Vec::with_capacity(n + 4);
+        for i in 0..n {
+            let (a, b) = (pts[(i + n - 1) % n], pts[i]);
+            match (inside(a), inside(b)) {
+                (true, true) => kept.push(b),
+                (true, false) => kept.push(cross(a, b)),
+                (false, true) => kept.extend([cross(a, b), b]),
+                (false, false) => {}
+            }
+        }
+        pts = kept;
+    }
+    pts
 }
 
 /// A view fitting `pts` into the image, leaving the margin free.
@@ -568,7 +786,8 @@ fn stair(d: &mut Drawing, m: &Model, st: &Stair, level: Id) {
     let (u, half) = (heading(st.angle), st.width / 2.0);
     let at = |along: f64, across: f64| st.start + u * along + u.perp() * across;
     // The riser the cut plane passes through, from its own level; from above, none.
-    let cut = if up && each > 0.0 { (CUT_HEIGHT / each).floor() } else { f64::INFINITY };
+    let rise = m.plan_range(level).cut - m.elevation(st.level);
+    let cut = if up && each > 0.0 { (rise / each).floor() } else { f64::INFINITY };
     let seg = |d: &mut Drawing, a: P2, b: P2, past: bool| {
         let pts = vec![d.view.px(a), d.view.px(b)];
         d.push(Prim::Line { pts, width: 1.0, color: INK, dash: past.then_some([6.0, 4.0]), closed: false });
@@ -589,11 +808,17 @@ fn stair(d: &mut Drawing, m: &Model, st: &Stair, level: Id) {
     let (from, to, label) = if up { (at(0.0, 0.0), at(length, 0.0), "UP") } else { (at(length, 0.0), at(0.0, 0.0), "DN") };
     d.line(&[from, to], 1.0, INK, false);
     let (a, b) = (d.view.px(from), d.view.px(to));
+    let (x, y) = arrow(d, a, b);
+    d.text(label, (a.0 - x * 14.0, a.1 - y * 14.0), 9.0, INK);
+}
+
+/// An arrowhead at pixel `b`, pointing from `a`; the way it points, on screen.
+fn arrow(d: &mut Drawing, a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-3);
     let (x, y) = ((b.0 - a.0) / len, (b.1 - a.1) / len);
     let head = vec![b, (b.0 - x * 10.0 - y * 4.0, b.1 - y * 10.0 + x * 4.0), (b.0 - x * 10.0 + y * 4.0, b.1 - y * 10.0 - x * 4.0)];
     d.push(Prim::Fill { rings: vec![head], color: INK });
-    d.text(label, (a.0 - x * 14.0, a.1 - y * 14.0), 9.0, INK);
+    (x, y)
 }
 
 /// A roof in the plan of its level: its outline, and where its slopes meet, its ridge and hips.
@@ -625,9 +850,116 @@ fn arc(center: P2, from: P2, to: P2, n: u32) -> Vec<P2> {
         .collect()
 }
 
+/// A dimension, of its kind.
+fn dimension(d: &mut Drawing, m: &Model, dim: &Dimension) {
+    match dim.kind {
+        DimKind::Aligned => aligned(d, m, dim),
+        DimKind::Angular => angular(d, m, dim),
+        DimKind::Radial => radial(d, m, dim),
+    }
+}
+
+/// A number as a dimension shows it: to the hundredth, without trailing zeros.
+fn figure(x: f64) -> String {
+    format!("{}", (x * 100.0).round() / 100.0 + 0.0)
+}
+
+/// An angular dimension: an arc through `at` between its two lines, witness lines out along them
+/// to it, ticks at its ends, and the angle outside its middle.
+fn angular(d: &mut Drawing, m: &Model, dim: &Dimension) {
+    let Some((o, from, sweep)) = m.angle_sector(dim) else { return };
+    let r = dim.at.dist(o);
+    if r <= 0.0 {
+        return;
+    }
+    let px = 1.0 / d.view.scale;
+    let ray = |t: f64| P2(t.cos(), t.sin());
+    let arc: Vec<P2> = (0..=48).map(|i| o + ray(from + sweep * f64::from(i) / 48.0) * r).collect();
+    d.line(&arc, 1.0, INK, false);
+    let lines: Vec<(P2, P2)> = dim.refs.iter().filter_map(|x| m.reference_line(x).ok()).collect();
+    for t in [from, from + sweep] {
+        let u = ray(t);
+        // How far out along this ray its line reaches: the witness line runs from there to the arc.
+        let reach = lines
+            .iter()
+            .filter(|(a, b)| geom::parallel(*a, *b, o, o + u))
+            .flat_map(|(a, b)| [(*a - o).dot(u), (*b - o).dot(u)])
+            .fold(0.0, f64::max);
+        if r > reach + 3.0 * px {
+            d.line(&[o + u * (reach + 3.0 * px), o + u * (r + 4.0 * px)], 1.0, INK, false);
+        }
+        let (p, k) = (o + u * r, (u + u.perp()) * (3.0 * px));
+        d.line(&[p - k, p + k], 2.0, INK, false);
+    }
+    // Outside the arc's middle, clear of it however the text sits across the ray.
+    let (text, mid) = (format!("{}°", figure(sweep.to_degrees())), ray(from + sweep / 2.0));
+    let clear = f64::from(font::width(&text, 10.0) / 2.0) * mid.0.abs() + 5.0 * mid.1.abs() + 4.0;
+    d.text(&text, d.view.px(o + mid * (r + clear * px)), 10.0, INK);
+}
+
+/// A radial dimension: a line from a round element's centre (marked with a cross) toward `at`,
+/// an arrow where it meets the edge, and the radius past its end.
+fn radial(d: &mut Drawing, m: &Model, dim: &Dimension) {
+    let Some(Ok((c, r))) = dim.refs.first().map(|x| m.reference_arc(x)) else { return };
+    let u = if dim.at.dist(c) > 0.0 { (dim.at - c).unit() } else { P2(1.0, 0.0) };
+    let (edge, end) = (c + u * r, if dim.at.dist(c) > r { dim.at } else { c + u * r });
+    d.line(&[c, end], 1.0, INK, false);
+    let (a, b) = (d.view.px(c), d.view.px(edge));
+    // Inside a circle too small for it, the arrow comes in from outside.
+    if r * d.view.scale > 14.0 || end == edge {
+        arrow(d, a, b);
+    } else {
+        arrow(d, d.view.px(end), b);
+    }
+    for (dx, dy) in [(4.0, 0.0), (0.0, 4.0)] {
+        d.push(Prim::Line { pts: vec![(a.0 - dx, a.1 - dy), (a.0 + dx, a.1 + dy)], width: 1.0, color: INK, dash: None, closed: false });
+    }
+    let text = format!("R {}", figure(r));
+    let (x, y) = d.view.px(end);
+    let w = font::width(&text, 10.0) / 2.0 + 6.0;
+    d.text(&text, (x + u.0 as f32 * w, y - u.1 as f32 * w), 10.0, INK);
+}
+
+/// A text note: its lines down from its top left corner, turned as it is, and its leader with an
+/// arrow at its end.
+pub(crate) fn note(d: &mut Drawing, n: &Note) {
+    let h = (n.size * sheet::DENSITY) as f32;
+    // Counter-clockwise in the view, clockwise on screen.
+    let a = -(n.angle.to_radians() as f32);
+    let (sin, cos) = a.sin_cos();
+    let at = d.view.px(n.at);
+    let turn = |(x, y): (f32, f32)| (at.0 + x * cos - y * sin, at.1 + x * sin + y * cos);
+    for (i, line) in n.text.lines().enumerate() {
+        let mid = turn((font::width(line, h) / 2.0, h / 2.0 + i as f32 * h * 1.6));
+        d.text_turned(line, mid, h, a, INK);
+    }
+    if let Some(to) = n.leader {
+        let (from, to) = (turn((-h * 0.4, h / 2.0)), d.view.px(to));
+        d.push(Prim::Line { pts: vec![from, to], width: 1.0, color: INK, dash: None, closed: false });
+        arrow(d, from, to);
+    }
+}
+
+/// A spot elevation's mark at pixel `at`: a triangle standing on the point, and the height it
+/// reads over a line beside it.
+fn spot_mark(d: &mut Drawing, (x, y): (f32, f32), z: Option<f64>) {
+    d.push(Prim::Fill { rings: vec![vec![(x, y), (x + 5.0, y - 8.0), (x - 5.0, y - 8.0)]], color: INK });
+    let text = z.map_or_else(
+        || "?".into(),
+        |z| match z.round() + 0.0 {
+            0.0 => "±0".into(),
+            z if z > 0.0 => format!("+{z}"),
+            z => format!("{z}"),
+        },
+    );
+    let w = font::width(&text, 10.0);
+    d.push(Prim::Line { pts: vec![(x - 5.0, y - 8.0), (x + 9.0 + w, y - 8.0)], width: 1.0, color: INK, dash: None, closed: false });
+    d.text(&text, (x + 7.0 + w / 2.0, y - 16.0), 10.0, INK);
+}
+
 /// An aligned dimension: a witness line from each reference to the dimension line, a tick where
 /// it crosses, and each segment's length over its middle, readable from below or from the right.
-fn dimension(d: &mut Drawing, m: &Model, dim: &Dimension) {
+fn aligned(d: &mut Drawing, m: &Model, dim: &Dimension) {
     let (n, cross) = m.crossings(dim);
     let (Some(&(lo, _)), Some(&(hi, _))) = (cross.first(), cross.last()) else { return };
     // Along the dimension line, and along the references; `px` mm make a pixel.
@@ -1068,6 +1400,107 @@ mod tests {
         assert_eq!(d.pick(at, 2.0), Some(11));
         let png = section_png(&s.model, 12, view).unwrap();
         assert_eq!(pixel(&png, at), (POCHE.0, POCHE.1, POCHE.2));
+    }
+
+    #[test]
+    fn plans_draw_what_their_view_range_sees() {
+        let mut s = house();
+        // A low wall across the room (11), 900 mm tall; a floor (12); the roof over it all (13).
+        s.script("wall {\"points\": [[1000, 4500], [5000, 4500]], \"height\": 900}\nfloor {}\nroof {}").unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        let png = png(&d).unwrap();
+        // Cut at 1200: the window (900 to 2400 up) is open, and the low wall below the cut is seen from
+        // above, its outline thin and no poché.
+        assert_eq!(pixel(&png, d.view.px(P2(8050.0, 3000.0))), (255, 255, 255), "the window's opening");
+        assert_eq!(d.pick(d.view.px(P2(3000.0, 4600.0)), 2.0), Some(11));
+        assert_eq!(pixel(&png, d.view.px(P2(3000.0, 4500.0))), (255, 255, 255));
+        assert!(d.owners.contains(&Some(13)), "the roof overhead, under the level above");
+        // Cut above the window's head, the wall runs solid past it; with the top under the roof's
+        // eaves, the roof isn't seen.
+        s.execute("modify", &serde_json::json!({"id": 1, "view_range": {"cut": 2500, "top": 2600}})).unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        assert_eq!(pixel(&png_of(&d), d.view.px(P2(8050.0, 3000.0))), (POCHE.0, POCHE.1, POCHE.2));
+        assert!(!d.owners.contains(&Some(13)));
+        // From Level 2, the floor below shows once the view depth reaches down to it.
+        assert!(!plan(&s.model, 2, 800, 600).owners.contains(&Some(12)));
+        s.execute("modify", &serde_json::json!({"id": 2, "view_range": {"depth": -3000}})).unwrap();
+        assert!(plan(&s.model, 2, 800, 600).owners.contains(&Some(12)));
+    }
+
+    fn png_of(d: &Drawing) -> Vec<u8> {
+        png(d).unwrap()
+    }
+
+    #[test]
+    fn crop_regions_clip_plans_and_sections() {
+        let mut s = house();
+        s.execute("crop", &serde_json::json!({"view": 1, "region": [[-1000, -1000], [4000, 4000]]})).unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        assert!((d.view.cx - 1500.0).abs() < 1.0 && (d.view.cy - 1500.0).abs() < 1.0, "fitted to the crop: {:?}", d.view);
+        assert!(!d.owners.contains(&Some(4)), "the east wall lies outside");
+        assert_eq!(d.pick(d.view.px(P2(3000.0, 0.0)), 2.0), Some(3), "the south wall, up to the crop's edge");
+        assert_eq!(d.pick(d.view.px(P2(5000.0, 0.0)), 2.0), None);
+        // Annotation is whole or not there: the room's tag, its point on the crop's edge, keeps its name whole.
+        assert!(d.owners.contains(&Some(9)));
+        let name = d.view.px(P2(4000.0 + 300.0, 3000.0));
+        assert!(d.pick((name.0, name.1 - 16.0), 3.0) == Some(9), "the name past the crop's edge");
+        // Grid 1 stops at the crop's edge, its bubble there.
+        let (x, y) = d.view.px(P2(0.0, 4000.0));
+        assert_eq!(d.pick((x + 11.0, y - 11.0), 2.0), Some(10));
+        // A section cropped to the ground floor's lower part: Level 2 isn't in it, and the cut wall stops.
+        s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}").unwrap();
+        s.execute("crop", &serde_json::json!({"view": 11, "region": [[0, -100], [5000, 2000]]})).unwrap();
+        let view = section_fit(&s.model, 11, 800, 600);
+        let d = section(&s.model, 11, view);
+        assert!(!d.owners.contains(&Some(2)) && d.owners.contains(&Some(1)), "only the levels inside");
+        let png = section_png(&s.model, 11, view).unwrap();
+        // (Beside grid 1, on the wall's centre line.)
+        assert_eq!(pixel(&png, view.px(P2(950.0, 1500.0))), (POCHE.0, POCHE.1, POCHE.2), "the west wall, cut");
+        assert_eq!(pixel(&png, view.px(P2(950.0, 2500.0))), (255, 255, 255), "above the crop");
+    }
+
+    #[test]
+    fn notes_spot_elevations_and_dimensions_draw_in_their_views() {
+        let mut s = house();
+        // A note (11), a floor (12) and a spot elevation on it (13); a slanted wall (14) and an angular
+        // dimension (15) between it and the south wall; a round column (16) and a radial dimension (17).
+        s.script(
+            r#"text {"text": "NOTE", "at": [1000, 5000]}
+               floor {}
+               spot {"at": [2000, 2000]}
+               wall {"points": [[0, 0], [3000, 3000]], "type": "Interior - 100mm"}
+               dimension {"kind": "angular", "refs": [[4000, 0], [1500, 1500]], "at": [2500, 1000]}
+               column {"at": [6000, 4000], "type": "Round 300"}
+               dimension {"kind": "radial", "refs": [[6150, 4000]], "at": [6800, 4800]}"#,
+        )
+        .unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        let png = png(&d).unwrap();
+        let dark = |at: (f32, f32)| {
+            let (r, g, b) = pixel(&png, at);
+            r < 200 && g < 200 && b < 200
+        };
+        // The note: its first letter's upright, just right of and below its top left corner.
+        let (x, y) = d.view.px(P2(1000.0, 5000.0));
+        assert_eq!(d.pick((x + 1.0, y + 6.0), 2.0), Some(11));
+        // The spot elevation's mark: a triangle standing on the point.
+        let (x, y) = d.view.px(P2(2000.0, 2000.0));
+        assert!(dark((x, y - 4.0)), "its triangle");
+        assert_eq!(d.pick((x, y - 3.0), 2.0), Some(13));
+        // The angular dimension's arc, 1000 mm out from the corner at 45° / 2 round from east.
+        let r = P2(2500.0, 1000.0).length();
+        let mid = P2(22.5f64.to_radians().cos(), 22.5f64.to_radians().sin()) * r;
+        assert_eq!(d.pick(d.view.px(mid), 2.0), Some(15));
+        // The radial one's line, from the column's centre toward `at`.
+        let along = P2(6000.0, 4000.0) + (P2(6800.0, 4800.0) - P2(6000.0, 4000.0)) * 0.5;
+        assert_eq!(d.pick(d.view.px(along), 2.0), Some(17));
+        // In a section: a spot elevation at its point, and a note.
+        s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}\nspot {\"at\": [3000, 2000], \"view\": 18}\ntext {\"text\": \"N\", \"at\": [5000, 2500], \"view\": 18}").unwrap();
+        let view = section_fit(&s.model, 18, 800, 600);
+        let d = section(&s.model, 18, view);
+        let (x, y) = view.px(P2(3000.0, 2000.0));
+        assert_eq!(d.pick((x, y - 3.0), 2.0), Some(19));
+        assert!(d.owners.contains(&Some(20)));
     }
 
     #[test]

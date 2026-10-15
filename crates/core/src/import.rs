@@ -854,7 +854,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     let mut taken = BTreeSet::new();
     let mut level_of: HashMap<u64, Id> = HashMap::new();
     for (sid, n, z) in &storeys {
-        let level = m.insert(Element::Level(Level { name: fresh(&mut taken, n), elevation: *z }));
+        let level = m.insert(Element::Level(Level::new(fresh(&mut taken, n), *z)));
         level_of.insert(*sid, level);
         seen.insert(*sid);
     }

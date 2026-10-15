@@ -143,6 +143,32 @@ impl Solid {
         }
     }
 
+    /// Whether plan point `q` lies within its footprint.
+    fn over(&self, q: P2) -> bool {
+        match self {
+            Solid::Box { frame, a, c, .. } => {
+                let (s, t) = ((q - frame.o).dot(frame.u), (q - frame.o).dot(frame.n));
+                (a.0..=a.1).contains(&s) && (c.0..=c.1).contains(&t)
+            }
+            Solid::Slab { face, .. } => geom::contains(&plan(face), q),
+        }
+    }
+
+    /// Its corners.
+    fn corners(&self) -> Vec<P3> {
+        let mut out = Vec::new();
+        match self {
+            Solid::Box { frame, a, c, z, .. } => {
+                for (s, t, h) in [a.0, a.1].into_iter().flat_map(|s| [(s, c.0), (s, c.1)]).flat_map(|(s, t)| [(s, t, z.0), (s, t, z.1)]) {
+                    let p = frame.o + frame.u * s + frame.n * t;
+                    out.push([p.0, p.1, h]);
+                }
+            }
+            Solid::Slab { face, rise, .. } => out.extend(face.iter().flat_map(|p| [*p, [p[0], p[1], p[2] + rise]])),
+        }
+        out
+    }
+
     /// The stretches of the line from `p` along unit `u` that lie over it, as distances from `p`.
     pub(crate) fn across(&self, p: P2, u: P2) -> Vec<(f64, f64)> {
         match self {
@@ -320,25 +346,13 @@ impl Scene {
     pub fn fit(&self, azimuth: f64, elevation: f64, width: u32, height: u32) -> Camera {
         let mut cam = Camera { azimuth, elevation: elevation.clamp(-89.0, 89.0), scale: 1.0, target: [0.0; 3], width, height };
         let room = |px: u32| (f64::from(px) - 2.0 * MARGIN).max(1.0);
-        let mut pts = self.tris.iter().flat_map(|t| t.p);
-        let Some(first) = pts.next() else {
+        let pts: Vec<P3> = self.tris.iter().flat_map(|t| t.p).collect();
+        let Some((target, w, h)) = extent(&cam, &pts) else {
             cam.scale = room(width).min(room(height)) / 10_000.0;
             return cam;
         };
-        let (lo, hi) = pts.fold((first, first), |(lo, hi), p| {
-            ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])])
-        });
-        let middle = mul(add(lo, hi), 0.5);
-        let (_, right, up) = cam.axes();
-        // The extent across and up the picture, from the middle of the box around the model.
-        let (mut x, mut y) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
-        for p in self.tris.iter().flat_map(|t| t.p) {
-            let d = sub(p, middle);
-            let (px, py) = (dot(d, right), dot(d, up));
-            (x, y) = ((x.0.min(px), x.1.max(px)), (y.0.min(py), y.1.max(py)));
-        }
-        cam.target = add(middle, add(mul(right, (x.0 + x.1) / 2.0), mul(up, (y.0 + y.1) / 2.0)));
-        cam.scale = (room(width) / (x.1 - x.0).max(1000.0)).min(room(height) / (y.1 - y.0).max(1000.0)).clamp(1e-6, 50.0);
+        cam.target = target;
+        cam.scale = (room(width) / w.max(1000.0)).min(room(height) / h.max(1000.0)).clamp(1e-6, 50.0);
         cam
     }
 
@@ -381,7 +395,9 @@ impl Scene {
                         continue;
                     }
                     let z = wa * a.2 + wb * b.2 + wc * c.2;
-                    if clip.is_some_and(|k| z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1) {
+                    if clip.is_some_and(|k| {
+                        z > k.near || k.far.is_some_and(|f| z < k.near - f) || x < k.x.0 || x > k.x.1 || y < k.y.0 || y > k.y.1
+                    }) {
                         continue;
                     }
                     let z = z as f32;
@@ -430,12 +446,55 @@ impl Scene {
 }
 
 /// What a section's or an elevation's picture keeps: what lies beyond its plane, depths (toward
-/// the camera) below `near`, and no more than `far` past it; between pixel columns `x.0` and `x.1`.
+/// the camera) below `near`, and no more than `far` past it; between pixel columns `x.0` and `x.1`,
+/// and rows `y.0` and `y.1`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Clip {
     pub near: f64,
     pub far: Option<f64>,
     pub x: (f64, f64),
+    pub y: (f64, f64),
+}
+
+/// Where `pts` lie as `cam` looks at them: the point in their middle, and how far they spread
+/// across the picture and up it, mm.
+fn extent(cam: &Camera, pts: &[P3]) -> Option<(P3, f64, f64)> {
+    let first = *pts.first()?;
+    let (lo, hi) = pts.iter().fold((first, first), |(lo, hi), p| {
+        ([lo[0].min(p[0]), lo[1].min(p[1]), lo[2].min(p[2])], [hi[0].max(p[0]), hi[1].max(p[1]), hi[2].max(p[2])])
+    });
+    let middle = mul(add(lo, hi), 0.5);
+    let (_, right, up) = cam.axes();
+    let (mut x, mut y) = ((f64::MAX, f64::MIN), (f64::MAX, f64::MIN));
+    for p in pts {
+        let d = sub(*p, middle);
+        let (px, py) = (dot(d, right), dot(d, up));
+        (x, y) = ((x.0.min(px), x.1.max(px)), (y.0.min(py), y.1.max(py)));
+    }
+    Some((add(middle, add(mul(right, (x.0 + x.1) / 2.0), mul(up, (y.0 + y.1) / 2.0))), x.1 - x.0, y.1 - y.0))
+}
+
+/// The whole model from `azimuth` and `elevation` at `scale` px per mm: the picture as large as
+/// that makes it (up to [`MAX_SIDE`] a side), `room` px clear around it. A 3D view on a sheet.
+pub fn camera(m: &Model, azimuth: f64, elevation: f64, scale: f64, room: f64) -> Camera {
+    let mut cam = Camera { azimuth, elevation: elevation.clamp(-89.0, 89.0), scale, target: [0.0; 3], width: 1, height: 1 };
+    let pts: Vec<P3> = solids(m).iter().flat_map(Solid::corners).collect();
+    if let Some((target, w, h)) = extent(&cam, &pts) {
+        let side = |d: f64| (d * scale + 2.0 * room).ceil().clamp(1.0, f64::from(MAX_SIDE)) as u32;
+        (cam.target, cam.width, cam.height) = (target, side(w), side(h));
+    }
+    cam
+}
+
+/// Each element's top over plan point `p`: the highest top of its solids standing over it.
+pub(crate) fn tops_at(m: &Model, p: P2) -> BTreeMap<Id, f64> {
+    let mut tops = BTreeMap::new();
+    for s in solids(m).iter().filter(|s| s.over(p)) {
+        let z = s.z_at(p).1;
+        let top = tops.entry(s.owner()).or_insert(z);
+        *top = f64::max(*top, z);
+    }
+    tops
 }
 
 /// Halfway from `a` to `b`.

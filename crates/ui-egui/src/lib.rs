@@ -87,6 +87,14 @@ pub enum Tool {
     Offset,
     /// An aligned dimension: the references picked so far. A click away from any places it.
     Dimension(Vec<Reference>),
+    /// An angular dimension: the lines picked so far, two that meet; then a click where its arc goes.
+    Angular(Vec<Reference>),
+    /// A radial dimension: the round column picked, then a click toward where its radius goes.
+    Radial(Option<Reference>),
+    /// A text note where clicked, saying what the Options Bar says.
+    Text,
+    /// A spot elevation where clicked.
+    Spot,
     /// Tag the door or window clicked.
     Tag,
     /// A section: its start, once clicked.
@@ -128,14 +136,7 @@ enum Pending {
 }
 
 /// The schedules: the category `schedule` takes, and the view's name.
-const SCHEDULES: [(&str, &str); 6] = [
-    ("rooms", "Room Schedule"),
-    ("doors", "Door Schedule"),
-    ("windows", "Window Schedule"),
-    ("walls", "Wall Schedule"),
-    ("floors", "Floor Schedule"),
-    ("levels", "Level Schedule"),
-];
+pub(crate) const SCHEDULES: [(&str, &str); 6] = schedule::VIEWS;
 
 /// Ribbon buttons that pick tools: icon, label, tooltip, tool.
 type Tools<'a> = &'a [(Icon, &'a str, &'a str, Tool)];
@@ -222,6 +223,8 @@ pub struct BimApp {
     offset_copy: bool,
     /// Tags placed with a leader.
     tag_leader: bool,
+    /// What the Text tool writes.
+    note_text: String,
     /// A length typed while picking points: the listening dimension.
     typed_length: String,
     /// A selected wall's temporary dimension being typed: the wall, the length so far.
@@ -427,6 +430,7 @@ impl BimApp {
             offset: "1000".into(),
             offset_copy: true,
             tag_leader: false,
+            note_text: String::new(),
             typed_length: String::new(),
             dim_edit: None,
             tab_cycle: false,
@@ -491,7 +495,9 @@ impl BimApp {
             Tool::Room => Some("Place Room"),
             Tool::Level => Some("Place Level"),
             Tool::Grid(_) => Some("Place Grid"),
-            Tool::Dimension(_) => Some("Place Dimensions"),
+            Tool::Dimension(_) | Tool::Angular(_) | Tool::Radial(_) => Some("Place Dimensions"),
+            Tool::Text => Some("Place Text"),
+            Tool::Spot => Some("Spot Elevation"),
             Tool::Tag => Some("Tag"),
             Tool::Section(_) => Some("Section"),
             Tool::Elevation => Some("Elevation"),
@@ -726,6 +732,8 @@ impl BimApp {
                 Some("corner") => Tool::Trim(None),
                 Some("split") => Tool::Split,
                 Some("dimension") => Tool::Dimension(Vec::new()),
+                Some("text") => Tool::Text,
+                Some("spot") => Tool::Spot,
                 Some("tag") => Tool::Tag,
                 Some("column") => Tool::Column,
                 Some("delete") => {
@@ -814,6 +822,8 @@ impl BimApp {
             Tool::Align(Some(_)) => Tool::Align(None),
             Tool::Trim(Some(_)) => Tool::Trim(None),
             Tool::Dimension(refs) if !refs.is_empty() => Tool::Dimension(Vec::new()),
+            Tool::Angular(refs) if !refs.is_empty() => Tool::Angular(Vec::new()),
+            Tool::Radial(Some(_)) => Tool::Radial(None),
             Tool::Section(Some(_)) => Tool::Section(None),
             Tool::Stair(Some(_)) => Tool::Stair(None),
             Tool::Modify => {
@@ -846,38 +856,50 @@ impl BimApp {
         self.sheet = sheet;
         self.selection.clear();
         self.typed_length.clear();
-        // The tools that pick points work in plans; any other view takes clicks to select.
-        if !matches!(sheet, Sheet::Plan(_)) && self.tool != Tool::Level {
+        // The tools that pick points work in plans (Text in sections and on sheets too, Spot
+        // Elevation in sections); any other view takes clicks to select.
+        let works = match sheet {
+            Sheet::Plan(_) => true,
+            Sheet::Section(_) => matches!(self.tool, Tool::Text | Tool::Spot),
+            Sheet::Paper(_) => self.tool == Tool::Text,
+            _ => false,
+        };
+        if !works && self.tool != Tool::Level {
             self.tool = Tool::Modify;
         }
         match &mut self.tool {
             Tool::Wall(chain) => chain.clear(),
             Tool::Grid(start) => *start = None,
-            Tool::Dimension(refs) => refs.clear(),
+            Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
+            Tool::Radial(r) => *r = None,
             Tool::Section(start) | Tool::Stair(start) => *start = None,
             Tool::Move(_) | Tool::Copy(_) => self.tool = Tool::Modify,
             _ => {}
         }
     }
 
-    /// The views on no sheet yet, as Place View lists them: plans, then sections and elevations.
-    fn unplaced_views(&self) -> Vec<(Id, String)> {
+    /// The views on no sheet yet, as Place View lists them: plans, sections and elevations, the
+    /// 3D view and the schedules; each as `place` takes it, by id, or by name while it isn't an
+    /// element yet.
+    fn unplaced_views(&self) -> Vec<(Value, String)> {
         let m = &self.session.model;
-        let placed: BTreeSet<Id> = m
+        let placed: BTreeSet<&str> = m
             .elements
             .values()
             .filter_map(|e| match e {
-                Element::Viewport(v) => Some(v.view),
+                Element::Viewport(v) => m.view_name(v.view),
                 _ => None,
             })
             .collect();
-        let plans = m.levels().into_iter().map(|(id, l)| (id, format!("Floor Plan: {}", l.name)));
+        let plans = m.levels().into_iter().map(|(id, l)| (json!(id), format!("Floor Plan: {}", l.name), l.name.as_str()));
         let cuts = m.elements.iter().filter_map(|(id, e)| match e {
-            Element::Section(v) => Some((*id, format!("Section: {}", v.name))),
-            Element::Elevation(v) => Some((*id, format!("Elevation: {}", v.name))),
+            Element::Section(v) => Some((json!(id), format!("Section: {}", v.name), v.name.as_str())),
+            Element::Elevation(v) => Some((json!(id), format!("Elevation: {}", v.name), v.name.as_str())),
             _ => None,
         });
-        plans.chain(cuts).filter(|(id, _)| !placed.contains(id)).collect()
+        let others = std::iter::once((json!("{3D}"), "3D View: {3D}".to_string(), "{3D}"))
+            .chain(SCHEDULES.iter().map(|(_, name)| (json!(name), format!("Schedule: {name}"), *name)));
+        plans.chain(cuts).chain(others).filter(|(_, _, name)| !placed.contains(name)).map(|(v, label, _)| (v, label)).collect()
     }
 
     /// Close a view's tab; the last one stays open.
@@ -1153,12 +1175,28 @@ impl BimApp {
         self.tools(
             ui,
             "Dimension",
-            &[(
-                Icon::Dimension,
-                "Aligned",
-                "Aligned Dimension (DI): pick parallel walls or grids, then click where the dimension line goes",
-                Tool::Dimension(Vec::new()),
-            )],
+            &[
+                (
+                    Icon::Dimension,
+                    "Aligned",
+                    "Aligned Dimension (DI): pick parallel wall faces, wall ends, doors, windows or grids, then click where the \
+                     dimension line goes",
+                    Tool::Dimension(Vec::new()),
+                ),
+                (
+                    Icon::Angular,
+                    "Angular",
+                    "Angular Dimension: pick two lines that meet, then click where the arc goes",
+                    Tool::Angular(Vec::new()),
+                ),
+                (Icon::Radial, "Radial", "Radial Dimension: pick a round column, then click where the radius goes", Tool::Radial(None)),
+                (Icon::Spot, "Spot Elevation", "Spot Elevation (EL): click a floor, a roof or a stair; in a section, a point", Tool::Spot),
+            ],
+        );
+        self.tools(
+            ui,
+            "Text",
+            &[(Icon::Text, "Text", "Text (TX): type the note in the Options Bar, then click where it goes", Tool::Text)],
         );
         panel(ui, "Tag", |ui| {
             let tip = "Tag by Category (TG): click a door or window to tag it with its mark";
@@ -1187,6 +1225,22 @@ impl BimApp {
             let tip = "Dark Mode: the window and the views light on dark; sheets stay paper. It starts as your system's theme";
             if big_button(ui, Icon::Theme, "Dark Mode", dark, tip).clicked() {
                 ui.ctx().set_theme(if dark { egui::Theme::Light } else { egui::Theme::Dark });
+            }
+            // A plan's or a section's crop region: on to what it shows, or off.
+            let view = match self.sheet {
+                Sheet::Plan(id) | Sheet::Section(id) => Some(id),
+                _ => None,
+            };
+            let cropped = view.is_some_and(|id| match self.session.model.elements.get(&id) {
+                Some(Element::Level(l)) => l.crop.is_some(),
+                Some(Element::Section(v) | Element::Elevation(v)) => v.crop.is_some(),
+                _ => false,
+            });
+            let tip = "Crop View: show only the crop region; drag its edges by their grips";
+            if ui.add_enabled_ui(view.is_some(), |ui| big_button(ui, Icon::Crop, "Crop View", cropped, tip)).inner.clicked()
+                && let Some(id) = view
+            {
+                self.run("crop", if cropped { json!({"view": id, "region": null}) } else { json!({"view": id}) });
             }
         });
         panel(ui, "Create", |ui| {
@@ -1230,7 +1284,12 @@ impl BimApp {
                     }
                     for (view, label) in views {
                         if ui.button(label).clicked() {
-                            self.run("place", json!({"sheet": sheet, "view": view}));
+                            let mut p = json!({"sheet": sheet, "view": view});
+                            // The 3D view as it's turned on screen.
+                            if let (Some("{3D}"), Some(c)) = (p["view"].as_str(), self.orbit.camera) {
+                                (p["azimuth"], p["elevation"]) = (json!(c.azimuth), json!(c.elevation));
+                            }
+                            self.run("place", p);
                         }
                     }
                 });
@@ -1376,6 +1435,11 @@ impl BimApp {
                 Tool::Tag => {
                     ui.checkbox(&mut self.tag_leader, "Leader");
                 }
+                Tool::Text => {
+                    let l = ui.label("Text:");
+                    ui.add(TextEdit::singleline(&mut self.note_text).desired_width(240.0).hint_text("what the note says"))
+                        .labelled_by(l.id);
+                }
                 Tool::Offset => {
                     let l = ui.label("Offset:");
                     ui.add(TextEdit::singleline(&mut self.offset).desired_width(70.0).hint_text("mm")).labelled_by(l.id);
@@ -1448,6 +1512,8 @@ impl BimApp {
             (Sheet::View3D | Sheet::Section(_) | Sheet::Paper(_), Tool::Level) => {
                 return "Type the new level's elevation in the Options Bar, then Create.";
             }
+            (Sheet::Section(_) | Sheet::Paper(_), Tool::Text) => return "Type the note in the Options Bar, then click where it goes.",
+            (Sheet::Section(_), Tool::Spot) => return "Click a point to mark its height.",
             (Sheet::View3D | Sheet::Section(_) | Sheet::Paper(_), _) => {
                 return "This tool works in plan views: open one from the Project Browser.";
             }
@@ -1478,10 +1544,16 @@ impl BimApp {
             Tool::Trim(Some(_)) => "Pick the second wall, on the part to keep.",
             Tool::Split => "Click a wall where to split it.",
             Tool::Offset => "Point to a wall: the offset goes to the cursor's side. Click to place it.",
-            Tool::Dimension(refs) if refs.is_empty() => "Pick a wall face, a wall's centre line or a grid to measure from.",
+            Tool::Dimension(refs) if refs.is_empty() => "Pick a wall face, centre line or end, a door, a window or a grid to measure from.",
             Tool::Dimension(refs) if refs.len() == 1 => "Pick the next reference, parallel to the first.",
             Tool::Dimension(_) => "Pick more references, or click away from them where the dimension line goes. Esc cancels.",
             Tool::Tag => "Click a door or window to tag it with its mark.",
+            Tool::Angular(refs) if refs.len() < 2 => "Pick a wall, a grid or another line; then one that meets it.",
+            Tool::Angular(_) => "Click where the arc goes: the angle on that side. Esc cancels.",
+            Tool::Radial(None) => "Pick a round column.",
+            Tool::Radial(Some(_)) => "Click where the radius goes. Esc cancels.",
+            Tool::Text => "Type the note in the Options Bar, then click where it goes: its top left corner.",
+            Tool::Spot => "Click a floor, a roof, a stair or a wall: the spot elevation reads the height of its top there.",
             Tool::Section(None) => "Click the section's start: it looks to the left of the line you draw.",
             Tool::Section(Some(_)) => "Click the section's end.",
             Tool::Elevation => "Click beside the building: the elevation looks at the side you click by.",
@@ -1644,11 +1716,11 @@ impl BimApp {
                             ui.end_row();
                             for row in &t.rows {
                                 for (v, c) in row.iter().zip(&t.columns) {
-                                    match v.as_f64() {
-                                        // Areas and perimeters to the hundredth, so the column lines up.
-                                        Some(x) if c.ends_with("(m²)") || c.ends_with("(m)") => ui.monospace(format!("{x:.2}")),
-                                        Some(_) => ui.monospace(properties::text(v)),
-                                        None => ui.label(properties::text(v)),
+                                    let text = schedule::shown(c, v);
+                                    if v.is_number() {
+                                        ui.monospace(text)
+                                    } else {
+                                        ui.label(text)
                                     };
                                 }
                                 ui.end_row();

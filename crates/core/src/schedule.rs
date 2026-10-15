@@ -12,6 +12,26 @@ pub struct Table {
     pub rows: Vec<Vec<Value>>,
 }
 
+/// The schedules there are, as views: each one's category, and its name.
+pub const VIEWS: [(&str, &str); 6] = [
+    ("room", "Room Schedule"),
+    ("door", "Door Schedule"),
+    ("window", "Window Schedule"),
+    ("wall", "Wall Schedule"),
+    ("floor", "Floor Schedule"),
+    ("level", "Level Schedule"),
+];
+
+/// A cell as a schedule shows it: areas and lengths in metres to two places, so the column lines
+/// up; other numbers to the hundredth; text as it is.
+pub fn shown(column: &str, v: &Value) -> String {
+    match v.as_f64() {
+        Some(x) if column.ends_with("(m²)") || column.ends_with("(m)") => format!("{x:.2}"),
+        Some(x) => format!("{}", (x * 100.0).round() / 100.0 + 0.0),
+        None => cell(v),
+    }
+}
+
 /// Each schedule's columns: a heading and the field of the element's JSON it shows (`level` as
 /// the level's name). Rows sort by the first column.
 const SCHEDULES: &[(&str, &[(&str, &str)])] = &[

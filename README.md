@@ -26,8 +26,8 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/desktop.png" alt="The BIMCraft desktop app on the sample house: the ribbon's Architecture tab (Wall, Door, Window, Column, Roof, Stair, Room, Level, Grid), Properties and the Project Browser on the left, and the Level 1 plan with its dimensions, tags, section, four elevation markers and the roof's edge dashed overhead" width="100%">
-  <br><sub><b>The sample house</b> (<code>cargo run --release -p bimcraft -- --sample</code>): Revit's layout in BIMCraft's own icons and colours, with dimensions, door and window tags, a section and the four elevation marks, all built from BIMCraft commands.</sub>
+  <img src="docs/images/desktop.png" alt="The BIMCraft desktop app on the sample house: the ribbon's Architecture tab (Wall, Door, Window, Column, Roof, Stair, Room, Level, Grid), Properties with the plan's view range and the Project Browser on the left, and the Level 1 plan with its dimensions, tags, a spot elevation, a note, the section, four elevation markers and the roof's edge dashed overhead" width="100%">
+  <br><sub><b>The sample house</b> (<code>cargo run --release -p bimcraft -- --sample</code>): Revit's layout in BIMCraft's own icons and colours, with dimensions, door and window tags, a spot elevation, a note, a section and the four elevation marks, all built from BIMCraft commands.</sub>
 </p>
 
 <p align="center">
@@ -57,7 +57,7 @@
   </tr>
   <tr>
     <td width="50%"><img src="docs/images/sample-sheet.png" alt="Sheet A102 of the sample house: Section 1 and the South and East elevations at 1 : 100, each titled, and the title box with the project, the sheet's name, its scale and its number"></td>
-    <td width="50%"><img src="docs/images/desktop-dark.png" alt="The desktop app in dark mode: the View tab with Dark Mode on, the chrome dark, and the Level 1 plan drawn light on a dark ground, the walls' poché grey and the grids blue"></td>
+    <td width="50%"><img src="docs/images/desktop-dark.png" alt="The desktop app in dark mode: the View tab with Dark Mode and Crop View, the chrome dark, and the Level 1 plan drawn light on a dark ground, the walls' poché grey and the grids blue"></td>
   </tr>
   <tr>
     <td><sub><b>Sheets</b>: views placed at a scale under a title block, printed to PDF a page each.</sub></td>
@@ -96,14 +96,14 @@ BIMCraft is in early, fast development. Honest status:
 | Rooms | Placed at a point, bounded by the walls around it, and following them when they change; free-standing islands (a shaft) are subtracted; area and perimeter at the wall centre line |
 | Types | Wall, floor, door, window, column and roof types; editing one changes every element that uses it |
 | Editing | Modify any field, of one element or many in one step; move, copy, rotate and mirror, with the walls joined to them stretching to stay joined and doors and windows going with their walls; trim or extend two walls to a corner; split a wall; delete (a wall takes its doors and windows with it, and they their tags); undo and redo |
-| Annotation | Aligned dimensions between parallel wall faces, wall centre lines and grids, one segment or a chain, measuring the model as it is, so they follow what they measure (a change that would turn a reference out of parallel with the others is refused); door and window tags showing their marks, going where their doors and windows go, with or without a leader; tag everything not tagged yet in one go |
-| Views | A floor plan per level, cut 1200 mm above it: wall poché with clean joins, door swings, window glass, room tags, grid bubbles, dimensions, door and window tags; PNG and SVG. Sections and elevations along any line: the cut in poché (a roof's along its slope), what lies beyond in hidden line, levels named with their heights, grids; the four building elevations in one go; their marks on every plan; PNG. A 3D view, from any angle: walls with their doors and windows cut out, slabs, columns, stairs and roofs, door leaves and glass, shaded, with an edge wherever faces meet; PNG |
-| Sheets | ISO A0 to A4, landscape, with a title block (project, sheet name and number, scale); plans, sections and elevations placed on them at a scale and titled, a view on one sheet; PNG, and PDF: one sheet, or every sheet a page |
-| Schedules | Rooms, doors, windows, walls, floors and levels; CSV |
+| Annotation | Aligned dimensions between parallel references, one segment or a chain: wall faces, centre lines and ends, door and window centres and jambs, grids; angular dimensions between two lines that meet, and radial ones on round columns; all measuring the model as it is, so they follow what they measure (a change that would turn a reference out of parallel with the others is refused). Door and window tags showing their marks, going where their doors and windows go, with or without a leader; tag everything not tagged yet in one go. Text notes in plans, sections, elevations and on sheets, of any size and angle, over several lines, with a leader; spot elevations reading the top of what they stand on in plan (a floor, a roof's slope, a stair's tread), or the height of a point in a section |
+| Views | A floor plan per level with Revit's view range: cut at its cut plane (1200 mm up by default), what lies below seen from it down to the bottom, faint beyond it down to the view depth, and roofs overhead up to the top: wall poché with clean joins, door swings, window glass, room tags, grid bubbles, dimensions, door and window tags; PNG and SVG. Sections and elevations along any line: the cut in poché (a roof's along its slope), what lies beyond in hidden line, levels named with their heights, grids; the four building elevations in one go; their marks on every plan; PNG. Crop regions on plans and sections: the view shows only what's inside, grids stopping at its edge with their bubbles. A 3D view, from any angle: walls with their doors and windows cut out, slabs, columns, stairs and roofs, door leaves and glass, shaded, with an edge wherever faces meet; PNG |
+| Sheets | ISO A0 to A4, landscape, with a title block (project, sheet name and number, scale); plans, sections, elevations and the 3D view placed on them at a scale and titled, schedules as ruled tables, text notes on the paper, a view on one sheet; PNG, and PDF: one sheet, or every sheet a page |
+| Schedules | Rooms, doors, windows, walls, floors and levels; CSV; on sheets |
 | IFC import | IFC2x3 and IFC4 files, as Revit and other BIM tools write them: storeys, straight walls with their doors and windows, floors, rooms, columns, grids, single straight stairs, and roofs flat or pitched over a rectangle, each measured from its geometry, whether the file extrudes a profile, writes a Brep or a triangle mesh; walls that nearly meet are joined; a model at map coordinates is moved near the origin; what can't come in is listed, with why |
-| Files | `.bimcraft` projects (JSON); IFC4 export with storeys, swept-solid walls, slabs, spaces, columns and stairs, roofs as closed shells of flat faces, and openings that cut the walls and hold the doors and windows (dimensions and tags belong to plans, and stay out of it) |
+| Files | `.bimcraft` projects (JSON); IFC4 export with storeys, swept-solid walls, slabs, spaces, columns and stairs, roofs as closed shells of flat faces, and openings that cut the walls and hold the doors and windows (dimensions, tags, notes and spot elevations belong to views, and stay out of it) |
 | Agents | MCP server, scripts, and every command callable with JSON |
-| Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan per level that pans and zooms, sections and elevations, a 3D view that orbits, and sheets; tools for walls, doors, windows, columns, roofs, stairs, rooms, levels, grids, dimensions, tags, sections and elevations; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner); typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme |
+| Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan per level that pans and zooms, sections and elevations, a 3D view that orbits, and sheets; tools for walls, doors, windows, columns, roofs, stairs, rooms, levels, grids, dimensions (aligned, angular, radial), spot elevations, text, tags, sections and elevations; Crop View with grips to drag a crop region's edges, and the view range in Properties; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner); typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme |
 
 The IFC4 export is checked with [IfcOpenShell](https://ifcopenshell.org) 0.9: the sample house has no schema or EXPRESS rule
 errors, every element builds its geometry, and the walls' volumes (with the openings cut out) and the roof's match a hand
@@ -130,7 +130,7 @@ cargo build --release
 That builds the sample house and saves the project, an IFC4 file and the Level 1 plan:
 
 <p align="center">
-  <img src="docs/images/sample-plan.png" alt="Level 1 of the sample house: grey wall poché, door swings, windows, room tags with areas, grid bubbles, dimensions, door and window tags, and the roof's edge dashed overhead" width="100%">
+  <img src="docs/images/sample-plan.png" alt="Level 1 of the sample house: grey wall poché, door swings, windows, room tags with areas, grid bubbles, dimensions, door and window tags, a spot elevation and a note, and the roof's edge dashed overhead" width="100%">
 </p>
 
 `--cmd 'render {"view": "{3D}", "path": "house-3d.png"}'` adds the 3D view (`azimuth` and `elevation` turn it);
@@ -179,11 +179,13 @@ switches.
 | Move, copy | Drag a selected element, or Move (MV) and Copy (CO): click a base point, then where it goes. Walls joined to a moved wall stretch to stay joined, so room areas follow; doors and windows slide along their walls. Constrain keeps the move square; Multiple goes on copying |
 | Rotate, mirror | Rotate (RO) turns the selection about its middle: click the angle's start, then its end, or type an angle in the Options Bar; Place Centre moves the centre. Mirror Pick Axis (MM) mirrors across a wall or grid you pick, Mirror Draw Axis (DM) across a line you click; Copy is on, as in Revit |
 | Align, trim, split, offset | Align (AL): pick a reference line (a grid, a wall's face or centre line), then the wall to line up with it. Trim/Extend to Corner (TR): pick two walls on the parts to keep. Split Element (SL): click a wall where to cut it. Offset (OF): point to a wall, and a copy goes to the cursor's side at the Options Bar's distance |
-| Dimension, tag | Annotate > Aligned (DI): pick parallel walls or grids, each by the face or centre line nearest the cursor, then click away from them where the dimension line goes; more picks make a chain. Annotate > Tag by Category (TG): click a door or window to tag it with its mark, with a leader when the Options Bar says so; Tag All tags the rest of the view. Drag a dimension or a tag to move it |
+| Dimension, tag | Annotate > Aligned (DI): pick parallel references, each the line nearest the cursor (a wall's face, centre line or end, a door's or window's centre or jamb, a grid), then click away from them where the dimension line goes; more picks make a chain. Angular: pick two lines that meet, then click where the arc goes; the angle on that side. Radial: pick a round column, then click where the radius goes. Annotate > Tag by Category (TG): click a door or window to tag it with its mark, with a leader when the Options Bar says so; Tag All tags the rest of the view. Drag a dimension or a tag to move it |
+| Spot elevations, text | Annotate > Spot Elevation (EL): click a floor, a roof, a stair or a wall in plan, and it reads the height of its top there, following it; in a section, click a point to mark its height. Annotate > Text (TX): type the note in the Options Bar (`\n` breaks a line), then click its top left corner, in a plan, a section or on a sheet; Properties sets its size and angle |
+| Crop, view range | View > Crop View crops a plan or a section to what it shows; drag the grips at its edges' middles to move them (a section's sides move its line). Off shows it all again. Properties of a plan holds its View Range: Top (clear it for the level above), Cut Plane, Bottom and View Depth, in mm above the level |
 | Lengths | While a tool waits for its next point, type a length and press Enter: it goes that far toward the cursor. A selected wall shows its length as a temporary dimension; click the number to type a new one |
 | Edit types | Edit Type opens Type Properties: change the type everywhere it's used, or Duplicate it into a new one |
 | Views | The Project Browser opens plans, elevations, sections, the 3D view and schedules in tabs; View > Close Inactive closes the others |
-| Lay out sheets | View > Sheet makes one (A101, A102…); on it, Place View puts a plan, section or elevation that's on no sheet yet, at 1 : 100. Drag a view to move it, set its scale in Properties, double-click it to open it. File > Export > Sheets as PDF prints them all |
+| Lay out sheets | View > Sheet makes one (A101, A102…); on it, Place View puts a view that's on no sheet yet: a plan, a section or an elevation at 1 : 100, the 3D view as it's turned on screen, or a schedule. Drag a view or a note to move it, set its scale in Properties, double-click it to open it. File > Export > Sheets as PDF prints them all |
 | Cut a section, add an elevation | View > Section: click its start and end; it looks to the left of the line, so drawn west to east it looks north. View > Elevation: click beside the building, and it looks at that side. Open them from the browser, or double-click their marks in a plan; in them, click to select what they cut or see |
 | Look in 3D | The cube on the Quick Access Toolbar (or View > 3D View, or {3D} in the browser) opens the 3D view. Shift and the middle button orbit, as in Revit, and so does a drag; the middle button pans, the wheel zooms; Home in the navigation bar goes back to the south-east view. Click to select, as in plan |
 | Move around | The wheel zooms at the cursor, the middle button pans, the navigation bar or ZF zooms to fit; TL toggles Thin Lines |
@@ -234,16 +236,19 @@ changes nothing.
 | `column` | CL | `at`, `type?`, `angle?`, `level?`, `top_level?`, `height?`, `base_offset?` |
 | `stair` | | `start`, `end?` or `angle?` (the way it climbs), `level?`, `top_level?`, `height?`, `width?`, `riser?` (the most each riser may rise), `tread?` |
 | `roof` | | `level?` (the one above the lowest), `boundary?` (else the walls of the level below), `overhang?`, `slope?` (0 is flat), `gable?`, `type?` |
-| `dimension` | DI | `refs` (each `{id, face?}`, a face being `left`, `right` or `centre`, or a point on the line), `at`, `level?` |
+| `dimension` | DI | `refs` (each `{id, face?}`: a wall's `centre`, `left` or `right` face, `start` or `end`; a door's or window's `centre`, or its jamb at the `start` or `end` side; a grid's line; or a point on one), `at`, `level?`, `kind?` (`aligned`, `angular` between two lines that meet, `radial` on a round column) |
 | `tag` | TG | `ids?` (without them, every door and window on the level not tagged yet), `level?`, `offset?`, `leader?` |
+| `text` | TX | `text`, `at` (its top left), `view?` (a level's plan by default; a section, an elevation, or a sheet by number), `size?` (mm on paper, 2.5), `angle?`, `leader?` |
+| `spot` | EL | `at`, `view?`, `host?`: in a plan, the top of what stands there; in a section or an elevation, the point's height |
 | `section` | | `start`, `end` (it looks to the left of the line), `depth?`, `name?` |
 | `elevation` | | `facing?` (north, south, east or west: the side it shows), `at?`, or `start` and `end`; none of them: the four building elevations |
 | `sheet` | | `number?` (A101, A102… by default), `name?`, `size?` (A0 to A4; A3 by default) |
-| `place` | | `sheet` (its number), `view` (a level's, section's or elevation's name), `at?` (mm on the paper), `scale?` (100 for 1 : 100) |
+| `place` | | `sheet` (its number), `view` (a level's, section's, elevation's, schedule's or 3D view's name: Room Schedule, `{3D}`…), `at?` (mm on the paper), `scale?` (100 for 1 : 100), `azimuth?` and `elevation?` for the 3D view |
+| `crop` | | `view`, `region?` (two corners: plan mm, or along a section and up), or `null` to uncrop; none: to what the view shows |
 | `level` | LL | `elevation`, `name?` |
 | `grid` | GR | `start`, `end`, `name?` |
 | `type` | | `category`, `name`, and its sizes: creates the type, or edits it everywhere it's used |
-| `modify` | | `id` (or `ids`, several in one step) and the fields to change |
+| `modify` | | `id` (or `ids`, several in one step) and the fields to change; into a field that is an object, such as a level's `view_range` (`top`, `cut`, `bottom`, `depth`), they merge |
 | `move` | MV | `ids`, `by`; `end` to move one end of a wall |
 | `copy` | CO | `ids`, `by` |
 | `rotate` | RO | `ids`, `about`, `angle` in degrees, `copy?` |
@@ -259,10 +264,6 @@ A `level` can be given by name or id; without one, commands use the lowest level
 an elevation by name, a sheet by number (a path ending .pdf prints it), or with `{3D}` (and `azimuth?`, `elevation?`) the 3D
 view. `save` to a .pdf prints every sheet, a page each.
 
-A `level` can be given by name or id; without one, commands use the lowest level. `render {view}` draws a plan, a section or
-an elevation by name, a sheet by number (a path ending .pdf prints it), or with `{3D}` (and `azimuth?`, `elevation?`) the 3D
-view. `save` to a .pdf prints every sheet, a page each.
-
 ## Architecture
 
 ```text
@@ -271,9 +272,10 @@ crates/core            bimcraft-core: everything but the front ends; no UI
   model.rs             the building model, and the rules checked after every command
   engine.rs            the session: commands, undo and redo, scripts
   commands.rs          the command set
-  render.rs, font.rs   plans, sections and elevations as display lists drawn to SVG, PNG or a canvas, in our own stroke lettering
+  render.rs, font.rs   plans, sections and elevations as display lists drawn to SVG, PNG or a canvas, cropped to their crop
+                       regions, in our own stroke lettering
   view3d.rs            the 3D view: the model as solids, drawn with a depth buffer, shaded and edged; picking
-  sheet.rs, pdf.rs     sheets: the title block and the views on them at their scales; PDF
+  sheet.rs, pdf.rs     sheets: the title block, the views on them at their scales, schedules as tables, notes; PDF
   schedule.rs, ifc.rs  schedules and CSV; IFC4 export
   step.rs, import.rs   ISO 10303-21 files read; IFC import, every element measured from its geometry
 crates/ui-egui         bimcraft-ui-egui: the desktop front end, a thin shell over the session
@@ -294,22 +296,19 @@ treated as hostile, and a command that fails or panics leaves the model as it wa
 front end only reads the model and runs commands, so another front end can replace it. The canvas draws the same display list
 the PNG and SVG exports do, and picks elements from it. Agent instructions are in [CLAUDE.md](CLAUDE.md).
 
-The rules come from CADCraft. Everything is a command, and the desktop, the CLI, scripts and MCP all reach the same ones.
-Production code never panics: `unwrap`, `expect` and `panic!` are lint errors, `unsafe` is forbidden, every parameter is
-treated as hostile, and a command that fails or panics leaves the model as it was. The core knows nothing of a UI; the egui
-front end only reads the model and runs commands, so another front end can replace it. The canvas draws the same display list
-the PNG and SVG exports do, and picks elements from it. Agent instructions are in [CLAUDE.md](CLAUDE.md).
-
 ## Roadmap
 
-What's not there yet, roughly in order: schedules and the 3D view on sheets; stairs with landings and turns, and railings;
-pitched roofs over outlines other than rectangles, and walls attached to roofs; columns placed at grid intersections; in
-sections, crop regions you can drag and other cut patterns; in 3D, perspective cameras, a section box, other visual styles
-and smoothed edges; other dimensions (to wall ends and openings, angular, radial) and text notes; array and scale; wall
-joins at angles other than 90°; room separation lines; areas at the wall finish; imperial units; and, from IFC, curved and
-curtain walls, sloped floors, stairs of several flights and other roof shapes. Revit's own `.rvt` format is closed and
-undocumented, so BIMCraft won't read it itself; IFC is the way in and out, and `.rvt` files will come in through Autodesk's
-own converter.
+Done: views and notes (view ranges, crop regions, text notes, spot elevations, angular and radial dimensions and dimensions to
+wall ends and openings, schedules and the 3D view on sheets). Next, in order: lengths in metres or in feet and inches as well
+as millimetres; a Portuguese translation; then real walls (compound types with layers, joins at any angle, curved walls,
+walls attached to roofs and floors, other location lines); sloped floors, ceilings and shaft openings; stairs of several
+flights with landings, railings and ramps; roofs over any footprint (hips over L-shaped plans), extrusion roofs and dormers;
+families, BIMCraft's own parametric components (never Autodesk's `.rfa`); project parameters and schedules with chosen fields,
+filters, sorting and formulas; visibility and graphics (overrides, filters, view templates, phases, design options); locked
+and equal dimensions, arrays and groups; materials, hatch patterns, perspective views and a section box; DWG and DXF, more of
+IFC, and gbXML; structure, then MEP; site and massing; several people editing one model; and packaging for macOS and Linux,
+signed installers and auto-update. Revit's own `.rvt` format is closed and undocumented, so BIMCraft won't read it itself;
+IFC is the way in and out, and `.rvt` files will come in through Autodesk's own converter.
 
 ## Downloads
 

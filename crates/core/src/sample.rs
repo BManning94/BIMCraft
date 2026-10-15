@@ -1,7 +1,7 @@
 //! A small single-storey house built from commands: the demo (`bimcraft-cli run --sample`) and
 //! a test of the whole command set.
 
-pub const SAMPLE: &str = r#"# Sample house: 10 x 7 m, four rooms under a hipped roof, dimensioned and tagged, with elevations, a section, and two sheets.
+pub const SAMPLE: &str = r#"# Sample house: 10 x 7 m, four rooms under a hipped roof, dimensioned and tagged, with elevations, a section, and three sheets.
 new {"name": "Sample House"}
 grid {"start": [0, -1500], "end": [0, 8500]}
 grid {"start": [6000, -1500], "end": [6000, 8500]}
@@ -42,4 +42,10 @@ sheet {"name": "Section and Elevations"}
 place {"sheet": "A102", "view": "Section 1", "at": [120, 215]}
 place {"sheet": "A102", "view": "South", "at": [120, 110]}
 place {"sheet": "A102", "view": "East", "at": [300, 160]}
+# A note and a spot elevation on the ground floor, the room schedule beside its plan, and the 3D view on a sheet of its own.
+text {"text": "Oak floor", "at": [6300, 900]}
+spot {"at": [1000, 1000]}
+place {"sheet": "A101", "view": "Room Schedule"}
+sheet {"name": "3D View"}
+place {"sheet": "A103", "view": "{3D}", "scale": 75}
 "#;

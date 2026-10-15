@@ -7,7 +7,8 @@ use std::f64::consts::PI;
 
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
-    Column, DEFAULT_HEIGHT, Dimension, Element, Id, MAX_COORD, Model, RISER, Roof, Section, Stair, TOL, TREAD, Tag,
+    Column, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Id, Line, MAX_COORD, Model, NOTE_SIZE, Note, RISER, Reference, Roof,
+    Section, Spot, Stair, TOL, TREAD, Tag,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::roof_footprint;
@@ -59,11 +60,23 @@ pub struct Canvas {
     /// What's under the cursor, as `Drawing::pick_all` orders it, and how far Tab has gone.
     under: Vec<Id>,
     cycle: usize,
+    /// A crop region's grip being dragged: the view, and which edge (see [`grips`]).
+    crop_drag: Option<(Id, usize)>,
 }
 
 impl Default for Canvas {
     fn default() -> Canvas {
-        Canvas { cams: BTreeMap::new(), rect: Rect::ZERO, level: None, cursor: None, grab: None, drag: None, under: Vec::new(), cycle: 0 }
+        Canvas {
+            cams: BTreeMap::new(),
+            rect: Rect::ZERO,
+            level: None,
+            cursor: None,
+            grab: None,
+            drag: None,
+            under: Vec::new(),
+            cycle: 0,
+            crop_drag: None,
+        }
     }
 }
 
@@ -138,6 +151,14 @@ impl Canvas {
             _ => self.grab = None,
         }
         Some((self.view(id)?, hover.map(|p| (p.x - rect.min.x, p.y - rect.min.y))))
+    }
+
+    /// View `id` moved `dx` mm along, to keep what's on screen in place when its coordinates move
+    /// under it (a section's start moving along its line).
+    pub(crate) fn slide(&mut self, id: Id, dx: f64) {
+        if let Some(c) = self.cams.get_mut(&id) {
+            c.cx += dx;
+        }
     }
 
     /// Zoom by `factor` about the middle of the view.
@@ -285,10 +306,10 @@ impl Scene<'_> {
     }
 }
 
-/// Of the lines Align, Mirror and dimensions use on an element (a grid's, a wall's centre line
-/// and faces), the one nearest `p`.
+/// Of the lines Align, Mirror and dimensions use on an element (a grid's, a wall's centre line,
+/// faces and ends, a door's or a window's centre and jambs), the one nearest `p`.
 fn nearest_line(m: &Model, id: Id, p: P2) -> Option<(P2, P2)> {
-    m.reference_at(id, p).and_then(|(r, _)| m.reference_line(&r).ok())
+    m.reference_at(id, p, |_| true).and_then(|(r, _)| m.reference_line(&r).ok())
 }
 
 /// Degrees from the ray `centre`→`from` to the ray `centre`→`to`, counter-clockwise, in
@@ -354,6 +375,32 @@ fn start_of(tool: &Tool) -> &[P2] {
         Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) => start.as_slice(),
         _ => &[],
     }
+}
+
+/// Where a crop region's edges have their grips: west, east, south and north (in a section: its
+/// start, its end, its bottom and its top).
+fn grips([lo, hi]: [P2; 2]) -> [P2; 4] {
+    let mid = (lo + hi) * 0.5;
+    [P2(lo.0, mid.1), P2(hi.0, mid.1), P2(mid.0, lo.1), P2(mid.0, hi.1)]
+}
+
+/// The region with edge `k` (as [`grips`] orders them) moved to `p`, at least 100 mm across.
+fn regrip([lo, hi]: [P2; 2], k: usize, p: P2) -> [P2; 2] {
+    match k {
+        0 => [P2(p.0.min(hi.0 - 100.0), lo.1), hi],
+        1 => [lo, P2(p.0.max(lo.0 + 100.0), hi.1)],
+        2 => [P2(lo.0, p.1.min(hi.1 - 100.0)), hi],
+        _ => [lo, P2(hi.0, p.1.max(lo.1 + 100.0))],
+    }
+}
+
+/// Of element `id`'s lines that a dimension of `kind` can take after `first` (for an aligned one,
+/// parallel to it; for an angular one, across it), the nearest `p`, if it's within `near` mm: a
+/// wall's far end isn't picked by a click on its middle.
+fn reference_for(m: &Model, kind: DimKind, first: Option<&Reference>, id: Id, p: P2, near: f64) -> Option<Reference> {
+    let first = first.and_then(|r| m.reference_line(r).ok());
+    let keep = |l: Line| first.is_none_or(|(a, b)| geom::parallel(a, b, l.0, l.1) == (kind == DimKind::Aligned));
+    m.reference_at(id, p, keep).filter(|(_, d)| *d <= near).map(|(r, _)| r)
 }
 
 /// The modifier keys held at the last primary-button release (else now): Ctrl adds to the
@@ -443,6 +490,8 @@ impl BimApp {
         if (std::mem::take(&mut self.tab_cycle) || tab) && !c.under.is_empty() {
             c.cycle = (c.cycle + 1) % c.under.len();
         }
+        // How near the cursor a dimension's reference line must be, mm.
+        let near = 2.0 * f64::from(PICK) / view.scale;
         let hovered = match (&self.tool, local) {
             (Tool::Modify, Some(_)) => c.under.get(c.cycle).copied(),
             (Tool::Door | Tool::Window | Tool::Trim(_) | Tool::Split | Tool::Offset, Some(q)) => {
@@ -451,22 +500,32 @@ impl BimApp {
             (Tool::Align(_) | Tool::Mirror { draw: false, .. }, Some(q)) => {
                 d.pick(q, PICK).filter(|id| !model.reference_lines(*id).is_empty())
             }
-            // A wall or grid to measure to, parallel to the first one picked.
-            (Tool::Dimension(refs), Some(q)) => {
-                let first = refs.first().and_then(|r| model.reference_line(r).ok());
-                d.pick_all(q, PICK).into_iter().find(|id| {
-                    model.reference_lines(*id).first().is_some_and(|(_, (a, b))| first.is_none_or(|(c, e)| geom::parallel(*a, *b, c, e)))
-                })
+            // Something to measure to: with a line parallel to the first one picked, or for an angle,
+            // one across it.
+            (Tool::Dimension(refs), Some(q)) => d
+                .pick_all(q, PICK)
+                .into_iter()
+                .find(|id| reference_for(&model, DimKind::Aligned, refs.first(), *id, view.mm(q), near).is_some()),
+            (Tool::Angular(refs), Some(q)) if refs.len() < 2 => d
+                .pick_all(q, PICK)
+                .into_iter()
+                .find(|id| reference_for(&model, DimKind::Angular, refs.first(), *id, view.mm(q), near).is_some()),
+            (Tool::Radial(None), Some(q)) => {
+                d.pick_all(q, PICK).into_iter().find(|id| model.reference_arc(&Reference { id: *id, face: Face::Centre }).is_ok())
             }
+            // What a spot elevation would read.
+            (Tool::Spot, Some(q)) => model.spot_host(level, view.mm(q)),
             (Tool::Tag, Some(q)) => {
                 d.pick(q, PICK).filter(|id| matches!(model.elements.get(id), Some(Element::Door(_) | Element::Window(_))))
             }
             _ => None,
         };
 
+        let crop = self.crop_grips(ui, &response, rect, &view, level);
         // A drag from an element moves the selection; from empty floor, it draws a selection box.
         if response.drag_started_by(PointerButton::Primary)
             && self.tool == Tool::Modify
+            && self.canvas.crop_drag.is_none()
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
             let o = (o.x - rect.min.x, o.y - rect.min.y);
@@ -515,6 +574,7 @@ impl BimApp {
             marked.push(first);
         }
         paint(&p, Place::at(rect.min), &d, &marked, hovered, self.thin, &[]);
+        p.extend(crop);
         let rooms = hovered.iter().map(|id| (*id, pal().hover)).chain(self.selection.iter().map(|id| (*id, pal().accent)));
         for (id, accent) in rooms {
             if let Some(Element::Room(r)) = model.elements.get(&id)
@@ -565,6 +625,49 @@ impl BimApp {
                 self.canvas.zoom(id, 0.8);
             }
         });
+    }
+
+    /// View `id`'s crop region over it, in `rect` through `view`: its outline, and with Modify, a
+    /// grip at the middle of each edge. A drag from a grip moves that edge; on release, `crop`.
+    /// What to paint over the view once it's drawn.
+    pub(crate) fn crop_grips(&mut self, ui: &Ui, response: &Response, rect: Rect, view: &View, id: Id) -> Vec<Shape> {
+        let Some(region) = render::crop_region(&self.session.model, id) else { return Vec::new() };
+        let at = |p: P2| pos(rect.min, view.px(p));
+        let modify = self.tool == Tool::Modify;
+        if modify
+            && response.drag_started_by(PointerButton::Primary)
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
+            && let Some(k) = grips(region).iter().position(|g| at(*g).distance(o) <= 8.0)
+        {
+            self.canvas.crop_drag = Some((id, k));
+        }
+        let held = self.canvas.crop_drag.filter(|(v, _)| *v == id).map(|(_, k)| k);
+        let now = ui.input(|i| i.pointer.latest_pos()).map(|q| view.mm((q.x - rect.min.x, q.y - rect.min.y)));
+        let shown = match (held, now) {
+            (Some(k), Some(p)) => regrip(region, k, round(p)),
+            _ => region,
+        };
+        if response.drag_stopped()
+            && let Some(k) = held
+        {
+            self.canvas.crop_drag = None;
+            let moved = shown != region && self.run("crop", json!({"view": id, "region": [point(shown[0]), point(shown[1])]})).is_some();
+            // A section's start went along its line: what's on screen stays where it was.
+            if moved && k == 0 && self.session.model.section(id).is_some() {
+                self.canvas.slide(id, -shown[0].0);
+            }
+        }
+        let [lo, hi] = shown;
+        let ring = [lo, P2(hi.0, lo.1), hi, P2(lo.0, hi.1)].map(at).to_vec();
+        let mut shapes = vec![Shape::closed_line(ring, Stroke::new(1.0, if held.is_some() { pal().accent } else { pal().muted }))];
+        if modify {
+            for g in grips(shown) {
+                let r = Rect::from_center_size(at(g), vec2(9.0, 9.0));
+                shapes.push(Shape::rect_filled(r, 1.0, pal().surface));
+                shapes.push(Shape::rect_stroke(r, 1.0, Stroke::new(1.5, pal().accent), StrokeKind::Middle));
+            }
+        }
+        shapes
     }
 
     /// Add `found` to the selection with Ctrl, take it away with Shift, else select just it.
@@ -662,8 +765,9 @@ impl BimApp {
             // A reference under the cursor joins the dimension; a click away from them places it.
             Tool::Dimension(refs) => {
                 let mut refs = refs.clone();
-                match hovered.and_then(|id| m.reference_at(id, v.mm(at))) {
-                    Some((r, _)) => {
+                match hovered.and_then(|id| reference_for(m, DimKind::Aligned, refs.first(), id, v.mm(at), 2.0 * f64::from(PICK) / v.scale))
+                {
+                    Some(r) => {
                         if !refs.contains(&r) {
                             refs.push(r);
                         }
@@ -677,6 +781,38 @@ impl BimApp {
                     }
                     None => {}
                 }
+            }
+            // Two lines that meet, then where the arc goes.
+            Tool::Angular(refs) => {
+                let mut refs = refs.clone();
+                match hovered.and_then(|id| reference_for(m, DimKind::Angular, refs.first(), id, v.mm(at), 2.0 * f64::from(PICK) / v.scale))
+                {
+                    Some(r) if refs.len() < 2 && !refs.contains(&r) => {
+                        refs.push(r);
+                        self.tool = Tool::Angular(refs);
+                    }
+                    _ if refs.len() == 2 => {
+                        let p = json!({"kind": "angular", "refs": refs, "at": point(round(v.mm(at))), "level": level});
+                        if self.run("dimension", p).is_some() {
+                            self.tool = Tool::Angular(Vec::new());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            &Tool::Radial(picked) => match (picked, hovered) {
+                (None, Some(id)) => self.tool = Tool::Radial(Some(Reference { id, face: Face::Centre })),
+                (Some(r), _) => {
+                    if self.run("dimension", json!({"kind": "radial", "refs": [r], "at": point(round(v.mm(at))), "level": level})).is_some()
+                    {
+                        self.tool = Tool::Radial(None);
+                    }
+                }
+                (None, None) => {}
+            },
+            Tool::Text => self.write_note(level, round(v.mm(at))),
+            Tool::Spot => {
+                self.run("spot", json!({"at": point(round(v.mm(at))), "view": level}));
             }
             Tool::Tag => {
                 if let Some(id) = hovered {
@@ -722,6 +858,18 @@ impl BimApp {
                 }
             },
         }
+    }
+
+    /// The Text tool's click: a note saying what the Options Bar says, its top left at `at` in
+    /// view `view` (a plan's level, a section, an elevation or a sheet).
+    pub(crate) fn write_note(&mut self, view: Id, at: P2) {
+        if self.note_text.trim().is_empty() {
+            self.status = Status { text: "text: type what the note says in the Options Bar first".into(), error: true };
+            return;
+        }
+        // `\n` typed in the bar breaks the line.
+        let text = self.note_text.replace("\\n", "\n");
+        self.run("text", json!({"text": text, "at": point(at), "view": view}));
     }
 
     /// Rotate the selection about `centre` by `angle` degrees, counter-clockwise; with Copy, a
@@ -958,7 +1106,7 @@ impl BimApp {
             // The section a click would end, and the elevation a click would place.
             &Tool::Section(Some(start)) => {
                 let end = snap(m, level, v, q, &[start], shift);
-                sketched(&Element::Section(Section { name: m.free_view_name("Section", true), start, end, depth: None }));
+                sketched(&Element::Section(Section { name: m.free_view_name("Section", true), start, end, depth: None, crop: None }));
                 return;
             }
             Tool::Elevation => {
@@ -966,7 +1114,8 @@ impl BimApp {
                 if let Some(f) = m.facing_from(at)
                     && let Some((start, end)) = m.elevation_line(f, Some(at))
                 {
-                    sketched(&Element::Elevation(Section { name: m.free_view_name(f.name(), false), start, end, depth: None }));
+                    let name = m.free_view_name(f.name(), false);
+                    sketched(&Element::Elevation(Section { name, start, end, depth: None, crop: None }));
                 }
                 return;
             }
@@ -1031,14 +1180,15 @@ impl BimApp {
             }
             // The references picked, the one under the cursor, else the dimension a click places.
             Tool::Dimension(refs) => {
-                let candidate = hovered.and_then(|id| m.reference_at(id, v.mm(q))).map(|(r, _)| r);
+                let candidate =
+                    hovered.and_then(|id| reference_for(m, DimKind::Aligned, refs.first(), id, v.mm(q), 2.0 * f64::from(PICK) / v.scale));
                 for r in refs.iter().chain(&candidate) {
                     if let Ok((a, b)) = m.reference_line(r) {
                         dashed(sc.screen(a), sc.screen(b));
                     }
                 }
                 if candidate.is_none() && refs.len() >= 2 {
-                    sketched(&Element::Dimension(Dimension { level, refs: refs.clone(), at: round(v.mm(q)) }));
+                    sketched(&Element::Dimension(Dimension { level, kind: DimKind::Aligned, refs: refs.clone(), at: round(v.mm(q)) }));
                 }
                 return;
             }
@@ -1046,6 +1196,34 @@ impl BimApp {
                 if let Some(id) = hovered {
                     sketched(&Element::Tag(Tag { host: id, offset: m.tag_offset(id), leader: self.tag_leader }));
                 }
+                return;
+            }
+            // The lines picked, the one under the cursor, else the arc a click places.
+            Tool::Angular(refs) => {
+                let candidate =
+                    hovered.and_then(|id| reference_for(m, DimKind::Angular, refs.first(), id, v.mm(q), 2.0 * f64::from(PICK) / v.scale));
+                for r in refs.iter().chain(candidate.as_ref().filter(|_| refs.len() < 2)) {
+                    if let Ok((a, b)) = m.reference_line(r) {
+                        dashed(sc.screen(a), sc.screen(b));
+                    }
+                }
+                if refs.len() == 2 {
+                    sketched(&Element::Dimension(Dimension { level, kind: DimKind::Angular, refs: refs.clone(), at: round(v.mm(q)) }));
+                }
+                return;
+            }
+            &Tool::Radial(Some(r)) => {
+                sketched(&Element::Dimension(Dimension { level, kind: DimKind::Radial, refs: vec![r], at: round(v.mm(q)) }));
+                return;
+            }
+            Tool::Text if !self.note_text.trim().is_empty() => {
+                let text = self.note_text.replace("\\n", "\n");
+                sketched(&Element::Text(Note { view: level, at: round(v.mm(q)), text, size: NOTE_SIZE, angle: 0.0, leader: None }));
+                return;
+            }
+            Tool::Spot => {
+                let at = round(v.mm(q));
+                sketched(&Element::Spot(Spot { view: level, at, host: m.spot_host(level, at) }));
                 return;
             }
             Tool::Column => {

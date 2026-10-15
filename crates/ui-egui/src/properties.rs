@@ -33,14 +33,29 @@ enum Kind {
     TopLevel,
     /// A wall's height: typed when its top is unconnected, else what its levels make it.
     Height,
+    /// A number, or nothing (a plan's top at the level above): typed, or cleared.
+    Limit,
+    /// Whether a view is cropped: on crops it to what it shows (`crop`), off uncrops it.
+    Crop,
     /// Derived from the rest; read only.
     Shown,
 }
 
 use Kind::*;
 
-/// A parameter: its group, its field as `elements` names it, its label, its editor.
+/// A parameter: its group, its field as `elements` names it (a field of a field after a dot, as
+/// `view_range.cut`), its label, its editor.
 type Row = (&'static str, &'static str, &'static str, Kind);
+
+/// Field `key` of element `e`'s JSON, through the dots.
+fn field_of<'a>(e: &'a Value, key: &str) -> &'a Value {
+    key.split('.').fold(e, |v, k| &v[k])
+}
+
+/// `{key: val}` for `modify`, nested through the dots: modify merges into fields that are objects.
+fn nested(key: &str, val: Value) -> Value {
+    key.rsplit('.').fold(val, |v, k| json!({ k: v }))
+}
 
 fn rows(category: &str) -> &'static [Row] {
     match category {
@@ -84,7 +99,22 @@ fn rows(category: &str) -> &'static [Row] {
         ],
         "level" => &[("Constraints", "elevation", "Elevation", Number), ("Identity Data", "name", "Name", Text)],
         "grid" => &[("Identity Data", "name", "Name", Text), ("Other", "start", "Start", Point), ("Other", "end", "End", Point)],
-        "dimension" => &[("Dimensions", "values", "Value", Shown), ("Other", "at", "Line Through", Point)],
+        "dimension" => {
+            &[("Dimensions", "values", "Value", Shown), ("Other", "kind", "Kind", Shown), ("Other", "at", "Line Through", Point)]
+        }
+        "text" => &[
+            ("Text", "text", "Text", Text),
+            ("Graphics", "size", "Text Size (mm)", Number),
+            ("Other", "angle", "Rotation (°)", Number),
+            ("Other", "at", "Location", Point),
+        ],
+        "spot" => &[("Dimensions", "elevation", "Elevation", Shown), ("Other", "host", "Host", Shown), ("Other", "at", "Location", Point)],
+        "schedule" => &[("Identity Data", "name", "View Name", Text), ("Other", "of", "Category", Shown)],
+        "view3d" => &[
+            ("Identity Data", "name", "View Name", Text),
+            ("Camera", "azimuth", "Azimuth (°)", Number),
+            ("Camera", "elevation", "Elevation (°)", Number),
+        ],
         "tag" => {
             &[("Graphics", "leader", "Leader Line", Flag), ("Other", "host", "Tagged Element", Shown), ("Other", "offset", "Offset", Point)]
         }
@@ -126,6 +156,7 @@ fn rows(category: &str) -> &'static [Row] {
         ],
         "section" | "elevation" => &[
             ("Identity Data", "name", "View Name", Text),
+            ("Extents", "crop", "Crop View", Crop),
             ("Extents", "depth", "Far Clip Offset", Number),
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
@@ -139,6 +170,11 @@ const PLAN: &[Row] = &[
     ("Identity Data", "name", "View Name", Text),
     ("Extents", "id", "Associated Level", LevelName),
     ("Extents", "elevation", "Level Elevation", Number),
+    ("Extents", "crop", "Crop View", Crop),
+    ("View Range", "view_range.top", "Top", Limit),
+    ("View Range", "view_range.cut", "Cut Plane", Number),
+    ("View Range", "view_range.bottom", "Bottom", Number),
+    ("View Range", "view_range.depth", "View Depth", Number),
 ];
 
 /// A type's parameters, as its Type Properties list them: its field, its label.
@@ -173,6 +209,9 @@ fn icon(category: &str) -> Icon {
         "column" => Icon::Column,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,
+        "text" => Icon::Text,
+        "spot" => Icon::Spot,
+        "view3d" => Icon::View3D,
         _ => Icon::Plan,
     }
 }
@@ -197,6 +236,8 @@ pub(crate) fn number(s: &str) -> Option<f64> {
 fn parse(kind: Kind, s: &str) -> Result<Value, String> {
     match kind {
         Number | Height => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number")),
+        Limit if s.trim().is_empty() => Ok(Value::Null),
+        Limit => number(s).map(|x| json!(x)).ok_or_else(|| format!("`{s}` is not a number; clear it for none")),
         Point => match s.split([',', ' ']).filter(|t| !t.trim().is_empty()).collect::<Vec<_>>()[..] {
             [x, y] if number(x).is_some() && number(y).is_some() => Ok(json!([number(x), number(y)])),
             _ => Err(format!("`{s}` is not a point; type x, y in mm")),
@@ -298,7 +339,9 @@ impl BimApp {
             ([], Tool::Room, _) => Subject::New("room"),
             ([], Tool::Level, _) => Subject::New("level"),
             ([], Tool::Grid(_), _) => Subject::New("grid"),
-            ([], Tool::Dimension(_), _) => Subject::New("dimension"),
+            ([], Tool::Dimension(_) | Tool::Angular(_) | Tool::Radial(_), _) => Subject::New("dimension"),
+            ([], Tool::Text, _) => Subject::New("text"),
+            ([], Tool::Spot, _) => Subject::New("spot"),
             ([], Tool::Tag, _) => Subject::New("tag"),
             ([], Tool::Section(_), _) => Subject::New("section"),
             ([], Tool::Elevation, _) => Subject::New("elevation"),
@@ -372,6 +415,13 @@ impl BimApp {
         ui.add_space(4.0);
         if !ids.is_empty() {
             self.parameters(ui, &model, &ids, rows);
+        }
+        // A 3D view on a sheet: where it looks from, too.
+        if let Subject::Element(id) = subject
+            && let Some(bimcraft_core::model::Element::Viewport(vp)) = model.elements.get(&id)
+            && let Some(bimcraft_core::model::Element::View3D(_)) = model.elements.get(&vp.view)
+        {
+            self.parameters(ui, &model, &[vp.view], self::rows("view3d"));
         }
         ui.add_space(8.0);
         // Fields commit on Enter or when they lose the keyboard, which a click here does.
@@ -461,7 +511,10 @@ impl BimApp {
             .iter()
             .map(|r| r.1)
             .chain(["top_level", "enclosed"])
-            .map(|k| (k.to_string(), if all.iter().all(|e| e[k] == first[k]) { first[k].clone() } else { Value::Null }))
+            .map(|k| {
+                let shared = all.iter().all(|e| field_of(e, k) == field_of(&first, k));
+                (k.to_string(), if shared { field_of(&first, k).clone() } else { Value::Null })
+            })
             .collect();
         let v = Value::Object(v);
         let levels: Vec<String> = model.levels().iter().map(|(_, l)| l.name.clone()).collect();
@@ -473,6 +526,7 @@ impl BimApp {
             }
         }
         let mut change: Option<(&str, Result<Value, String>)> = None;
+        let mut crop = None;
         for group in groups {
             let open = !self.collapsed.contains(group);
             if group_header(ui, group, open) && !self.collapsed.remove(group) {
@@ -493,6 +547,14 @@ impl BimApp {
                             }
                             LevelName => {
                                 ui.label(RichText::new(level_name(val)).color(pal().muted));
+                            }
+                            Crop => {
+                                let mut on = !val.is_null();
+                                let r = ui.checkbox(&mut on, "");
+                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, label));
+                                if r.labelled_by(name.id).changed() {
+                                    crop = Some(on);
+                                }
                             }
                             Flag => {
                                 let mut on = val.as_bool().unwrap_or(false);
@@ -516,8 +578,9 @@ impl BimApp {
                                     change = Some((key, Ok(if l == NONE { Value::Null } else { json!(l) })));
                                 }
                             }
-                            Text | Number | Point | Height => {
-                                if let Some(typed) = self.field(ui, id, key, text(val), name.id) {
+                            Text | Number | Point | Height | Limit => {
+                                let hint = if kind == Limit { "Level Above" } else { "" };
+                                if let Some(typed) = self.field(ui, id, key, text(val), name.id, hint) {
                                     change = Some((key, parse(kind, &typed)));
                                 }
                             }
@@ -530,9 +593,15 @@ impl BimApp {
         if ids.len() == 1 && v["enclosed"] == json!(false) {
             ui.label(RichText::new("Not enclosed: the walls around it don't close.").color(pal().error));
         }
+        // A view's crop: on to all it shows, or off.
+        if let (Some(on), &[view]) = (crop, ids) {
+            self.run("crop", if on { json!({"view": view}) } else { json!({"view": view, "region": null}) });
+        }
         match change {
             Some((key, Ok(val))) => {
-                self.run("modify", json!({"ids": ids, key: val}));
+                let mut p = nested(key, val);
+                p["ids"] = json!(ids);
+                self.run("modify", p);
             }
             Some((key, Err(e))) => self.status = Status { text: format!("{key}: {e}"), error: true },
             None => {}
@@ -541,14 +610,14 @@ impl BimApp {
 
     /// A text field that edits as the user types and commits once, when they press Enter or
     /// click away (Escape drops the edit): the text typed, if it changed.
-    fn field(&mut self, ui: &mut Ui, id: Id, key: &'static str, current: String, label: UiId) -> Option<String> {
+    fn field(&mut self, ui: &mut Ui, id: Id, key: &'static str, current: String, label: UiId, hint: &str) -> Option<String> {
         let wid = ui.make_persistent_id(("field", id, key));
         let focused = ui.memory(|m| m.has_focus(wid));
         let mut typed = match &self.edit {
             Some((i, k, t)) if focused && *i == id && *k == key => t.clone(),
             _ => current.clone(),
         };
-        let r = ui.add(TextEdit::singleline(&mut typed).id(wid).desired_width(f32::INFINITY)).labelled_by(label);
+        let r = ui.add(TextEdit::singleline(&mut typed).id(wid).desired_width(f32::INFINITY).hint_text(hint)).labelled_by(label);
         if r.has_focus() {
             self.edit = Some((id, key, typed));
             return None;

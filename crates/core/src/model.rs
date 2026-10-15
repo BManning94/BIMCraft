@@ -1,9 +1,12 @@
 //! The building model: levels, grids, walls, floors, doors, windows, rooms, columns, stairs and
-//! roofs, the types they use, the dimensions and tags annotating plans, the sections and
-//! elevations looking at it, and the sheets its views are placed on. Lengths are millimetres, x east, y north, z up; each level
-//! has an elevation. On a sheet, millimetres of paper from its bottom left corner.
+//! roofs, the types they use, the dimensions, tags, text notes and spot elevations annotating
+//! views, the sections, elevations, schedules and 3D views looking at it, and the sheets its views
+//! are placed on. Lengths are millimetres, x east, y north, z up; each level has an elevation. In
+//! a section or an elevation, millimetres along its line from its start, and up; on a sheet,
+//! millimetres of paper from its bottom left corner.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::f64::consts::{PI, TAU};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +17,11 @@ pub type Id = u64;
 /// A line in plan, through two points.
 pub type Line = (P2, P2);
 
-/// Height of a plan view's cut plane above its level.
+/// Height of a plan view's cut plane above its level, unless its view range says otherwise; rooms
+/// find the walls that bound them at this height.
 pub const CUT_HEIGHT: f64 = 1200.0;
+/// A text note's capitals, on paper, unless told otherwise: mm.
+pub const NOTE_SIZE: f64 = 2.5;
 /// Wall ends closer than this join, in mm.
 pub const TOL: f64 = 1.0;
 /// Coordinates and lengths beyond 1000 km are refused.
@@ -31,11 +37,50 @@ pub const MAX_TEXT: usize = 256;
 /// Points one command or floor outline may carry.
 pub const MAX_POINTS: usize = 10_000;
 
+/// A level, and its floor plan: what the plan sees (its view range), and the part of it the plan
+/// shows (its crop region, corners south-west then north-east; all of it without one).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Level {
     pub name: String,
     pub elevation: f64,
+    #[serde(default)]
+    pub view_range: ViewRange,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<[P2; 2]>,
+}
+
+impl Level {
+    pub fn new(name: impl Into<String>, elevation: f64) -> Level {
+        Level { name: name.into(), elevation, view_range: ViewRange::default(), crop: None }
+    }
+}
+
+/// A plan's view range, as Revit's: mm above its level. Cut by the `cut` plane, seen from it down
+/// to the `bottom` and, beyond, to the view `depth`; above the cut, up to the `top` (the level
+/// above when none) for what overhangs.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ViewRange {
+    pub top: Option<f64>,
+    pub cut: f64,
+    pub bottom: f64,
+    pub depth: f64,
+}
+
+impl Default for ViewRange {
+    fn default() -> ViewRange {
+        ViewRange { top: None, cut: CUT_HEIGHT, bottom: 0.0, depth: 0.0 }
+    }
+}
+
+/// A plan's view range as heights: its top, cut plane, bottom and view depth.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanRange {
+    pub top: f64,
+    pub cut: f64,
+    pub bottom: f64,
+    pub depth: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -107,8 +152,9 @@ pub struct Room {
     pub number: String,
 }
 
-/// Which of an element's lines a dimension measures to: a wall's centre line, or its face on the
-/// left or the right of its start-to-end direction. A grid has only its line.
+/// Which of an element's lines a dimension measures to: a wall's centre line, its face on the
+/// left or the right of its start-to-end direction, or its start or end; a door's or a window's
+/// centre, or its jamb toward its wall's start or end. A grid has only its line.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Face {
@@ -117,15 +163,17 @@ pub enum Face {
     Centre,
     Left,
     Right,
+    Start,
+    End,
 }
 
 impl Face {
     /// The same face of a mirrored wall: a mirror image swaps left and right.
     pub fn mirrored(self) -> Face {
         match self {
-            Face::Centre => Face::Centre,
             Face::Left => Face::Right,
             Face::Right => Face::Left,
+            other => other,
         }
     }
 
@@ -134,6 +182,8 @@ impl Face {
             Face::Centre => "centre line",
             Face::Left => "left face",
             Face::Right => "right face",
+            Face::Start => "start",
+            Face::End => "end",
         }
     }
 }
@@ -147,14 +197,77 @@ pub struct Reference {
     pub face: Face,
 }
 
-/// An aligned dimension in a level's plan: the distances between parallel references, along a
-/// line through `at` across them. It measures the model as it is, so it follows what it measures.
+/// A dimension in a level's plan. Aligned: the distances between parallel references, along a
+/// line through `at` across them. Angular: the angle between two references that meet, on the
+/// side of `at`, its arc through `at`. Radial: a round element's radius, its line toward `at`. It
+/// measures the model as it is, so it follows what it measures.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Dimension {
     pub level: Id,
+    #[serde(default)]
+    pub kind: DimKind,
     pub refs: Vec<Reference>,
     pub at: P2,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DimKind {
+    #[default]
+    Aligned,
+    Angular,
+    Radial,
+}
+
+/// A text note in a view: a level's plan, a section, an elevation or a sheet. `at` is the top left
+/// of its first line, in the view's own terms; `size` its capitals' height on paper, mm; turned
+/// `angle` degrees counter-clockwise; with a leader to `leader`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Note {
+    pub view: Id,
+    pub at: P2,
+    pub text: String,
+    #[serde(default = "note_size")]
+    pub size: f64,
+    #[serde(default)]
+    pub angle: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leader: Option<P2>,
+}
+
+fn note_size() -> f64 {
+    NOTE_SIZE
+}
+
+/// A spot elevation in a view: in a level's plan, the height of the top of `host` at `at`; in a
+/// section or an elevation, of its point `at`, along and up.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Spot {
+    pub view: Id,
+    pub at: P2,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<Id>,
+}
+
+/// A schedule view: the elements of category `of` in rows, as the `schedule` command lists them.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    pub name: String,
+    pub of: String,
+}
+
+/// A 3D view, seen from `azimuth` degrees round from east (counter-clockwise) and `elevation`
+/// degrees up.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct View3D {
+    pub name: String,
+    pub azimuth: f64,
+    pub elevation: f64,
 }
 
 /// A door's or window's tag, showing its mark in the plan of its wall's level, `offset` mm from
@@ -235,7 +348,8 @@ pub fn heading(angle: f64) -> P2 {
 
 /// A section or an elevation: a vertical view along the line from `start` to `end`, looking to
 /// its left. A section cuts the model at its line; an elevation's line lies outside the building,
-/// looking at it. It sees `depth` mm past its line, or everything without one.
+/// looking at it. It sees `depth` mm past its line, or everything without one; cropped, only from
+/// the height `crop[0]` up to `crop[1]`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Section {
@@ -244,6 +358,8 @@ pub struct Section {
     pub end: P2,
     #[serde(default)]
     pub depth: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<[f64; 2]>,
 }
 
 impl Section {
@@ -311,8 +427,8 @@ pub fn paper(size: &str) -> Option<P2> {
     }
 }
 
-/// A view on a sheet: a level's plan, a section or an elevation, its middle `at` mm from the
-/// paper's bottom left corner, at 1 : `scale`.
+/// A view on a sheet: a level's plan, a section, an elevation, a schedule or a 3D view, its middle
+/// `at` mm from the paper's bottom left corner, at 1 : `scale` (a schedule keeps its own size).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Viewport {
@@ -341,11 +457,19 @@ pub enum Element {
     Column(Column),
     Stair(Stair),
     Roof(Roof),
+    Text(Note),
+    Spot(Spot),
+    Schedule(Schedule),
+    View3D(View3D),
 }
 
 impl Element {
     pub fn category(&self) -> &'static str {
         match self {
+            Element::Text(_) => "text",
+            Element::Spot(_) => "spot",
+            Element::Schedule(_) => "schedule",
+            Element::View3D(_) => "view3d",
             Element::Level(_) => "level",
             Element::Grid(_) => "grid",
             Element::Wall(_) => "wall",
@@ -445,8 +569,8 @@ impl Model {
         m.types.column.insert("Rectangular 400 x 400".into(), ColumnType { width: 400.0, depth: 400.0, round: false });
         m.types.column.insert("Round 300".into(), ColumnType { width: 300.0, depth: 300.0, round: true });
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0 });
-        m.insert(Element::Level(Level { name: "Level 1".into(), elevation: 0.0 }));
-        m.insert(Element::Level(Level { name: "Level 2".into(), elevation: 3000.0 }));
+        m.insert(Element::Level(Level::new("Level 1", 0.0)));
+        m.insert(Element::Level(Level::new("Level 2", 3000.0)));
         m
     }
 
@@ -512,10 +636,28 @@ impl Model {
         }
     }
 
-    /// Whether a plan of `level` cuts the wall: the wall spans the level's cut plane.
+    /// Whether a plan of `level` cuts the wall: the wall spans the plan's cut plane.
     pub fn cut_by(&self, w: &Wall, level: Id) -> bool {
-        let z = self.elevation(level) + CUT_HEIGHT;
+        self.spans(w, self.plan_range(level).cut)
+    }
+
+    /// Whether the wall bounds the rooms of `level`: it spans the height rooms are found at,
+    /// [`CUT_HEIGHT`] above the level, whatever the level's plan cuts at.
+    pub fn bounding(&self, w: &Wall, level: Id) -> bool {
+        self.spans(w, self.elevation(level) + CUT_HEIGHT)
+    }
+
+    fn spans(&self, w: &Wall, z: f64) -> bool {
         self.base_z(w) <= z && z < self.top_z(w)
+    }
+
+    /// The heights of the view range of `level`'s plan. A top that isn't set is the level above
+    /// (none above: no limit), and never below the cut plane.
+    pub fn plan_range(&self, level: Id) -> PlanRange {
+        let z = self.elevation(level);
+        let r = self.level(level).map_or_else(ViewRange::default, |l| l.view_range);
+        let above = || self.level_above(level).map_or(f64::INFINITY, |a| self.elevation(a));
+        PlanRange { top: r.top.map_or_else(above, |t| z + t).max(z + r.cut), cut: z + r.cut, bottom: z + r.bottom, depth: z + r.depth }
     }
 
     /// How far wall `id` reaches past its end at `p` so a corner closes: the half thickness of the
@@ -599,12 +741,16 @@ impl Model {
                 Some(Element::Door(o) | Element::Window(o)) => wall_level(o),
                 _ => None,
             },
+            // Notes and spot elevations in a level's plan.
+            Element::Text(Note { view, .. }) | Element::Spot(Spot { view, .. }) => self.level(*view).map(|_| *view),
             Element::Level(_)
             | Element::Grid(_)
             | Element::Section(_)
             | Element::Elevation(_)
             | Element::Sheet(_)
-            | Element::Viewport(_) => None,
+            | Element::Viewport(_)
+            | Element::Schedule(_)
+            | Element::View3D(_) => None,
         }
     }
 
@@ -690,11 +836,14 @@ impl Model {
         }
     }
 
-    /// The name of view `id`, a level's plan, a section or an elevation; none for another element.
+    /// The name of view `id`: a level's plan, a section, an elevation, a schedule or a 3D view;
+    /// none for another element.
     pub fn view_name(&self, id: Id) -> Option<&str> {
         match self.elements.get(&id) {
             Some(Element::Level(l)) => Some(&l.name),
             Some(Element::Section(v) | Element::Elevation(v)) => Some(&v.name),
+            Some(Element::Schedule(sc)) => Some(&sc.name),
+            Some(Element::View3D(v)) => Some(&v.name),
             _ => None,
         }
     }
@@ -708,17 +857,9 @@ impl Model {
     }
 
     /// The first of `base`, `base 2`, `base 3`… (or with `numbered`, `base 1`, `base 2`…) that no
-    /// view has: no level, section or elevation.
+    /// view has.
     pub fn free_view_name(&self, base: &str, numbered: bool) -> String {
-        let taken: BTreeSet<&str> = self
-            .elements
-            .values()
-            .filter_map(|e| match e {
-                Element::Level(l) => Some(l.name.as_str()),
-                Element::Section(v) | Element::Elevation(v) => Some(v.name.as_str()),
-                _ => None,
-            })
-            .collect();
+        let taken: BTreeSet<&str> = self.elements.keys().filter_map(|id| self.view_name(*id)).collect();
         (1..)
             .map(|n| if n == 1 && !numbered { base.to_string() } else { format!("{base} {n}") })
             .find(|n| !taken.contains(n.as_str()))
@@ -799,30 +940,52 @@ impl Model {
     }
 
     /// The line `r` measures to, or why there is none. A wall's lines reach as far as its plan
-    /// outline does, past the ends it shares.
+    /// outline does, past the ends it shares; its ends, and a door's or a window's centre and
+    /// jambs, run across it from face to face.
     pub fn reference_line(&self, r: &Reference) -> Result<Line, String> {
         match (self.elements.get(&r.id), r.face) {
             (Some(Element::Grid(g)), Face::Centre) => Ok((g.start, g.end)),
             (Some(Element::Grid(_)), _) => Err(format!("grid {} has no faces; measure to its line", r.id)),
             (Some(Element::Wall(w)), face) => {
                 let u = (w.end - w.start).unit();
-                let side = match face {
-                    Face::Centre => 0.0,
-                    Face::Left => 0.5,
-                    Face::Right => -0.5,
-                };
-                let n = u.perp() * (side * self.thickness(w));
-                Ok((w.start - u * self.join_reach(r.id, w.start) + n, w.end + u * self.join_reach(r.id, w.end) + n))
+                let (a, b) = (w.start - u * self.join_reach(r.id, w.start), w.end + u * self.join_reach(r.id, w.end));
+                let half = u.perp() * (self.thickness(w) / 2.0);
+                Ok(match face {
+                    Face::Centre => (a, b),
+                    Face::Left => (a + half, b + half),
+                    Face::Right => (a - half, b - half),
+                    Face::Start => (a - half, a + half),
+                    Face::End => (b - half, b + half),
+                })
             }
-            (Some(e), _) => Err(format!("{} {} isn't a wall or a grid", e.category(), r.id)),
+            (Some(e @ (Element::Door(o) | Element::Window(o))), face) => {
+                let what = format!("{} {}", e.category(), r.id);
+                let (Some(w), Some(t)) = (self.wall(o.host), self.opening_type(e)) else {
+                    return Err(format!("{what} has no wall or no type to measure"));
+                };
+                let along = match face {
+                    Face::Centre => o.offset,
+                    Face::Start => o.offset - t.width / 2.0,
+                    Face::End => o.offset + t.width / 2.0,
+                    Face::Left | Face::Right => {
+                        return Err(format!("{what} has a centre and two jambs, start and end; measure to one of those"));
+                    }
+                };
+                let u = (w.end - w.start).unit();
+                let (p, half) = (w.start + u * along, u.perp() * (self.thickness(w) / 2.0));
+                Ok((p - half, p + half))
+            }
+            (Some(e), _) => Err(format!("{} {} isn't a wall, a door, a window or a grid", e.category(), r.id)),
             (None, _) => Err(format!("element {} doesn't exist", r.id)),
         }
     }
 
-    /// The lines dimensions measure to on element `id`: a wall's centre line and faces, a grid's.
+    /// The lines dimensions measure to on element `id`: a wall's centre line, faces and ends, a
+    /// door's or a window's centre and jambs, a grid's line.
     pub fn reference_lines(&self, id: Id) -> Vec<(Reference, Line)> {
         let faces: &[Face] = match self.elements.get(&id) {
-            Some(Element::Wall(_)) => &[Face::Centre, Face::Left, Face::Right],
+            Some(Element::Wall(_)) => &[Face::Centre, Face::Left, Face::Right, Face::Start, Face::End],
+            Some(Element::Door(_) | Element::Window(_)) => &[Face::Centre, Face::Start, Face::End],
             Some(Element::Grid(_)) => &[Face::Centre],
             _ => &[],
         };
@@ -835,9 +998,51 @@ impl Model {
             .collect()
     }
 
-    /// Of element `id`'s reference lines, the one nearest `p`, and how far it is.
-    pub fn reference_at(&self, id: Id, p: P2) -> Option<(Reference, f64)> {
-        self.reference_lines(id).into_iter().map(|(r, (a, b))| (r, geom::dist_to_segment(p, a, b))).min_by(|x, y| x.1.total_cmp(&y.1))
+    /// Of element `id`'s reference lines that `keep` takes, the one nearest `p`, and how far it is.
+    pub fn reference_at(&self, id: Id, p: P2, keep: impl Fn(Line) -> bool) -> Option<(Reference, f64)> {
+        self.reference_lines(id)
+            .into_iter()
+            .filter(|(_, l)| keep(*l))
+            .map(|(r, (a, b))| (r, geom::dist_to_segment(p, a, b)))
+            .min_by(|x, y| x.1.total_cmp(&y.1))
+    }
+
+    /// The circle a radial dimension measures on `r`: a round column's centre and radius.
+    pub fn reference_arc(&self, r: &Reference) -> Result<(P2, f64), String> {
+        match self.elements.get(&r.id) {
+            Some(Element::Column(c)) => match self.types.column.get(&c.type_name) {
+                Some(t) if t.round => Ok((c.at, t.width / 2.0)),
+                _ => Err(format!("column {} isn't round; a radial dimension measures round columns", r.id)),
+            },
+            Some(e) => Err(format!("{} {} isn't round; a radial dimension measures round columns", e.category(), r.id)),
+            None => Err(format!("element {} doesn't exist", r.id)),
+        }
+    }
+
+    /// An angular dimension's arc: where its two lines meet, the angle (radians, counter-clockwise
+    /// from east) of the ray it starts on, and how far it sweeps counter-clockwise to the other:
+    /// the one of the four angles the lines make that holds `at`.
+    pub fn angle_sector(&self, d: &Dimension) -> Option<(P2, f64, f64)> {
+        let [r1, r2] = d.refs.as_slice() else { return None };
+        let ((a, b), (c, e)) = (self.reference_line(r1).ok()?, self.reference_line(r2).ok()?);
+        let o = geom::line_intersection(a, b, c, e)?;
+        let at = d.at - o;
+        let theta = at.1.atan2(at.0);
+        let rays = |p: P2, q: P2| {
+            let u = q - p;
+            [u.1.atan2(u.0), (-u.1).atan2(-u.0)]
+        };
+        for s in rays(a, b) {
+            for t in rays(c, e) {
+                for (from, to) in [(s, t), (t, s)] {
+                    let sweep = (to - from).rem_euclid(TAU);
+                    if sweep < PI && (theta - from).rem_euclid(TAU) <= sweep {
+                        return Some((o, from, sweep));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Which way a dimension's line runs, square to its first reference: eastward, or northward
@@ -859,24 +1064,48 @@ impl Model {
         (n, v)
     }
 
-    /// The lengths a dimension shows, segment by segment: west to east, or south to north.
+    /// What a dimension shows: an aligned one's lengths, segment by segment (west to east, or
+    /// south to north); an angular one's angle, in degrees; a radial one's radius.
     pub fn dimension_values(&self, d: &Dimension) -> Vec<f64> {
-        self.crossings(d)
-            .1
-            .windows(2)
-            .filter_map(|w| match w {
-                [x, y] => Some(y.0 - x.0),
-                _ => None,
-            })
-            .collect()
+        match d.kind {
+            DimKind::Aligned => self
+                .crossings(d)
+                .1
+                .windows(2)
+                .filter_map(|w| match w {
+                    [x, y] => Some(y.0 - x.0),
+                    _ => None,
+                })
+                .collect(),
+            DimKind::Angular => self.angle_sector(d).map(|(_, _, sweep)| sweep.to_degrees()).into_iter().collect(),
+            DimKind::Radial => d.refs.first().and_then(|r| self.reference_arc(r).ok()).map(|(_, r)| r).into_iter().collect(),
+        }
     }
 
-    /// Centre lines of the walls a plan of `level` cuts: what bounds its rooms.
+    /// What a spot elevation placed in the plan of `level` at `p` reads: the highest top there of
+    /// what stands on the level.
+    pub fn spot_host(&self, level: Id, p: P2) -> Option<Id> {
+        let on = |id: &Id| self.elements.get(id).is_some_and(|e| self.level_of(e) == Some(level));
+        crate::view3d::tops_at(self, p).into_iter().filter(|(id, _)| on(id)).max_by(|a, b| a.1.total_cmp(&b.1)).map(|(id, _)| id)
+    }
+
+    /// What a spot elevation reads: in a plan, the top of its host at its point (none while its
+    /// host isn't there); in a section or an elevation, its point's height.
+    pub fn spot_value(&self, sp: &Spot) -> Option<f64> {
+        // ponytail: builds every solid per spot, per drawing; share one set of solids if plans carry many spots.
+        match self.elements.get(&sp.view)? {
+            Element::Level(_) => crate::view3d::tops_at(self, sp.at).get(&sp.host?).copied(),
+            Element::Section(_) | Element::Elevation(_) => Some(sp.at.1),
+            _ => None,
+        }
+    }
+
+    /// Centre lines of the walls that bound the rooms of `level`.
     pub fn bounding_lines(&self, level: Id) -> Vec<(P2, P2)> {
         self.elements
             .values()
             .filter_map(|e| match e {
-                Element::Wall(w) if self.cut_by(w, level) => Some((w.start, w.end)),
+                Element::Wall(w) if self.bounding(w, level) => Some((w.start, w.end)),
                 _ => None,
             })
             .collect()
@@ -922,12 +1151,41 @@ impl Model {
         for (&id, e) in &self.elements {
             let who = format!("{} {id}", e.category());
             let level_ok = |l: Id| self.level(l).map(|_| ()).ok_or(format!("{who}: level {l} doesn't exist"));
+            // A view annotation is drawn in: a plan, a section or an elevation, or with `sheets`, a sheet.
+            let view_ok = |v: Id, sheets: bool| match self.elements.get(&v) {
+                Some(Element::Level(_) | Element::Section(_) | Element::Elevation(_)) => Ok(()),
+                Some(Element::Sheet(_)) if sheets => Ok(()),
+                Some(other) => Err(format!(
+                    "{who}: {} {v} isn't a plan, a section, an elevation{}",
+                    other.category(),
+                    if sheets { " or a sheet" } else { "" }
+                )),
+                None => Err(format!("{who}: view {v} doesn't exist")),
+            };
             match e {
                 Element::Level(l) => {
                     text(&who, "name", &l.name)?;
                     coord(&format!("{who} elevation"), l.elevation)?;
                     if !level_names.insert(l.name.as_str()) {
                         return Err(format!("{who}: another level is already named `{}`", l.name));
+                    }
+                    let r = &l.view_range;
+                    for (what, v) in [("cut", r.cut), ("bottom", r.bottom), ("depth", r.depth)].into_iter().chain(r.top.map(|t| ("top", t)))
+                    {
+                        coord(&format!("{who} view range {what}"), v)?;
+                    }
+                    if !(r.depth <= r.bottom && r.bottom <= r.cut && r.top.is_none_or(|t| r.cut <= t)) {
+                        return Err(format!(
+                            "{who}: its plan's view range runs top ≥ cut plane ≥ bottom ≥ view depth, not top {}, cut {}, bottom {}, \
+                             depth {}",
+                            r.top.map_or_else(|| "at the level above".into(), |t| t.to_string()),
+                            r.cut,
+                            r.bottom,
+                            r.depth
+                        ));
+                    }
+                    if let Some([a, b]) = l.crop {
+                        crop(&who, a, b)?;
                     }
                 }
                 Element::Grid(g) => {
@@ -996,12 +1254,19 @@ impl Model {
                 Element::Dimension(d) => {
                     level_ok(d.level)?;
                     point(&who, d.at)?;
-                    if d.refs.len() < 2 || d.refs.len() > MAX_POINTS {
-                        return Err(format!("{who}: a dimension measures between 2 to {MAX_POINTS} references"));
+                    match (d.kind, d.refs.len()) {
+                        (DimKind::Aligned, 2..=MAX_POINTS) | (DimKind::Angular, 2) | (DimKind::Radial, 1) => {}
+                        (DimKind::Aligned, _) => return Err(format!("{who}: a dimension measures between 2 to {MAX_POINTS} references")),
+                        (DimKind::Angular, _) => return Err(format!("{who}: an angular dimension measures between two lines")),
+                        (DimKind::Radial, _) => return Err(format!("{who}: a radial dimension measures one round element")),
                     }
                     let mut seen = BTreeSet::new();
                     let mut first: Option<(Reference, Line)> = None;
                     for r in &d.refs {
+                        if d.kind == DimKind::Radial {
+                            self.reference_arc(r).map_err(|e| format!("{who}: {e}"))?;
+                            continue;
+                        }
                         let line = self.reference_line(r).map_err(|e| format!("{who}: {e}"))?;
                         let what = format!("{} {}", self.cat(r.id), r.id);
                         if !seen.insert((r.id, r.face)) {
@@ -1009,15 +1274,69 @@ impl Model {
                         }
                         match first {
                             None => first = Some((*r, line)),
-                            Some((f, (a, b))) if !geom::parallel(a, b, line.0, line.1) => {
-                                return Err(format!(
-                                    "{who}: {what} isn't parallel to {} {}; a dimension measures between parallel walls and grids",
-                                    self.cat(f.id),
-                                    f.id
-                                ));
+                            Some((f, (a, b))) => {
+                                let parallel = geom::parallel(a, b, line.0, line.1);
+                                let other = format!("{} {}", self.cat(f.id), f.id);
+                                if d.kind == DimKind::Aligned && !parallel {
+                                    return Err(format!(
+                                        "{who}: {what} isn't parallel to {other}; a dimension measures between parallel walls and grids"
+                                    ));
+                                }
+                                if d.kind == DimKind::Angular && parallel {
+                                    return Err(format!("{who}: {what} is parallel to {other}; an angle is between lines that meet"));
+                                }
                             }
-                            Some(_) => {}
                         }
+                    }
+                }
+                Element::Text(n) => {
+                    view_ok(n.view, true)?;
+                    point(&who, n.at)?;
+                    text(&who, "text", &n.text)?;
+                    if n.text.trim().is_empty() {
+                        return Err(format!("{who}: a text note needs text"));
+                    }
+                    if !(n.size > 0.0 && n.size <= 100.0) {
+                        return Err(format!("{who}: size {} mm isn't above 0 and at most 100", n.size));
+                    }
+                    coord(&format!("{who} angle"), n.angle)?;
+                    if let Some(l) = n.leader {
+                        point(&format!("{who} leader"), l)?;
+                    }
+                }
+                Element::Spot(sp) => {
+                    view_ok(sp.view, false)?;
+                    point(&who, sp.at)?;
+                    match (self.level(sp.view), sp.host) {
+                        (Some(_), None) => return Err(format!("{who}: a spot elevation in a plan reads an element's top; give `host`")),
+                        (_, Some(h)) if !self.elements.contains_key(&h) => return Err(format!("{who}: element {h} doesn't exist")),
+                        _ => {}
+                    }
+                }
+                Element::Schedule(sc) => {
+                    text(&who, "name", &sc.name)?;
+                    if sc.name.trim().is_empty() {
+                        return Err(format!("{who}: a view needs a name"));
+                    }
+                    if !crate::schedule::VIEWS.iter().any(|(c, _)| *c == crate::commands::category(&sc.of)) {
+                        let names: Vec<&str> = crate::schedule::VIEWS.iter().map(|(c, _)| *c).collect();
+                        return Err(format!("{who}: there's no schedule of `{}`; there are: {}", sc.of, names.join(", ")));
+                    }
+                    if !view_names.insert(sc.name.as_str()) {
+                        return Err(format!("{who}: another view is already named `{}`", sc.name));
+                    }
+                }
+                Element::View3D(v) => {
+                    text(&who, "name", &v.name)?;
+                    if v.name.trim().is_empty() {
+                        return Err(format!("{who}: a view needs a name"));
+                    }
+                    coord(&format!("{who} azimuth"), v.azimuth)?;
+                    if !(-89.0..=89.0).contains(&v.elevation) {
+                        return Err(format!("{who}: elevation {}° isn't between -89° and 89°", v.elevation));
+                    }
+                    if !view_names.insert(v.name.as_str()) {
+                        return Err(format!("{who}: another view is already named `{}`", v.name));
                     }
                 }
                 Element::Section(v) | Element::Elevation(v) => {
@@ -1028,6 +1347,13 @@ impl Model {
                     line(&who, v.start, v.end)?;
                     if let Some(d) = v.depth {
                         size(&format!("{who} depth"), d)?;
+                    }
+                    if let Some([bottom, top]) = v.crop {
+                        coord(&format!("{who} crop"), bottom)?;
+                        coord(&format!("{who} crop"), top)?;
+                        if bottom >= top - TOL {
+                            return Err(format!("{who}: its crop runs from a bottom up to a top above it, not from {bottom} to {top}"));
+                        }
                     }
                     if !view_names.insert(v.name.as_str()) {
                         return Err(format!("{who}: another view is already named `{}`", v.name));
@@ -1103,7 +1429,7 @@ impl Model {
                         return Err(format!("{who}: {} {} isn't a sheet", self.cat(v.sheet), v.sheet));
                     }
                     let name = self.view_name(v.view).ok_or(format!(
-                        "{who}: {} {} isn't a plan, a section or an elevation",
+                        "{who}: {} {} isn't a plan, a section, an elevation, a schedule or a 3D view",
                         self.cat(v.view),
                         v.view
                     ))?;
@@ -1127,7 +1453,7 @@ impl Model {
             }
         }
         if let Some(n) = view_names.intersection(&level_names).next() {
-            return Err(format!("a section or elevation is named `{n}`, as a level is; name it otherwise"));
+            return Err(format!("a view is named `{n}`, as a level is; name it otherwise"));
         }
         for (host, mut v) in spans {
             v.sort_by(|x, y| x.0.total_cmp(&y.0));
@@ -1167,6 +1493,18 @@ fn size(what: &str, v: f64) -> Result<(), String> {
 fn point(who: &str, p: P2) -> Result<(), String> {
     coord(&format!("{who} x"), p.0)?;
     coord(&format!("{who} y"), p.1)
+}
+
+/// A crop region from its corner `a` to `b`: finite, and `a` south-west of `b` (in a section, below
+/// and before it).
+fn crop(who: &str, a: P2, b: P2) -> Result<(), String> {
+    point(&format!("{who} crop"), a)?;
+    point(&format!("{who} crop"), b)?;
+    if a.0 < b.0 - TOL && a.1 < b.1 - TOL {
+        Ok(())
+    } else {
+        Err(format!("{who}: a crop region runs from its south-west corner to its north-east one (in a section, bottom left to top right)"))
+    }
 }
 
 fn line(who: &str, a: P2, b: P2) -> Result<(), String> {

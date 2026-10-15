@@ -10,12 +10,12 @@ use serde_json::{Map, Value, json};
 use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
 use crate::model::{
-    Column, ColumnType, DEFAULT_HEIGHT, Dimension, Element, Facing, Floor, FloorType, Grid, Id, Level, MAX_COORD, MAX_POINTS, MAX_TEXT,
-    Model, Opening, OpeningType, RISER, Reference, Roof, RoofType, Room, STAIR_WIDTH, Section, Sheet, Stair, TOL, TREAD, Tag, Viewport,
-    Wall, WallType, heading, paper,
+    Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Face, Facing, Floor, FloorType, Grid, Id, Level, Line, MAX_COORD,
+    MAX_POINTS, MAX_TEXT, Model, NOTE_SIZE, Note, Opening, OpeningType, RISER, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule,
+    Section, Sheet, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
-use crate::{pdf, render, sheet, view3d};
+use crate::{pdf, render, schedule, sheet, view3d};
 
 type R = Result<Value, String>;
 
@@ -103,10 +103,32 @@ pub static ALL: &[Command] = &[
         "dimension",
         "Aligned Dimension",
         &["DI"],
-        "{refs: [ref, …], at: [x, y], level?} the distances between parallel references, along a line through `at`. A ref is \
-         {id, face?: centre|left|right} (a wall's faces are left and right of its start-to-end direction; a grid has only \
-         its line), or a point [x, y] on a wall face, a wall's centre line or a grid line. It follows what it measures",
+        "{refs: [ref, …], at: [x, y], level?, kind?: aligned|angular|radial} aligned (the default): the distances between \
+         parallel references, along a line through `at`; angular: the angle between two references that meet, on the side \
+         of `at`; radial: a round column's radius, toward `at`. A ref is {id, face?}: a wall's centre (the default), left or \
+         right face (of its start-to-end direction), start or end; a door's or window's centre, or its jamb toward its wall's \
+         start or end; a grid's line. Or a point [x, y] on one of those (for radial, on a round column's edge). It follows \
+         what it measures",
         dimension,
+    ),
+    edit(
+        "text",
+        "Text",
+        &["TX"],
+        "{text, at: [x, y], view?, size?, angle?, leader?: [x, y]} a text note, its first line's top left at `at`, in a view \
+         by name or id: a level's plan (the lowest by default; `at` in plan mm), a section or an elevation (`at` along its \
+         line from its start, and up), or a sheet by number (`at` in paper mm). `size` is its capitals' height on paper, \
+         mm (2.5); `angle` degrees counter-clockwise; with `leader`, a line to that point. Lines break at \\n",
+        text_note,
+    ),
+    edit(
+        "spot",
+        "Spot Elevation",
+        &["EL"],
+        "{at: [x, y], view?, host?} a spot elevation: in a level's plan (the lowest by default), the height of the top of \
+         what stands on the level at `at` (or of `host`), following it; in a section or an elevation, of its point `at`, \
+         along and up",
+        spot,
     ),
     edit(
         "tag",
@@ -145,10 +167,22 @@ pub static ALL: &[Command] = &[
         "place",
         "Place View",
         &[],
-        "{sheet: number or id, view: a level's, section's or elevation's name or id, at?: [x, y], scale?} puts the view on \
-         the sheet at 1 : `scale` (100 by default), its middle `at` mm from the paper's bottom left corner (by default right \
-         of the views there, or in the middle); a view goes on one sheet",
+        "{sheet: number or id, view: a level's, section's, elevation's, schedule's or 3D view's name or id, at?: [x, y], \
+         scale?, azimuth?, elevation?} puts the view on the sheet at 1 : `scale` (100 by default; a schedule keeps its size), \
+         its middle `at` mm from the paper's bottom left corner (by default right of the views there, or in the middle); a \
+         view goes on one sheet. A schedule (Room Schedule, Door Schedule…) or the 3D view ({3D}, seen from `azimuth` and \
+         `elevation` degrees) comes to be as it's first placed",
         place,
+    ),
+    edit(
+        "crop",
+        "Crop View",
+        &[],
+        "{view, region?: [[x, y], [x, y]] | null} crops a level's plan to the region's south-west and north-east corners \
+         (plan mm), or a section or an elevation to its bottom left and top right (along its line from its start, and up: \
+         its line then runs between them, and the notes in it stay put); null uncrops it; without a region, it crops to \
+         what the view shows now",
+        crop,
     ),
     edit(
         "type",
@@ -209,7 +243,8 @@ pub static ALL: &[Command] = &[
         "delete",
         "Delete",
         &["DE"],
-        "{ids: [id,…]} deleting a wall deletes its doors and windows, deleting those their tags; dimensions lose what's deleted",
+        "{ids: [id,…]} deleting a wall deletes its doors and windows, deleting those their tags; a view takes its notes and \
+         spot elevations, and what a spot elevation reads takes it; dimensions lose what's deleted",
         delete,
     ),
     other("inspect", "Inspect", "{} levels, element counts, types, warnings and undo history", inspect),
@@ -350,6 +385,23 @@ fn level_param(c: &str, m: &Model, p: &Value, key: &str) -> Result<Id, String> {
         }),
         Some(v) => v.as_u64().filter(|&id| m.level(id).is_some()).ok_or_else(|| bad(c, format!("`{key}`: {v} is not a level"))),
         None => Err(bad(c, "the model has no levels")),
+    }
+}
+
+/// `view` by name or id: a level's plan, a section, an elevation, a schedule or a 3D view, or with
+/// `sheets` a sheet by its number; when not given, the plan of `level` (the lowest by default).
+fn view_param(c: &str, m: &Model, p: &Value, sheets: bool) -> Result<Id, String> {
+    match p.get("view") {
+        v if absent(v) => level_param(c, m, p, "level"),
+        Some(Value::String(n)) => m
+            .elements
+            .iter()
+            .find_map(|(id, e)| {
+                (m.view_name(*id) == Some(n.as_str()) || sheets && matches!(e, Element::Sheet(sh) if sh.number == *n)).then_some(*id)
+            })
+            .ok_or_else(|| bad(c, format!("no view named `{n}`"))),
+        Some(v) => v.as_u64().filter(|id| m.elements.contains_key(id)).ok_or_else(|| bad(c, format!("`view`: {v} is not a view"))),
+        None => level_param(c, m, p, "level"),
     }
 }
 
@@ -513,7 +565,14 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("area_m2".into(), json!(region.as_ref().map_or(0.0, |g| m2(g.area()))));
             extra.insert("perimeter_m".into(), json!(region.as_ref().map_or(0.0, |g| (g.perimeter() / 10.0).round() / 100.0)));
         }
-        Element::Level(_) | Element::Grid(_) => {}
+        Element::Text(_) => {
+            extra.insert("level".into(), json!(m.level_of(e)));
+        }
+        Element::Spot(sp) => {
+            extra.insert("elevation".into(), json!(m.spot_value(sp).map(hundredth)));
+            extra.insert("level".into(), json!(m.level_of(e)));
+        }
+        Element::Level(_) | Element::Grid(_) | Element::Schedule(_) | Element::View3D(_) => {}
     }
     let mut v = serde_json::to_value(e).unwrap_or_default();
     if let Some(o) = v.as_object_mut() {
@@ -733,7 +792,7 @@ fn level(s: &mut Session, p: &Value) -> R {
         Some(n) => n,
         None => (taken.len() + 1..).map(|n| format!("Level {n}")).find(|n| !taken.contains(n.as_str())).unwrap_or_default(),
     };
-    let id = s.model_mut().insert(Element::Level(Level { name: name.clone(), elevation }));
+    let id = s.model_mut().insert(Element::Level(Level::new(name.clone(), elevation)));
     Ok(json!({"id": id, "name": name}))
 }
 
@@ -884,16 +943,34 @@ fn room(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id, "number": number, "area_m2": area}))
 }
 
-/// The wall face, wall centre line or grid line a plan of `level` shows nearest `p`, within 100 mm.
-fn reference_near(m: &Model, level: Id, p: P2) -> Option<Reference> {
+/// Of the lines a plan of `level` shows that `keep` takes (walls' faces, centre lines and ends,
+/// doors' and windows' centres and jambs, grids), the nearest `p`, within 100 mm.
+fn reference_near(m: &Model, level: Id, p: P2, keep: impl Fn(Line) -> bool) -> Option<Reference> {
+    let cut = |w: Id| m.wall(w).is_some_and(|w| m.cut_by(w, level));
     m.elements
         .iter()
-        .filter(|(_, e)| match e {
-            Element::Wall(w) => m.cut_by(w, level),
+        .filter(|(id, e)| match e {
+            Element::Wall(_) => cut(**id),
+            Element::Door(o) | Element::Window(o) => cut(o.host),
             Element::Grid(_) => true,
             _ => false,
         })
-        .filter_map(|(&id, _)| m.reference_at(id, p))
+        .filter_map(|(&id, _)| m.reference_at(id, p, &keep))
+        .filter(|(_, d)| *d <= 100.0)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(r, _)| r)
+}
+
+/// The round column on `level` whose edge passes nearest `p`, within 100 mm.
+fn arc_near(m: &Model, level: Id, p: P2) -> Option<Reference> {
+    m.elements
+        .iter()
+        .filter(|(_, e)| matches!(e, Element::Column(col) if col.level == level))
+        .filter_map(|(&id, _)| {
+            let r = Reference { id, face: Face::Centre };
+            let (c, radius) = m.reference_arc(&r).ok()?;
+            Some((r, (p.dist(c) - radius).abs()))
+        })
         .filter(|(_, d)| *d <= 100.0)
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(r, _)| r)
@@ -904,21 +981,32 @@ fn dimension(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let level = level_param(c, m, p, "level")?;
     let at = point_req(c, p, "at")?;
+    let kind = match string(c, p, "kind")? {
+        None => DimKind::Aligned,
+        Some(k) => serde_json::from_value(json!(k)).map_err(|_| bad(c, format!("`kind` is aligned, angular or radial, not `{k}`")))?,
+    };
     let given = p.get("refs").and_then(Value::as_array).ok_or_else(|| bad(c, "`refs` [ref, …] is required"))?;
     if given.len() > MAX_POINTS {
         return Err(bad(c, format!("`refs` has more than {MAX_POINTS} references")));
     }
-    let refs = given
-        .iter()
-        .map(|v| match point(v) {
-            Some(q) => reference_near(m, level, q).ok_or_else(|| {
-                bad(c, format!("no wall face, wall centre line or grid line at [{}, {}] on {}", q.0, q.1, level_name(m, level)))
-            }),
+    let mut refs: Vec<Reference> = Vec::new();
+    for v in given {
+        let near = |q: P2, what: &str| bad(c, format!("no {what} at [{}, {}] on {}", q.0, q.1, level_name(m, level)));
+        let r = match point(v) {
+            Some(q) if kind == DimKind::Radial => arc_near(m, level, q).ok_or_else(|| near(q, "round column's edge"))?,
+            Some(q) => {
+                // After the first: one parallel to it, or for an angle, one across it.
+                let first = refs.first().and_then(|r| m.reference_line(r).ok());
+                let keep = |l: Line| first.is_none_or(|(a, b)| geom::parallel(a, b, l.0, l.1) == (kind == DimKind::Aligned));
+                reference_near(m, level, q, keep)
+                    .ok_or_else(|| near(q, "wall face, wall centre line, wall end, door, window or grid line"))?
+            }
             None => serde_json::from_value::<Reference>(v.clone())
-                .map_err(|e| bad(c, format!("{v} is not a reference {{id, face?}} or a point [x, y]: {e}"))),
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let d = Dimension { level, refs, at };
+                .map_err(|e| bad(c, format!("{v} is not a reference {{id, face?}} or a point [x, y]: {e}")))?,
+        };
+        refs.push(r);
+    }
+    let d = Dimension { level, kind, refs, at };
     let values: Vec<f64> = m.dimension_values(&d).into_iter().map(hundredth).collect();
     let id = s.model_mut().insert(Element::Dimension(d));
     Ok(json!({"id": id, "values": values}))
@@ -957,6 +1045,43 @@ fn tag(s: &mut Session, p: &Value) -> R {
     let m = s.model_mut();
     let ids: Vec<Id> = tags.into_iter().map(|t| m.insert(Element::Tag(t))).collect();
     Ok(json!({"ids": ids}))
+}
+
+fn text_note(s: &mut Session, p: &Value) -> R {
+    let c = "text";
+    let m = &s.model;
+    let text = string(c, p, "text")?.ok_or_else(|| bad(c, "`text` is required"))?;
+    let at = point_req(c, p, "at")?;
+    let view = view_param(c, m, p, true)?;
+    let n = Note {
+        view,
+        at,
+        text,
+        size: num(c, p, "size")?.unwrap_or(NOTE_SIZE),
+        angle: num(c, p, "angle")?.unwrap_or(0.0),
+        leader: point_opt(c, p, "leader")?,
+    };
+    let id = s.model_mut().insert(Element::Text(n));
+    Ok(json!({"id": id}))
+}
+
+fn spot(s: &mut Session, p: &Value) -> R {
+    let c = "spot";
+    let m = &s.model;
+    let at = point_req(c, p, "at")?;
+    let view = view_param(c, m, p, false)?;
+    let host = match (id_opt(c, p, "host")?, m.level(view)) {
+        (Some(h), _) => Some(h),
+        (None, Some(_)) => Some(m.spot_host(view, at).ok_or_else(|| {
+            let place = format!("[{}, {}] on {}", at.0, at.1, level_name(m, view));
+            bad(c, format!("nothing to read at {place}; place it on a floor, a roof, a stair, a wall or a column"))
+        })?),
+        (None, None) => None,
+    };
+    let sp = Spot { view, at, host };
+    let elevation = m.spot_value(&sp).map(hundredth);
+    let id = s.model_mut().insert(Element::Spot(sp));
+    Ok(json!({"id": id, "elevation": elevation, "host": host}))
 }
 
 /// The top of something standing on `level`: up to the next level, or `height` mm tall, or up to
@@ -1073,7 +1198,7 @@ fn section(s: &mut Session, p: &Value) -> R {
         Some(n) => n,
         None => s.model.free_view_name("Section", true),
     };
-    let id = s.model_mut().insert(Element::Section(Section { name: name.clone(), start, end, depth }));
+    let id = s.model_mut().insert(Element::Section(Section { name: name.clone(), start, end, depth, crop: None }));
     Ok(json!({"id": id, "name": name}))
 }
 
@@ -1113,11 +1238,93 @@ fn elevation(s: &mut Session, p: &Value) -> R {
     let m = s.model_mut();
     let made: Vec<(Id, String)> = lines
         .into_iter()
-        .map(|(name, start, end)| (m.insert(Element::Elevation(Section { name: name.clone(), start, end, depth })), name))
+        .map(|(name, start, end)| (m.insert(Element::Elevation(Section { name: name.clone(), start, end, depth, crop: None })), name))
         .collect();
     match made.as_slice() {
         [(id, name)] => Ok(json!({"id": id, "name": name})),
         _ => Ok(json!({"ids": made.iter().map(|(id, _)| *id).collect::<Vec<_>>()})),
+    }
+}
+
+fn crop(s: &mut Session, p: &Value) -> R {
+    let c = "crop";
+    let m = &s.model;
+    let view = view_param(c, m, p, true)?;
+    // Some(corners), or Some(None) to uncrop; none: to what the view shows now.
+    let region = match p.get("region") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(_) => match points(c, p, "region")?.as_slice() {
+            [a, b] => Some(Some([*a, *b])),
+            _ => return Err(bad(c, "`region` is two corners, [[x, y], [x, y]]")),
+        },
+    };
+    match m.elements.get(&view) {
+        Some(Element::Level(l)) => {
+            let crop = match region {
+                Some(r) => r,
+                None => {
+                    let pts = render::plan_shows(m, view);
+                    let first = *pts.first().ok_or_else(|| bad(c, format!("{} shows nothing to crop to", l.name)))?;
+                    let (lo, hi) =
+                        pts.iter().fold((first, first), |(lo, hi), q| (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1))));
+                    Some([micron(lo - P2(1000.0, 1000.0)), micron(hi + P2(1000.0, 1000.0))])
+                }
+            };
+            if let Some(Element::Level(l)) = s.model_mut().elements.get_mut(&view) {
+                l.crop = crop;
+            }
+            Ok(json!({"view": view, "crop": crop}))
+        }
+        Some(Element::Section(v) | Element::Elevation(v)) => {
+            let mut v = v.clone();
+            // How far along the line its start moves.
+            let mut shift = 0.0;
+            match region {
+                Some(Some([a, b])) => {
+                    if !(a.0 < b.0 - TOL && a.1 < b.1 - TOL) {
+                        return Err(bad(
+                            c,
+                            "a crop region runs from its bottom left corner to its top right one (in a plan, south-west to north-east)",
+                        ));
+                    }
+                    // Its line runs between the region's sides.
+                    let u = (v.end - v.start).unit();
+                    (v.start, v.end, v.crop, shift) = (micron(v.start + u * a.0), micron(v.start + u * b.0), Some([a.1, b.1]), a.0);
+                }
+                Some(None) => v.crop = None,
+                None => v.crop = render::crop_region(m, view).map(|[lo, hi]| [lo.1, hi.1]),
+            }
+            let crop = v.crop;
+            let m = s.model_mut();
+            if let Some(Element::Section(old) | Element::Elevation(old)) = m.elements.get_mut(&view) {
+                *old = v;
+            }
+            // What's noted in the view keeps its spot over the model.
+            for e in m.elements.values_mut() {
+                match e {
+                    Element::Text(n) if n.view == view => {
+                        n.at.0 -= shift;
+                        if let Some(l) = &mut n.leader {
+                            l.0 -= shift;
+                        }
+                    }
+                    Element::Spot(sp) if sp.view == view => sp.at.0 -= shift,
+                    _ => {}
+                }
+            }
+            Ok(json!({"view": view, "crop": crop}))
+        }
+        _ => Err(bad(c, format!("{} isn't a plan, a section or an elevation; only those crop", view_title(m, view)))),
+    }
+}
+
+/// What to call element `id` in a message: a view's or a sheet's name, else its category and id.
+fn view_title(m: &Model, id: Id) -> String {
+    match (m.view_name(id), m.sheet(id)) {
+        (Some(n), _) => n.to_string(),
+        (_, Some(sh)) => format!("sheet {}", sh.number),
+        _ => format!("{} {id}", m.elements.get(&id).map_or("element", Element::category)),
     }
 }
 
@@ -1156,24 +1363,32 @@ fn place(s: &mut Session, p: &Value) -> R {
         Some(v) => v.as_u64().filter(|id| m.sheet(*id).is_some()).ok_or_else(|| bad(c, format!("`sheet`: {v} is not a sheet")))?,
         None => return Err(bad(c, "`sheet`, a sheet's number or id, is required")),
     };
+    let scale = num(c, p, "scale")?.unwrap_or(100.0);
+    let at = point_opt(c, p, "at")?;
     let view = match p.get("view") {
-        Some(Value::String(n)) => m
-            .elements
-            .keys()
-            .find(|id| m.view_name(**id) == Some(n.as_str()))
-            .copied()
-            .ok_or_else(|| bad(c, format!("no level, section or elevation named `{n}`")))?,
+        Some(Value::String(n)) => match m.elements.keys().find(|id| m.view_name(**id) == Some(n.as_str())) {
+            Some(id) => *id,
+            // A schedule, or the 3D view, comes to be as it's first placed.
+            None => {
+                let made = match schedule::VIEWS.iter().find(|(_, name)| name == n) {
+                    Some((category, name)) => Element::Schedule(Schedule { name: name.to_string(), of: category.to_string() }),
+                    None if n == "{3D}" => Element::View3D(View3D {
+                        name: n.clone(),
+                        azimuth: num(c, p, "azimuth")?.unwrap_or(view3d::AZIMUTH),
+                        elevation: num(c, p, "elevation")?.unwrap_or(view3d::ELEVATION),
+                    }),
+                    None => return Err(bad(c, format!("no level, section, elevation, schedule or 3D view named `{n}`"))),
+                };
+                s.model_mut().insert(made)
+            }
+        },
         Some(v) => v
             .as_u64()
             .filter(|id| m.view_name(*id).is_some())
-            .ok_or_else(|| bad(c, format!("`view`: {v} is not a plan, a section or an elevation")))?,
-        None => return Err(bad(c, "`view`, a level's, section's or elevation's name or id, is required")),
+            .ok_or_else(|| bad(c, format!("`view`: {v} is not a plan, a section, an elevation, a schedule or a 3D view")))?,
+        None => return Err(bad(c, "`view`, a level's, section's, elevation's, schedule's or 3D view's name or id, is required")),
     };
-    let scale = num(c, p, "scale")?.unwrap_or(100.0);
-    let at = match point_opt(c, p, "at")? {
-        Some(a) => a,
-        None => sheet::spot(m, sheet, view, scale),
-    };
+    let at = at.unwrap_or_else(|| sheet::spot(&s.model, sheet, view, scale));
     let id = s.model_mut().insert(Element::Viewport(Viewport { sheet, view, at, scale }));
     Ok(json!({"id": id, "at": at}))
 }
@@ -1247,7 +1462,13 @@ fn modify(s: &mut Session, p: &Value) -> R {
                 "level" | "top_level" if val.is_string() => json!(level_param(c, m, p, k)?),
                 _ => val.clone(),
             };
-            obj.insert(k.clone(), val);
+            match obj.get_mut(k) {
+                // Into a field that is an object (a plan's view range), the new one merges.
+                Some(old) if old.is_object() && val.is_object() => merge(old, &val),
+                _ => {
+                    obj.insert(k.clone(), val);
+                }
+            }
         }
         edited.push((id, serde_json::from_value::<Element>(v).map_err(|e| bad(c, format!("element {id}: {e}")))?));
     }
@@ -1258,6 +1479,23 @@ fn modify(s: &mut Session, p: &Value) -> R {
     match (p.get("ids"), ids.as_slice()) {
         (None, [one]) => Ok(element_json(&s.model, *one)),
         _ => Ok(json!({"modified": ids})),
+    }
+}
+
+/// `patch` merged into `into`, as JSON Merge Patch (RFC 7386) does: objects merge key by key, a
+/// null removes its key, anything else replaces what was there.
+fn merge(into: &mut Value, patch: &Value) {
+    match (into, patch) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (k, v) in b {
+                if v.is_null() {
+                    a.remove(k);
+                } else {
+                    merge(a.entry(k.clone()).or_insert(Value::Null), v);
+                }
+            }
+        }
+        (into, patch) => *into = patch.clone(),
     }
 }
 
@@ -1284,6 +1522,16 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
     match &mut e {
         Element::Level(_) => return Err(bad(c, format!("level {id} has no place in plan; change its elevation, or add a level"))),
         Element::Sheet(_) => return Err(bad(c, format!("sheet {id} has no place in plan; move the views on it"))),
+        Element::Schedule(_) | Element::View3D(_) => {
+            return Err(bad(c, format!("{category} {id} has no place in plan; move its viewport on its sheet")));
+        }
+        Element::Text(n) => {
+            let (at, angle) = turned(f, n.at, n.angle);
+            // A mirrored note still reads the right way round.
+            (n.at, n.angle) = (at, if mo.mirror { n.angle } else { angle });
+            n.leader = n.leader.map(f);
+        }
+        Element::Spot(sp) => sp.at = f(sp.at),
         Element::Viewport(v) => v.at = f(v.at),
         Element::Column(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
         Element::Stair(st) => (st.start, st.angle) = turned(f, st.start, st.angle),
@@ -1472,7 +1720,7 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
         match transformed(c, m, id, mo, &copying)? {
             // A copied wall brings its doors and windows; see below.
             Element::Door(o) | Element::Window(o) if copying.contains(&o.host) => {}
-            e @ (Element::Dimension(_) | Element::Tag(_)) => notes.push((id, e)),
+            e @ (Element::Dimension(_) | Element::Tag(_) | Element::Spot(_)) => notes.push((id, e)),
             e => copies.push((id, e)),
         }
     }
@@ -1533,6 +1781,7 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
                 }
             }
             Element::Tag(t) => t.host = hosts.get(&t.host).copied().unwrap_or(t.host),
+            Element::Spot(sp) => sp.host = sp.host.map(|h| hosts.get(&h).copied().unwrap_or(h)),
             _ => {}
         }
         let id = m.insert(e);
@@ -1698,6 +1947,9 @@ fn delete(s: &mut Session, p: &Value) -> R {
                         Element::Door(o) | Element::Window(o) => gone.contains(&o.host),
                         Element::Tag(t) => gone.contains(&t.host),
                         Element::Viewport(v) => gone.contains(&v.sheet) || gone.contains(&v.view),
+                        // Notes and spot elevations go with their view, spots with what they read.
+                        Element::Text(n) => gone.contains(&n.view),
+                        Element::Spot(sp) => gone.contains(&sp.view) || sp.host.is_some_and(|h| gone.contains(&h)),
                         _ => false,
                     }
             })

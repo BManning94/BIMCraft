@@ -11,7 +11,7 @@ use egui::accesskit::Role;
 use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{BimApp, Sheet, Tool};
 
@@ -309,7 +309,7 @@ fn the_browser_opens_level_plans_and_schedules() {
     // Below the browser's fold, past the elevations and sections: reached as screen readers do.
     h.get_by_label("Room Schedule").click_accesskit();
     h.run();
-    assert_eq!(h.state().sheet, Sheet::Schedule("rooms"));
+    assert_eq!(h.state().sheet, Sheet::Schedule("room"));
     assert!(h.query_by_label("Kitchen").is_some(), "a row of the room schedule");
 }
 
@@ -478,7 +478,7 @@ fn views_open_in_tabs_that_switch_and_close() {
     press(&mut h, "Level 2");
     h.get_by_label("Room Schedule").click_accesskit();
     h.run();
-    assert_eq!(h.state().sheet, Sheet::Schedule("rooms"));
+    assert_eq!(h.state().sheet, Sheet::Schedule("room"));
     topmost(&mut h, "Level 1");
     assert_eq!(h.state().sheet, Sheet::Plan(1));
     press(&mut h, "Close Room Schedule");
@@ -926,4 +926,134 @@ fn dark_mode_turns_the_window_and_the_drawing_dark() {
     assert_eq!(crate::style::pal().surface, crate::style::DARK.surface);
     press(&mut h, "Dark Mode");
     assert!(!crate::style::dark() && crate::canvas::color(PAPER) == egui::Color32::WHITE);
+}
+
+#[test]
+fn text_notes_go_where_clicked_in_plans_sections_and_sheets() {
+    let mut h = app_at(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}\nsheet {{}}"), 0.05);
+    let (section, sheet) = (ids(&h, "section")[0], ids(&h, "sheet")[0]);
+    press(&mut h, "Annotate");
+    press(&mut h, "Text");
+    assert!(h.query_by_label("Modify | Place Text").is_some());
+    // With nothing typed, a click says what's missing.
+    click(&mut h, P2(2000.0, 2000.0));
+    assert!(ids(&h, "text").is_empty() && h.state().status.error);
+    type_into(&mut h, "Text:", "Tiled floor");
+    click(&mut h, P2(2000.0, 2000.0));
+    let notes = ids(&h, "text");
+    assert_eq!(
+        (field(&h, notes[0], "text"), field(&h, notes[0], "at"), field(&h, notes[0], "view")),
+        (json!("Tiled floor"), json!([2000.0, 2000.0]), json!(1))
+    );
+    // The tool goes on working in a section, along it and up, and on a sheet, in paper mm.
+    press(&mut h, "Section 1");
+    assert_eq!((h.state().sheet, &h.state().tool), (Sheet::Section(section), &Tool::Text));
+    click(&mut h, P2(3000.0, 2500.0));
+    h.get_by_label("A101 - Unnamed").click_accesskit();
+    h.run();
+    click(&mut h, P2(50.0, 50.0));
+    let notes = ids(&h, "text");
+    assert_eq!((field(&h, notes[1], "view"), field(&h, notes[1], "at")), (json!(section), json!([3000.0, 2500.0])));
+    assert_eq!((field(&h, notes[2], "view"), field(&h, notes[2], "at")), (json!(sheet), json!([50.0, 50.0])));
+}
+
+#[test]
+fn angular_and_radial_dimensions_and_spot_elevations_from_the_annotate_tab() {
+    // Walls 3 to 6, a slanted one 7, a round column 8, the floor 9.
+    let mut h = app(&format!(
+        "{BOX}\nwall {{\"points\": [[0, 0], [3000, 3000]], \"type\": \"Interior - 100mm\"}}\ncolumn {{\"at\": [6000, 4000], \"type\": \"Round 300\"}}\nfloor {{}}"
+    ));
+    press(&mut h, "Annotate");
+    press(&mut h, "Angular");
+    assert!(h.query_by_label("Modify | Place Dimensions").is_some());
+    // The south wall, the slanted one, then where the arc goes.
+    click(&mut h, P2(4000.0, 0.0));
+    click(&mut h, P2(1500.0, 1500.0));
+    click(&mut h, P2(2500.0, 1000.0));
+    let dims = ids(&h, "dimension");
+    assert_eq!((field(&h, dims[0], "kind"), field(&h, dims[0], "values")), (json!("angular"), json!([45.0])));
+    assert_eq!(h.state().tool, Tool::Angular(Vec::new()), "ready for the next one");
+    press(&mut h, "Annotate");
+    press(&mut h, "Radial");
+    click(&mut h, P2(6150.0, 4000.0));
+    click(&mut h, P2(6800.0, 4800.0));
+    let dims = ids(&h, "dimension");
+    assert_eq!((field(&h, dims[1], "kind"), field(&h, dims[1], "values")), (json!("radial"), json!([150.0])));
+    press(&mut h, "Annotate");
+    press(&mut h, "Spot Elevation");
+    click(&mut h, P2(5000.0, 2000.0));
+    let spots = ids(&h, "spot");
+    assert_eq!((field(&h, spots[0], "host"), field(&h, spots[0], "elevation")), (json!(9), json!(0.0)));
+}
+
+#[test]
+fn crop_view_and_its_grips_frame_plans_and_sections() {
+    let mut h = app(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    let section = ids(&h, "section")[0];
+    let crop_view = |h: &mut Harness<BimApp>| {
+        // The ribbon's button; Properties has a Crop View row too.
+        h.get_by_role_and_label(Role::Button, "Crop View").click();
+        h.run();
+    };
+    press(&mut h, "View");
+    crop_view(&mut h);
+    // All the plan shows (the walls, the section's line), a metre past it.
+    assert_eq!(field(&h, 1, "crop"), json!([[-2000.0, -1100.0], [10000.0, 7100.0]]));
+    // The east edge, by its grip, dragged west.
+    drag(&mut h, P2(10000.0, 3000.0), P2(4000.0, 3000.0));
+    assert_eq!(field(&h, 1, "crop"), json!([[-2000.0, -1100.0], [4000.0, 7100.0]]));
+    assert!(h.state().selection.is_empty(), "the grip took the drag, not a selection box");
+    crop_view(&mut h);
+    assert_eq!(field(&h, 1, "crop"), Value::Null);
+    // A section's top, dragged down; its start, dragged along its line: what's on screen stays put.
+    press(&mut h, "Section 1");
+    drag(&mut h, P2(5000.0, 3600.0), P2(5000.0, 2000.0));
+    assert_eq!(field(&h, section, "crop"), json!([-600.0, 2000.0]));
+    let before = h.state().screen(P2(1000.0, 700.0));
+    drag(&mut h, P2(0.0, 700.0), P2(1000.0, 700.0));
+    assert_eq!(field(&h, section, "start"), json!([0.0, 3000.0]));
+    assert!((h.state().screen(P2(0.0, 700.0)) - before).length() < 1.0);
+}
+
+#[test]
+fn a_plans_view_range_is_in_its_properties() {
+    let mut h = app(BOX);
+    assert!(h.query_by_label("View Range").is_some());
+    type_into(&mut h, "Cut Plane", "1500");
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, 1, "view_range"), json!({"top": null, "cut": 1500.0, "bottom": 0.0, "depth": 0.0}));
+    type_into(&mut h, "Top", "2600");
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, 1, "view_range")["top"], json!(2600.0));
+    // Cleared, back to the level above.
+    h.get_by_label("Top").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    key(&mut h, Key::Backspace);
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, 1, "view_range")["top"], Value::Null);
+}
+
+#[test]
+fn place_view_puts_schedules_and_the_3d_view_on_sheets() {
+    let mut h = app_at(&format!("{BOX}\nroom {{\"point\": [4000, 3000], \"name\": \"Hall\"}}"), 0.05);
+    press(&mut h, "View");
+    press(&mut h, "Sheet");
+    for view in ["Schedule: Room Schedule", "3D View: {3D}"] {
+        press(&mut h, "View");
+        press(&mut h, "Place View");
+        press(&mut h, view);
+    }
+    let (schedules, views) = (ids(&h, "schedule"), ids(&h, "view3d"));
+    assert_eq!((schedules.len(), views.len(), ids(&h, "viewport").len()), (1, 1, 2));
+    // Placed, they're no longer offered.
+    press(&mut h, "View");
+    press(&mut h, "Place View");
+    assert!(h.query_by_label("Schedule: Room Schedule").is_none() && h.query_by_label("Schedule: Door Schedule").is_some());
+    key(&mut h, Key::Escape);
+    // A double click on the schedule opens it.
+    let vp = ids(&h, "viewport")[0];
+    let at = field(&h, vp, "at");
+    double_click(&mut h, P2(at[0].as_f64().unwrap(), at[1].as_f64().unwrap()));
+    assert_eq!(h.state().sheet, Sheet::Schedule("room"));
 }

@@ -1,7 +1,8 @@
 //! Sheets in the desktop app: the core's drawing of a sheet (its title block, its views at their
-//! scales) made at paper density once per change, and scaled as the view zooms, so lettering and
-//! line weights keep to the paper. Click a view to select it, drag it to move it, double-click it
-//! to open it; Properties shows the sheet's parameters when nothing is selected.
+//! scales, its schedules and notes) made at paper density once per change, and scaled as the view
+//! zooms, so lettering and line weights keep to the paper. Click a view to select it, drag it (or
+//! a note) to move it, double-click it to open it; the Text tool writes on the paper. Properties
+//! shows the sheet's parameters when nothing is selected.
 
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use egui::{Color32, ColorImage, PointerButton, Pos2, Rect, Sense, Stroke, Stroke
 
 use crate::canvas::{PICK, Place, click_modifiers, paint};
 use crate::style::pal;
-use crate::{BimApp, Sheet, Status, Tool};
+use crate::{BimApp, SCHEDULES, Sheet, Status, Tool};
 
 /// The sheet on screen, between frames: its drawing and the pictures in it, and a view being
 /// dragged (from which paper point).
@@ -69,7 +70,7 @@ impl BimApp {
         if response.drag_started_by(PointerButton::Primary)
             && modify
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
-            && let Some(vp) = pick(o).filter(|v| matches!(model.elements.get(v), Some(Element::Viewport(_))))
+            && let Some(vp) = pick(o).filter(|v| matches!(model.elements.get(v), Some(Element::Viewport(_) | Element::Text(_))))
         {
             papers.drag = Some(view.mm((o.x - rect.min.x, o.y - rect.min.y)));
             if !self.selection.contains(&vp) {
@@ -108,8 +109,10 @@ impl BimApp {
         let view_of = |id: Id| match model.elements.get(&id) {
             Some(Element::Viewport(v)) => match model.elements.get(&v.view) {
                 Some(Element::Level(_)) => Some(Sheet::Plan(v.view)),
-                Some(_) => Some(Sheet::Section(v.view)),
-                None => None,
+                Some(Element::Section(_) | Element::Elevation(_)) => Some(Sheet::Section(v.view)),
+                Some(Element::View3D(_)) => Some(Sheet::View3D),
+                Some(Element::Schedule(sc)) => SCHEDULES.iter().find(|(c, _)| *c == sc.of).map(|(c, _)| Sheet::Schedule(c)),
+                _ => None,
             },
             _ => None,
         };
@@ -124,6 +127,11 @@ impl BimApp {
         {
             match pick(q) {
                 found if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
+                // Notes in paper mm, to the half millimetre.
+                _ if self.tool == Tool::Text => {
+                    let p = view.mm((q.x - rect.min.x, q.y - rect.min.y));
+                    self.write_note(id, P2((p.0 * 2.0).round() / 2.0, (p.1 * 2.0).round() / 2.0));
+                }
                 _ => self.status = Status { text: "this tool works in plan views: open one from the Project Browser".into(), error: true },
             }
         }

@@ -1,13 +1,16 @@
 //! Sections and elevations: the core's picture of what the view sees past its line, its cut,
-//! levels and grids drawn over it, panned and zoomed like a plan (its points run along its line
-//! and up). A click picks what it shows: a cut, a level, a grid, or what lies beyond.
+//! levels, grids, notes and spot elevations drawn over it, panned and zoomed like a plan (its
+//! points run along its line and up). A click picks what it shows: a cut, a level, a grid, or what
+//! lies beyond; with Text or Spot Elevation, it places one. Its crop region's grips drag its edges.
 
 use std::sync::Arc;
 
+use bimcraft_core::geom::P2;
 use bimcraft_core::model::{Id, Model};
 use bimcraft_core::render::{self, Rgb, View};
 use bimcraft_core::view3d::{Image, MAX_SIDE};
 use egui::{Color32, ColorImage, Rect, Sense, TextureHandle, TextureOptions, Ui, pos2};
+use serde_json::json;
 
 use crate::canvas::{PICK, Place, click_modifiers, color, paint};
 use crate::orbit::{rgb, scene_of};
@@ -33,6 +36,7 @@ impl BimApp {
         let model = Arc::clone(&self.session.model);
         let fit = |w, h| render::section_fit(&model, id, w, h);
         let Some((view, local)) = self.canvas.navigate(ui, &response, rect, id, fit) else { return };
+        let crop = self.crop_grips(ui, &response, rect, &view, id);
         let d = render::section(&model, id, view);
         // The picture at the screen's pixels, framed as the drawing is in points.
         let ppp = f64::from(ui.ctx().pixels_per_point());
@@ -73,17 +77,27 @@ impl BimApp {
             p.image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         paint(&p, Place::at(rect.min), &d, &self.selection, hovered, self.thin, &[]);
-        let clicked = response
-            .clicked()
-            .then(|| response.interact_pointer_pos())
-            .flatten()
-            .map(|at| pick(&self.cut, (at.x - rect.min.x, at.y - rect.min.y)));
-        match clicked {
-            Some(found) if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
-            Some(_) => {
+        p.extend(crop);
+        let clicked =
+            response.clicked().then(|| response.interact_pointer_pos()).flatten().map(|at| (at.x - rect.min.x, at.y - rect.min.y));
+        // Along the line and up, to the nearest 10 mm.
+        let at = |q: (f32, f32)| {
+            let p = view.mm(q);
+            P2((p.0 / 10.0).round() * 10.0, (p.1 / 10.0).round() * 10.0)
+        };
+        match (clicked, &self.tool) {
+            (Some(q), Tool::Modify) => {
+                let found = pick(&self.cut, q);
+                self.pick_up(found.into_iter().collect(), click_modifiers(ui));
+            }
+            (Some(q), Tool::Text) => self.write_note(id, at(q)),
+            (Some(q), Tool::Spot) => {
+                self.run("spot", json!({"at": [at(q).0, at(q).1], "view": id}));
+            }
+            (Some(_), _) => {
                 self.status = Status { text: "this tool works in plan views: open one from the Project Browser".into(), error: true }
             }
-            None => {}
+            (None, _) => {}
         }
         self.nav_bar(ui, rect, id);
     }

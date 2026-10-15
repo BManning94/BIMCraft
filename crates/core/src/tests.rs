@@ -470,6 +470,25 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"start": [0, 0], "end": [0, 0], "width": 0, "tread": 1e300}),
         json!({"slope": 89.99, "overhang": -1e9}),
         json!({"slope": 1e300, "boundary": [[0, 0], [1, 0], [0, 0]]}),
+        json!({"id": 1, "view_range": {"cut": 1e300}}),
+        json!({"id": 1, "view_range": {"cut": -5, "bottom": 10, "top": "x"}}),
+        json!({"id": 1, "view_range": [1, 2]}),
+        json!({"id": 1, "crop": [[5, 5], [0, 0]]}),
+        json!({"view": 1, "region": [[0, 0], [0, 0]]}),
+        json!({"view": 1, "region": "x"}),
+        json!({"view": 1, "region": [[-1e300, 0], [1e300, 1]]}),
+        json!({"view": "{3D}", "region": null}),
+        json!({"text": "", "at": [0, 0]}),
+        json!({"text": "x", "at": [0, 0], "size": 1e300, "angle": f64::MAX, "leader": [1e300, 0]}),
+        json!({"text": "x", "at": [0, 0], "view": 3}),
+        json!({"at": [4000, 3000], "view": 3, "host": u64::MAX}),
+        json!({"kind": "angular", "refs": [{"id": 3}, {"id": 5}], "at": [0, 0]}),
+        json!({"kind": "angular", "refs": [{"id": 3}, {"id": 4}, {"id": 6}], "at": [0, 0]}),
+        json!({"kind": "radial", "refs": [{"id": 3}], "at": [0, 0]}),
+        json!({"kind": 7, "refs": [{"id": 3}, {"id": 4, "face": "end"}], "at": [0, 0]}),
+        json!({"sheet": "A101", "view": "Room Schedule", "scale": -1}),
+        json!({"sheet": "A101", "view": "{3D}", "azimuth": 1e300, "elevation": 90}),
+        json!({"id": 1, "name": "{3D}"}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -483,6 +502,194 @@ fn hostile_params_never_panic_or_break_the_model() {
 
 fn temp(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("bimcraft-test-{}-{name}", std::process::id()))
+}
+
+#[test]
+fn plans_have_a_view_range_that_modify_merges_into() {
+    let mut s = Session::new();
+    house(&mut s);
+    // Revit's: cut 1200 mm up, the top at the level above, the bottom and the view depth at the level.
+    assert_eq!(element(&mut s, 1)["view_range"], json!({"top": null, "cut": 1200.0, "bottom": 0.0, "depth": 0.0}));
+    run(&mut s, "modify", json!({"id": 1, "view_range": {"cut": 1500, "top": 2800}}));
+    run(&mut s, "modify", json!({"id": 1, "view_range": {"depth": -500}}));
+    assert_eq!(element(&mut s, 1)["view_range"], json!({"top": 2800.0, "cut": 1500.0, "bottom": 0.0, "depth": -500.0}));
+    // Back to the level above, field by field.
+    run(&mut s, "modify", json!({"id": 1, "view_range": {"top": null}}));
+    assert_eq!(element(&mut s, 1)["view_range"]["top"], Value::Null);
+    // Top ≥ cut plane ≥ bottom ≥ view depth.
+    let e = s.execute("modify", &json!({"id": 1, "view_range": {"bottom": 2000}})).unwrap_err();
+    assert!(e.contains("view range"), "{e}");
+    // Rooms keep to their walls whatever a plan cuts: raised over the walls, the cut plane leaves the room as it was.
+    let room = run(&mut s, "room", json!({"point": [4000, 3000]}))["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": 1, "view_range": {"cut": 3500, "top": 4000}}));
+    assert_eq!(element(&mut s, room)["area_m2"], 48.0);
+}
+
+#[test]
+fn crop_regions_frame_plans_and_sections() {
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "sheet", json!({}));
+    let vp = run(&mut s, "place", json!({"sheet": "A101", "view": "Level 1"}))["id"].as_u64().unwrap();
+    let whole = element(&mut s, vp)["size"][0].as_f64().unwrap();
+    // A plan cropped to its west half takes half the paper.
+    run(&mut s, "crop", json!({"view": "Level 1", "region": [[-500, -500], [4000, 6500]]}));
+    assert_eq!(element(&mut s, 1)["crop"], json!([[-500.0, -500.0], [4000.0, 6500.0]]));
+    let half = element(&mut s, vp)["size"][0].as_f64().unwrap();
+    assert!(half < whole - 30.0, "{half} {whole}");
+    // Null uncrops; no region crops to all it shows.
+    run(&mut s, "crop", json!({"view": "Level 1", "region": null}));
+    assert_eq!(element(&mut s, 1)["crop"], Value::Null);
+    run(&mut s, "crop", json!({"view": 1}));
+    let c = element(&mut s, 1)["crop"].clone();
+    assert!(c[0][0].as_f64().unwrap() <= -100.0 && c[1][1].as_f64().unwrap() >= 6100.0, "{c}");
+    // A section's crop region is its line's ends, along it, and the heights it shows; what's noted
+    // in it stays over the same spot.
+    let sec = run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["id"].as_u64().unwrap();
+    let note = run(&mut s, "text", json!({"text": "Insulated", "at": [3000, 1000], "view": sec}))["id"].as_u64().unwrap();
+    run(&mut s, "crop", json!({"view": "Section 1", "region": [[500, -200], [6000, 2500]]}));
+    let e = element(&mut s, sec);
+    assert_eq!(
+        (e["start"].clone(), e["end"].clone(), e["crop"].clone()),
+        (json!([-500.0, 3000.0]), json!([5000.0, 3000.0]), json!([-200.0, 2500.0]))
+    );
+    assert_eq!(element(&mut s, note)["at"], json!([2500.0, 1000.0]));
+    // Corners the wrong way round, and views that don't crop, are refused.
+    assert!(s.execute("crop", &json!({"view": 1, "region": [[4000, 0], [0, 4000]]})).unwrap_err().contains("south-west"));
+    assert!(s.execute("crop", &json!({"view": "A101"})).unwrap_err().contains("A101"));
+}
+
+#[test]
+fn text_notes_go_in_plans_sections_and_sheets() {
+    let mut s = Session::new();
+    house(&mut s);
+    // In the lowest level's plan by default, 2.5 mm capitals on paper.
+    let n = run(&mut s, "TX", json!({"text": "Tiled floor\nfalls to the drain", "at": [1000, 5000]}))["id"].as_u64().unwrap();
+    let e = element(&mut s, n);
+    assert_eq!((e["view"].as_u64(), e["size"].as_f64(), e["level"].as_u64()), (Some(1), Some(2.5), Some(1)));
+    // In a section along it and up, with a leader; on a sheet, in paper mm.
+    let sec = run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["id"].as_u64().unwrap();
+    run(&mut s, "sheet", json!({}));
+    let cut = run(&mut s, "text", json!({"text": "Insulated", "at": [500, 2500], "view": "Section 1", "leader": [1000, 1500]}));
+    assert_eq!(element(&mut s, cut["id"].as_u64().unwrap())["leader"], json!([1000.0, 1500.0]));
+    run(&mut s, "text", json!({"text": "General notes", "at": [30, 280], "view": "A101", "size": 5}));
+    for (p, what) in [
+        (json!({"text": " ", "at": [0, 0]}), "text"),
+        (json!({"text": "x", "at": [0, 0], "view": "Nowhere"}), "Nowhere"),
+        (json!({"text": "x", "at": [0, 0], "size": 0}), "size"),
+        (json!({"text": "x"}), "at"),
+    ] {
+        let e = s.execute("text", &p).unwrap_err();
+        assert!(e.contains(what), "{p}: {e}");
+    }
+    // A note moves like anything else, and goes with its view.
+    run(&mut s, "move", json!({"ids": [n], "by": [500, 0]}));
+    assert_eq!(element(&mut s, n)["at"], json!([1500.0, 5000.0]));
+    run(&mut s, "delete", json!({"ids": [sec]}));
+    assert_eq!(count(&mut s, "text"), 2);
+}
+
+#[test]
+fn dimensions_measure_to_wall_ends_and_openings() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    let door = run(&mut s, "door", json!({"at": [2000, 0]}))["id"].as_u64().unwrap();
+    // From the bottom wall's west end (its outline reaches the corner, 100 mm past the centre line)
+    // to the door's centre and its jamb toward the wall's end.
+    let r =
+        run(&mut s, "DI", json!({"refs": [{"id": ids[0], "face": "start"}, {"id": door}, {"id": door, "face": "end"}], "at": [0, -1000]}));
+    assert_eq!(r["values"], json!([2100.0, 450.0]));
+    let dim = r["id"].as_u64().unwrap();
+    // By points: the door's other jamb, then the bottom wall's east end.
+    let r = run(&mut s, "dimension", json!({"refs": [[1550, 50], [8100, 50]], "at": [0, -1500]}));
+    assert_eq!(r["values"], json!([6550.0]));
+    // The door slides along: what measures to it follows.
+    run(&mut s, "move", json!({"ids": [door], "by": [500, 0]}));
+    assert_eq!(element(&mut s, dim)["values"], json!([2600.0, 450.0]));
+    let e = s.execute("dimension", &json!({"refs": [{"id": door, "face": "left"}, {"id": ids[1]}], "at": [0, 0]})).unwrap_err();
+    assert!(e.contains("jambs"), "{e}");
+}
+
+#[test]
+fn angular_and_radial_dimensions_measure_angles_and_radii() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    let slant = run(&mut s, "wall", json!({"points": [[0, 0], [3000, 3000]], "type": "Interior - 100mm"}))["ids"][0].as_u64().unwrap();
+    // Between the bottom wall and the slanted one, the angle on `at`'s side.
+    let r = run(&mut s, "dimension", json!({"kind": "angular", "refs": [{"id": ids[0]}, {"id": slant}], "at": [2000, 800]}));
+    assert_eq!(r["values"], json!([45.0]));
+    let r = run(&mut s, "dimension", json!({"kind": "angular", "refs": [[4000, 0], [1500, 1500]], "at": [-2000, 800]}));
+    assert_eq!(r["values"], json!([135.0]));
+    let e = s.execute("dimension", &json!({"kind": "angular", "refs": [{"id": ids[0]}, {"id": ids[2]}], "at": [0, 0]})).unwrap_err();
+    assert!(e.contains("parallel"), "{e}");
+    let e = s.execute("dimension", &json!({"kind": "spiral", "refs": [{"id": ids[0]}], "at": [0, 0]})).unwrap_err();
+    assert!(e.contains("radial"), "{e}");
+    // A round column's radius, by id or by a point on its edge; walls have none.
+    let col = run(&mut s, "column", json!({"at": [5000, 3000], "type": "Round 300"}))["id"].as_u64().unwrap();
+    let r = run(&mut s, "dimension", json!({"kind": "radial", "refs": [{"id": col}], "at": [5600, 3600]}));
+    assert_eq!(r["values"], json!([150.0]));
+    let radius = r["id"].as_u64().unwrap();
+    let r = run(&mut s, "dimension", json!({"kind": "radial", "refs": [[5150, 3000]], "at": [5600, 2400]}));
+    assert_eq!(r["values"], json!([150.0]));
+    let e = s.execute("dimension", &json!({"kind": "radial", "refs": [{"id": ids[0]}], "at": [0, 0]})).unwrap_err();
+    assert!(e.contains("round"), "{e}");
+    // It follows its column's type.
+    run(&mut s, "type", json!({"category": "column", "name": "Round 300", "width": 500}));
+    assert_eq!(element(&mut s, radius)["values"], json!([250.0]));
+}
+
+#[test]
+fn spot_elevations_read_the_height_of_what_they_stand_on() {
+    let mut s = Session::new();
+    house(&mut s);
+    let floor = run(&mut s, "floor", json!({}))["id"].as_u64().unwrap();
+    run(&mut s, "roof", json!({}));
+    // In Level 1's plan, the top of the highest thing standing on the level there: the floor.
+    let spot = run(&mut s, "EL", json!({"at": [4000, 3000]}));
+    assert_eq!((spot["elevation"].as_f64(), spot["host"].as_u64()), (Some(0.0), Some(floor)));
+    // In Level 2's, the roof's top 100 mm short of its ridge: 3000 mm in from the walls' faces at 30°, and its thickness upright.
+    let roof = run(&mut s, "spot", json!({"at": [4000, 2900], "view": "Level 2"}));
+    let (tan, cos) = (30f64.to_radians().tan(), 30f64.to_radians().cos());
+    assert!((roof["elevation"].as_f64().unwrap() - (3000.0 + 3000.0 * tan + 300.0 / cos)).abs() < 0.01, "{roof}");
+    // In a section, the height of its point.
+    run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}));
+    assert_eq!(run(&mut s, "spot", json!({"at": [1000, 2700], "view": "Section 1"}))["elevation"], 2700.0);
+    assert!(s.execute("spot", &json!({"at": [20000, 0]})).unwrap_err().contains("nothing"));
+    // It follows the model: the level goes up, the floor's top with it; the floor goes, and its spot.
+    run(&mut s, "modify", json!({"id": 1, "elevation": 100}));
+    assert_eq!(element(&mut s, spot["id"].as_u64().unwrap())["elevation"], 100.0);
+    run(&mut s, "delete", json!({"ids": [floor]}));
+    assert_eq!(count(&mut s, "spot"), 2);
+}
+
+#[test]
+fn schedules_and_the_3d_view_go_on_sheets() {
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "sheet", json!({}));
+    // A schedule by its name: its view comes to be as it's placed.
+    let vp = run(&mut s, "place", json!({"sheet": "A101", "view": "Door Schedule"}))["id"].as_u64().unwrap();
+    let all = run(&mut s, "elements", json!({"category": "schedule"}));
+    assert_eq!((all["count"].as_u64(), all["elements"][0]["of"].as_str()), (Some(1), Some("door")));
+    assert_eq!(element(&mut s, vp)["title"], "Door Schedule");
+    // The 3D view, from where it's asked to look.
+    let v3 = run(&mut s, "place", json!({"sheet": "A101", "view": "{3D}", "azimuth": 30, "elevation": 20}))["id"].as_u64().unwrap();
+    let view = element(&mut s, v3)["view"].as_u64().unwrap();
+    assert_eq!((element(&mut s, view)["azimuth"].clone(), element(&mut s, view)["elevation"].clone()), (json!(30.0), json!(20.0)));
+    // On one sheet each, as every view; a schedule that isn't one is refused.
+    run(&mut s, "sheet", json!({}));
+    assert!(s.execute("place", &json!({"sheet": "A102", "view": "{3D}"})).unwrap_err().contains("A101"));
+    assert!(s.execute("place", &json!({"sheet": "A102", "view": "Furniture Schedule"})).unwrap_err().contains("Furniture"));
+    // Printed with the rest; saved and opened again, the same.
+    let pdf = temp("schedules.pdf");
+    run(&mut s, "save", json!({"path": pdf}));
+    assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
+    let project = temp("schedules.bimcraft");
+    run(&mut s, "save", json!({"path": project}));
+    let saved = s.model.clone();
+    run(&mut s, "open", json!({"path": project}));
+    assert_eq!(*s.model, *saved);
+    let _ = (std::fs::remove_file(pdf), std::fs::remove_file(project));
 }
 
 #[test]
@@ -693,7 +900,8 @@ fn the_sample_house_builds_with_four_rooms() {
     assert_eq!(i["warnings"], json!([]));
     assert_eq!((i["counts"]["dimension"].as_u64(), i["counts"]["tag"].as_u64()), (Some(3), Some(9)), "every door and window tagged");
     assert_eq!((i["counts"]["elevation"].as_u64(), i["counts"]["section"].as_u64()), (Some(4), Some(1)));
-    assert_eq!((i["counts"]["sheet"].as_u64(), i["counts"]["viewport"].as_u64()), (Some(2), Some(4)));
+    assert_eq!((i["counts"]["sheet"].as_u64(), i["counts"]["viewport"].as_u64()), (Some(3), Some(6)));
+    assert_eq!((i["counts"]["text"].as_u64(), i["counts"]["spot"].as_u64(), i["counts"]["schedule"].as_u64()), (Some(1), Some(1), Some(1)));
     let rooms = run(&mut s, "schedule", json!({"category": "rooms"}));
     let areas: Vec<f64> = rooms["rows"].as_array().unwrap().iter().map(|r| r[3].as_f64().unwrap()).collect();
     assert_eq!(areas, [24.0, 18.0, 14.0, 14.0]);

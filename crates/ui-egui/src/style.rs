@@ -181,6 +181,11 @@ pub enum Icon {
     Stair,
     Roof,
     Theme,
+    Text,
+    Spot,
+    Angular,
+    Radial,
+    Crop,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -395,6 +400,30 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(2.0, 14.0), (12.0, 5.0), (22.0, 14.0), (19.0, 14.0), (12.0, 8.5), (5.0, 14.0)]),
             line(&[(6.0, 14.0), (6.0, 20.0), (18.0, 20.0), (18.0, 14.0)]),
         ],
+        // A capital A.
+        Icon::Text => vec![line(&[(5.0, 20.0), (12.0, 4.0), (19.0, 20.0)]), line(&[(8.0, 14.0), (16.0, 14.0)])],
+        // A triangle standing on a surface, its height written over a line beside it.
+        Icon::Spot => vec![
+            ring(&[(5.0, 9.0), (13.0, 9.0), (9.0, 16.0)]),
+            line(&[(2.0, 16.0), (22.0, 16.0)]),
+            line(&[(13.0, 9.0), (21.0, 9.0)]),
+            line(&[(15.0, 5.0), (21.0, 5.0)]),
+        ],
+        // Two lines from a corner, and the arc between them.
+        Icon::Angular => {
+            let mut v = vec![line(&[(4.0, 20.0), (21.0, 20.0)]), line(&[(4.0, 20.0), (16.0, 5.0)])];
+            v.push(Shape::line(arc(at(4.0, 20.0), 11.0 * k, -0.9, 0.0), s));
+            v
+        }
+        // A circle, its centre, and a radius out to it.
+        Icon::Radial => vec![
+            Shape::circle_stroke(at(12.0, 12.0), 8.0 * k, s),
+            Shape::circle_filled(at(12.0, 12.0), 1.5 * k, color),
+            line(&[(12.0, 12.0), (17.7, 6.3)]),
+            line(&[(14.5, 6.5), (17.7, 6.3), (17.5, 9.5)]),
+        ],
+        // Two crop marks, at opposite corners.
+        Icon::Crop => vec![line(&[(6.0, 2.0), (6.0, 18.0), (22.0, 18.0)]), line(&[(2.0, 6.0), (18.0, 6.0), (18.0, 22.0)])],
         // Half light, half dark.
         Icon::Theme => {
             let half: Vec<Pos2> = arc(at(12.0, 12.0), 8.0 * k, FRAC_PI_2, 3.0 * FRAC_PI_2);
