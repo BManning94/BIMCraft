@@ -26,6 +26,14 @@ jobs:
       - name: Build
         run: cargo build --release -p bimcraft -p bimcraft-cli
 
+      - name: Icon
+        shell: pwsh
+        run: |
+          # Explorer shows bimcraft.exe with the icon its build script links in: count it the way Explorer does.
+          Add-Type -Namespace Win32 -Name Shell -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int ExtractIconExW(string file, int index, IntPtr large, IntPtr small, int n);'
+          $icons = [Win32.Shell]::ExtractIconExW("$PWD\target\release\bimcraft.exe", -1, [IntPtr]::Zero, [IntPtr]::Zero, 0)
+          if ($icons -ne 1) { throw "bimcraft.exe should carry one icon, not $icons" }
+
       - name: Installer
         shell: pwsh
         run: |
