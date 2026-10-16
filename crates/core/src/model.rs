@@ -140,6 +140,9 @@ pub struct Wall {
     pub attach_top: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attach_base: Option<Id>,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 fn is_zero(x: &f64) -> bool {
@@ -304,6 +307,9 @@ pub struct Floor {
     pub slope: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrow: Option<[P2; 2]>,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A ceiling along `boundary` (counter-clockwise), open through its `openings` (holes inside it,
@@ -318,6 +324,9 @@ pub struct Ceiling {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub openings: Vec<Vec<P2>>,
     pub offset: f64,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A shaft opening: a hole along `boundary` through the floors, ceilings and roofs it passes
@@ -354,6 +363,9 @@ pub struct Opening {
     /// Hinge on the other jamb.
     #[serde(default)]
     pub flip_hand: bool,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -365,6 +377,9 @@ pub struct Room {
     pub point: P2,
     pub name: String,
     pub number: String,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// Which of an element's lines a dimension measures to: a wall's centre line, its face on the
@@ -478,12 +493,29 @@ pub struct Spot {
     pub host: Option<Id>,
 }
 
-/// A schedule view: the elements of category `of` in rows, as the `schedule` command lists them.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A schedule view: the elements of category `of` in rows, as the `schedule` command lists them:
+/// its `fields` (its category's unless it chooses), of the elements its `filters` keep, sorted by
+/// its `sort` fields (by its first unless it says) and, `grouped`, a row for each set of their values.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     pub name: String,
     pub of: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<crate::schedule::Field>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filters: Vec<crate::schedule::Filter>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sort: Vec<crate::schedule::Sort>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub grouped: bool,
+}
+
+impl Schedule {
+    /// The category it's of, as elements name theirs: `room`.
+    pub fn category(&self) -> String {
+        crate::commands::category(&self.of)
+    }
 }
 
 /// A 3D view, seen from `azimuth` degrees round from east (counter-clockwise) and `elevation`
@@ -525,6 +557,9 @@ pub struct Column {
     pub height: f64,
     #[serde(default)]
     pub base_offset: f64,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A family's type placed: at `at` on `level`, `offset` mm up from it, turned `angle` degrees
@@ -567,6 +602,9 @@ pub struct Stair {
     pub tread: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landings: Vec<Landing>,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A landing between two runs of a stair or a ramp: after `at` risers of a stair, or `at` mm up a
@@ -597,6 +635,9 @@ pub struct Ramp {
     pub slope: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub landings: Vec<Landing>,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A side of a stair or a ramp, going up it.
@@ -624,6 +665,9 @@ pub struct Railing {
     pub host: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<Side>,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 /// A roof on `level`, its base `offset` mm above it. By its footprint: its eaves along `boundary`
@@ -659,6 +703,9 @@ pub struct Roof {
     pub join: Option<Id>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extrusion: Option<Extrusion>,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 impl Roof {
@@ -818,6 +865,44 @@ pub enum Element {
 }
 
 impl Element {
+    /// Its own values of parameters: the project's, and a component's family's.
+    pub fn params(&self) -> Option<&BTreeMap<String, serde_json::Value>> {
+        match self {
+            Element::Wall(Wall { params, .. })
+            | Element::Floor(Floor { params, .. })
+            | Element::Ceiling(Ceiling { params, .. })
+            | Element::Roof(Roof { params, .. })
+            | Element::Door(Opening { params, .. })
+            | Element::Window(Opening { params, .. })
+            | Element::Room(Room { params, .. })
+            | Element::Column(Column { params, .. })
+            | Element::Component(Component { params, .. })
+            | Element::Stair(Stair { params, .. })
+            | Element::Ramp(Ramp { params, .. })
+            | Element::Railing(Railing { params, .. }) => Some(params),
+            _ => None,
+        }
+    }
+
+    /// Its own values of parameters, to change.
+    pub fn params_mut(&mut self) -> Option<&mut BTreeMap<String, serde_json::Value>> {
+        match self {
+            Element::Wall(Wall { params, .. })
+            | Element::Floor(Floor { params, .. })
+            | Element::Ceiling(Ceiling { params, .. })
+            | Element::Roof(Roof { params, .. })
+            | Element::Door(Opening { params, .. })
+            | Element::Window(Opening { params, .. })
+            | Element::Room(Room { params, .. })
+            | Element::Column(Column { params, .. })
+            | Element::Component(Component { params, .. })
+            | Element::Stair(Stair { params, .. })
+            | Element::Ramp(Ramp { params, .. })
+            | Element::Railing(Railing { params, .. }) => Some(params),
+            _ => None,
+        }
+    }
+
     pub fn category(&self) -> &'static str {
         match self {
             Element::Text(_) => "text",
@@ -937,6 +1022,45 @@ pub struct Types {
     pub railing: BTreeMap<String, RailingType>,
 }
 
+/// What a project parameter holds: text, a number, a length (mm), or yes or no.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ParameterKind {
+    #[default]
+    Text,
+    Number,
+    Length,
+    YesNo,
+}
+
+/// A project parameter, as Revit's Manage > Project Parameters makes one: a value of its kind each
+/// element of its categories may have of its own.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectParameter {
+    #[serde(default)]
+    pub kind: ParameterKind,
+    pub categories: Vec<String>,
+}
+
+/// The most project parameters a project holds.
+pub const MAX_PROJECT_PARAMETERS: usize = 256;
+
+/// The categories project parameters are for.
+pub const PARAMETER_CATEGORIES: [&str; 12] =
+    ["wall", "floor", "ceiling", "roof", "door", "window", "room", "column", "component", "stair", "ramp", "railing"];
+
+impl ProjectParameter {
+    /// Whether `v` is a value it holds.
+    pub fn holds(&self, v: &serde_json::Value) -> bool {
+        match self.kind {
+            ParameterKind::Text => v.as_str().is_some_and(|t| t.chars().count() <= MAX_TEXT),
+            ParameterKind::Number | ParameterKind::Length => v.as_f64().is_some_and(|x| x.is_finite() && x.abs() <= MAX_COORD),
+            ParameterKind::YesNo => v.is_boolean(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Model {
@@ -957,6 +1081,9 @@ pub struct Model {
     /// Its families, by name: what components place.
     #[serde(default)]
     pub families: BTreeMap<String, Family>,
+    /// Its project parameters, by name: values each element of their categories may have.
+    #[serde(default)]
+    pub parameters: BTreeMap<String, ProjectParameter>,
     pub elements: BTreeMap<Id, Element>,
 }
 
@@ -977,6 +1104,7 @@ impl Model {
             types: Types::default(),
             materials: BTreeMap::new(),
             families: BTreeMap::new(),
+            parameters: BTreeMap::new(),
             elements: BTreeMap::new(),
         };
         // A library to start from: each material its colour, its cut's pattern and its surface's.
@@ -1926,6 +2054,29 @@ impl Model {
             }
             f.check(&|m| self.materials.contains_key(m)).map_err(|e| format!("family `{n}`: {e}"))?;
         }
+        if self.parameters.len() > MAX_PROJECT_PARAMETERS {
+            return Err(format!("the project has {} parameters; it holds up to {MAX_PROJECT_PARAMETERS}", self.parameters.len()));
+        }
+        for (n, p) in &self.parameters {
+            let who = format!("parameter `{n}`");
+            if !crate::family::nameable(n) {
+                return Err(format!("{who}: a name starts with a letter and holds letters, digits, `_` and spaces, up to {MAX_TEXT}"));
+            }
+            if p.categories.is_empty() {
+                return Err(format!("{who}: it needs a category: one of {}", PARAMETER_CATEGORIES.join(", ")));
+            }
+            if let Some(c) = p.categories.iter().find(|c| !PARAMETER_CATEGORIES.contains(&c.as_str())) {
+                return Err(format!("{who}: `{c}` isn't a category it can be for; there are {}", PARAMETER_CATEGORIES.join(", ")));
+            }
+            if let Some(c) = p.categories.iter().find(|c| crate::schedule::own_field(c, n)) {
+                return Err(format!("{who}: {c}s have a `{n}` of their own; name it otherwise"));
+            }
+            if p.categories.iter().any(|c| c == "component")
+                && let Some((f, _)) = self.families.iter().find(|(_, f)| f.parameters.iter().any(|q| q.name == *n))
+            {
+                return Err(format!("{who}: family `{f}` has a parameter of that name; name it otherwise"));
+            }
+        }
         for (cat, n, thickness, layers) in self.layered_types() {
             let who = format!("{cat} type `{n}`");
             size(&format!("{who} thickness"), thickness)?;
@@ -1967,6 +2118,8 @@ impl Model {
         let mut level_names = BTreeSet::new();
         let mut grid_names = BTreeSet::new();
         let mut view_names = BTreeSet::new();
+        // The schedules every project has that the project has made its own: one each.
+        let mut twins = BTreeSet::new();
         let mut sheet_numbers = BTreeSet::new();
         // Each view on a sheet: the sheet.
         let mut placed: BTreeMap<Id, Id> = BTreeMap::new();
@@ -1986,6 +2139,29 @@ impl Model {
                 )),
                 None => Err(format!("{who}: view {v} doesn't exist")),
             };
+            // Its values of the project's parameters, each one of its category's, of its kind; a
+            // component's family's are its family's to check.
+            for (k, v) in e.params().into_iter().flatten() {
+                if let Element::Component(c) = e
+                    && self.families.get(&c.family).is_some_and(|f| f.parameters.iter().any(|p| p.name == *k))
+                {
+                    continue;
+                }
+                let p = self
+                    .parameters
+                    .get(k)
+                    .filter(|p| p.categories.iter().any(|c| c == e.category()))
+                    .ok_or_else(|| format!("{who}: `{k}` isn't a parameter of {}s; add it with `parameter`", e.category()))?;
+                if !p.holds(v) {
+                    let what = match p.kind {
+                        ParameterKind::Text => "text",
+                        ParameterKind::Number => "a number",
+                        ParameterKind::Length => "a length",
+                        ParameterKind::YesNo => "yes or no",
+                    };
+                    return Err(format!("{who}: `{k}` holds {what}, not {v}"));
+                }
+            }
             match e {
                 Element::Level(l) => {
                     text(&who, "name", &l.name)?;
@@ -2179,9 +2355,14 @@ impl Model {
                     if sc.name.trim().is_empty() {
                         return Err(format!("{who}: a view needs a name"));
                     }
-                    if !crate::schedule::VIEWS.iter().any(|(c, _)| *c == crate::commands::category(&sc.of)) {
-                        let names: Vec<&str> = crate::schedule::VIEWS.iter().map(|(c, _)| *c).collect();
-                        return Err(format!("{who}: there's no schedule of `{}`; there are: {}", sc.of, names.join(", ")));
+                    crate::schedule::check(self, sc).map_err(|e| format!("{who} (`{}`): {e}", sc.name))?;
+                    if let Some((of, name)) = crate::schedule::builtin(Some(&sc.name), None)
+                        && !twins.insert(of)
+                    {
+                        return Err(format!(
+                            "{who} (`{}`): another schedule is already the {of}s' {name}; call it something else",
+                            sc.name
+                        ));
                     }
                     if !view_names.insert(sc.name.as_str()) {
                         return Err(format!("{who}: another view is already named `{}`", sc.name));
@@ -2230,11 +2411,7 @@ impl Model {
                     coord(&format!("{who} angle"), c.angle)?;
                     coord(&format!("{who} offset"), c.offset)?;
                     for (k, v) in &c.params {
-                        let p = f
-                            .parameters
-                            .iter()
-                            .find(|p| p.name == *k)
-                            .ok_or_else(|| format!("{who}: `{k}` isn't a parameter of `{}`", c.family))?;
+                        let Some(p) = f.parameters.iter().find(|p| p.name == *k) else { continue };
                         if !p.instance {
                             return Err(format!(
                                 "{who}: `{k}` is a type parameter of `{}`; change it in its type, with `family`",
@@ -2617,6 +2794,7 @@ mod tests {
 
     fn wall(level: Id, a: P2, b: P2) -> Element {
         Element::Wall(Wall {
+            params: Default::default(),
             type_name: "Generic - 200mm".into(),
             level,
             start: a,
@@ -2643,6 +2821,7 @@ mod tests {
 
     fn door(host: Id, offset: f64) -> Element {
         Element::Door(Opening {
+            params: Default::default(),
             type_name: "Single 900 x 2100".into(),
             host,
             offset,
@@ -2704,7 +2883,7 @@ mod tests {
     fn rooms_are_bounded_by_the_walls_their_level_cuts() {
         let mut m = Model::new("t");
         boxed(&mut m);
-        let room = Room { level: 1, point: P2(3000.0, 2000.0), name: "Hall".into(), number: "1".into() };
+        let room = Room { params: Default::default(), level: 1, point: P2(3000.0, 2000.0), name: "Hall".into(), number: "1".into() };
         assert_eq!(m.room_region(&room).map(|r| r.area()), Some(24e6));
         let upstairs = Room { level: 2, ..room };
         assert_eq!(m.room_region(&upstairs), None, "Level 2 has no walls");

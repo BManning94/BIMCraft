@@ -43,6 +43,8 @@ cargo test --workspace
   reflected ceiling plan: `render {"view": "Level 1", "ceiling": true, "path": "/tmp/rcp.png"}`.
 - 3D: `bimcraft-cli run --sample --cmd 'render {"view": "{3D}", "path": "/tmp/3d.png"}'` (`azimuth` and `elevation`
   turn it). After touching `view3d.rs`, look at it. Sections and elevations render by name the same way: `"view": "Section 1"`.
+- Schedules: `bimcraft-cli run --sample --cmd 'schedule {"category": "rooms"}'` returns its columns, rows and totals (and
+  `available`, the fields there are); one placed on a sheet prints as a table: render the sheet and look at it.
 - Sheets: `bimcraft-cli run --sample --save /tmp/sheets.pdf` prints every sheet; read them back with poppler (`pdfinfo`,
   `pdftoppm -png`) when it's installed. `render {"view": "A101"}` draws one sheet as a PNG.
 - IFC: `bimcraft-cli run --sample --save /tmp/house.ifc`. After touching `ifc.rs`, validate with IfcOpenShell:
@@ -95,6 +97,15 @@ is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): 
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to
 its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.
+A project parameter (`Model::parameters`) is a value each element of its categories may hold in its `params`, of its kind;
+a component's `params` hold its family's instance values too, so a parameter for components can't take a family
+parameter's name, nor any category's own field's (`schedule::own_field`). A schedule's fields are its category's own
+(`OWN` in `schedule.rs`, read from `element_json`), the project parameters for it and, for components, the families'
+parameters, or calculated: a formula over the row's others, read as the family formula engine reads (lengths in mm, areas in
+m²), a field with no value leaving it with none (an unset yes or no is no). Filters compare numbers as the schedule shows
+them, so two that show the same are equal. The six schedules every project has (`schedule::VIEWS`) aren't elements
+until changed or placed (`schedule::standard`), and a schedule named as one of them, in any language or case, is that one; renaming a parameter renames it in schedules, but a formula naming it holds
+the rename back.
 A family (`Model::families`, `family.rs`) is parameters, types that set them and forms in its own axes: x along a
 component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
 `yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;

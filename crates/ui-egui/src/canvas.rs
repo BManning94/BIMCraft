@@ -1122,10 +1122,11 @@ impl BimApp {
             let up = (run * slope / 100.0 * 1000.0).round() / 1000.0;
             let landings = if top - bottom - up > 1.0 { vec![Landing { at: up, turn }] } else { Vec::new() };
             let done = done(&landings);
-            Ok((Element::Ramp(Ramp { level, top_level, height, start, angle, width, slope, landings }), done))
+            Ok((Element::Ramp(Ramp { params: Default::default(), level, top_level, height, start, angle, width, slope, landings }), done))
         } else {
             let width = m.units.parse(&self.stair_width).ok_or_else(|| tf("stair: `{}` is not a width", &[&self.stair_width]))?;
             let mut st = Stair {
+                params: Default::default(),
                 level,
                 top_level: m.level_above(level),
                 height: DEFAULT_HEIGHT,
@@ -1627,7 +1628,16 @@ impl BimApp {
                 let at = snap(m, level, v, q, &[], false);
                 let type_name =
                     self.types.get("column").cloned().or_else(|| m.default_type("column").map(String::from)).unwrap_or_default();
-                sketched(&Element::Column(Column { type_name, level, at, angle: 0.0, top_level: None, height: 0.0, base_offset: 0.0 }));
+                sketched(&Element::Column(Column {
+                    params: Default::default(),
+                    type_name,
+                    level,
+                    at,
+                    angle: 0.0,
+                    top_level: None,
+                    height: 0.0,
+                    base_offset: 0.0,
+                }));
                 return;
             }
             // The floor a click would make, under the walls, open over their courtyards.

@@ -73,6 +73,14 @@ fn browse(h: &mut Harness<BimApp>, label: &str) {
     h.run();
 }
 
+/// A view's entry in the Project Browser while its tab is open too: the lower of the two.
+fn browse_entry(h: &mut Harness<BimApp>, label: &str) {
+    use egui_kittest::kittest::NodeT;
+    let entry = h.get_all_by_label(label).max_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).map(|n| n.accesskit_node().id());
+    h.get_by(|n| Some(n.id()) == entry).click_accesskit();
+    h.run();
+}
+
 /// A primary click on the plan at a model point.
 fn click(h: &mut Harness<BimApp>, p: P2) {
     click_with(h, p, Modifiers::NONE);
@@ -145,6 +153,23 @@ fn drag(h: &mut Harness<BimApp>, from: P2, to: P2) {
 /// The id of the element `f` picks out.
 fn find(h: &Harness<BimApp>, f: impl Fn(&Element) -> bool) -> Id {
     h.state().session.model.elements.iter().find(|(_, e)| f(e)).map(|(id, _)| *id).unwrap()
+}
+
+/// A click on the widget of `role` named `label`: of those named alike, the one that role picks out.
+fn pick(h: &mut Harness<BimApp>, role: Role, label: &str) {
+    h.get_by_role_and_label(role, label).click();
+    h.run();
+}
+
+/// Replace the text of the field of `role` named `label`, and press Enter.
+fn type_role(h: &mut Harness<BimApp>, role: Role, label: &str, text: &str) {
+    h.get_by_role_and_label(role, label).focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.key_press(Key::Backspace);
+    h.get_by_role_and_label(role, label).type_text(text);
+    h.run();
+    key(h, Key::Enter);
 }
 
 fn key(h: &mut Harness<BimApp>, k: Key) {
@@ -1304,7 +1329,10 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             .filter_map(|n| n.accesskit_node().label())
             .collect()
     };
-    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}"));
+    let extra = r#"parameter {"name": "Finish Height", "kind": "length", "categories": ["wall"]}
+schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Length", "total": true}, {"name": "Twice", "formula": "Length * 2"}], "filters": [{"field": "Length", "op": "greater", "value": 1}], "sort": ["Length"]}"#;
+    let mut h =
+        app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}\n{extra}"));
     // The probe finds what it looks for: in English, the same labels are all English.
     assert!(english(&h, Language::Spanish).contains(&"Architecture".to_string()));
     for l in [Language::Portuguese, Language::Spanish] {
@@ -1331,6 +1359,29 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             }
             missed.extend(english(&h, l));
         }
+        // Project Parameters; New Schedule; a schedule, its properties' every tab.
+        key(&mut h, Key::Escape);
+        press(&mut h, tr("Manage"));
+        press(&mut h, tr("Project Parameters"));
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Close"));
+        press(&mut h, tr("View"));
+        press(&mut h, tr("Schedules"));
+        press(&mut h, tr("Schedule/Quantities…"));
+        pick(&mut h, Role::Button, &crate::lang::category("room", true));
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Cancel"));
+        browse_entry(&mut h, "Areas");
+        missed.extend(english(&h, l));
+        press(&mut h, &tr("Edit {}").replace("{}", tr("Fields")));
+        pick(&mut h, Role::Button, tr("Length"));
+        press(&mut h, tr("Calculated Value…"));
+        missed.extend(english(&h, l));
+        for tab in ["Filter", "Sorting/Grouping"] {
+            pick(&mut h, Role::Button, tr(tab));
+            missed.extend(english(&h, l));
+        }
+        press(&mut h, tr("Close"));
         missed.sort();
         missed.dedup();
         assert!(missed.is_empty(), "{l:?}: left in English: {missed:?}");
@@ -1721,4 +1772,159 @@ fn a_floor_types_layers_go_from_its_top_down() {
     let t = &h.state().session.model.types.floor["Generic - 200mm"];
     assert_eq!((t.thickness, t.layers.len()), (210.0, 2));
     assert_eq!((t.layers[0].material.as_str(), t.layers[0].thickness), ("Ceramic tile", 10.0));
+}
+
+#[test]
+fn project_parameters_are_made_in_their_window_and_given_values_in_properties() {
+    use bimcraft_core::model::ParameterKind;
+    let mut h = app(BOX);
+    press(&mut h, "Manage");
+    press(&mut h, "Project Parameters");
+    assert!(h.query_by_label("No project parameters yet: New makes one.").is_some());
+    press(&mut h, "New");
+    assert_eq!(h.state().session.model.parameters["Parameter 1"].categories, ["wall"]);
+    type_into(&mut h, "Name", "Finish Height");
+    key(&mut h, Key::Enter);
+    pick(&mut h, Role::CheckBox, "Doors");
+    assert_eq!(h.state().session.model.parameters["Finish Height"].categories, ["door", "wall"]);
+    h.get_by_role_and_label(Role::ComboBox, "Type of Parameter").click();
+    h.run();
+    press(&mut h, "Length");
+    assert_eq!(h.state().session.model.parameters["Finish Height"].kind, ParameterKind::Length);
+    press(&mut h, "Close");
+    // The bottom wall's value, typed in the project's units; emptied, it has none.
+    let wall = ids(&h, "wall")[0];
+    click(&mut h, P2(4000.0, 0.0));
+    type_role(&mut h, Role::TextInput, "Finish Height", "2400");
+    assert_eq!(field(&h, wall, "params"), json!({"Finish Height": 2400.0}));
+    type_role(&mut h, Role::TextInput, "Finish Height", "");
+    assert_eq!(field(&h, wall, "params"), Value::Null);
+    // Deleted, it's gone from the palette.
+    key(&mut h, Key::Escape);
+    press(&mut h, "Manage");
+    press(&mut h, "Project Parameters");
+    press(&mut h, "Delete");
+    press(&mut h, "Close");
+    assert!(h.state().session.model.parameters.is_empty());
+    click(&mut h, P2(4000.0, 0.0));
+    assert!(h.query_by_label("Finish Height").is_none() && h.query_by_label("Project Parameters").is_none(), "no group for it");
+}
+
+#[test]
+fn a_new_schedule_takes_its_fields_filter_and_sorting_from_schedule_properties() {
+    use bimcraft_core::schedule::{Filter, Op, Sort};
+    let rooms = r#"wall {"points": [[5000,0],[5000,6000]], "type": "Interior - 100mm"}
+room {"point": [6500, 3000], "name": "Kitchen"}
+room {"point": [2000, 3000], "name": "Living"}"#;
+    let mut h = app_at(&format!("{BOX}\n{rooms}"), 0.05);
+    press(&mut h, "View");
+    press(&mut h, "Schedules");
+    press(&mut h, "Schedule/Quantities…");
+    pick(&mut h, Role::Button, "Rooms");
+    // Named after its category, as no view is yet.
+    let named = {
+        use egui_kittest::kittest::NodeT;
+        h.get_by_role_and_label(Role::TextInput, "Name:").accesskit_node().value()
+    };
+    assert_eq!(named.as_deref(), Some("Room Schedule 2"));
+    type_into(&mut h, "Name:", "Room Areas");
+    press(&mut h, "OK");
+    let sc = ids(&h, "schedule")[0];
+    assert_eq!(h.state().sheet, Sheet::Table(sc));
+    let schedule = |h: &Harness<BimApp>| match h.state().session.model.elements.get(&sc) {
+        Some(Element::Schedule(s)) => s.clone(),
+        _ => panic!("schedule {sc} is gone"),
+    };
+    // Its fields: its perimeter taken away, its area totalled, and a cost worked out from it.
+    pick(&mut h, Role::Button, "Perimeter");
+    press(&mut h, "Remove");
+    pick(&mut h, Role::Button, "Area");
+    pick(&mut h, Role::CheckBox, "Calculate totals");
+    press(&mut h, "Calculated Value…");
+    type_role(&mut h, Role::TextInput, "Name", "Cost");
+    type_role(&mut h, Role::TextInput, "Formula", "Area * 120");
+    press(&mut h, "OK");
+    let s = schedule(&h);
+    let names: Vec<&str> = s.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Number", "Name", "Level", "Area", "Cost"]);
+    assert!(s.fields[3].total && s.fields[4].formula.as_deref() == Some("Area * 120"));
+    // Its filter: the rooms over 20 m².
+    pick(&mut h, Role::Button, "Filter");
+    press(&mut h, "Add Filter");
+    pick(&mut h, Role::ComboBox, "Filter by:");
+    pick(&mut h, Role::Button, "Area");
+    pick(&mut h, Role::ComboBox, "Comparison");
+    press(&mut h, "is greater than");
+    type_role(&mut h, Role::TextInput, "Filter by:", "20");
+    assert_eq!(schedule(&h).filters, [Filter { field: "Area".into(), op: Op::Greater, value: json!(20.0) }]);
+    // Sorted by its area, largest first, and a row for each.
+    pick(&mut h, Role::Button, "Sorting/Grouping");
+    press(&mut h, "Add Sort");
+    pick(&mut h, Role::ComboBox, "Sort by:");
+    pick(&mut h, Role::Button, "Area");
+    pick(&mut h, Role::ComboBox, "Order");
+    press(&mut h, "Descending");
+    pick(&mut h, Role::CheckBox, "Itemize every instance");
+    let s = schedule(&h);
+    assert_eq!((s.sort, s.grouped), (vec![Sort { field: "Area".into(), descending: true }], true));
+    press(&mut h, "Close");
+    // The view: the room its filter keeps, its cost, and the totals.
+    assert!(h.query_by_label("Living").is_some() && h.query_by_label("Kitchen").is_none());
+    assert!(h.query_by_label("3600").is_some(), "Living's cost: 30 m² at 120");
+    assert!(h.query_by_label("Total").is_some());
+    // On a sheet, Place View offers it; a double click on it there opens it.
+    press(&mut h, "View");
+    press(&mut h, "Sheet");
+    press(&mut h, "View");
+    press(&mut h, "Place View");
+    press(&mut h, "Schedule: Room Areas");
+    let vp = ids(&h, "viewport")[0];
+    let at = field(&h, vp, "at");
+    double_click(&mut h, P2(at[0].as_f64().unwrap(), at[1].as_f64().unwrap()));
+    assert_eq!(h.state().sheet, Sheet::Table(sc));
+    // Its own name in the browser, under the schedules every project has.
+    browse(&mut h, "Room Schedule");
+    assert_eq!(h.state().sheet, Sheet::Schedule("room"));
+    browse_entry(&mut h, "Room Areas");
+    assert_eq!(h.state().sheet, Sheet::Table(sc));
+}
+
+#[test]
+fn changing_a_schedule_every_project_has_makes_it_the_projects() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\ndoor {{\"at\": [6000, 0], \"type\": \"Single 800 x 2100\"}}"));
+    browse(&mut h, "Door Schedule");
+    assert!(ids(&h, "schedule").is_empty(), "opened, it's still every project's");
+    press(&mut h, "Edit Sorting/Grouping");
+    press(&mut h, "Add Sort");
+    pick(&mut h, Role::CheckBox, "Itemize every instance");
+    press(&mut h, "Close");
+    let sc = ids(&h, "schedule");
+    assert_eq!(sc.len(), 1);
+    assert_eq!(h.state().sheet, Sheet::Schedule("door"), "the same view, the project's now");
+    match h.state().session.model.elements.get(&sc[0]) {
+        Some(Element::Schedule(s)) => assert!(s.grouped && s.sort.len() == 1 && s.name == "Door Schedule"),
+        e => panic!("{e:?}"),
+    }
+    // Grouped by mark, every door its row still; by type, a row for each type.
+    assert!(h.query_by_label("Single 800 x 2100").is_some() && h.query_by_label("Single 900 x 2100").is_some());
+    // Renamed, it's a schedule of the project's like any other, and its tab stays on it.
+    type_role(&mut h, Role::TextInput, "View Name", "Doors by Type");
+    assert_eq!(h.state().sheet, Sheet::Table(sc[0]));
+    assert!(h.query_by_label("Single 800 x 2100").is_some());
+}
+
+#[test]
+fn a_new_schedule_named_as_another_view_stays_open_to_be_named_again() {
+    let mut h = app(BOX);
+    press(&mut h, "View");
+    press(&mut h, "Schedules");
+    press(&mut h, "Schedule/Quantities…");
+    pick(&mut h, Role::Button, "Walls");
+    type_into(&mut h, "Name:", "Level 1");
+    press(&mut h, "OK");
+    assert!(ids(&h, "schedule").is_empty());
+    assert!(h.state().status.error, "it says why");
+    type_into(&mut h, "Name:", "Wall Lengths");
+    press(&mut h, "OK");
+    assert_eq!(ids(&h, "schedule").len(), 1);
 }

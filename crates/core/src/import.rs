@@ -17,13 +17,18 @@ use crate::family::{Category, Expr, Family, Form, MAX_TRIANGLES, Parameter};
 use crate::geom::{self, P2};
 use crate::model::{
     Ceiling, CeilingType, Column, ColumnType, Component, Element, Extrusion, Floor, FloorType, Function, Grid, Id, Landing, Layer, Level,
-    MAX_COORD, MAX_LAYERS, MAX_POINTS, MAX_TEXT, Model, Opening, OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft,
-    Side, Stair, TOL, Wall, WallType, culprit, heading,
+    MAX_COORD, MAX_LAYERS, MAX_POINTS, MAX_PROJECT_PARAMETERS, MAX_TEXT, Model, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind,
+    ProjectParameter, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
 };
 use crate::stairs;
 use crate::step::{self, Entity, File, V};
 use crate::view3d::{P3, add, cross, dot, mul, sub, unit};
 use crate::walls::{self, Axis, Plane};
+use serde_json::json;
+
+/// The most project parameter values an import reads: a set related to many elements hands each
+/// all its values.
+const MAX_VALUES: usize = 1_000_000;
 
 /// A model read from an IFC file: its schema, what was left out and why, and how far it was moved
 /// to bring it near the origin.
@@ -1168,6 +1173,8 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     let (mut skipped, mut seen): (Vec<String>, HashSet<u64>) = (Vec::new(), HashSet::new());
     // Each element made, and what it was in the file.
     let mut from: HashMap<Id, String> = HashMap::new();
+    // The elements made of each in the file.
+    let mut elements_from: HashMap<u64, Vec<Id>> = HashMap::new();
 
     // Storeys, as levels, lowest first.
     let mut storeys: Vec<(u64, String, f64)> = named(&["IFCBUILDINGSTOREY"])
@@ -1320,6 +1327,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     for w in raw {
         let (top_level, height) = topped(w.level, w.z.0, w.z.1);
         let wall = Wall {
+            params: Default::default(),
             type_name: w.type_name,
             level: w.level,
             start: w.start,
@@ -1334,6 +1342,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let id = m.insert(Element::Wall(wall));
         from.insert(id, who(w.ifc));
+        elements_from.entry(w.ifc).or_default().push(id);
         walls.insert(w.ifc, (id, w.start, w.end, w.z.0));
         peaks.push((id, w.peak, w.z.1));
         seen.insert(w.ifc);
@@ -1423,6 +1432,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let z = top.at(tail);
         let level = level_near(z).unwrap_or_else(|| level_for(id, z));
         let floor = Floor {
+            params: Default::default(),
             type_name,
             level,
             boundary: ring.into_iter().map(flat).collect(),
@@ -1433,6 +1443,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let fid = m.insert(Element::Floor(floor));
         from.insert(fid, who(id));
+        elements_from.entry(id).or_default().push(fid);
         seen.insert(id);
     }
 
@@ -1461,8 +1472,16 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let level = level_for(id, z0);
         let boundary = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
         let offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
-        let cid = m.insert(Element::Ceiling(Ceiling { type_name, level, boundary, openings: openings_of(id, holes), offset }));
+        let cid = m.insert(Element::Ceiling(Ceiling {
+            params: Default::default(),
+            type_name,
+            level,
+            boundary,
+            openings: openings_of(id, holes),
+            offset,
+        }));
         from.insert(cid, who(id));
+        elements_from.entry(id).or_default().push(cid);
         seen.insert(id);
     }
 
@@ -1495,6 +1514,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
                 let overhang = if pitched && below > 0.0 { below / rd.slope.to_radians().tan() } else { 0.0 };
                 let offset = if pitched && below > 0.0 { 0.0 } else { -below };
                 let roof = Roof {
+                    params: Default::default(),
                     type_name,
                     level,
                     boundary: rd.boundary,
@@ -1512,6 +1532,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
                     Ok(_) => {
                         let rid = m.insert(Element::Roof(roof));
                         from.insert(rid, who(id));
+                        elements_from.entry(id).or_default().push(rid);
                     }
                     Err(why) => leave(&mut skipped, &mut seen, id, &why),
                 }
@@ -1554,6 +1575,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let base_offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
         let sid = m.insert(Element::Shaft(Shaft { level, boundary, top_level, height: (height * 1000.0).round() / 1000.0, base_offset }));
         from.insert(sid, who(id));
+        elements_from.entry(id).or_default().push(sid);
     }
 
     // Columns: a section across them, and how high they stand.
@@ -1602,6 +1624,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let (top_level, height) = topped(level, z0, z1);
         let angle = if round { 0.0 } else { (u.1.atan2(u.0).to_degrees() * 1e6).round() / 1e6 };
         let column = Column {
+            params: Default::default(),
             type_name,
             level,
             at: micron(at),
@@ -1612,6 +1635,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let cid = m.insert(Element::Column(column));
         from.insert(cid, who(id));
+        elements_from.entry(id).or_default().push(cid);
         seen.insert(id);
     }
 
@@ -1734,6 +1758,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let c = Component { family, type_name, level, at: micron(at), angle, offset, mirrored, params: BTreeMap::new() };
         let cid = m.insert(Element::Component(c));
         from.insert(cid, who(id));
+        elements_from.entry(id).or_default().push(cid);
         seen.insert(id);
     }
     for (name, f) in families.into_iter().filter(|(n, _)| !unsound.contains_key(n)) {
@@ -1790,6 +1815,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         // Its riser, from the rise the model will measure, so it counts the same risers.
         let climb = top_level.map_or(height, |t| elevation(t) - elevation(level));
         let stair = Stair {
+            params: Default::default(),
             level,
             top_level,
             height,
@@ -1802,6 +1828,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let sid = m.insert(Element::Stair(stair));
         from.insert(sid, who(id));
+        elements_from.entry(id).or_default().push(sid);
         railings_on.extend(of("IFCRAILING").into_iter().map(|p| (p, sid)));
     }
 
@@ -1843,6 +1870,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let level = level_for(id, z0);
         let (top_level, height) = topped(level, z0, z0 + rise);
         let ramp = Ramp {
+            params: Default::default(),
             level,
             top_level,
             height: (height * 1000.0).round() / 1000.0,
@@ -1854,6 +1882,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let rid = m.insert(Element::Ramp(ramp));
         from.insert(rid, who(id));
+        elements_from.entry(id).or_default().push(rid);
         railings_on.extend(of("IFCRAILING").into_iter().map(|p| (p, rid)));
     }
 
@@ -1872,6 +1901,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             Some(&host) => {
                 let level = m.elements.get(&host).and_then(|h| m.level_of(h)).unwrap_or(0);
                 let on = |side| Railing {
+                    params: Default::default(),
                     type_name: String::new(),
                     level,
                     path: Vec::new(),
@@ -1901,11 +1931,12 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
                 let level = level_for(id, first[2] - h);
                 let path = axis.iter().map(|p| micron(r.flat(*p))).collect();
                 let base_offset = ((first[2] - h - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
-                Railing { type_name, level, path, base_offset, host: None, side: None }
+                Railing { params: Default::default(), type_name, level, path, base_offset, host: None, side: None }
             }
         };
         let rid = m.insert(Element::Railing(railing));
         from.insert(rid, who(id));
+        elements_from.entry(id).or_default().push(rid);
     }
 
     // Doors and windows: where their openings cut their walls.
@@ -1944,6 +1975,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         *count += 1;
         let flip_hand = enumeration(o.args.get(11)).is_some_and(|op| op.contains("RIGHT"));
         let op = Opening {
+            params: Default::default(),
             type_name,
             host,
             offset: micron(P2((s0 + s1) / 2.0, 0.0)).0,
@@ -1954,6 +1986,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let oid = m.insert(if is_door { Element::Door(op) } else { Element::Window(op) });
         from.insert(oid, who(id));
+        elements_from.entry(id).or_default().push(oid);
         seen.insert(id);
     }
 
@@ -1990,8 +2023,15 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             }
         };
         let level = level_for(id, floor.unwrap_or(0.0));
-        let rid = m.insert(Element::Room(Room { level, point: micron(point), name: clip(&room_name), number: clip(&number) }));
+        let rid = m.insert(Element::Room(Room {
+            params: Default::default(),
+            level,
+            point: micron(point),
+            name: clip(&room_name),
+            number: clip(&number),
+        }));
         from.insert(rid, who(id));
+        elements_from.entry(id).or_default().push(rid);
         seen.insert(id);
     }
 
@@ -2011,7 +2051,72 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             let tag = text(axis.args.first()).map_or_else(|| next_number(grid_names.iter().map(String::as_str)), String::from);
             let gid = m.insert(Element::Grid(Grid { name: fresh(&mut grid_names, &tag), start, end }));
             from.insert(gid, who(id));
+            elements_from.entry(id).or_default().push(gid);
         }
+    }
+
+    // The project's parameters, from the property sets BIMCraft writes them in: each one's kind
+    // from its first value's, for the categories of the elements holding one; up to as many as a
+    // project holds, and as many values as `MAX_VALUES`.
+    let (mut over, mut values) = (BTreeSet::new(), 0);
+    'sets: for rel in named(&["IFCRELDEFINESBYPROPERTIES"]).into_iter().filter_map(e) {
+        let Some(set) = reference(rel.args.get(5)).and_then(e).filter(|x| x.name == "IFCPROPERTYSET") else { continue };
+        if text(set.args.get(2)) != Some(crate::ifc::PARAMETERS) {
+            continue;
+        }
+        for prop in refs(set.args.get(4)).into_iter().filter_map(e).filter(|x| x.name == "IFCPROPERTYSINGLEVALUE") {
+            let Some(name) = text(prop.args.first()).filter(|n| crate::family::nameable(n)) else { continue };
+            let (kind, value) = match prop.args.get(2) {
+                Some(V::Typed(t, v)) => match (t.as_str(), &**v) {
+                    ("IFCTEXT" | "IFCLABEL" | "IFCIDENTIFIER", V::Str(s)) => (ParameterKind::Text, json!(clip(s))),
+                    ("IFCBOOLEAN" | "IFCLOGICAL", V::Enum(b)) if b == "T" || b == "F" => (ParameterKind::YesNo, json!(b == "T")),
+                    ("IFCLENGTHMEASURE" | "IFCPOSITIVELENGTHMEASURE", v) => match real(Some(v)) {
+                        Some(x) => (ParameterKind::Length, json!((x * mm * 1e6).round() / 1e6)),
+                        None => continue,
+                    },
+                    ("IFCREAL" | "IFCINTEGER" | "IFCNUMERICMEASURE" | "IFCCOUNTMEASURE", v) => match real(Some(v)) {
+                        Some(x) => (ParameterKind::Number, json!(x)),
+                        None => continue,
+                    },
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            for id in refs(rel.args.get(4)).iter().filter_map(|x| elements_from.get(x)).flatten() {
+                let Some(el) = m.elements.get(id) else { continue };
+                let cat = el.category();
+                let theirs = |f: &str| m.families.get(f).is_some_and(|f| f.parameters.iter().any(|p| p.name == name));
+                let fits = PARAMETER_CATEGORIES.contains(&cat)
+                    && !crate::schedule::own_field(cat, name)
+                    && !matches!(el, Element::Component(c) if theirs(&c.family))
+                    && m.parameters.get(name).is_none_or(|p| p.kind == kind);
+                let p = ProjectParameter { kind, categories: vec![cat.to_string()] };
+                if !fits || !p.holds(&value) {
+                    continue;
+                }
+                if !m.parameters.contains_key(name) && m.parameters.len() >= MAX_PROJECT_PARAMETERS {
+                    over.insert(name.to_string());
+                    continue;
+                }
+                if values >= MAX_VALUES {
+                    skipped.push(format!("project parameter values past the {MAX_VALUES} BIMCraft reads"));
+                    break 'sets;
+                }
+                values += 1;
+                let p = m.parameters.entry(name.to_string()).or_insert(p);
+                if !p.categories.iter().any(|c| c == cat) {
+                    p.categories.push(cat.to_string());
+                    p.categories.sort();
+                }
+                if let Some(params) = m.elements.get_mut(id).and_then(Element::params_mut) {
+                    params.insert(name.to_string(), value.clone());
+                }
+            }
+        }
+    }
+
+    if !over.is_empty() {
+        skipped.push(format!("{} project parameters: past the {MAX_PROJECT_PARAMETERS} a project holds", over.len()));
     }
 
     // The materials the layers are made of, in the library, shaded as the file shades them.
@@ -2504,6 +2609,76 @@ ENDSEC;END-ISO-10303-21;",
         let (x, y) = (span(pts.iter().map(|p| p.0)).unwrap_or_default(), span(pts.iter().map(|p| p.1)).unwrap_or_default());
         let z = span(pieces.iter().flat_map(|p| [p.bottom, p.top])).unwrap_or_default();
         (r(x.0), r(x.1), r(y.0), r(y.1), r(z.0), r(z.1))
+    }
+
+    #[test]
+    fn project_parameters_go_out_in_a_property_set_and_come_back_with_their_kinds() {
+        let mut s = crate::engine::Session::new();
+        s.script(
+            r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}
+               door {"at": [4000, 0]}
+               room {"point": [4000, 3000]}
+               component {"family": "Chair", "at": [2000, 2000]}
+               parameter {"name": "Fire Rating", "categories": ["wall", "door"]}
+               parameter {"name": "Cost", "kind": "number", "categories": ["door", "component"]}
+               parameter {"name": "Finish Height", "kind": "length", "categories": ["room"]}
+               parameter {"name": "Accessible", "kind": "yesno", "categories": ["door", "room"]}"#,
+        )
+        .unwrap();
+        let ids = |m: &Model, cat: &str| -> Vec<Id> { m.elements.iter().filter(|(_, e)| e.category() == cat).map(|(id, _)| *id).collect() };
+        let (wall, door, room, chair) =
+            (ids(&s.model, "wall")[0], ids(&s.model, "door")[0], ids(&s.model, "room")[0], ids(&s.model, "component")[0]);
+        for (id, values) in [
+            (wall, json!({"Fire Rating": "60 min"})),
+            (door, json!({"Fire Rating": "30 min", "Cost": 450.5, "Accessible": true})),
+            (room, json!({"Finish Height": 2400, "Accessible": false})),
+            (chair, json!({"Cost": 80})),
+        ] {
+            s.execute("modify", &json!({"id": id, "params": values})).unwrap();
+        }
+        let file = crate::ifc::export(&s.model);
+        assert_eq!(file.matches("IFCRELDEFINESBYPROPERTIES(").count(), 4);
+        assert!(file.contains("IFCPROPERTYSINGLEVALUE('Finish Height',$,IFCLENGTHMEASURE(2400.),$)"), "{file}");
+        assert!(file.contains("IFCPROPERTYSINGLEVALUE('Accessible',$,IFCBOOLEAN(.T.),$)"));
+        let i = ifc(file.as_bytes(), "x").unwrap();
+        assert_eq!(i.skipped, Vec::<String>::new());
+        assert_eq!(i.model.parameters, s.model.parameters, "each kind, for the categories holding one");
+        // Numbers as numbers: 2400 and 2400.0 alike.
+        let values = |m: &Model, cat: &str| -> Option<BTreeMap<String, serde_json::Value>> {
+            let params = m.elements.values().find(|e| e.category() == cat).and_then(Element::params)?;
+            Some(params.iter().map(|(k, v)| (k.clone(), v.as_f64().map_or_else(|| v.clone(), |x| json!(x)))).collect())
+        };
+        for cat in ["wall", "door", "room", "component"] {
+            assert_eq!(values(&i.model, cat), values(&s.model, cat), "{cat}");
+        }
+        // In metres, a length comes in in millimetres.
+        let metres = file.replace(".MILLI.,.METRE.", "$,.METRE.").replace("IFCLENGTHMEASURE(2400.)", "IFCLENGTHMEASURE(2.4)");
+        let i = ifc(metres.as_bytes(), "x").unwrap();
+        assert_eq!(values(&i.model, "room").and_then(|p| p.get("Finish Height").cloned()), Some(json!(2400.0)));
+    }
+
+    #[test]
+    fn a_property_set_of_more_parameters_than_a_project_holds_comes_in_up_to_them() {
+        let mut s = crate::engine::Session::new();
+        s.script(r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}"#).unwrap();
+        let file = crate::ifc::export(&s.model);
+        // Every wall, related to one set of more parameters than a project holds.
+        let walls: Vec<String> =
+            file.lines().filter(|l| l.contains("=IFCWALL(")).filter_map(|l| l.split('=').next().map(String::from)).collect();
+        let n = crate::model::MAX_PROJECT_PARAMETERS + 50;
+        let mut extra = String::new();
+        let props: Vec<String> = (0..n)
+            .map(|i| {
+                extra.push_str(&format!("#{}=IFCPROPERTYSINGLEVALUE('P{i}',$,IFCREAL(1.),$);\n", 900_000 + i));
+                format!("#{}", 900_000 + i)
+            })
+            .collect();
+        extra.push_str(&format!("#899998=IFCPROPERTYSET('0aaaaaaaaaaaaaaaaaaaaa',$,'Project Parameters',$,({}));\n", props.join(",")));
+        extra.push_str(&format!("#899999=IFCRELDEFINESBYPROPERTIES('0bbbbbbbbbbbbbbbbbbbbb',$,$,$,({}),#899998);\n", walls.join(",")));
+        let file = file.replacen("ENDSEC;\nEND-ISO", &format!("{extra}ENDSEC;\nEND-ISO"), 1);
+        let i = ifc(file.as_bytes(), "x").unwrap();
+        assert_eq!(i.model.parameters.len(), crate::model::MAX_PROJECT_PARAMETERS);
+        assert!(i.skipped.iter().any(|s| s.contains("parameter")), "{:?}", i.skipped);
     }
 
     #[test]

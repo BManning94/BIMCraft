@@ -9,11 +9,12 @@ use std::sync::Arc;
 
 use bimcraft_core::element_json;
 use bimcraft_core::family::{Kind as Holds, Val};
-use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model, Pattern};
+use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model, PARAMETER_CATEGORIES, ParameterKind, Pattern};
+use bimcraft_core::schedule::{self, Field, Filter, Op, Sort};
 use bimcraft_core::units::Units;
 use egui::{
     Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText,
-    Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -557,7 +558,7 @@ impl BimApp {
             ([], _, Sheet::Plan(level)) => Subject::Plan(level),
             ([], _, Sheet::Ceiling(_)) => Subject::CeilingPlan,
             ([], _, Sheet::View3D) => Subject::View3D,
-            ([], _, Sheet::Schedule(_)) => Subject::Schedule,
+            ([], _, Sheet::Schedule(_) | Sheet::Table(_)) => Subject::Schedule,
         }
     }
 
@@ -642,6 +643,10 @@ impl BimApp {
         if !ids.is_empty() {
             self.parameters(ui, &model, &ids, rows);
             self.component_parameters(ui, &model, &ids);
+            self.project_parameters(ui, &model, &ids);
+        }
+        if subject == Subject::Schedule {
+            self.schedule_parameters(ui);
         }
         // A 3D view on a sheet: where it looks from, too.
         if let Subject::Element(id) = subject
@@ -1013,6 +1018,142 @@ impl BimApp {
             }
             Some((key, Err(e))) => self.status = Status { text: format!("{key}: {e}"), error: true },
             None => {}
+        }
+    }
+
+    /// The selected elements' values of the project's parameters for their category, in a group of
+    /// their own: a field for each, a checkbox for yes or no. An edit sets them all; emptied, a
+    /// field takes their values away.
+    fn project_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
+        let cats: BTreeSet<&str> = ids.iter().filter_map(|id| model.elements.get(id)).map(Element::category).collect();
+        let (Some(&id), Some(&cat)) = (ids.first(), cats.first()) else { return };
+        let params: Vec<(&String, ParameterKind)> = model
+            .parameters
+            .iter()
+            .filter(|(_, p)| cats.len() == 1 && p.categories.iter().any(|c| c == cat))
+            .map(|(n, p)| (n, p.kind))
+            .collect();
+        if params.is_empty() {
+            return;
+        }
+        // Blank across a selection may be values that differ, not none.
+        let value = |name: &str| -> Value {
+            let of = |i: &Id| model.elements.get(i).and_then(Element::params).and_then(|p| p.get(name)).cloned().unwrap_or(Value::Null);
+            let first = of(&id);
+            if ids.iter().all(|i| of(i) == first) { first } else { Value::Null }
+        };
+        let group = "Project Parameters";
+        let open = !self.collapsed.contains(group);
+        if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
+            self.collapsed.insert(group);
+        }
+        if !open {
+            return;
+        }
+        let units = model.units;
+        let mut change: Option<(String, Result<Value, String>)> = None;
+        Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
+            let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+            Grid::new(("project-parameters", id)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
+                for (name, kind) in &params {
+                    let val = value(name);
+                    let label = ui.label(name.as_str());
+                    let field = match kind {
+                        ParameterKind::YesNo => {
+                            let mut on = val.as_bool().unwrap_or(false);
+                            let r = ui.checkbox(&mut on, "");
+                            r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, name.as_str()));
+                            if r.labelled_by(label.id).changed() {
+                                change = Some((name.to_string(), Ok(json!(on))));
+                            }
+                            ui.end_row();
+                            continue;
+                        }
+                        ParameterKind::Length => Length,
+                        ParameterKind::Number => Number,
+                        ParameterKind::Text => Text,
+                    };
+                    if let Some(typed) = self.field(ui, id, &format!("params.{name}"), shown(field, &val, units), label.id, "") {
+                        let v = if typed.trim().is_empty() { Ok(Value::Null) } else { parse(field, &typed, units) };
+                        change = Some((name.to_string(), v));
+                    }
+                    ui.end_row();
+                }
+            });
+        });
+        match change {
+            Some((name, Ok(v))) => {
+                self.run("modify", json!({"ids": ids, "params": {name: v}}));
+            }
+            Some((name, Err(e))) => self.status = Status { text: format!("{name}: {e}"), error: true },
+            None => {}
+        }
+    }
+
+    /// A schedule view's own parameters, as Revit's palette has them: its name and category, and
+    /// its fields, filters and sorting, each Edit… opening Schedule Properties on its tab.
+    fn schedule_parameters(&mut self, ui: &mut Ui) {
+        let Some((made, sc)) = self.shown_schedule() else { return };
+        let mut open = None;
+        let mut rename = None;
+        for group in ["Identity Data", "Other"] {
+            let unfolded = !self.collapsed.contains(group);
+            if group_header(ui, t(group), unfolded) && !self.collapsed.remove(group) {
+                self.collapsed.insert(group);
+            }
+            if !unfolded {
+                continue;
+            }
+            Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
+                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                Grid::new(("schedule-properties", group)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(
+                    ui,
+                    |ui| {
+                        if group == "Identity Data" {
+                            let label = ui.label(t("View Name"));
+                            match made {
+                                Some(id) => {
+                                    if let Some(typed) = self.field(ui, id, "name", sc.name.clone(), label.id, "") {
+                                        rename = Some((id, typed));
+                                    }
+                                }
+                                // Every project's, as it is: named as the project's once it's changed.
+                                None => {
+                                    ui.label(RichText::new(&sc.name).color(pal().muted));
+                                }
+                            }
+                            ui.end_row();
+                            return;
+                        }
+                        ui.label(t("Category"));
+                        ui.label(RichText::new(lang::category(&sc.of, true)).color(pal().muted));
+                        ui.end_row();
+                        for (tab, label) in SCHEDULE_TABS.iter().enumerate() {
+                            ui.label(t(label));
+                            let r = ui.button(t("Edit…"));
+                            // Named for what it edits, for screen readers.
+                            r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Edit {}", &[t(label)])));
+                            if r.clicked() {
+                                open = Some(tab);
+                            }
+                            ui.end_row();
+                        }
+                    },
+                );
+            });
+        }
+        // Named otherwise, one every project has is just the project's: its tab follows it.
+        if let Some((id, name)) = rename
+            && self.run("modify", json!({"id": id, "name": name.trim()})).is_some()
+            && let Sheet::Schedule(_) = self.sheet
+            && schedule::builtin(Some(name.trim()), None).is_none()
+        {
+            let was = self.sheet;
+            self.views.iter_mut().filter(|v| **v == was).for_each(|v| *v = Sheet::Table(id));
+            self.sheet = Sheet::Table(id);
+        }
+        if let Some(tab) = open {
+            self.schedule_dialog = Some(ScheduleDialog { tab, ..ScheduleDialog::default() });
         }
     }
 
@@ -1451,6 +1592,605 @@ impl BimApp {
         }
         if !(ok || cancel || r.should_close()) {
             self.family_dialog = Some(d);
+        }
+    }
+}
+
+/// What a project parameter holds, as Project Parameters names it.
+const KINDS: [(ParameterKind, &str); 4] =
+    [(ParameterKind::Text, "Text"), (ParameterKind::Number, "Number"), (ParameterKind::Length, "Length"), (ParameterKind::YesNo, "Yes/No")];
+
+/// Manage > Project Parameters: the project's parameters, the one picked to edit, and its name as
+/// typed (a rename once typed in).
+pub(crate) struct ParametersDialog {
+    picked: String,
+    name: String,
+}
+
+impl ParametersDialog {
+    pub(crate) fn new(m: &Model) -> ParametersDialog {
+        let picked = m.parameters.keys().next().cloned().unwrap_or_default();
+        ParametersDialog { name: picked.clone(), picked }
+    }
+}
+
+/// View > Schedules > Schedule/Quantities: the category picked, and the name typed.
+#[derive(Default)]
+pub(crate) struct NewSchedule {
+    category: Option<&'static str>,
+    name: String,
+}
+
+/// Schedule Properties' tabs.
+const SCHEDULE_TABS: [&str; 3] = ["Fields", "Filter", "Sorting/Grouping"];
+
+/// Schedule Properties, for the schedule on screen: the tab showing, the field picked in each list
+/// of the Fields tab, and a calculated field being made (its name, kind and formula).
+#[derive(Default)]
+pub(crate) struct ScheduleDialog {
+    tab: usize,
+    available: Option<String>,
+    scheduled: Option<usize>,
+    calculated: Option<(String, schedule::Kind, String)>,
+}
+
+/// What a calculated field comes to, as Schedule Properties names it.
+const RESULTS: [(schedule::Kind, &str); 4] = [
+    (schedule::Kind::Number, "Number"),
+    (schedule::Kind::Length, "Length"),
+    (schedule::Kind::Area, "Area"),
+    (schedule::Kind::YesNo, "Yes/No"),
+];
+
+/// A filter's comparisons, as Schedule Properties says them.
+const OPS: [(Op, &str); 14] = [
+    (Op::Equals, "equals"),
+    (Op::NotEquals, "does not equal"),
+    (Op::Greater, "is greater than"),
+    (Op::GreaterOrEqual, "is greater than or equal to"),
+    (Op::Less, "is less than"),
+    (Op::LessOrEqual, "is less than or equal to"),
+    (Op::Contains, "contains"),
+    (Op::NotContains, "does not contain"),
+    (Op::BeginsWith, "begins with"),
+    (Op::NotBeginsWith, "does not begin with"),
+    (Op::EndsWith, "ends with"),
+    (Op::NotEndsWith, "does not end with"),
+    (Op::HasValue, "has a value"),
+    (Op::HasNoValue, "has no value"),
+];
+
+/// The comparisons a field holding `kind` takes: text all of them, numbers by size, yes or no
+/// whether it is.
+fn ops(kind: schedule::Kind) -> Vec<(Op, &'static str)> {
+    let fits = |op: Op| match kind {
+        schedule::Kind::Text => true,
+        schedule::Kind::YesNo => matches!(op, Op::Equals | Op::NotEquals | Op::HasValue | Op::HasNoValue),
+        _ => !matches!(op, Op::Contains | Op::NotContains | Op::BeginsWith | Op::NotBeginsWith | Op::EndsWith | Op::NotEndsWith),
+    };
+    OPS.into_iter().filter(|(op, _)| fits(*op)).collect()
+}
+
+/// A filter's value as typed, for a field holding `kind`: lengths in `units`, areas in m² or ft².
+fn filter_value(kind: schedule::Kind, typed: &str, units: Units) -> Result<Value, String> {
+    match kind {
+        schedule::Kind::Text => Ok(json!(typed.trim())),
+        schedule::Kind::Length => units.parse(typed).map(|x| json!(x)).ok_or_else(|| tf("`{}` is not a length", &[typed.trim()])),
+        // Typed as the schedule shows it; kept in m².
+        schedule::Kind::Area => {
+            number(typed).map(|x| json!(x / units.area(1e6).0)).ok_or_else(|| tf("`{}` is not a number", &[typed.trim()]))
+        }
+        _ => number(typed).map(|x| json!(x)).ok_or_else(|| tf("`{}` is not a number", &[typed.trim()])),
+    }
+}
+
+/// A value of a field holding `kind` that a filter can compare with, when it has none yet.
+fn blank(kind: schedule::Kind) -> Value {
+    match kind {
+        schedule::Kind::Text => json!(""),
+        schedule::Kind::YesNo => json!(true),
+        _ => json!(0.0),
+    }
+}
+
+impl BimApp {
+    /// Manage > Project Parameters: each project parameter, what it holds and the categories it's
+    /// for, as Revit's dialog has them. Each change is a `parameter` command, undone like any other.
+    pub(crate) fn parameters_window(&mut self, ctx: &Context) {
+        let Some(mut d) = self.parameters_dialog.take() else { return };
+        let model = Arc::clone(&self.session.model);
+        let (mut close, mut run, mut picked): (bool, Option<Value>, Option<String>) = (false, None, None);
+        let r = Modal::new(UiId::new("project-parameters")).show(ctx, |ui| {
+            ui.set_width(460.0);
+            ui.label(RichText::new(t("Project Parameters")).heading());
+            ui.add_space(6.0);
+            Grid::new("parameter-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                let l = ui.label(t("Parameter:"));
+                ui.horizontal(|ui| {
+                    let c = ComboBox::from_id_salt("parameter-name").selected_text(&d.picked).width(200.0).show_ui(ui, |ui| {
+                        for name in model.parameters.keys() {
+                            if ui.selectable_label(*name == d.picked, name).clicked() {
+                                picked = Some(name.clone());
+                            }
+                        }
+                    });
+                    c.response.labelled_by(l.id);
+                    if ui.button(t("New")).clicked() {
+                        let fresh = (1..)
+                            .map(|n| format!("{} {n}", t("Parameter")))
+                            .find(|n| !model.parameters.contains_key(n))
+                            .unwrap_or_default();
+                        run = Some(json!({"name": fresh, "categories": ["wall"]}));
+                        picked = Some(fresh);
+                    }
+                    if ui.add_enabled(model.parameters.contains_key(&d.picked), Button::new(t("Delete"))).clicked() {
+                        run = Some(json!({"name": d.picked, "delete": true}));
+                        picked = model.parameters.keys().find(|n| **n != d.picked).cloned().or_else(|| Some(String::new()));
+                    }
+                });
+                ui.end_row();
+            });
+            match model.parameters.get(&d.picked) {
+                Some(p) => {
+                    ui.add_space(6.0);
+                    Grid::new("parameter").num_columns(2).striped(true).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                        let l = ui.label(t("Name"));
+                        let r = ui.add(TextEdit::singleline(&mut d.name).desired_width(200.0)).labelled_by(l.id);
+                        if r.lost_focus() && !d.name.trim().is_empty() && d.name.trim() != d.picked {
+                            run = Some(json!({"name": d.picked, "rename": d.name.trim()}));
+                            picked = Some(d.name.trim().to_string());
+                        }
+                        ui.end_row();
+                        let l = ui.label(t("Type of Parameter"));
+                        let now = KINDS.iter().find(|(k, _)| *k == p.kind).map_or("Text", |(_, n)| n);
+                        let c = ComboBox::from_id_salt("parameter-kind").selected_text(t(now)).width(160.0).show_ui(ui, |ui| {
+                            for (k, label) in KINDS {
+                                if ui.selectable_label(k == p.kind, t(label)).clicked() && k != p.kind {
+                                    run = Some(json!({"name": d.picked, "kind": k}));
+                                }
+                            }
+                        });
+                        c.response.labelled_by(l.id);
+                        ui.end_row();
+                    });
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(t("Categories")).strong());
+                    Grid::new("parameter-categories").num_columns(3).spacing(vec2(16.0, 4.0)).show(ui, |ui| {
+                        for (i, cat) in PARAMETER_CATEGORIES.iter().enumerate() {
+                            let mut on = p.categories.iter().any(|c| c == cat);
+                            if ui.checkbox(&mut on, lang::category(cat, true)).changed() {
+                                let mut list: Vec<&str> = p.categories.iter().map(String::as_str).filter(|c| c != cat).collect();
+                                if on {
+                                    list.push(cat);
+                                }
+                                run = Some(json!({"name": d.picked, "categories": list}));
+                            }
+                            if i % 3 == 2 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                }
+                None => {
+                    ui.label(RichText::new(t("No project parameters yet: New makes one.")).color(pal().muted));
+                }
+            }
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+        });
+        if let Some(p) = run
+            && self.run("parameter", p).is_none()
+        {
+            picked = None;
+        }
+        if let Some(n) = picked {
+            (d.name, d.picked) = (n.clone(), n);
+        } else if !self.session.model.parameters.contains_key(&d.picked) {
+            d = ParametersDialog::new(&self.session.model);
+        }
+        if !(close || r.should_close()) {
+            self.parameters_dialog = Some(d);
+        }
+    }
+
+    /// View > Schedules > Schedule/Quantities: a category and a name, and OK makes the schedule,
+    /// opens it, and opens its properties on Fields.
+    pub(crate) fn new_schedule_window(&mut self, ctx: &Context) {
+        let Some(mut d) = self.new_schedule.take() else { return };
+        let (mut ok, mut cancel) = (false, false);
+        let model = Arc::clone(&self.session.model);
+        let r = Modal::new(UiId::new("new-schedule")).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label(RichText::new(t("New Schedule")).heading());
+            ui.add_space(6.0);
+            ui.label(t("Category:"));
+            ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                for cat in schedule::categories() {
+                    if ui.selectable_label(d.category == Some(cat), lang::category(cat, true)).clicked() {
+                        d.category = Some(cat);
+                        // Named after it, as one of its kind there isn't yet.
+                        let base = tf("{} Schedule", &[&lang::category(cat, false)]);
+                        d.name = std::iter::once(base.clone())
+                            .chain((2..).map(|n| format!("{base} {n}")))
+                            .find(|n| {
+                                schedule::builtin(Some(n), None).is_none()
+                                    && !model.elements.keys().any(|id| model.view_name(*id) == Some(n.as_str()))
+                            })
+                            .unwrap_or(base);
+                    }
+                }
+            });
+            ui.add_space(6.0);
+            let l = ui.label(t("Name:"));
+            ui.add(TextEdit::singleline(&mut d.name).desired_width(300.0)).labelled_by(l.id);
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                cancel = ui.button(t("Cancel")).clicked();
+                ok = ui.add_enabled(d.category.is_some() && !d.name.trim().is_empty(), Button::new(t("OK"))).clicked();
+            });
+        });
+        if ok && let Some(cat) = d.category {
+            let name = d.name.trim().to_string();
+            if let Some(made) = self.run("schedule", json!({"name": name, "category": cat})) {
+                let sheet = match (schedule::builtin(Some(&name), None), made["id"].as_u64()) {
+                    (Some((cat, _)), _) => crate::SCHEDULES.iter().find(|(c, _)| *c == cat).map(|(c, _)| Sheet::Schedule(c)),
+                    (None, Some(id)) => Some(Sheet::Table(id)),
+                    (None, None) => None,
+                };
+                if let Some(sheet) = sheet {
+                    self.open_sheet(sheet);
+                    self.schedule_dialog = Some(ScheduleDialog::default());
+                }
+                return;
+            }
+        }
+        // Refused, it stays open, the status saying why, to be named again.
+        if !(cancel || r.should_close()) {
+            self.new_schedule = Some(d);
+        }
+    }
+
+    /// Schedule Properties, for the schedule on screen: its Fields (its category's, and calculated
+    /// ones, in order, their headings and totals), its Filter and its Sorting/Grouping, as Revit's
+    /// tabs have them. Each change is a `schedule` command, undone like any other.
+    pub(crate) fn schedule_window(&mut self, ctx: &Context) {
+        let Some(mut d) = self.schedule_dialog.take() else { return };
+        let Some((made, sc)) = self.shown_schedule() else { return };
+        let model = Arc::clone(&self.session.model);
+        let units = model.units;
+        let cat = sc.category();
+        let available = schedule::fields(&model, &cat);
+        let mut fields: Vec<Field> = if sc.fields.is_empty() { schedule::defaults(&cat) } else { sc.fields.clone() };
+        let kind_of = |fields: &[Field], name: &str| -> schedule::Kind {
+            match fields.iter().find(|f| f.name == name && f.formula.is_some()) {
+                Some(f) => f.kind.unwrap_or_default(),
+                None => available.iter().find(|(n, _)| n == name).map_or(schedule::Kind::Text, |(_, k)| *k),
+            }
+        };
+        // Every field there is to filter and sort by: its category's, then the calculated ones.
+        let names: Vec<String> =
+            available.iter().map(|(n, _)| n.clone()).chain(fields.iter().filter(|f| f.formula.is_some()).map(|f| f.name.clone())).collect();
+        let key = made.unwrap_or(0);
+        let mut change: Option<Value> = None;
+        let mut close = false;
+        let r = Modal::new(UiId::new("schedule-properties")).show(ctx, |ui| {
+            ui.set_width(620.0);
+            ui.label(RichText::new(tf("Schedule Properties: {}", &[&sc.name])).heading());
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                for (i, label) in SCHEDULE_TABS.iter().enumerate() {
+                    if ui.selectable_label(d.tab == i, t(label)).clicked() {
+                        d.tab = i;
+                    }
+                }
+            });
+            ui.separator();
+            match d.tab {
+                0 => {
+                    let shown: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                    // Revit's three columns: the fields there are, what moves them, the fields shown.
+                    ui.horizontal_top(|ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(220.0);
+                            ui.label(RichText::new(t("Available fields:")).strong());
+                            ui.push_id("available", |ui| {
+                                ScrollArea::vertical().max_height(220.0).min_scrolled_height(220.0).show(ui, |ui| {
+                                    ui.set_width(210.0);
+                                    for (name, _) in available.iter().filter(|(n, _)| !shown.contains(n)) {
+                                        if ui.selectable_label(d.available.as_ref() == Some(name), t(name)).clicked() {
+                                            d.available = Some(name.clone());
+                                        }
+                                    }
+                                });
+                            });
+                        });
+                        ui.vertical(|ui| {
+                            ui.set_width(140.0);
+                            ui.add_space(28.0);
+                            let can_add = d.available.as_ref().is_some_and(|n| !shown.contains(n));
+                            if ui.add_enabled(can_add, Button::new(t("Add")).min_size(vec2(130.0, 0.0))).clicked()
+                                && let Some(name) = d.available.take()
+                            {
+                                fields.push(Field { name, ..Field::default() });
+                                d.scheduled = Some(fields.len() - 1);
+                                change = Some(json!({"fields": fields}));
+                            }
+                            let picked = d.scheduled.filter(|i| *i < fields.len());
+                            if ui
+                                .add_enabled(picked.is_some() && fields.len() > 1, Button::new(t("Remove")).min_size(vec2(130.0, 0.0)))
+                                .clicked()
+                                && let Some(i) = picked
+                            {
+                                fields.remove(i);
+                                d.scheduled = None;
+                                change = Some(json!({"fields": fields}));
+                            }
+                            ui.add_space(12.0);
+                            if ui.add(Button::new(t("Calculated Value…")).min_size(vec2(130.0, 0.0))).clicked() {
+                                d.calculated = Some((String::new(), schedule::Kind::Number, String::new()));
+                            }
+                        });
+                        ui.vertical(|ui| {
+                            ui.set_width(220.0);
+                            ui.label(RichText::new(t("Scheduled fields (in order):")).strong());
+                            ui.push_id("scheduled", |ui| {
+                                ScrollArea::vertical().max_height(190.0).min_scrolled_height(190.0).show(ui, |ui| {
+                                    ui.set_width(210.0);
+                                    for (i, f) in fields.iter().enumerate() {
+                                        if ui.selectable_label(d.scheduled == Some(i), t(&f.name)).clicked() {
+                                            d.scheduled = Some(i);
+                                        }
+                                    }
+                                });
+                            });
+                            ui.horizontal(|ui| {
+                                let picked = d.scheduled.filter(|i| *i < fields.len());
+                                if ui.add_enabled(picked.is_some_and(|i| i > 0), Button::new(t("Move Up"))).clicked()
+                                    && let Some(i) = picked
+                                {
+                                    fields.swap(i, i - 1);
+                                    d.scheduled = Some(i - 1);
+                                    change = Some(json!({"fields": fields}));
+                                }
+                                if ui.add_enabled(picked.is_some_and(|i| i + 1 < fields.len()), Button::new(t("Move Down"))).clicked()
+                                    && let Some(i) = picked
+                                {
+                                    fields.swap(i, i + 1);
+                                    d.scheduled = Some(i + 1);
+                                    change = Some(json!({"fields": fields}));
+                                }
+                            });
+                        });
+                    });
+                    // The field picked: its heading, its totals; a calculated one's formula and kind.
+                    if let Some(i) = d.scheduled.filter(|i| *i < fields.len()) {
+                        ui.add_space(6.0);
+                        let kind = kind_of(&fields, &fields[i].name);
+                        Grid::new("schedule-field").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                            let l = ui.label(t("Heading"));
+                            let now = fields[i].heading.clone().unwrap_or_else(|| t(&fields[i].name).to_string());
+                            if let Some(typed) = self.field(ui, key, &format!("heading.{i}"), now, l.id, "") {
+                                let typed = typed.trim();
+                                fields[i].heading = (!typed.is_empty() && typed != fields[i].name).then(|| typed.to_string());
+                                change = Some(json!({"fields": fields}));
+                            }
+                            ui.end_row();
+                            if matches!(kind, schedule::Kind::Number | schedule::Kind::Length | schedule::Kind::Area) {
+                                let l = ui.label(t("Calculate totals"));
+                                let mut on = fields[i].total;
+                                let r = ui.checkbox(&mut on, "");
+                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, t("Calculate totals")));
+                                if r.labelled_by(l.id).changed() {
+                                    fields[i].total = on;
+                                    change = Some(json!({"fields": fields}));
+                                }
+                                ui.end_row();
+                            }
+                            if let Some(formula) = fields[i].formula.clone() {
+                                let l = ui.label(t("Formula"));
+                                if let Some(typed) = self.field(ui, key, &format!("formula.{i}"), formula, l.id, "") {
+                                    fields[i].formula = Some(typed.trim().to_string());
+                                    change = Some(json!({"fields": fields}));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    }
+                    // A calculated value being made: its name, what it comes to, its formula.
+                    let (mut add, mut drop) = (false, false);
+                    if let Some((name, kind, formula)) = &mut d.calculated {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(t("Calculated Value")).strong());
+                        Grid::new("calculated").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                            let l = ui.label(t("Name"));
+                            ui.add(TextEdit::singleline(name).desired_width(240.0)).labelled_by(l.id);
+                            ui.end_row();
+                            let l = ui.label(t("Type"));
+                            let now = RESULTS.iter().find(|(k, _)| k == kind).map_or("Number", |(_, n)| n);
+                            let c = ComboBox::from_id_salt("calculated-kind").selected_text(t(now)).width(160.0).show_ui(ui, |ui| {
+                                for (k, label) in RESULTS {
+                                    ui.selectable_value(kind, k, t(label));
+                                }
+                            });
+                            c.response.labelled_by(l.id);
+                            ui.end_row();
+                            let l = ui.label(t("Formula"));
+                            ui.add(TextEdit::singleline(formula).desired_width(240.0).hint_text("Area * 120")).labelled_by(l.id);
+                            ui.end_row();
+                        });
+                        ui.horizontal(|ui| {
+                            add = ui.add_enabled(!name.trim().is_empty() && !formula.trim().is_empty(), Button::new(t("OK"))).clicked();
+                            drop = ui.button(t("Cancel")).clicked();
+                        });
+                    }
+                    if drop {
+                        d.calculated = None;
+                    }
+                    if add && let Some((name, kind, formula)) = d.calculated.clone() {
+                        let mut with = fields.clone();
+                        with.push(Field {
+                            name: name.trim().to_string(),
+                            formula: Some(formula.trim().to_string()),
+                            kind: Some(kind),
+                            ..Field::default()
+                        });
+                        change = Some(json!({"fields": with}));
+                    }
+                }
+                1 => {
+                    let mut filters: Vec<Filter> = sc.filters.clone();
+                    let mut edited = false;
+                    Grid::new("schedule-filters").num_columns(5).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+                        let mut gone = None;
+                        for (i, f) in filters.iter_mut().enumerate() {
+                            let kind = kind_of(&fields, &f.field);
+                            // Each row's caption names its field, its comparison and its value.
+                            let caption = ui.label(t(if i == 0 { "Filter by:" } else { "And:" }));
+                            let c = ComboBox::from_id_salt(("filter-field", i)).selected_text(t(&f.field)).width(170.0).show_ui(ui, |ui| {
+                                for n in &names {
+                                    if ui.selectable_label(*n == f.field, t(n)).clicked() && *n != f.field {
+                                        (f.field, f.op, f.value) = (n.clone(), Op::HasValue, Value::Null);
+                                        edited = true;
+                                    }
+                                }
+                            });
+                            c.response.labelled_by(caption.id);
+                            let now = OPS.iter().find(|(op, _)| *op == f.op).map_or("equals", |(_, n)| n);
+                            let c = ComboBox::from_id_salt(("filter-op", i)).selected_text(t(now)).width(190.0).show_ui(ui, |ui| {
+                                for (op, label) in ops(kind) {
+                                    if ui.selectable_label(op == f.op, t(label)).clicked() && op != f.op {
+                                        f.op = op;
+                                        let fits = match kind {
+                                            schedule::Kind::Text => f.value.is_string(),
+                                            schedule::Kind::YesNo => f.value.is_boolean(),
+                                            _ => f.value.is_number(),
+                                        };
+                                        if !matches!(op, Op::HasValue | Op::HasNoValue) && !fits {
+                                            f.value = blank(kind);
+                                        }
+                                        edited = true;
+                                    }
+                                }
+                            });
+                            c.response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, t("Comparison")));
+                            match (f.op, kind) {
+                                (Op::HasValue | Op::HasNoValue, _) => {
+                                    ui.label("");
+                                }
+                                (_, schedule::Kind::YesNo) => {
+                                    let now = if f.value.as_bool().unwrap_or(true) { "Yes" } else { "No" };
+                                    let c =
+                                        ComboBox::from_id_salt(("filter-yes", i)).selected_text(t(now)).width(120.0).show_ui(ui, |ui| {
+                                            for (b, label) in [(true, "Yes"), (false, "No")] {
+                                                if ui.selectable_label(f.value.as_bool() == Some(b), t(label)).clicked() {
+                                                    f.value = json!(b);
+                                                    edited = true;
+                                                }
+                                            }
+                                        });
+                                    c.response.labelled_by(caption.id);
+                                }
+                                (_, kind) => {
+                                    let now = match (kind, f.value.as_f64()) {
+                                        (schedule::Kind::Length, Some(x)) => units.length(x),
+                                        (schedule::Kind::Area, Some(x)) => format!("{}", (units.area(x * 1e6).0 * 100.0).round() / 100.0),
+                                        _ => text(&f.value),
+                                    };
+                                    if let Some(typed) = self.field(ui, key, &format!("filter.{i}"), now, caption.id, "") {
+                                        match filter_value(kind, &typed, units) {
+                                            Ok(v) => {
+                                                f.value = v;
+                                                edited = true;
+                                            }
+                                            Err(e) => self.status = Status { text: e, error: true },
+                                        }
+                                    }
+                                }
+                            }
+                            if ui.button(t("Remove")).clicked() {
+                                gone = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                        if let Some(i) = gone {
+                            filters.remove(i);
+                            edited = true;
+                        }
+                    });
+                    if ui.button(t("Add Filter")).clicked()
+                        && let Some(first) = names.first()
+                    {
+                        filters.push(Filter { field: first.clone(), op: Op::HasValue, value: Value::Null });
+                        edited = true;
+                    }
+                    if edited {
+                        change = Some(json!({"filters": filters}));
+                    }
+                }
+                _ => {
+                    let mut sort: Vec<Sort> = sc.sort.clone();
+                    let mut edited = false;
+                    Grid::new("schedule-sort").num_columns(4).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+                        let mut gone = None;
+                        for (i, s) in sort.iter_mut().enumerate() {
+                            let caption = ui.label(t(if i == 0 { "Sort by:" } else { "Then by:" }));
+                            let c = ComboBox::from_id_salt(("sort-field", i)).selected_text(t(&s.field)).width(170.0).show_ui(ui, |ui| {
+                                for n in &names {
+                                    if ui.selectable_label(*n == s.field, t(n)).clicked() && *n != s.field {
+                                        s.field = n.clone();
+                                        edited = true;
+                                    }
+                                }
+                            });
+                            c.response.labelled_by(caption.id);
+                            let now = if s.descending { "Descending" } else { "Ascending" };
+                            let c = ComboBox::from_id_salt(("sort-way", i)).selected_text(t(now)).width(120.0).show_ui(ui, |ui| {
+                                for (down, label) in [(false, "Ascending"), (true, "Descending")] {
+                                    if ui.selectable_label(s.descending == down, t(label)).clicked() && s.descending != down {
+                                        s.descending = down;
+                                        edited = true;
+                                    }
+                                }
+                            });
+                            c.response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, t("Order")));
+                            if ui.button(t("Remove")).clicked() {
+                                gone = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                        if let Some(i) = gone {
+                            sort.remove(i);
+                            edited = true;
+                        }
+                    });
+                    if ui.button(t("Add Sort")).clicked()
+                        && let Some(first) = fields.first()
+                    {
+                        sort.push(Sort { field: first.name.clone(), descending: false });
+                        edited = true;
+                    }
+                    if edited {
+                        change = Some(json!({"sort": sort}));
+                    }
+                    ui.add_space(6.0);
+                    let mut every = !sc.grouped;
+                    if ui.checkbox(&mut every, t("Itemize every instance")).changed() {
+                        change = Some(json!({"grouped": !every}));
+                    }
+                }
+            }
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+        });
+        if let Some(mut p) = change {
+            p["name"] = json!(sc.name);
+            let done = self.run("schedule", p).is_some();
+            if done && d.calculated.is_some() && d.tab == 0 {
+                d.calculated = None;
+            }
+        }
+        if !(close || r.should_close()) {
+            self.schedule_dialog = Some(d);
         }
     }
 }

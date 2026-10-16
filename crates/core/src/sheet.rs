@@ -45,7 +45,7 @@ fn framing(m: &Model, view: Id, scale: f64) -> Option<View> {
         Element::Level(_) => render::plan_extent(m, view),
         Element::Section(_) | Element::Elevation(_) => render::section_extent(m, view, k)?.to_vec(),
         Element::Schedule(sc) => {
-            let (width, height) = table_size(&table_of(m, sc));
+            let (width, height) = table_size(&sc.name, &table_of(m, sc));
             return Some(View { scale: 1.0, cx: 0.0, cy: 0.0, width, height });
         }
         Element::View3D(v) => {
@@ -125,34 +125,53 @@ fn title_block(d: &mut Drawing, project: &str, sheet: &Sheet, paper: P2, scale: 
     d.text(&sheet.number, at, number, INK);
 }
 
-/// A schedule's table: its headings, its rows' cells as shown, and each column's width, px.
-type Table = (Vec<String>, Vec<Vec<String>>, Vec<f32>);
+/// A schedule's table: its headings; its rows' cells as shown, its totals' last; each column's
+/// width, px; and whether it has totals.
+struct Table {
+    headings: Vec<String>,
+    rows: Vec<Vec<String>>,
+    widths: Vec<f32>,
+    totals: bool,
+}
 
 fn table_of(m: &Model, sc: &Schedule) -> Table {
-    let t = schedule::table(m, &sc.of).unwrap_or(schedule::Table { columns: Vec::new(), rows: Vec::new() });
-    let cells: Vec<Vec<String>> =
-        t.rows.iter().map(|r| r.iter().zip(&t.columns).map(|(v, c)| schedule::shown(m.units, c, v)).collect()).collect();
-    let headings: Vec<String> = t.columns.iter().map(|c| m.language.word(&schedule::heading(m.units, c)).to_string()).collect();
+    let t = schedule::table(m, sc).unwrap_or(schedule::Table { columns: Vec::new(), rows: Vec::new(), totals: None });
+    let said = |c: &schedule::Column, v: &serde_json::Value| {
+        let s = schedule::shown(m.units, c.kind, v);
+        if v.is_boolean() { m.language.word(&s).to_string() } else { s }
+    };
+    let mut rows: Vec<Vec<String>> = t.rows.iter().map(|r| r.iter().zip(&t.columns).map(|(v, c)| said(c, v)).collect()).collect();
+    if let Some(totals) = &t.totals {
+        let mut row: Vec<String> = totals.iter().zip(&t.columns).map(|(v, c)| said(c, v)).collect();
+        if let Some(first) = row.first_mut().filter(|f| f.is_empty()) {
+            *first = m.language.word("Total").to_string();
+        }
+        rows.push(row);
+    }
+    let headings: Vec<String> = t
+        .columns
+        .iter()
+        .map(|c| schedule::heading(m.units, &schedule::Column { heading: m.language.word(&c.heading).to_string(), kind: c.kind }))
+        .collect();
     let widths = (0..headings.len())
         .map(|i| {
             let widest = headings.get(i).map_or(0.0, |c| font::width(c, CELL_TEXT));
-            cells.iter().filter_map(|r| r.get(i)).map(|c| font::width(c, CELL_TEXT)).fold(widest, f32::max) + 2.0 * PAD
+            rows.iter().filter_map(|r| r.get(i)).map(|c| font::width(c, CELL_TEXT)).fold(widest, f32::max) + 2.0 * PAD
         })
         .collect();
-    (headings, cells, widths)
+    Table { headings, rows, widths, totals: t.totals.is_some() }
 }
 
-fn table_size((_, rows, widths): &Table) -> (u32, u32) {
-    let width = widths.iter().sum::<f32>().max(2.0 * PAD + font::width("Level Schedule", TITLE_TEXT));
-    (width.ceil() as u32, (TITLE_ROW + ROW * (rows.len() + 1) as f32).ceil() as u32)
+fn table_size(name: &str, t: &Table) -> (u32, u32) {
+    let width = t.widths.iter().sum::<f32>().max(2.0 * PAD + font::width(name, TITLE_TEXT));
+    (width.ceil() as u32, (TITLE_ROW + ROW * (t.rows.len() + 1) as f32).ceil() as u32)
 }
 
 /// Schedule `sc` as a ruled table from its top left corner at `(x, y)` px: its title, then its
-/// headings and its rows, a column each.
+/// headings and its rows, a column each, its totals under a heavier rule.
 fn table(d: &mut Drawing, m: &Model, sc: &Schedule, (x, y): (f32, f32)) {
     let t = table_of(m, sc);
-    let (w, h) = table_size(&t);
-    let (columns, rows, widths) = t;
+    let (w, h) = table_size(&sc.name, &t);
     // On whole pixels, so its rules come out crisp.
     let (x, y, w, h) = (x.round(), y.round(), w as f32, h as f32);
     let rule = |d: &mut Drawing, a: (f32, f32), b: (f32, f32), width: f32| {
@@ -162,20 +181,20 @@ fn table(d: &mut Drawing, m: &Model, sc: &Schedule, (x, y): (f32, f32)) {
     d.text(&sc.name, (x + w / 2.0, y + TITLE_ROW / 2.0), TITLE_TEXT, INK);
     let top = y + TITLE_ROW;
     rule(d, (x, top), (x + w, top), 1.0);
-    let lines = std::iter::once(columns).chain(rows);
-    for (i, cells) in lines.enumerate() {
+    let last = t.rows.len();
+    for (i, cells) in std::iter::once(&t.headings).chain(&t.rows).enumerate() {
         let row = top + ROW * i as f32;
         if i > 0 {
-            rule(d, (x, row), (x + w, row), if i == 1 { 1.5 } else { 0.5 });
+            rule(d, (x, row), (x + w, row), if i == 1 || (t.totals && i == last) { 1.5 } else { 0.5 });
         }
         let mut left = x;
-        for (text, width) in cells.iter().zip(&widths) {
+        for (text, width) in cells.iter().zip(&t.widths) {
             d.text(text, (left + PAD + font::width(text, CELL_TEXT) / 2.0, row + ROW / 2.0), CELL_TEXT, INK);
             left += width;
         }
     }
     let mut left = x;
-    for width in widths.iter().take(widths.len().saturating_sub(1)) {
+    for width in t.widths.iter().take(t.widths.len().saturating_sub(1)) {
         left += width;
         rule(d, (left, top), (left, y + h), 0.5);
     }
@@ -306,6 +325,31 @@ mod tests {
         // What a viewport draws is the viewport's to pick; the title block is the sheet's.
         assert_eq!(d.pick(at(P2(4000.0, 0.0)), 2.0), Some(8));
         assert_eq!(d.pick(d.view.px(P2(20.0, 150.0)), 2.0), Some(7));
+    }
+
+    #[test]
+    fn a_schedule_on_a_sheet_shows_its_own_fields_and_its_totals_in_the_projects_language() {
+        let mut s = Session::new();
+        s.script(
+            r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}
+               room {"point": [4000, 3000], "name": "Living"}
+               sheet {"name": "Areas"}
+               schedule {"name": "Room Areas", "category": "rooms", "fields": ["Name", {"name": "Area", "total": true}, {"name": "Big", "formula": "Area > 40", "kind": "yesno"}]}
+               place {"sheet": "A101", "view": "Room Areas", "at": [100, 220]}"#,
+        )
+        .unwrap();
+        let sc = s.model.elements.values().find_map(|e| if let Element::Schedule(sc) = e { Some(sc.clone()) } else { None }).unwrap();
+        let t = table_of(&s.model, &sc);
+        assert_eq!(t.headings, ["Name", "Area (m²)", "Big"]);
+        assert_eq!(t.rows, [vec!["Living", "48.00", "Yes"], vec!["Total", "48.00", ""]]);
+        assert!(t.totals);
+        // A row more than its rows and headings: its totals.
+        let vp = s.model.elements.iter().find_map(|(id, e)| matches!(e, Element::Viewport(_)).then_some(*id)).unwrap();
+        let (frame, _) = frame(&s.model, vp).unwrap();
+        assert_eq!(frame.height as f32, TITLE_ROW + 3.0 * ROW);
+        s.execute("language", &serde_json::json!({"code": "pt"})).unwrap();
+        let t = table_of(&s.model, &sc);
+        assert_eq!((t.headings[1].as_str(), t.rows[0][2].as_str(), t.rows[1][0].as_str()), ("Área (m²)", "Sim", "Total"));
     }
 
     #[test]

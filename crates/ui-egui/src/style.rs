@@ -204,6 +204,7 @@ pub enum Icon {
     Materials,
     Component,
     LoadFamily,
+    Parameters,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -520,6 +521,10 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
         // A chair from its side: its back, its seat, its legs.
         Icon::Component => {
             vec![line(&[(7.0, 3.0), (7.0, 21.0)]), line(&[(7.0, 13.0), (18.0, 13.0), (18.0, 21.0)]), line(&[(4.0, 21.0), (21.0, 21.0)])]
+        }
+        // A tag, as a value hangs on what it's of.
+        Icon::Parameters => {
+            vec![ring(&[(3.0, 7.0), (14.0, 7.0), (21.0, 12.0), (14.0, 17.0), (3.0, 17.0)]), Shape::circle_stroke(at(7.5, 12.0), 1.8 * k, s)]
         }
         // A box, and an arrow down into it.
         Icon::LoadFamily => vec![

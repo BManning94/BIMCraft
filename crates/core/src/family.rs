@@ -159,7 +159,7 @@ const SEGMENTS: usize = 32;
 /// Corners one profile may have.
 pub const MAX_PROFILE: usize = 64;
 /// Formulas one may take from in a row: `A` from `B` from `C`…
-const MAX_CHAIN: usize = 16;
+pub const MAX_CHAIN: usize = 16;
 /// Triangles a family's types may build together.
 pub const MAX_BUILT: usize = 400_000;
 /// Triangles one form, as a file brings it, may have.
@@ -414,15 +414,57 @@ fn value(n: &Node, get: &mut dyn FnMut(&str) -> Result<f64, String>) -> Result<f
                 "ln" => one(get)?.ln(),
                 "log" => one(get)?.log10(),
                 "pi" if args.is_empty() => std::f64::consts::PI,
-                _ => {
-                    return Err(format!(
-                        "`{f}` isn't a function: there are if, and, or, not, min, max, abs, sqrt, round, roundup, rounddown, \
-                         sin, cos, tan, asin, acos, atan, exp, ln, log and pi()"
-                    ));
-                }
+                _ => return Err(format!("`{f}` isn't a function: there are {FUNCTIONS}")),
             }
         }
     })
+}
+
+/// The functions a formula calls.
+const FUNCTIONS: &str =
+    "if, and, or, not, min, max, abs, sqrt, round, roundup, rounddown, sin, cos, tan, asin, acos, atan, exp, ln, log and pi()";
+
+/// The names `formula` reads, in every branch of its `if`s; or why it can't be worked out: it
+/// doesn't read, or calls a function there isn't or with the wrong number of values.
+pub fn names(formula: &str) -> Result<Vec<String>, String> {
+    fn walk(n: &Node, out: &mut Vec<String>) -> Result<(), String> {
+        match n {
+            Node::Number(_) => {}
+            Node::Name(name) if !out.contains(name) => out.push(name.clone()),
+            Node::Name(_) => {}
+            Node::Minus(a) => walk(a, out)?,
+            Node::Chain(first, rest) => {
+                walk(first, out)?;
+                for (_, n) in rest {
+                    walk(n, out)?;
+                }
+            }
+            Node::Op(_, a, b) => {
+                walk(a, out)?;
+                walk(b, out)?;
+            }
+            Node::Call(f, args) => {
+                let fits = match f.to_lowercase().as_str() {
+                    "if" => args.len() == 3,
+                    "and" | "or" | "min" | "max" => !args.is_empty(),
+                    "pi" => args.is_empty(),
+                    "not" | "abs" | "sqrt" | "round" | "roundup" | "rounddown" | "sin" | "cos" | "tan" | "asin" | "acos" | "atan"
+                    | "exp" | "ln" | "log" => args.len() == 1,
+                    _ => return Err(format!("`{f}` isn't a function: there are {FUNCTIONS}")),
+                };
+                if !fits {
+                    return Err(format!("`{f}` doesn't take {} values", args.len()));
+                }
+                for a in args {
+                    walk(a, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+    let mut out = Vec::new();
+    walk(&parse(formula)?, &mut out).map_err(|e| format!("formula `{formula}`: {e}"))?;
+    Ok(out)
 }
 
 /// `formula` worked out, its parameters' values from `get`: numbers, lengths in mm and angles in
@@ -449,6 +491,15 @@ fn worked(formula: &str, node: &Node, get: &mut dyn FnMut(&str) -> Result<f64, S
     let said = |e: String| format!("formula `{formula}`: {e}");
     let x = value(node, get).map_err(said)?;
     if x.is_finite() { Ok(x) } else { Err(said(format!("it comes to {x}, which isn't a number"))) }
+}
+
+/// Whether `name` is one a formula can say: a letter or `_` first, then letters, digits, `_` and
+/// spaces, none at its end; up to `MAX_TEXT` long.
+pub fn nameable(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ')
+        && !name.ends_with(' ')
+        && name.chars().count() <= MAX_TEXT
 }
 
 /// A stored value read as parameter `p` holds it.
@@ -580,10 +631,7 @@ impl Family {
         let mut names = BTreeSet::new();
         for p in &self.parameters {
             let who = format!("parameter `{}`", p.name);
-            let nameable = p.name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-                && p.name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ')
-                && !p.name.ends_with(' ');
-            if !nameable || p.name.chars().count() > MAX_TEXT {
+            if !nameable(&p.name) {
                 return Err(format!("{who}: a name starts with a letter and holds letters, digits, `_` and spaces, up to {MAX_TEXT}"));
             }
             if !names.insert(p.name.as_str()) {

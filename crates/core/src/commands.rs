@@ -13,9 +13,9 @@ use crate::language::Language;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
     Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Model,
-    NOTE_SIZE, Note, Opening, OpeningType, Pattern, RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType,
-    Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading,
-    paper,
+    NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, ProjectParameter, RAMP_SLOPE, RAMP_WIDTH, RISER,
+    Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL,
+    TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
 use crate::units::Units;
@@ -288,6 +288,17 @@ pub static ALL: &[Command] = &[
         material,
     ),
     edit(
+        "parameter",
+        "Project Parameters",
+        &[],
+        "{name, kind?: text|number|length|yesno, categories?: [wall|floor|ceiling|roof|door|window|room|column|component|stair|\
+         ramp|railing, …], rename?, delete?: true} a project parameter, as Revit's Manage > Project Parameters makes one: a value \
+         of its kind each element of its categories may have of its own, set with `modify {id, params: {name: value}}` (lengths \
+         in mm, yes or no as true or false). Off a category, that category's elements lose their values of it; deleted, every \
+         element does; renamed, they follow it. `inspect` lists them",
+        parameter,
+    ),
+    edit(
         "family",
         "Load Family",
         &[],
@@ -405,10 +416,23 @@ pub static ALL: &[Command] = &[
          30° up), as a PNG (pngBase64), or written to a path: .png, .svg for a plan, .pdf for a sheet",
         render_view,
     ),
-    other(
+    edit(
         "schedule",
         "Schedule",
-        "{category: rooms|doors|windows|walls|floors|levels, path?} columns and rows; a .csv file with a path",
+        &[],
+        "{name?, category?, fields?, filters?, sort?, grouped?, path?} a schedule view, as Revit's View > Schedules makes one, \
+         and its table: columns, rows and totals (and a .csv file with a path). A new one needs `name` and `category`: rooms, \
+         doors, windows, walls, floors, ceilings, roofs, columns, components, stairs, ramps, railings or levels; `category` \
+         alone reads its own (Room Schedule, Door Schedule, Window Schedule, Wall Schedule, Floor Schedule, Level Schedule, \
+         each the project's once changed). `fields`: its columns, in order, each a field's name (`available` lists them: its \
+         category's own, Count, project parameters, a component's family's parameters) or {name, formula?, kind?: \
+         number|length|area|yesno, heading?, total?}; with a formula, a calculated field worked out from the row's other \
+         fields as a family's formulas are (lengths in mm, areas in m²; `Area * 120`); `total` sums it in a totals row. \
+         `filters`: [{field, op: equals|not-equals|greater|greater-or-equal|less|less-or-equal|contains|not-contains|\
+         begins-with|not-begins-with|ends-with|not-ends-with|has-value|has-no-value, value}, …], the elements all of them \
+         keep (text in any case, numbers as the schedule shows them, an unset yes or no as no). `sort`: [field or {field, descending?}, …], in turn (its first column unless it says); \
+         `grouped`, a row for each set of the sort fields' values: Count and totals summed, and a field whose values differ \
+         left empty. Each one given replaces the last; `fields: []` goes back to its category's",
         schedule,
     ),
     other(
@@ -1045,12 +1069,85 @@ fn render_view(s: &mut Session, p: &Value) -> R {
 
 fn schedule(s: &mut Session, p: &Value) -> R {
     let c = "schedule";
-    let cat = string(c, p, "category")?.ok_or_else(|| bad(c, "`category` is required: rooms, doors, windows, walls, floors or levels"))?;
-    let t = crate::schedule::table(&s.model, &cat).map_err(|e| bad(c, e))?;
+    let m = &s.model;
+    let name = string(c, p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+    let cat = match string(c, p, "category")? {
+        Some(k) if !schedule::categories().contains(&category(&k).as_str()) => {
+            return Err(bad(c, format!("`{k}` isn't a category schedules are of; there are: {}", schedule::categories().join(", "))));
+        }
+        k => k.map(|k| category(&k)),
+    };
+    let builtin = schedule::builtin(name.as_deref(), cat.as_deref());
+    let found = name.as_deref().and_then(|n| schedule::named(m, n)).or_else(|| builtin.and_then(|(_, n)| schedule::named(m, n)));
+    let mut sc = match (found, builtin, &name, &cat) {
+        (Some(id), ..) => match m.elements.get(&id) {
+            Some(Element::Schedule(sc)) => sc.clone(),
+            _ => return Err(bad(c, format!("element {id} isn't a schedule"))),
+        },
+        (None, Some((of, n)), _, _) => Schedule { name: m.language.word(n).to_string(), of: of.to_string(), ..Schedule::default() },
+        (None, None, Some(n), Some(k)) => Schedule { name: n.clone(), of: k.clone(), ..Schedule::default() },
+        (None, None, Some(n), None) => return Err(bad(c, format!("there's no schedule `{n}`; a new one needs `category` too"))),
+        (None, None, None, Some(k)) => Schedule { of: k.clone(), ..Schedule::default() },
+        (None, None, None, None) => return Err(bad(c, "`name` or `category` is required")),
+    };
+    if let Some(k) = cat.as_deref().filter(|k| *k != category(&sc.of)) {
+        return Err(bad(c, format!("`{}` schedules {}s, not {k}s; make another for those", sc.name, sc.of)));
+    }
+    // Each given, replaced whole: a field or a sort field by its name alone, or in full.
+    let named = |key: &str, by: &str| -> Result<Option<Value>, String> {
+        match p.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Array(list)) => {
+                Ok(Some(Value::Array(list.iter().map(|v| if v.is_string() { json!({by: v}) } else { v.clone() }).collect())))
+            }
+            Some(v) => Err(bad(c, format!("`{key}` is a list, not {v}"))),
+        }
+    };
+    fn read<T: serde::de::DeserializeOwned>(key: &str, v: Value) -> Result<T, String> {
+        serde_json::from_value(v).map_err(|e| bad("schedule", format!("`{key}`: {e}")))
+    }
+    let mut changed = false;
+    if let Some(v) = named("fields", "name")? {
+        (sc.fields, changed) = (read("fields", v)?, true);
+    }
+    if let Some(v) = named("filters", "field")? {
+        (sc.filters, changed) = (read("filters", v)?, true);
+    }
+    if let Some(v) = named("sort", "field")? {
+        (sc.sort, changed) = (read("sort", v)?, true);
+    }
+    if let Some(v) = p.get("grouped").filter(|v| !v.is_null()) {
+        (sc.grouped, changed) = (v.as_bool().ok_or_else(|| bad(c, format!("`grouped` is true or false, not {v}")))?, true);
+    }
+    // A new one is made whatever it's given.
+    let changed = changed || (found.is_none() && builtin.is_none());
+    let id = match (found, changed) {
+        (Some(id), true) => {
+            s.model_mut().elements.insert(id, Element::Schedule(sc.clone()));
+            Some(id)
+        }
+        (None, true) if !sc.name.is_empty() => Some(s.model_mut().insert(Element::Schedule(sc.clone()))),
+        (None, true) => None,
+        (id, false) => id,
+    };
+    let m = &s.model;
+    // Sound before its table is made; and a file only for one the model keeps.
+    crate::schedule::check(m, &sc).map_err(|e| bad(c, e))?;
+    let t = crate::schedule::table(m, &sc).map_err(|e| bad(c, e))?;
     if let Some(path) = string(c, p, "path")? {
+        if changed {
+            m.check().map_err(|e| bad(c, e))?;
+        }
         std::fs::write(&path, crate::schedule::to_csv(&t)).map_err(|e| bad(c, format!("{path}: {e}")))?;
     }
-    Ok(json!({"columns": t.columns, "rows": t.rows}))
+    let columns: Vec<String> = t.columns.iter().map(|col| crate::schedule::heading(Units::Millimetres, col)).collect();
+    let available: Vec<String> = crate::schedule::fields(m, &category(&sc.of)).into_iter().map(|(n, _)| n).collect();
+    let mut out =
+        json!({"id": id, "name": sc.name, "category": category(&sc.of), "columns": columns, "rows": t.rows, "available": available});
+    if let Some(totals) = t.totals {
+        out["totals"] = json!(totals);
+    }
+    Ok(out)
 }
 
 fn undo(s: &mut Session, _: &Value) -> R {
@@ -1122,6 +1219,7 @@ fn wall(s: &mut Session, p: &Value) -> R {
         .windows(2)
         .filter_map(|seg| match seg {
             [a, b] => Some(m.insert(Element::Wall(Wall {
+                params: Default::default(),
                 type_name: type_name.clone(),
                 level,
                 start: *a,
@@ -1228,6 +1326,7 @@ fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
         })),
     };
     let o = Opening {
+        params: Default::default(),
         type_name,
         host,
         offset,
@@ -1264,7 +1363,16 @@ fn floor(s: &mut Session, p: &Value) -> R {
     let (offset, slope) = (num(c, p, "offset")?.unwrap_or(0.0), num(c, p, "slope")?.unwrap_or(0.0));
     // Its openings lie inside it and apart, or the model refuses it.
     let area = m2(geom::area(&boundary) - openings.iter().map(|o| geom::area(o).abs()).sum::<f64>());
-    let id = s.model_mut().insert(Element::Floor(Floor { type_name, level, boundary, openings, offset, slope, arrow }));
+    let id = s.model_mut().insert(Element::Floor(Floor {
+        params: Default::default(),
+        type_name,
+        level,
+        boundary,
+        openings,
+        offset,
+        slope,
+        arrow,
+    }));
     Ok(json!({"id": id, "area_m2": area}))
 }
 
@@ -1292,7 +1400,7 @@ fn ceiling(s: &mut Session, p: &Value) -> R {
     let offset = num(c, p, "offset")?.unwrap_or(CEILING_HEIGHT);
     // Its openings lie inside it and apart, or the model refuses it.
     let area = m2(geom::area(&boundary) - openings.iter().map(|o| geom::area(o).abs()).sum::<f64>());
-    let id = s.model_mut().insert(Element::Ceiling(Ceiling { type_name, level, boundary, openings, offset }));
+    let id = s.model_mut().insert(Element::Ceiling(Ceiling { params: Default::default(), type_name, level, boundary, openings, offset }));
     Ok(json!({"id": id, "area_m2": area}))
 }
 
@@ -1323,7 +1431,7 @@ fn room(s: &mut Session, p: &Value) -> R {
             _ => None,
         })),
     };
-    let r = Room { level, point, name, number: number.clone() };
+    let r = Room { params: Default::default(), level, point, name, number: number.clone() };
     let region = m.room_region(&r).ok_or_else(|| {
         bad(
             c,
@@ -1505,6 +1613,7 @@ fn column(s: &mut Session, p: &Value) -> R {
     let type_name = type_param(c, p, m, "column")?;
     let (top_level, height) = top_param(c, m, p, level)?;
     let col = Column {
+        params: Default::default(),
         type_name,
         level,
         at,
@@ -1545,6 +1654,7 @@ fn stair(s: &mut Session, p: &Value) -> R {
     let (top_level, height) = top_param(c, m, p, level)?;
     let dim = |key: &str, default: f64| num(c, p, key).map(|v| v.unwrap_or(default));
     let st = Stair {
+        params: Default::default(),
         level,
         top_level,
         height,
@@ -1569,8 +1679,15 @@ fn sides(c: &str, s: &mut Session, p: &Value, id: Id, level: Id) -> Result<Vec<I
     }
     let type_name = s.model.default_type("railing").map(String::from).ok_or_else(|| bad(c, "the model has no railing types"))?;
     let m = s.model_mut();
-    let railing =
-        |side| Railing { type_name: type_name.clone(), level, path: Vec::new(), base_offset: 0.0, host: Some(id), side: Some(side) };
+    let railing = |side| Railing {
+        params: Default::default(),
+        type_name: type_name.clone(),
+        level,
+        path: Vec::new(),
+        base_offset: 0.0,
+        host: Some(id),
+        side: Some(side),
+    };
     Ok([Side::Left, Side::Right].into_iter().map(|side| m.insert(Element::Railing(railing(side)))).collect())
 }
 
@@ -1582,6 +1699,7 @@ fn ramp(s: &mut Session, p: &Value) -> R {
     let level = level_param(c, m, p, "level")?;
     let (top_level, height) = top_param(c, m, p, level)?;
     let r = Ramp {
+        params: Default::default(),
         level,
         top_level,
         height,
@@ -1602,7 +1720,15 @@ fn railing(s: &mut Session, p: &Value) -> R {
     let c = "railing";
     let m = &s.model;
     let type_name = type_param(c, p, m, "railing")?;
-    let base = |level, path, host, side| Railing { type_name: type_name.clone(), level, path, base_offset: 0.0, host, side };
+    let base = |level, path, host, side| Railing {
+        params: Default::default(),
+        type_name: type_name.clone(),
+        level,
+        path,
+        base_offset: 0.0,
+        host,
+        side,
+    };
     let made: Vec<Railing> = match id_opt(c, p, "host")? {
         // Along a stair's or a ramp's sides.
         Some(host) => {
@@ -1645,6 +1771,7 @@ fn roof(s: &mut Session, p: &Value) -> R {
         (false, None) => roof_footprint(m, level, overhang).map_err(|e| bad(c, e))?,
     };
     let r = Roof {
+        params: Default::default(),
         type_name,
         level,
         boundary,
@@ -1711,6 +1838,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
     let boundary = [at - u * f + n * h, at - u * f - n * h, at + u * back - n * h, at + u * back + n * h].map(micron).to_vec();
     let model = s.model_mut();
     let roof = model.insert(Element::Roof(Roof {
+        params: Default::default(),
         type_name: hr.type_name.clone(),
         level,
         boundary,
@@ -1726,6 +1854,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
     }));
     let wall = |start: P2, end: P2| {
         Element::Wall(Wall {
+            params: Default::default(),
             type_name: type_name.clone(),
             level,
             start,
@@ -1984,16 +2113,12 @@ fn place(s: &mut Session, p: &Value) -> R {
             // A schedule, or the 3D view, comes to be as it's first placed: a schedule by its name in
             // English or in the project's language, named in the latter.
             None => {
-                let names: Vec<&'static str> = schedule::VIEWS.iter().map(|(_, name)| *name).collect();
-                let builtin = m.language.find(n, &names).and_then(|name| schedule::VIEWS.iter().find(|(_, v)| *v == name));
-                let existing = builtin.and_then(|(of, _)| {
-                    m.elements.iter().find_map(|(id, e)| matches!(e, Element::Schedule(sc) if sc.of == *of).then_some(*id))
-                });
-                match (builtin, existing) {
+                let builtin = schedule::builtin(Some(n), None);
+                match (builtin, builtin.and_then(|(_, name)| schedule::named(m, name))) {
                     (_, Some(id)) => id,
                     (Some((of, name)), None) => {
                         let name = m.language.word(name).to_string();
-                        s.model_mut().insert(Element::Schedule(Schedule { name, of: of.to_string() }))
+                        s.model_mut().insert(Element::Schedule(Schedule { name, of: of.to_string(), ..Schedule::default() }))
                     }
                     (None, _) if n == "{3D}" => s.model_mut().insert(Element::View3D(View3D {
                         name: n.clone(),
@@ -2062,6 +2187,109 @@ fn material(s: &mut Session, p: &Value) -> R {
     };
     m.materials.insert(name.clone(), mat.clone());
     Ok(json!({"name": name, "material": mat}))
+}
+
+fn parameter(s: &mut Session, p: &Value) -> R {
+    let c = "parameter";
+    let name = string(c, p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
+    let m = s.model_mut();
+    // Off the categories `gone`, the ones it was for: their elements' values of `name`, and their
+    // schedules' column of it, and filtering and sorting by it. A component's value of its family's
+    // parameter of that name is its family's, and stays.
+    let clear = |m: &mut Model, name: &str, gone: &[String]| {
+        let Model { families, elements, .. } = m;
+        for e in elements.values_mut() {
+            if let Element::Schedule(sc) = e {
+                if gone.contains(&sc.category()) {
+                    sc.fields.retain(|f| f.name != name || f.formula.is_some());
+                    sc.filters.retain(|f| f.field != name);
+                    sc.sort.retain(|s| s.field != name);
+                }
+                continue;
+            }
+            let (cat, family) = (e.category(), if let Element::Component(cp) = &*e { families.get(&cp.family) } else { None });
+            if !gone.iter().any(|g| g == cat) || family.is_some_and(|f| f.parameters.iter().any(|q| q.name == name)) {
+                continue;
+            }
+            if let Some(params) = e.params_mut() {
+                params.remove(name);
+            }
+        }
+    };
+    if flag(c, p, "delete")? {
+        let Some(was) = m.parameters.remove(&name) else {
+            return Err(bad(c, format!("there's no parameter `{name}`")));
+        };
+        clear(m, &name, &was.categories);
+        return Ok(json!({"deleted": name}));
+    }
+    let mut param: ProjectParameter = m.parameters.get(&name).cloned().unwrap_or_default();
+    if let Some(v) = p.get("kind").filter(|v| !v.is_null()) {
+        let kind: ParameterKind =
+            serde_json::from_value(v.clone()).map_err(|_| bad(c, format!("`kind`: {v} isn't one of text, number, length, yesno")))?;
+        // Values of it: its categories' elements' own (a component's of its family's parameter of
+        // that name aren't).
+        let Model { families, elements, .. } = &*m;
+        let valued = elements.values().any(|e| {
+            let theirs = matches!(e, Element::Component(cp) if families.get(&cp.family).is_some_and(|f| f.parameters.iter().any(|q| q.name == name)));
+            param.categories.iter().any(|k| k == e.category()) && !theirs && e.params().is_some_and(|ps| ps.contains_key(&name))
+        });
+        if kind != param.kind && valued {
+            return Err(bad(c, format!("`{name}` has values of its kind; take them away before it holds another")));
+        }
+        param.kind = kind;
+    }
+    if let Some(v) = p.get("categories").filter(|v| !v.is_null()) {
+        let list: Vec<String> =
+            serde_json::from_value(v.clone()).map_err(|_| bad(c, format!("`categories` is a list of categories, not {v}")))?;
+        if let Some(k) = list.iter().find(|k| !PARAMETER_CATEGORIES.contains(&category(k).as_str())) {
+            return Err(bad(c, format!("`{k}` isn't a category it can be for; there are {}", PARAMETER_CATEGORIES.join(", "))));
+        }
+        let mut list: Vec<String> = list.iter().map(|k| category(k)).collect();
+        list.sort();
+        list.dedup();
+        let gone: Vec<String> = param.categories.iter().filter(|k| !list.contains(k)).cloned().collect();
+        clear(m, &name, &gone);
+        param.categories = list;
+    }
+    let name = match string(c, p, "rename")? {
+        Some(to) => {
+            let to = to.trim().to_string();
+            if to.is_empty() {
+                return Err(bad(c, "`rename` needs a name"));
+            }
+            if to != name && m.parameters.contains_key(&to) {
+                return Err(bad(c, format!("there's a parameter `{to}` already")));
+            }
+            m.parameters.remove(&name);
+            for e in m.elements.values_mut() {
+                if let Element::Schedule(sc) = e {
+                    if param.categories.contains(&category(&sc.of)) {
+                        let swap = |n: &mut String| {
+                            if *n == name {
+                                *n = to.clone();
+                            }
+                        };
+                        sc.fields.iter_mut().filter(|f| f.formula.is_none()).for_each(|f| swap(&mut f.name));
+                        sc.filters.iter_mut().for_each(|f| swap(&mut f.field));
+                        sc.sort.iter_mut().for_each(|s| swap(&mut s.field));
+                    }
+                    continue;
+                }
+                let cat = e.category();
+                if param.categories.iter().any(|k| k == cat)
+                    && let Some(params) = e.params_mut()
+                    && let Some(v) = params.remove(&name)
+                {
+                    params.insert(to.clone(), v);
+                }
+            }
+            to
+        }
+        None => name,
+    };
+    m.parameters.insert(name.clone(), param.clone());
+    Ok(json!({"name": name, "parameter": param}))
 }
 
 fn family(s: &mut Session, p: &Value) -> R {
@@ -3033,7 +3261,8 @@ fn inspect(s: &mut Session, _: &Value) -> R {
     Ok(json!({
         "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
         "counts": counts,
-        "types": m.types, "materials": m.materials, "families": families(m), "warnings": warnings, "history": s.history(),
+        "types": m.types, "materials": m.materials, "families": families(m), "parameters": m.parameters, "warnings": warnings,
+        "history": s.history(),
     }))
 }
 

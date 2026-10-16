@@ -414,6 +414,360 @@ fn tags_name_doors_and_windows_and_go_where_they_go() {
     assert_eq!(count(&mut s, "tag"), 2);
 }
 
+#[test]
+fn project_parameters_give_the_elements_of_their_categories_values_of_their_own() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    run(&mut s, "parameter", json!({"name": "Fire Rating", "categories": ["walls", "doors"]}));
+    run(&mut s, "parameter", json!({"name": "Cost", "kind": "number", "categories": ["wall"]}));
+    run(&mut s, "modify", json!({"ids": ids, "params": {"Fire Rating": "60 min", "Cost": 120}}));
+    let w = crate::element_json(&s.model, ids[0]);
+    assert_eq!((&w["params"]["Fire Rating"], &w["params"]["Cost"]), (&json!("60 min"), &json!(120)));
+    // A value is what its kind holds, and only its categories' elements have one.
+    let e = s.execute("modify", &json!({"id": ids[0], "params": {"Cost": "cheap"}})).unwrap_err();
+    assert!(e.contains("Cost") && e.contains("number"), "{e}");
+    let room = run(&mut s, "room", json!({"point": [4000, 3000]}))["id"].as_u64().unwrap();
+    let e = s.execute("modify", &json!({"id": room, "params": {"Cost": 5}})).unwrap_err();
+    assert!(e.contains("Cost") && e.contains("room"), "{e}");
+    // A copy takes its values along; a null takes one away.
+    let copied = run(&mut s, "copy", json!({"ids": [ids[0]], "by": [0, -3000]}))["ids"][0].as_u64().unwrap();
+    assert_eq!(crate::element_json(&s.model, copied)["params"]["Cost"], json!(120));
+    run(&mut s, "modify", json!({"id": copied, "params": {"Cost": null}}));
+    assert_eq!(crate::element_json(&s.model, copied)["params"].get("Cost"), None);
+    // Renamed, the values follow; off a category, its elements' values go; deleted, all of them.
+    run(&mut s, "parameter", json!({"name": "Cost", "rename": "Price"}));
+    assert_eq!(crate::element_json(&s.model, ids[0])["params"]["Price"], json!(120));
+    run(&mut s, "parameter", json!({"name": "Fire Rating", "categories": ["door"]}));
+    assert_eq!(crate::element_json(&s.model, ids[0])["params"].get("Fire Rating"), None);
+    run(&mut s, "parameter", json!({"name": "Price", "delete": true}));
+    assert_eq!(crate::element_json(&s.model, ids[0])["params"], Value::Null);
+    let names: Vec<String> = s.model.parameters.keys().cloned().collect();
+    assert_eq!(names, ["Fire Rating"]);
+    for (bad, says) in [
+        (json!({"name": "X", "categories": ["clouds"]}), "clouds"),
+        (json!({"name": "X", "kind": "colour", "categories": ["wall"]}), "colour"),
+        (json!({"name": "X", "categories": []}), "categor"),
+        (json!({"name": "1st", "categories": ["wall"]}), "name"),
+        (json!({"name": "Width", "categories": ["component"]}), "family"),
+    ] {
+        let e = s.execute("parameter", &bad).unwrap_err();
+        assert!(e.contains(says), "{bad}: {e}");
+    }
+}
+
+/// Two rooms, Kitchen (18 m²) and Living (30 m²), and three doors: D2 and two numbered ones.
+fn flat(s: &mut Session) {
+    s.script(
+        r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}
+           wall {"points": [[5000,0],[5000,6000]], "type": "Interior - 100mm"}
+           room {"point": [6500, 3000], "name": "Kitchen"}
+           room {"point": [2000, 3000], "name": "Living", "number": "10"}
+           door {"at": [6000, 0], "mark": "D2"}
+           door {"at": [2000, 0]}
+           door {"at": [5000, 3000], "type": "Single 800 x 2100"}"#,
+    )
+    .unwrap();
+}
+
+#[test]
+fn schedules_show_the_fields_chosen_of_the_elements_their_filters_keep_sorted_grouped_and_totalled() {
+    let mut s = Session::new();
+    flat(&mut s);
+    let fields = json!(["Name", {"name": "Area", "total": true}, "Number"]);
+    let r = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Rooms by Area", "category": "rooms", "fields": fields, "sort": [{"field": "Area", "descending": true}]}),
+    );
+    assert_eq!(r["columns"], json!(["Name", "Area (m²)", "Number"]));
+    assert_eq!(r["rows"], json!([["Living", 30.0, "10"], ["Kitchen", 18.0, "1"]]));
+    assert_eq!(r["totals"], json!([null, 48.0, null]));
+    assert!(r["available"].as_array().unwrap().contains(&json!("Perimeter")), "{}", r["available"]);
+    // Filters keep what they all hold for; text in any case.
+    let r = run(&mut s, "schedule", json!({"name": "Rooms by Area", "filters": [{"field": "Name", "op": "begins-with", "value": "kit"}]}));
+    assert_eq!((r["rows"].clone(), r["totals"].clone()), (json!([["Kitchen", 18.0, "1"]]), json!([null, 18.0, null])));
+    let r = run(&mut s, "schedule", json!({"name": "Rooms by Area", "filters": [{"field": "Area", "op": "greater", "value": 20}]}));
+    assert_eq!(r["rows"], json!([["Living", 30.0, "10"]]));
+    // It's the project's view now: by its name, and as it was left. A name every project's
+    // schedule of another category has is that one's.
+    assert_eq!(count(&mut s, "schedule"), 1);
+    let id = run(&mut s, "schedule", json!({"name": "Rooms by Area"}))["id"].as_u64().unwrap();
+    let e = s.execute("modify", &json!({"id": id, "name": "Window Schedule"})).unwrap_err();
+    assert!(e.contains("Window Schedule") && e.contains("window"), "{e}");
+    assert_eq!(run(&mut s, "schedule", json!({"name": "Rooms by Area"}))["rows"], json!([["Living", 30.0, "10"]]));
+    // A schedule every project has becomes the project's once changed: grouped by type here, its
+    // doors counted, a mark that differs left empty.
+    let r = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Door Schedule", "fields": ["Type", "Width", {"name": "Count", "total": true}, "Mark"], "sort": ["Type"], "grouped": true}),
+    );
+    assert_eq!(r["rows"], json!([["Single 800 x 2100", 800.0, 1.0, "2"], ["Single 900 x 2100", 900.0, 2.0, null]]));
+    assert_eq!(r["totals"], json!([null, null, 3.0, null]));
+    assert_eq!(count(&mut s, "schedule"), 2);
+    assert_eq!(run(&mut s, "schedule", json!({"category": "doors"}))["rows"].as_array().map(Vec::len), Some(2));
+    // Back to its category's fields, every element its row, sorted by its first column.
+    let r = run(&mut s, "schedule", json!({"name": "Door Schedule", "fields": [], "sort": [], "grouped": false}));
+    assert_eq!(r["columns"], json!(["Mark", "Type", "Width", "Height", "Level", "Wall"]));
+    let marks: Vec<&str> = r["rows"].as_array().unwrap().iter().filter_map(|row| row[0].as_str()).collect();
+    assert_eq!(marks, ["1", "2", "D2"]);
+    // Every category the model holds has a schedule; the room schedule's perimeter is a length.
+    assert_eq!(run(&mut s, "schedule", json!({"category": "rooms"}))["rows"][0][4], json!(18000.0));
+    run(&mut s, "stair", json!({"start": [1000, 1000], "angle": 90}));
+    let r = run(&mut s, "schedule", json!({"category": "stairs"}));
+    assert_eq!(r["columns"], json!(["Id", "Level", "Width", "Height", "Risers", "Riser Height", "Tread"]));
+    assert_eq!(r["rows"].as_array().map(Vec::len), Some(1));
+    // Undo takes a change back.
+    run(&mut s, "undo", json!({}));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(run(&mut s, "schedule", json!({"name": "Door Schedule"}))["columns"], json!(["Type", "Width", "Count", "Mark"]));
+}
+
+#[test]
+fn calculated_fields_work_out_formulas_over_the_rows_other_fields() {
+    let mut s = Session::new();
+    flat(&mut s);
+    let fields = json!([
+        "Name",
+        "Area",
+        {"name": "Cost", "formula": "Area * 120", "total": true},
+        {"name": "Half Perimeter", "formula": "Perimeter / 2", "kind": "length"},
+        {"name": "Large", "formula": "Area > 20", "kind": "yesno"},
+        {"name": "Cost With Tax", "formula": "Cost * 1.1", "heading": "Cost + 10%"},
+    ]);
+    let r = run(&mut s, "schedule", json!({"name": "Costs", "category": "rooms", "fields": fields}));
+    assert_eq!(r["columns"], json!(["Name", "Area (m²)", "Cost", "Half Perimeter", "Large", "Cost + 10%"]));
+    assert_eq!(r["rows"], json!([["Kitchen", 18.0, 2160.0, 9000.0, false, 2376.0], ["Living", 30.0, 3600.0, 11000.0, true, 3960.0]]));
+    assert_eq!(r["totals"], json!([null, null, 5760.0, null, null, null]));
+    // Filtered and sorted by like any other.
+    let r = run(&mut s, "schedule", json!({"name": "Costs", "filters": [{"field": "Large", "op": "equals", "value": true}]}));
+    assert_eq!(r["rows"].as_array().map(Vec::len), Some(1));
+    // A field with no value leaves a formula reading it with none.
+    run(&mut s, "parameter", json!({"name": "Rate", "kind": "number", "categories": ["room"]}));
+    let living = run(&mut s, "elements", json!({"category": "rooms"}))["elements"][1]["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": living, "params": {"Rate": 100}}));
+    let r =
+        run(&mut s, "schedule", json!({"name": "Costs", "filters": [], "fields": ["Name", {"name": "Cost", "formula": "Area * Rate"}]}));
+    assert_eq!(r["rows"], json!([["Kitchen", null], ["Living", 3000.0]]));
+    for (bad, says) in [
+        (json!([{"name": "X", "formula": "Nope * 2"}]), "Nope"),
+        (json!([{"name": "A", "formula": "B + 1"}, {"name": "B", "formula": "A * 2"}]), "comes back to itself"),
+        (json!([{"name": "X", "formula": "Name * 2"}]), "text"),
+        (json!([{"name": "Area", "formula": "1"}]), "call it something else"),
+        (json!([{"name": "X", "formula": "(1 + Area"}]), "isn't closed"),
+        (json!([{"name": "X", "formula": "sqrt(Area, 2)"}]), "sqrt"),
+        (json!([{"name": "X", "formula": "Area", "kind": "text"}]), "number"),
+        (json!(["Colour"]), "Colour"),
+        (json!(["Name", "Name"]), "twice"),
+        (json!([{"name": "Name", "total": true}]), "total"),
+        (json!([{"name": "Area", "kind": "length"}]), "formula"),
+    ] {
+        let e = s.execute("schedule", &json!({"name": "Costs", "fields": bad})).unwrap_err();
+        assert!(e.contains(says), "{bad}: {e}");
+    }
+    for (p, says) in [
+        (json!({"filters": [{"field": "Area", "op": "contains", "value": "1"}]}), "text"),
+        (json!({"filters": [{"field": "Area", "op": "greater", "value": "big"}]}), "area"),
+        (json!({"filters": [{"field": "Area", "op": "near", "value": 1}]}), "near"),
+        (json!({"filters": [{"field": "Colour", "op": "has-value"}]}), "Colour"),
+        (json!({"sort": ["Colour"]}), "Colour"),
+        (json!({"grouped": "yes"}), "grouped"),
+        (json!({"category": "doors"}), "rooms"),
+    ] {
+        let mut p = p;
+        p["name"] = json!("Costs");
+        let e = s.execute("schedule", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    assert!(s.execute("schedule", &json!({"name": "Nowhere"})).unwrap_err().contains("category"));
+    assert!(s.execute("schedule", &json!({"name": "S", "category": "clouds"})).unwrap_err().contains("clouds"));
+}
+
+#[test]
+fn schedules_follow_the_project_parameters_they_show() {
+    let mut s = Session::new();
+    flat(&mut s);
+    run(&mut s, "parameter", json!({"name": "Fire Rating", "categories": ["door"]}));
+    let d2 = run(&mut s, "elements", json!({"category": "doors"}))["elements"][0]["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": d2, "params": {"Fire Rating": "30 min"}}));
+    let filter = json!([{"field": "Fire Rating", "op": "has-value"}]);
+    let r = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Fire Doors", "category": "doors", "fields": ["Mark", "Fire Rating"], "filters": filter, "sort": ["Fire Rating"]}),
+    );
+    assert_eq!(r["rows"], json!([["D2", "30 min"]]));
+    // Renamed, the schedule shows it by its new name; deleted, it goes, and its filter with it.
+    run(&mut s, "parameter", json!({"name": "Fire Rating", "rename": "Fire Resistance"}));
+    let r = run(&mut s, "schedule", json!({"name": "Fire Doors"}));
+    assert_eq!((r["columns"].clone(), r["rows"].clone()), (json!(["Mark", "Fire Resistance"]), json!([["D2", "30 min"]])));
+    run(&mut s, "parameter", json!({"name": "Fire Resistance", "categories": ["window"]}));
+    let r = run(&mut s, "schedule", json!({"name": "Fire Doors"}));
+    assert_eq!((r["columns"].clone(), r["rows"].as_array().map(Vec::len)), (json!(["Mark"]), Some(3)));
+    // A formula reading one stops it changing under it.
+    run(&mut s, "parameter", json!({"name": "Rate", "kind": "number", "categories": ["door"]}));
+    run(&mut s, "schedule", json!({"name": "Fire Doors", "fields": ["Mark", {"name": "Cost", "formula": "Rate * 2"}]}));
+    let e = s.execute("parameter", &json!({"name": "Rate", "delete": true})).unwrap_err();
+    assert!(e.contains("Rate") && e.contains("Fire Doors"), "{e}");
+    // A parameter can't take a name its categories' own fields have.
+    let e = s.execute("parameter", &json!({"name": "Width", "categories": ["door"]})).unwrap_err();
+    assert!(e.contains("Width") && e.contains("own"), "{e}");
+}
+
+#[test]
+fn component_schedules_show_their_families_parameters() {
+    let mut s = Session::new();
+    flat(&mut s);
+    for (family, x) in [("Chair", 1000), ("Chair", 2000), ("Table", 3000)] {
+        run(&mut s, "component", json!({"family": family, "at": [x, 2000]}));
+    }
+    let r = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Furniture", "category": "components", "fields": ["Family", "Width", {"name": "Count", "total": true}], "sort": ["Family"], "grouped": true}),
+    );
+    let rows = r["rows"].as_array().unwrap();
+    assert_eq!(
+        rows.iter().map(|row| (row[0].clone(), row[2].clone())).collect::<Vec<_>>(),
+        [(json!("Chair"), json!(2.0)), (json!("Table"), json!(1.0))]
+    );
+    assert!(rows.iter().all(|row| row[1].as_f64().is_some_and(|w| w > 0.0)), "{rows:?}");
+    assert_eq!(r["totals"][2], json!(3.0));
+}
+
+#[test]
+fn a_project_holds_up_to_its_most_parameters() {
+    let mut s = Session::new();
+    for i in 0..crate::model::MAX_PROJECT_PARAMETERS {
+        run(&mut s, "parameter", json!({"name": format!("P{i}"), "categories": ["wall"]}));
+    }
+    let e = s.execute("parameter", &json!({"name": "One More", "categories": ["wall"]})).unwrap_err();
+    assert!(e.contains(&crate::model::MAX_PROJECT_PARAMETERS.to_string()), "{e}");
+}
+
+#[test]
+fn a_schedule_is_checked_before_its_table_is_made_or_written() {
+    let mut s = Session::new();
+    flat(&mut s);
+    // One no command makes its own: what's wrong with it is said all the same.
+    let circle = json!(["Id", {"name": "A", "formula": "B + 1"}, {"name": "B", "formula": "A + 1"}]);
+    let e = s.execute("schedule", &json!({"category": "stairs", "fields": circle})).unwrap_err();
+    assert!(e.contains("comes back to itself"), "{e}");
+    let many: Vec<Value> = (0..1000).map(|_| json!("Id")).collect();
+    let e = s.execute("schedule", &json!({"category": "walls", "fields": many})).unwrap_err();
+    assert!(e.contains("64"), "{e}");
+    // A file is written only for a schedule the model keeps.
+    for (i, bad) in [json!({"name": "X", "category": "rooms", "fields": ["Nope"]}), json!({"name": "Level 1", "category": "rooms"})]
+        .into_iter()
+        .enumerate()
+    {
+        let path = temp(&format!("refused-{i}.csv"));
+        let mut p = bad;
+        p["path"] = json!(path);
+        assert!(s.execute("schedule", &p).is_err(), "{p}");
+        assert!(!path.exists(), "{p} wrote {}", path.display());
+    }
+    // Whatever a filter compares, its value is a small one.
+    let long = "x".repeat(crate::model::MAX_TEXT + 1);
+    let e =
+        s.execute("schedule", &json!({"name": "Y", "category": "rooms", "filters": [{"field": "Name", "op": "has-value", "value": long}]}));
+    assert!(e.is_err(), "{e:?}");
+}
+
+#[test]
+fn a_schedule_every_project_has_is_one_whatever_language_or_case_names_it() {
+    let mut s = Session::new();
+    flat(&mut s);
+    s.script(
+        r#"language {"code": "pt"}
+           sheet {}
+           place {"sheet": "A101", "view": "Room Schedule"}
+           language {"code": "en"}"#,
+    )
+    .unwrap();
+    // Named in Portuguese, it's still the Room Schedule: placed already, it isn't made again.
+    assert!(s.execute("place", &json!({"sheet": "A101", "view": "Room Schedule"})).is_err());
+    assert_eq!(count(&mut s, "schedule"), 1);
+    let id = run(&mut s, "schedule", json!({"category": "rooms"}))["id"].as_u64();
+    assert!(id.is_some());
+    // In any case.
+    run(&mut s, "modify", json!({"id": id, "name": "room schedule"}));
+    assert_eq!(run(&mut s, "schedule", json!({"category": "rooms"}))["id"].as_u64(), id);
+    // And no other schedule takes its name in another language.
+    let other = run(&mut s, "schedule", json!({"name": "Rooms 2", "category": "rooms"}))["id"].as_u64();
+    let e = s.execute("modify", &json!({"id": other, "name": "Tabla de habitaciones"})).unwrap_err();
+    assert!(e.contains("Tabla de habitaciones") && e.contains("already"), "{e}");
+}
+
+#[test]
+fn a_chain_of_calculated_fields_is_capped_whichever_order_they_come_in() {
+    let mut s = Session::new();
+    flat(&mut s);
+    // B01 reads B02 … B10 reads A01 … A10 reads Id: 20 formulas in a row.
+    let chain = |first: &str, second: &str| -> Vec<Value> {
+        let mut fields = vec![json!("Id")];
+        for (group, last) in [
+            (first, if first == "A" { "Id".to_string() } else { "A01".into() }),
+            (second, if second == "A" { "Id".to_string() } else { "A01".into() }),
+        ] {
+            for i in 1..=10 {
+                let next = if i == 10 { last.clone() } else { format!("{group}{:02}", i + 1) };
+                fields.push(json!({"name": format!("{group}{i:02}"), "formula": format!("{next} + 1")}));
+            }
+        }
+        fields
+    };
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        let e = s.execute("schedule", &json!({"name": "Chain", "category": "walls", "fields": chain(first, second)})).unwrap_err();
+        assert!(e.contains("in a row"), "{first} first: {e}");
+    }
+}
+
+#[test]
+fn a_components_familys_values_are_its_familys_not_the_projects() {
+    let mut s = Session::new();
+    flat(&mut s);
+    run(
+        &mut s,
+        "family",
+        json!({"name": "Crate", "parameters": [{"name": "Cost", "kind": "number", "instance": true, "value": 5}], "types": {"Small": {}},
+               "forms": [{"profile": [[0, 0], [500, 0], [500, 500], [0, 500]], "to": 500}]}),
+    );
+    run(&mut s, "component", json!({"family": "Crate", "at": [1000, 1000], "params": {"Cost": 7}}));
+    // A project parameter of the same name for doors: the crate's value is its family's.
+    run(&mut s, "parameter", json!({"name": "Cost", "kind": "number", "categories": ["door"]}));
+    let door = run(&mut s, "elements", json!({"category": "doors"}))["elements"][0]["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": door, "params": {"Cost": 100}}));
+    let crates = json!({"name": "Crates", "category": "components", "fields": ["Family", "Cost"], "filters": [{"field": "Cost", "op": "has-value"}], "sort": ["Cost"]});
+    assert_eq!(run(&mut s, "schedule", crates)["rows"], json!([["Crate", 7.0]]));
+    // Off doors, the doors' values go; the crates' schedule keeps its family's Cost.
+    run(&mut s, "parameter", json!({"name": "Cost", "categories": ["wall"]}));
+    let r = run(&mut s, "schedule", json!({"name": "Crates"}));
+    assert_eq!((r["columns"].clone(), r["rows"].clone()), (json!(["Family", "Cost"]), json!([["Crate", 7.0]])));
+    match s.model.elements.values().find_map(|e| if let crate::model::Element::Schedule(sc) = e { Some(sc.clone()) } else { None }) {
+        Some(sc) => assert_eq!((sc.filters.len(), sc.sort.len()), (1, 1)),
+        None => panic!("no schedule"),
+    }
+    // IFC carries the door's project value, not the crate's family one.
+    run(&mut s, "parameter", json!({"name": "Cost", "categories": ["door"]}));
+    run(&mut s, "modify", json!({"id": door, "params": {"Cost": 100}}));
+    let file = crate::ifc::export(&s.model);
+    assert_eq!(file.matches("IFCPROPERTYSINGLEVALUE('Cost'").count(), 1, "the door's alone");
+}
+
+#[test]
+fn an_unset_yes_or_no_is_no() {
+    let mut s = Session::new();
+    flat(&mut s);
+    run(&mut s, "parameter", json!({"name": "Accessible", "kind": "yesno", "categories": ["room"]}));
+    let kitchen = run(&mut s, "elements", json!({"category": "rooms"}))["elements"][0]["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": kitchen, "params": {"Accessible": true}}));
+    let r = run(&mut s, "schedule", json!({"name": "Access", "category": "rooms", "fields": ["Name", "Accessible"]}));
+    assert_eq!(r["rows"], json!([["Kitchen", true], ["Living", false]]));
+    let r = run(&mut s, "schedule", json!({"name": "Access", "filters": [{"field": "Accessible", "op": "equals", "value": false}]}));
+    assert_eq!(r["rows"], json!([["Living", false]]));
+}
+
 /// A desk family: a top `Height` up, as wide and deep as its type says.
 fn desk(s: &mut Session) {
     run(
@@ -838,6 +1192,16 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"name": "F", "types": {}, "parameters": [{"name": " ", "kind": "material", "value": 5}]}),
         json!({"name": "", "delete": true, "rename": ""}),
         json!({"path": "/nonexistent/family.json"}),
+        json!({"name": "P", "kind": "length", "categories": ["wall", "wall", "clouds"], "rename": "Q"}),
+        json!({"name": "P", "kind": "yesno", "categories": ["door", "component"], "rename": "1 bad"}),
+        json!({"name": "Count", "categories": ["room"]}),
+        json!({"ids": [3, 4], "params": {"X": 1e300, "Y": [1, 2]}}),
+        json!({"name": "Room Schedule", "fields": [{"name": "X", "formula": "X + 1"}, {"name": "Y", "formula": "if(1, 2)"}], "sort": "x"}),
+        json!({"name": "S", "category": "walls", "fields": ["Length", {"name": "Big", "formula": "((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((Length"}], "grouped": true}),
+        json!({"name": "S", "category": "stairs", "filters": [{"field": "Risers", "op": "greater", "value": 1e300}], "sort": [{"field": "Risers", "descending": "yes"}]}),
+        json!({"category": "doors", "fields": [{"name": "Count", "total": true, "heading": 5}, {"name": "Z", "formula": "1/0", "total": true}]}),
+        json!({"name": "Door Schedule", "category": "rooms", "path": "/nonexistent/x.csv"}),
+        json!({"name": "W", "category": "walls", "fields": [{"name": "A", "formula": "B"}, {"name": "B", "formula": "C"}, {"name": "C", "formula": "A"}]}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {

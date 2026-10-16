@@ -137,10 +137,19 @@ const WORDS: &[[&str; 3]] = &[
     ["Wall", "Parede", "Muro"],
     ["Length", "Comprimento", "Longitud"],
     ["Thickness", "Espessura", "Espesor"],
-    ["Area (m²)", "Área (m²)", "Área (m²)"],
-    ["Area (ft²)", "Área (ft²)", "Área (ft²)"],
-    ["Perimeter (m)", "Perímetro (m)", "Perímetro (m)"],
-    ["Perimeter (ft)", "Perímetro (ft)", "Perímetro (ft)"],
+    ["Area", "Área", "Área"],
+    ["Perimeter", "Perímetro", "Perímetro"],
+    ["Count", "Contagem", "Recuento"],
+    ["Family", "Família", "Familia"],
+    ["Offset", "Deslocamento", "Desfase"],
+    ["Slope", "Inclinação", "Pendiente"],
+    ["Plan Area", "Área em planta", "Área en planta"],
+    ["Risers", "Espelhos", "Contrahuellas"],
+    ["Riser Height", "Altura do espelho", "Altura de contrahuella"],
+    ["Tread", "Piso", "Huella"],
+    ["Total", "Total", "Total"],
+    ["Yes", "Sim", "Sí"],
+    ["No", "Não", "No"],
 ];
 
 #[cfg(test)]

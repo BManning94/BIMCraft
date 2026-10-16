@@ -49,8 +49,11 @@ pub enum Sheet {
     Section(Id),
     /// A sheet: paper with a title block, and views placed on it.
     Paper(Id),
-    /// The schedule of a category, as the `schedule` command names it.
+    /// One of the schedules every project has, by its category (`schedule::VIEWS`): the project's
+    /// own once it's changed.
     Schedule(&'static str),
+    /// Another schedule of the project's, by id.
+    Table(Id),
 }
 
 /// What clicks on the plan do.
@@ -298,6 +301,9 @@ pub struct BimApp {
     type_dialog: Option<properties::TypeDialog>,
     materials_dialog: Option<properties::MaterialsDialog>,
     family_dialog: Option<properties::FamilyDialog>,
+    parameters_dialog: Option<properties::ParametersDialog>,
+    schedule_dialog: Option<properties::ScheduleDialog>,
+    new_schedule: Option<properties::NewSchedule>,
     /// The family and type the Component tool places, as picked, and how far it's turned, degrees.
     component: Option<(String, String)>,
     component_angle: f64,
@@ -526,6 +532,9 @@ impl BimApp {
             type_dialog: None,
             materials_dialog: None,
             family_dialog: None,
+            parameters_dialog: None,
+            schedule_dialog: None,
+            new_schedule: None,
             component: None,
             component_angle: 0.0,
             collapsed: BTreeSet::new(),
@@ -627,7 +636,14 @@ impl BimApp {
             Sheet::View3D => "{3D}".into(),
             Sheet::Section(id) => self.session.model.section(id).map_or_else(|| "Section".into(), |v| v.name.clone()),
             Sheet::Paper(id) => self.session.model.sheet(id).map_or_else(|| "Sheet".into(), |s| format!("{} - {}", s.number, s.name)),
-            Sheet::Schedule(cat) => t(SCHEDULES.iter().find(|(c, _)| *c == cat).map_or(cat, |(_, name)| name)).to_string(),
+            Sheet::Schedule(cat) => match schedule::standard(&self.session.model, cat) {
+                (Some(_), sc) => sc.name,
+                (None, _) => t(SCHEDULES.iter().find(|(c, _)| *c == cat).map_or(cat, |(_, name)| name)).to_string(),
+            },
+            Sheet::Table(id) => match self.session.model.elements.get(&id) {
+                Some(Element::Schedule(sc)) => sc.name.clone(),
+                _ => "Schedule".into(),
+            },
         }
     }
 
@@ -640,7 +656,7 @@ impl BimApp {
             Sheet::Section(id) if matches!(self.session.model.elements.get(&id), Some(Element::Elevation(_))) => "Elevation",
             Sheet::Section(_) => "Section",
             Sheet::Paper(_) => "Sheet",
-            Sheet::Schedule(_) => "Schedule",
+            Sheet::Schedule(_) | Sheet::Table(_) => "Schedule",
         };
         format!("{}: {}", t(kind), self.view_name(sheet))
     }
@@ -705,7 +721,7 @@ impl BimApp {
                 Sheet::View3D => self.view3d(ui),
                 Sheet::Section(id) => self.section_view(ui, id),
                 Sheet::Paper(id) => self.paper_view(ui, id),
-                Sheet::Schedule(cat) => self.schedule(ui, cat),
+                Sheet::Schedule(_) | Sheet::Table(_) => self.schedule(ui),
             }
         });
         self.warning(&ctx);
@@ -743,6 +759,7 @@ impl BimApp {
             Sheet::Section(id) => m.section(*id).is_some(),
             Sheet::Paper(id) => m.sheet(*id).is_some(),
             Sheet::View3D | Sheet::Schedule(_) => true,
+            Sheet::Table(id) => matches!(m.elements.get(id), Some(Element::Schedule(_))),
         };
         self.views.retain(exists);
         if !exists(&self.sheet) {
@@ -758,7 +775,14 @@ impl BimApp {
 
     fn keys(&mut self, ctx: &Context) {
         // A dialog takes the keys while it's open.
-        if self.type_dialog.is_some() || self.materials_dialog.is_some() || self.family_dialog.is_some() || self.pending.is_some() {
+        if self.type_dialog.is_some()
+            || self.materials_dialog.is_some()
+            || self.family_dialog.is_some()
+            || self.parameters_dialog.is_some()
+            || self.schedule_dialog.is_some()
+            || self.new_schedule.is_some()
+            || self.pending.is_some()
+        {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -1058,7 +1082,7 @@ impl BimApp {
         match self.sheet {
             Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) | Sheet::Paper(id) => self.canvas.fit(id),
             Sheet::View3D => self.fit3d(),
-            Sheet::Schedule(_) => {}
+            Sheet::Schedule(_) | Sheet::Table(_) => {}
         }
     }
 
@@ -1112,9 +1136,29 @@ impl BimApp {
             Element::Elevation(v) => Some((json!(id), tf("Elevation: {}", &[&v.name]), v.name.as_str())),
             _ => None,
         });
-        let others = std::iter::once((json!("{3D}"), t("3D View: {3D}").to_string(), "{3D}"))
-            .chain(SCHEDULES.iter().map(|(_, name)| (json!(name), tf("Schedule: {}", &[t(name)]), *name)));
+        // The schedules every project has, by their English names, then the project's others.
+        let builtin = SCHEDULES.iter().map(|(cat, name)| match schedule::standard(m, cat) {
+            (Some(id), sc) => (json!(id), tf("Schedule: {}", &[&sc.name]), m.view_name(id).unwrap_or(name)),
+            (None, _) => (json!(name), tf("Schedule: {}", &[t(name)]), *name),
+        });
+        let made = self.schedules().into_iter().map(|(id, name)| (json!(id), tf("Schedule: {}", &[name]), name));
+        let others = std::iter::once((json!("{3D}"), t("3D View: {3D}").to_string(), "{3D}")).chain(builtin).chain(made);
         plans.chain(cuts).chain(others).filter(|(_, _, name)| !placed.contains(name)).map(|(v, label, _)| (v, label)).collect()
+    }
+
+    /// The project's schedules other than those every project has: their ids and names, by name.
+    pub(crate) fn schedules(&self) -> Vec<(Id, &str)> {
+        let m = &self.session.model;
+        let mut out: Vec<(Id, &str)> = m
+            .elements
+            .iter()
+            .filter_map(|(id, e)| match e {
+                Element::Schedule(sc) if schedule::builtin(Some(&sc.name), None).is_none() => Some((*id, sc.name.as_str())),
+                _ => None,
+            })
+            .collect();
+        out.sort_by_key(|(_, name)| name.to_lowercase());
+        out
     }
 
     /// Close a view's tab; the last one stays open.
@@ -1149,7 +1193,7 @@ impl BimApp {
                         (p["azimuth"], p["elevation"]) = (json!(c.azimuth), json!(c.elevation));
                     }
                 }
-                (Sheet::Schedule(_), _) => {}
+                (Sheet::Schedule(_) | Sheet::Table(_), _) => {}
             }
             return self.run("render", p).is_some();
         }
@@ -1515,11 +1559,21 @@ impl BimApp {
             if big_button(ui, Icon::Elevation, "Elevation", self.tool == Tool::Elevation, tip).clicked() {
                 self.set_tool(Tool::Elevation);
             }
-            let r = big_button(ui, Icon::Schedule, "Schedules", false, "Open a schedule");
+            let r = big_button(ui, Icon::Schedule, "Schedules", false, "Make a schedule, or open one");
             Popup::menu(&r).show(|ui| {
+                if ui.button(t("Schedule/Quantities…")).clicked() {
+                    self.new_schedule = Some(properties::NewSchedule::default());
+                }
+                ui.separator();
                 for (cat, name) in SCHEDULES {
-                    if ui.button(name).clicked() {
+                    if ui.button(t(name)).clicked() {
                         self.open_sheet(Sheet::Schedule(cat));
+                    }
+                }
+                let made: Vec<(Id, String)> = self.schedules().into_iter().map(|(id, n)| (id, n.to_string())).collect();
+                for (id, name) in made {
+                    if ui.button(name).clicked() {
+                        self.open_sheet(Sheet::Table(id));
                     }
                 }
             });
@@ -1582,6 +1636,10 @@ impl BimApp {
             let tip = "Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show";
             if big_button(ui, Icon::Materials, "Materials", self.materials_dialog.is_some(), tip).clicked() {
                 self.materials_dialog = Some(properties::MaterialsDialog::new(&self.session.model));
+            }
+            let tip = "Project Parameters: values of your own each element of their categories holds, for schedules and IFC";
+            if big_button(ui, Icon::Parameters, "Project Parameters", self.parameters_dialog.is_some(), tip).clicked() {
+                self.parameters_dialog = Some(properties::ParametersDialog::new(&self.session.model));
             }
             let now = self.session.model.units;
             let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
@@ -2117,7 +2175,14 @@ impl BimApp {
         });
         CollapsingHeader::new(t("Schedules/Quantities (all)")).default_open(true).show(ui, |ui| {
             for (cat, name) in SCHEDULES {
-                open = item(ui, t(name), Sheet::Schedule(cat)).or(open);
+                let name = match schedule::standard(m, cat) {
+                    (Some(_), sc) => sc.name,
+                    (None, _) => t(name).to_string(),
+                };
+                open = item(ui, &name, Sheet::Schedule(cat)).or(open);
+            }
+            for (id, name) in self.schedules() {
+                open = item(ui, name, Sheet::Table(id)).or(open);
             }
         });
         if !sheets.is_empty() {
@@ -2179,34 +2244,63 @@ impl BimApp {
         });
     }
 
-    fn schedule(&mut self, ui: &mut Ui, cat: &'static str) {
+    /// The schedule on screen: the project's, by id, and as it is (one every project has may be
+    /// none of the project's yet).
+    pub(crate) fn shown_schedule(&self) -> Option<(Option<Id>, bimcraft_core::model::Schedule)> {
+        let m = &self.session.model;
+        match self.sheet {
+            Sheet::Schedule(cat) => Some(schedule::standard(m, cat)),
+            Sheet::Table(id) => match m.elements.get(&id) {
+                Some(Element::Schedule(sc)) => Some((Some(id), sc.clone())),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// The schedule on screen as a table: its headings, its rows, its totals under a rule.
+    fn schedule(&mut self, ui: &mut Ui) {
+        let Some((_, sc)) = self.shown_schedule() else { return };
         Frame::new().fill(pal().surface).inner_margin(16.0).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            let name = self.view_name(Sheet::Schedule(cat));
+            let name = self.view_name(self.sheet);
             ui.label(RichText::new(&name).heading());
             ui.add_space(8.0);
-            match schedule::table(&self.session.model, cat) {
+            match schedule::table(&self.session.model, &sc) {
                 Err(e) => {
                     ui.label(e);
                 }
                 Ok(t) if t.rows.is_empty() => {
                     ui.label(RichText::new(tf("No rows yet: the {} is empty.", &[&name.to_lowercase()])).color(pal().muted));
                 }
-                Ok(t) => {
+                Ok(table) => {
+                    let units = self.session.model.units;
+                    let said = |c: &schedule::Column, v: &Value| {
+                        let text = schedule::shown(units, c.kind, v);
+                        if v.is_boolean() { t(&text).to_string() } else { text }
+                    };
                     ScrollArea::both().show(ui, |ui| {
-                        Grid::new(("schedule", cat)).striped(true).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
-                            let units = self.session.model.units;
-                            for c in &t.columns {
-                                ui.label(RichText::new(lang::t(&schedule::heading(units, c))).strong());
+                        Grid::new(("schedule", &sc.name)).striped(true).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
+                            for c in &table.columns {
+                                let heading = schedule::Column { heading: t(&c.heading).to_string(), kind: c.kind };
+                                ui.label(RichText::new(schedule::heading(units, &heading)).strong());
                             }
                             ui.end_row();
-                            for row in &t.rows {
-                                for (v, c) in row.iter().zip(&t.columns) {
-                                    let text = schedule::shown(units, c, v);
+                            for row in &table.rows {
+                                for (v, c) in row.iter().zip(&table.columns) {
                                     if v.is_number() {
-                                        ui.monospace(text)
+                                        ui.monospace(said(c, v))
                                     } else {
-                                        ui.label(text)
+                                        ui.label(said(c, v))
+                                    };
+                                }
+                                ui.end_row();
+                            }
+                            if let Some(totals) = &table.totals {
+                                for (i, (v, c)) in totals.iter().zip(&table.columns).enumerate() {
+                                    match v {
+                                        Value::Null if i == 0 => ui.label(RichText::new(t("Total")).strong()),
+                                        v => ui.monospace(RichText::new(said(c, v)).strong()),
                                     };
                                 }
                                 ui.end_row();
@@ -2222,6 +2316,9 @@ impl BimApp {
         self.type_properties(ctx);
         self.family_type_properties(ctx);
         self.materials_window(ctx);
+        self.parameters_window(ctx);
+        self.new_schedule_window(ctx);
+        self.schedule_window(ctx);
         let Some(pending) = self.pending else { return };
         #[derive(PartialEq)]
         enum Choice {

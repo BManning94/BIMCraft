@@ -12,7 +12,9 @@ use std::fmt::Write;
 
 use crate::family::Category;
 use crate::geom::{self, P2};
-use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Layer, Model, Railing, heading, mix};
+use serde_json::Value;
+
+use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Layer, Model, ParameterKind, Railing, heading, mix};
 use crate::stairs;
 use crate::view3d::P3;
 use crate::walls::{self, Axis};
@@ -37,6 +39,11 @@ const LANDING: u64 = 16;
 const PARTS: u64 = 17;
 const SLAB_MATERIALS: u64 = 18;
 const COMPONENT_MATERIALS: u64 = 19;
+const PROPERTIES: u64 = 20;
+const DEFINES: u64 = 21;
+
+/// The property set an element's values of the project's parameters go in.
+pub const PARAMETERS: &str = "Project Parameters";
 
 /// Part `i` of element `id`, for its GlobalId.
 fn part(id: Id, i: usize) -> u64 {
@@ -389,6 +396,8 @@ pub fn export(m: &Model) -> String {
 
     let mut contained: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
     let mut spaces: BTreeMap<Id, Vec<u64>> = BTreeMap::new();
+    // Each element's own entity, for what it holds of the project's parameters.
+    let mut products: BTreeMap<Id, u64> = BTreeMap::new();
     // Walls as (entity, placement), for the openings in them.
     let mut placed: BTreeMap<Id, (u64, u64)> = BTreeMap::new();
     // Floors, ceilings and roofs as (entity, placement, its height), for the shafts through them.
@@ -439,6 +448,7 @@ pub fn export(m: &Model) -> String {
                     s(&wl.type_name)
                 ));
                 contained.entry(wl.level).or_default().push(ent);
+                products.insert(id, ent);
                 placed.insert(id, (ent, at));
             }
             Element::Floor(f) => {
@@ -461,6 +471,7 @@ pub fn export(m: &Model) -> String {
                     s(&f.type_name)
                 ));
                 contained.entry(f.level).or_default().push(ent);
+                products.insert(id, ent);
                 hosts.insert(id, (ent, at, m.elevation(f.level)));
             }
             Element::Ceiling(c) => {
@@ -476,6 +487,7 @@ pub fn export(m: &Model) -> String {
                     s(&c.type_name)
                 ));
                 contained.entry(c.level).or_default().push(ent);
+                products.insert(id, ent);
                 hosts.insert(id, (ent, at, m.elevation(c.level)));
             }
             Element::Room(r) => {
@@ -497,6 +509,7 @@ pub fn export(m: &Model) -> String {
                     s(&r.name)
                 ));
                 spaces.entry(r.level).or_default().push(ent);
+                products.insert(id, ent);
             }
             Element::Column(col) => {
                 let (Some(&(_, storey)), Some(t)) = (storeys.get(&col.level), m.types.column.get(&col.type_name)) else { continue };
@@ -517,6 +530,7 @@ pub fn export(m: &Model) -> String {
                     s(&col.type_name)
                 ));
                 contained.entry(col.level).or_default().push(ent);
+                products.insert(id, ent);
             }
             // A component: its category's element, named by its family and type as Revit names them,
             // each form a closed face set styled in its material's colour.
@@ -553,6 +567,7 @@ pub fn export(m: &Model) -> String {
                 let name = s(&format!("{}:{}", cp.family, cp.type_name));
                 let ent = w.add(format!("{entity}({},$,{name},$,{name},#{at},#{shape},'{id}',.NOTDEFINED.)", w.guid(ELEMENT, id)));
                 contained.entry(cp.level).or_default().push(ent);
+                products.insert(id, ent);
                 // What it's made of: its material, or the set of them.
                 let relating = match made_of.as_slice() {
                     [] => None,
@@ -574,6 +589,7 @@ pub fn export(m: &Model) -> String {
                 let ent =
                     w.add(format!("IFCSTAIR({},$,'Stair',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&st.landings, "STAIR")));
                 contained.entry(st.level).or_default().push(ent);
+                products.insert(id, ent);
                 // Its flights, each tread a block from the floor up to it, as in 3D; its landings.
                 let mut parts = Vec::new();
                 for (i, run) in l.runs.iter().enumerate() {
@@ -603,6 +619,7 @@ pub fn export(m: &Model) -> String {
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
                 let ent = w.add(format!("IFCRAMP({},$,'Ramp',$,$,#{at},$,'{id}',{})", w.guid(ELEMENT, id), shape_of(&r.landings, "RAMP")));
                 contained.entry(r.level).or_default().push(ent);
+                products.insert(id, ent);
                 // Its flights, each solid from the floor up to its slope, as in 3D; its landings.
                 let mut parts = Vec::new();
                 for (i, run) in l.runs.iter().enumerate() {
@@ -622,6 +639,7 @@ pub fn export(m: &Model) -> String {
                 let Some(&(_, storey)) = storeys.get(&rl.level) else { continue };
                 let ent = w.railing(m, id, rl, storey, m.elevation(rl.level), axis);
                 contained.entry(rl.level).or_default().push(ent);
+                products.insert(id, ent);
             }
             Element::Roof(r) => {
                 let (Some(&(_, storey)), pieces) = (storeys.get(&r.level), m.roof_slabs(r)) else { continue };
@@ -641,6 +659,7 @@ pub fn export(m: &Model) -> String {
                     s(&r.type_name)
                 ));
                 contained.entry(r.level).or_default().push(ent);
+                products.insert(id, ent);
                 hosts.insert(id, (ent, at, m.elevation(r.level)));
             }
             _ => {}
@@ -652,6 +671,7 @@ pub fn export(m: &Model) -> String {
             && let Some((_, at, base, _)) = rl.host.and_then(|h| wholes.get(&h)).cloned()
         {
             let ent = w.railing(m, id, rl, at, base, axis);
+            products.insert(id, ent);
             if let Some((_, _, _, parts)) = rl.host.and_then(|h| wholes.get_mut(&h)) {
                 parts.push(ent);
             }
@@ -725,6 +745,7 @@ pub fn export(m: &Model) -> String {
         };
         w.add(format!("IFCRELFILLSELEMENT({},$,$,$,#{opening},#{ent})", w.guid(FILLS, id)));
         contained.entry(wl.level).or_default().push(ent);
+        products.insert(id, ent);
     }
     // Compound types' layers: a layer set for each type used, each layer's material once, with its
     // colour for viewers to shade it in; for each wall type and line its walls stand on, the set's
@@ -800,6 +821,31 @@ pub fn export(m: &Model) -> String {
         }
         if let Some(items) = spaces.get(level) {
             w.add(format!("IFCRELAGGREGATES({},$,$,$,#{storey},({}))", w.guid(SPACES, *level), refs(items)));
+        }
+    }
+    // Each element's values of the project's parameters: a property set of its own, `Project
+    // Parameters`, lengths in the file's millimetres.
+    for (&id, &ent) in &products {
+        let Some(e) = m.elements.get(&id) else { continue };
+        let Some(params) = e.params() else { continue };
+        let props: Vec<u64> = params
+            .iter()
+            .filter_map(|(name, v)| {
+                // The project's parameters for its category: a component's family's values are its family's.
+                let p = m.parameters.get(name).filter(|p| p.categories.iter().any(|c| c == e.category()))?;
+                let value = match (p.kind, v) {
+                    (ParameterKind::Text, Value::String(t)) => format!("IFCTEXT({})", s(t)),
+                    (ParameterKind::Number, v) => format!("IFCREAL({})", real(v.as_f64()?)),
+                    (ParameterKind::Length, v) => format!("IFCLENGTHMEASURE({})", real(v.as_f64()?)),
+                    (ParameterKind::YesNo, Value::Bool(b)) => format!("IFCBOOLEAN({})", if *b { ".T." } else { ".F." }),
+                    _ => return None,
+                };
+                Some(w.add(format!("IFCPROPERTYSINGLEVALUE({},$,{value},$)", s(name))))
+            })
+            .collect();
+        if !props.is_empty() {
+            let set = w.add(format!("IFCPROPERTYSET({},$,'{PARAMETERS}',$,({}))", w.guid(PROPERTIES, id), refs(&props)));
+            w.add(format!("IFCRELDEFINESBYPROPERTIES({},$,$,$,(#{ent}),#{set})", w.guid(DEFINES, id)));
         }
     }
 

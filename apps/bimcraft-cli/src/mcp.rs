@@ -63,8 +63,8 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "query_elements", "description": "Elements with ids, fields and derived values (wall length and height, room area_m2 and enclosed, door position `at`). Filter by category and level; page with limit and offset.",
          "inputSchema": {"type": "object", "properties": {"category": {"type": "string"}, "level": {"type": ["string", "integer"]}, "limit": {"type": "integer"}, "offset": {"type": "integer"}}}},
-        {"name": "schedule", "description": "A schedule as columns and rows: rooms (number, name, level, area, perimeter), doors, windows, walls, floors or levels.",
-         "inputSchema": {"type": "object", "properties": {"category": {"type": "string"}}, "required": ["category"]}},
+        {"name": "schedule", "description": "A schedule's columns, rows and totals, and the fields it could show (`available`). `category` alone reads that category's own: rooms (number, name, level, area, perimeter), doors, windows, walls, floors, levels; ceilings, roofs, columns, components, stairs, ramps and railings too. `name` and `category` make a new one. `fields` (names, or {name, formula, kind, heading, total}: a calculated one such as Area * 120, lengths in mm and areas in m²), `filters` ([{field, op: equals, greater, contains, has-value…, value}]), `sort` ([field or {field, descending}]) and `grouped` change it, each list replacing the last.",
+         "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "category": {"type": "string"}, "fields": {"type": "array"}, "filters": {"type": "array"}, "sort": {"type": "array"}, "grouped": {"type": "boolean"}}}},
         {"name": "render", "description": "Look at the model as a PNG: a level's floor plan (walls and columns with poché, doors with swings, windows, stairs, ramps and railings, roofs, room tags with areas, grids, dimensions, door and window tags), or with ceiling true its reflected ceiling plan, a section or elevation by name (the cut in poché, what's beyond, levels and grids), a sheet by number (its title block and the views on it), or with view \"{3D}\" the 3D view, seen from azimuth degrees round from east (counter-clockwise) and elevation degrees up; by default from the south-east, 30° up.",
          "inputSchema": {"type": "object", "properties": {"view": {"type": ["string", "integer"]}, "ceiling": {"type": "boolean"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}}}},
         {"name": "new_model", "description": "Start an empty project with Level 1 and Level 2.",
@@ -191,7 +191,7 @@ impl Server {
             }
             "inspect_model" => s.execute("inspect", &json!({})),
             "query_elements" => s.execute("elements", &args),
-            "schedule" => s.execute("schedule", &json!({ "category": args["category"] })),
+            "schedule" => s.execute("schedule", &args),
             "new_model" => s.execute("new", &args),
             "open" => s.execute("open", &args),
             "save" => s.execute("save", &args),
@@ -277,6 +277,9 @@ mod tests {
         assert_eq!(doors["elements"][0]["at"], json!([3000.0, 0.0]));
         let rooms = tool(&mut s, "schedule", json!({"category": "rooms"}));
         assert_eq!(rooms["rows"][0][3], 24.0);
+        let big = json!({"name": "Big Rooms", "category": "rooms", "fields": ["Name", {"name": "Cost", "formula": "Area * 100", "total": true}], "filters": [{"field": "Area", "op": "greater", "value": 20}]});
+        let big = tool(&mut s, "schedule", big);
+        assert_eq!((big["rows"].clone(), big["totals"].clone()), (json!([["Cabin", 2400.0]]), json!([null, 2400.0])));
         let img = tool(&mut s, "render", json!({"width": 400, "height": 300}));
         assert_eq!((img["type"].as_str(), img["mimeType"].as_str()), (Some("image"), Some("image/png")));
         let r = call(&mut s, 10, "tools/call", json!({"name": "render", "arguments": {"view": "{3D}", "azimuth": 135, "elevation": 20}}));
