@@ -68,9 +68,15 @@ use Kind::*;
 /// `view_range.cut`), its label, its editor.
 type Row = (&'static str, &'static str, &'static str, Kind);
 
-/// Field `key` of element `e`'s JSON, through the dots.
-fn field_of<'a>(e: &'a Value, key: &str) -> &'a Value {
-    key.split('.').fold(e, |v, k| &v[k])
+/// Field `key` of element `e`'s JSON, through the dots, shown as `kind`. The JSON leaves a number
+/// out at 0 (a floor's offset), so a length or a number it hasn't got is 0; a `null` it has is
+/// none (a section's far clip, which sees all there is).
+fn field_of(e: &Value, key: &str, kind: Kind) -> Value {
+    match key.split('.').try_fold(e, |v, k| v.get(k)) {
+        Some(v) => v.clone(),
+        None if matches!(kind, Length | Number) => json!(0.0),
+        None => Value::Null,
+    }
 }
 
 /// `{key: val}` for `modify`, nested through the dots: modify merges into fields that are objects.
@@ -698,11 +704,12 @@ impl BimApp {
         let first = element_json(model, id);
         let v: serde_json::Map<String, Value> = rows
             .iter()
-            .map(|r| r.1)
-            .chain(["top_level", "enclosed"])
-            .map(|k| {
-                let shared = all.iter().all(|e| field_of(e, k) == field_of(&first, k));
-                (k.to_string(), if shared { field_of(&first, k).clone() } else { Value::Null })
+            .map(|r| (r.1, r.3))
+            .chain([("top_level", Shown), ("enclosed", Shown)])
+            .map(|(k, kind)| {
+                let one = field_of(&first, k, kind);
+                let shared = all.iter().all(|e| field_of(e, k, kind) == one);
+                (k.to_string(), if shared { one } else { Value::Null })
             })
             .collect();
         let v = Value::Object(v);
@@ -728,7 +735,10 @@ impl BimApp {
                 continue;
             }
             Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
-                Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(124.0).show(ui, |ui| {
+                // Half the palette each, as Revit's columns: a long label wraps rather than pushing
+                // its field past the palette's edge.
+                let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
+                Grid::new(("properties", id, group)).num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
                     for &(_, key, label, kind) in rows.iter().filter(|r| r.0 == group) {
                         let val = &v[key];
                         // A length one element hasn't got (a straight wall's radius): no row.

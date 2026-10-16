@@ -610,6 +610,43 @@ fn properties_edit_every_selected_element_in_one_step() {
 }
 
 #[test]
+fn properties_show_0_where_the_json_leaves_a_number_out_and_blank_where_it_is_none() {
+    let mut h = app(&format!("{BOX}\nfloor {{}}\nfloor {{\"offset\": 300}}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    let value = |h: &Harness<BimApp>, label: &str| h.get_by_role_and_label(Role::TextInput, label).value().unwrap_or_default();
+    let floors = ids(&h, "floor");
+    // A floor on its level, flat: its JSON leaves its offset and its slope out.
+    h.state_mut().selection = floors[..1].to_vec();
+    h.run();
+    assert_eq!((value(&h, "Height Offset From Level"), value(&h, "Slope (°)")), ("0".into(), "0".into()));
+    // Both floors: the slopes they share show, their offsets differ.
+    h.state_mut().selection = floors;
+    h.run();
+    assert_eq!((value(&h, "Height Offset From Level"), value(&h, "Slope (°)")), (String::new(), "0".into()));
+    // None is not 0: a section with no far clip sees all there is, a plan's top is the level above.
+    h.state_mut().selection = ids(&h, "section");
+    h.run();
+    assert_eq!(value(&h, "Far Clip Offset"), "");
+    h.state_mut().selection.clear();
+    h.run();
+    assert_eq!(value(&h, "Top"), "");
+}
+
+#[test]
+fn the_palette_keeps_its_fields_and_apply_inside_it_whatever_their_labels() {
+    use egui_kittest::kittest::{By, NodeT};
+    let mut h = app(&format!("{BOX}\nfloor {{}}"));
+    h.state_mut().selection = ids(&h, "floor");
+    h.run();
+    let panel = egui::PanelState::load(&h.ctx, egui::Id::new("side")).map(|s| s.outer_rect).unwrap();
+    assert_eq!(panel.width(), 290.0, "the palette at its default width");
+    // Height Offset From Level is a long label.
+    let fields = h.query_all(By::new().predicate(|n| matches!(n.role(), Role::TextInput | Role::ComboBox)));
+    for n in fields.filter(|n| n.rect().intersects(panel)).chain([h.get_by_label("Apply")]) {
+        assert!(panel.contains_rect(n.rect()), "{:?} at {:?} runs out of the palette, {panel:?}", n.accesskit_node().label(), n.rect());
+    }
+}
+
+#[test]
 fn rotate_turns_the_selection_about_its_middle() {
     let mut h = app(r#"wall {"points": [[0, 0], [4000, 0]]}"#);
     click(&mut h, P2(3000.0, 0.0));
