@@ -24,8 +24,10 @@
     <MajorUpgrade AllowSameVersionUpgrades="yes" IgnoreLanguage="yes" DowngradeErrorMessage="A newer version of BIMCraft is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-    <Icon Id="BIMCraftIcon" SourceFile="assets\app-icon\bimcraft.ico" />
-    <Property Id="ARPPRODUCTICON" Value="BIMCraftIcon" />
+    <!-- Windows Installer writes the icon to a file named after its Id, and the shell only reads an icon
+         from a file named .ico or .exe: without the extension, the shortcuts showed no icon. -->
+    <Icon Id="BIMCraftIcon.ico" SourceFile="assets\app-icon\bimcraft.ico" />
+    <Property Id="ARPPRODUCTICON" Value="BIMCraftIcon.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/IPedrax/BIMCraft" />
     <Property Id="ARPURLUPDATEINFO" Value="https://github.com/IPedrax/BIMCraft/releases" />
     <Property Id="ARPHELPLINK" Value="https://github.com/IPedrax/BIMCraft/issues" />
@@ -51,9 +53,9 @@
     <Feature Id="Main" Title="BIMCraft" Level="1">
       <Component Id="App" Directory="INSTALLFOLDER">
         <File Id="BimcraftExe" Source="$(var.BinDir)\bimcraft.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="BIMCraft" Description="Building information modeling" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" Advertise="yes" />
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="BIMCraft" Description="Building information modeling" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon.ico" Advertise="yes" />
         </File>
-        <ProgId Id="BIMCraft.Project" Description="BIMCraft project" Icon="BIMCraftIcon" Advertise="yes">
+        <ProgId Id="BIMCraft.Project" Description="BIMCraft project" Icon="BIMCraftIcon.ico" Advertise="yes">
           <Extension Id="bimcraft" ContentType="application/x-bimcraft">
             <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
           </Extension>
@@ -77,7 +79,7 @@
       <!-- A shortcut that isn't advertised needs a registry key path, and in a profile folder (the
            desktop, which per-machine is the Public one) that key must be under HKCU (ICE38, ICE43, ICE57). -->
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">
-        <Shortcut Id="DesktopShortcut" Name="BIMCraft" Description="Building information modeling" Target="[INSTALLFOLDER]bimcraft.exe" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" />
+        <Shortcut Id="DesktopShortcut" Name="BIMCraft" Description="Building information modeling" Target="[INSTALLFOLDER]bimcraft.exe" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon.ico" />
         <RegistryValue Root="HKCU" Key="Software\BIMCraft" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
       </Component>
     </Feature>
