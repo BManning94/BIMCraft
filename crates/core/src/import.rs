@@ -266,6 +266,11 @@ fn span(xs: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
     xs.fold(None, |s: Option<(f64, f64)>, x| Some(s.map_or((x, x), |(lo, hi)| (lo.min(x), hi.max(x)))))
 }
 
+/// Whether two rings have the same corners, to the millimetre.
+fn same(a: &[P2], b: &[P2]) -> bool {
+    a.len() == b.len() && a.iter().all(|p| b.iter().any(|q| q.dist(*p) < 1.0))
+}
+
 struct Reader<'a> {
     f: &'a File,
     /// The file's length unit, in mm; its plane angle unit, in radians.
@@ -1070,6 +1075,26 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(w.ifc);
     }
 
+    // The openings through floors, ceilings and roofs: what each voids, its outline in plan at its
+    // top, and how high it reaches. Each comes in as a shaft, which takes the hole it cuts in what
+    // it voids: a mesh carries the holes cut in it.
+    let cuts: Vec<(u64, u64, Vec<P2>, f64, f64)> = named(&["IFCOPENINGELEMENT", "IFCOPENINGSTANDARDCASE"])
+        .into_iter()
+        .filter_map(|id| {
+            let h = *l.host.get(&id)?;
+            let host = e(h)?.name.as_str();
+            let o = e(id).filter(|_| SLABS.contains(&host) || matches!(host, "IFCCOVERING" | "IFCROOF"))?;
+            let faces = r.body(o);
+            let (z0, z1) = span(faces.iter().flatten().map(|p| p[2]))?;
+            let ring = outline(&faces, Plane::flat(z1), true)?.outer;
+            Some((id, h, ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect(), z0, z1))
+        })
+        .collect();
+    // The holes the openings through `id`, or through one of its parts, cut.
+    let voided = |id: u64| -> Vec<Vec<P2>> {
+        cuts.iter().filter(|(_, h, ..)| *h == id || l.whole.get(h) == Some(&id)).map(|(_, _, ring, ..)| ring.clone()).collect()
+    };
+
     // Floors: their top outline and the holes in it, and how thick they are below it.
     let in_whole = |id: u64, names: &[&str]| l.whole.get(&id).and_then(|w| e(*w)).is_some_and(|w| names.contains(&w.name.as_str()));
     let mut roofs: Vec<u64> = named(&["IFCROOF"]).into_iter().filter(|id| !l.whole.contains_key(id)).collect();
@@ -1113,24 +1138,13 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let type_name = kind(&mut m.types.floor, &base, |k| (k.thickness - t).abs() < 0.05, FloorType { thickness: t });
         let z = top.at(tail);
         let level = level_near(z).unwrap_or_else(|| level_for(id, z));
-        // A hole where an opening voids the slab is the opening's, which comes in as a shaft (a mesh
-        // carries the holes cut in it). Each of the rest from its south-west corner, in order: as the
-        // same file reads the same.
-        let voided: Vec<Vec<P2>> = l
-            .host
-            .iter()
-            .filter(|(_, h)| **h == id)
-            .filter_map(|(o, _)| {
-                let faces = r.body(e(*o)?);
-                let (_, z1) = span(faces.iter().flatten().map(|p| p[2]))?;
-                Some(outline(&faces, Plane::flat(z1), true)?.outer)
-            })
-            .collect();
-        let same = |a: &[P2], b: &[P2]| a.len() == b.len() && a.iter().all(|p| b.iter().any(|q| q.dist(*p) < 1.0));
+        // Its holes, less those the openings through it cut, each from its south-west corner, in
+        // order: as the same file reads the same.
+        let cut = voided(id);
         let mut openings: Vec<Vec<P2>> = holes
             .into_iter()
-            .filter(|h| !voided.iter().any(|v| same(h, v)))
             .map(|h| tidy(&h.into_iter().map(flat).collect::<Vec<P2>>()))
+            .filter(|h| !cut.iter().any(|c| same(h, c)))
             .collect();
         openings
             .sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
@@ -1182,7 +1196,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             }
         }
         seen.insert(id);
-        match roof_from(&r, &faces) {
+        match roof_from(&r, &faces, &voided(id)) {
             Ok(rd) => {
                 let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(rd.t)));
                 let type_name = kind(&mut m.types.roof, &base, |k| (k.thickness - rd.t).abs() < 0.05, RoofType { thickness: rd.t });
@@ -1241,19 +1255,8 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     // Shafts: the openings through floors, ceilings and roofs; openings alike (a shaft voids each
     // it passes through), one shaft.
     let mut shafts: Vec<(u64, Vec<P2>, f64, f64)> = Vec::new();
-    for id in named(&["IFCOPENINGELEMENT", "IFCOPENINGSTANDARDCASE"]) {
-        let host = l.host.get(&id).and_then(|h| e(*h)).map_or("", |h| h.name.as_str());
-        let Some(o) = e(id).filter(|_| SLABS.contains(&host) || matches!(host, "IFCCOVERING" | "IFCROOF")) else { continue };
-        let faces = r.body(o);
-        let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else { continue };
-        let Some(geom::Region { outer: ring, .. }) = outline(&faces, Plane::flat(z1), true) else { continue };
-        let ring: Vec<P2> = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
-        let alike = |(_, b, lo, hi): &(u64, Vec<P2>, f64, f64)| {
-            (lo - z0).abs() < 1.0
-                && (hi - z1).abs() < 1.0
-                && b.len() == ring.len()
-                && b.iter().all(|p| ring.iter().any(|q| q.dist(*p) < 1.0))
-        };
+    for (id, _, ring, z0, z1) in cuts {
+        let alike = |(_, b, lo, hi): &(u64, Vec<P2>, f64, f64)| (lo - z0).abs() < 1.0 && (hi - z1).abs() < 1.0 && same(b, &ring);
         if !shafts.iter().any(alike) {
             shafts.push((id, ring, z0, z1));
         }
@@ -1649,7 +1652,7 @@ struct RoofRead {
     z: f64,
 }
 
-fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
+fn roof_from(r: &Reader, faces: &[Vec<P3>], cut: &[Vec<P2>]) -> Result<RoofRead, String> {
     let round = |x: f64| (x * 100.0).round() / 100.0;
     let faces: Vec<Vec<P3>> = faces
         .iter()
@@ -1686,7 +1689,8 @@ fn roof_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RoofRead, String> {
         boundary.reverse();
         boundary.rotate_right(1);
     }
-    let mut openings: Vec<Vec<P2>> = rings.collect();
+    // Its holes, less those the openings through it `cut`, courtyards or not.
+    let mut openings: Vec<Vec<P2>> = rings.filter(|h| !cut.iter().any(|c| same(h, c))).collect();
     openings.sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
     let sloped: Vec<&(&Vec<P3>, Plane)> = up.iter().filter(|(_, p)| p.g.length() > 0.02).collect();
     let Some(&&(main, along)) = sloped.iter().max_by(|a, b| area3(a.0).total_cmp(&area3(b.0))) else {
@@ -1997,10 +2001,10 @@ ENDSEC;END-ISO-10303-21;"
         assert_eq!((c.at, c.angle, t.width, t.depth, t.round, c.height), (P2(3000.0, 4000.0), 90.0, 500.0, 300.0, false, 3000.0));
     }
 
-    #[test]
-    fn holes_in_a_slab_come_in_as_its_openings_or_as_the_shafts_through_it() {
-        // A 6 x 4 m slab 200 mm thick, its profile round two holes, an opening element voiding it
-        // through the east one, as a mesh would carry it.
+    /// An IFC4 file in mm with a 6 x 4 m slab 200 mm thick, its profile round two holes, an
+    /// opening element voiding it through the east one, as a mesh would carry it: `slab` makes the
+    /// slab #35, and what it's part of; the storey holds `within`.
+    fn holed(slab: &str, within: u32) -> String {
         let rect = |id: u32, (x0, y0): (f64, f64), (x1, y1): (f64, f64)| {
             let pts: Vec<String> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                 .iter()
@@ -2009,7 +2013,7 @@ ENDSEC;END-ISO-10303-21;"
                 .collect();
             format!("{}\n#{id}=IFCPOLYLINE((#{},#{},#{},#{},#{}));", pts.join("\n"), id + 1, id + 2, id + 3, id + 4, id + 1)
         };
-        let file = format!(
+        format!(
             "ISO-10303-21;HEADER;FILE_SCHEMA(('IFC4'));ENDSEC;DATA;
 #1=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
 #2=IFCUNITASSIGNMENT((#1));
@@ -2026,7 +2030,7 @@ ENDSEC;END-ISO-10303-21;"
 #32=IFCEXTRUDEDAREASOLID(#30,$,#31,200.);
 #33=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#32));
 #34=IFCPRODUCTDEFINITIONSHAPE($,$,(#33));
-#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.FLOOR.);
+{slab}
 #40=IFCCARTESIANPOINT((4500.,1500.));
 #41=IFCAXIS2PLACEMENT2D(#40,$);
 #42=IFCRECTANGLEPROFILEDEF(.AREA.,$,#41,1000.,1000.);
@@ -2035,13 +2039,17 @@ ENDSEC;END-ISO-10303-21;"
 #45=IFCPRODUCTDEFINITIONSHAPE($,$,(#44));
 #46=IFCOPENINGELEMENT('o',$,'Hole',$,$,#6,#45,$,.OPENING.);
 #47=IFCRELVOIDSELEMENT('v',$,$,$,#35,#46);
-#50=IFCRELCONTAINEDINSPATIALSTRUCTURE('r',$,$,$,(#35),#7);
+#50=IFCRELCONTAINEDINSPATIALSTRUCTURE('r',$,$,$,(#{within}),#7);
 ENDSEC;END-ISO-10303-21;",
             rect(10, (0.0, 0.0), (6000.0, 4000.0)),
             rect(20, (1000.0, 1000.0), (2500.0, 2000.0)),
             rect(25, (4000.0, 1000.0), (5000.0, 2000.0)),
-        );
-        let i = ifc(file.as_bytes(), "x").unwrap();
+        )
+    }
+
+    #[test]
+    fn holes_in_a_slab_come_in_as_its_openings_or_as_the_shafts_through_it() {
+        let i = ifc(holed("#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.FLOOR.);", 35).as_bytes(), "x").unwrap();
         assert_eq!(i.skipped, Vec::<String>::new());
         let Some(Element::Floor(f)) = only(&i.model, "floor").first().copied() else { panic!("no floor") };
         assert_eq!(f.openings, [[P2(1000.0, 1000.0), P2(1000.0, 2000.0), P2(2500.0, 2000.0), P2(2500.0, 1000.0)]]);
@@ -2049,6 +2057,21 @@ ENDSEC;END-ISO-10303-21;",
         assert_eq!(geom::area(&sh.boundary).abs(), 1_000_000.0);
         let floor = i.model.elements.iter().find(|(_, e)| e.category() == "floor").map(|(id, _)| *id);
         assert_eq!(crate::element_json(&i.model, floor.unwrap_or_default())["area_m2"], 21.5, "6 x 4 less 1.5 and 1");
+    }
+
+    #[test]
+    fn holes_in_a_roof_come_in_as_its_openings_or_as_the_shafts_through_it() {
+        // The slab as a roof, then as the part of one: the opening voids it either way.
+        let part = "#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.ROOF.);
+#36=IFCROOF('r',$,'Roof',$,$,#6,$,$,.FLAT_ROOF.);
+#37=IFCRELAGGREGATES('a',$,$,$,#36,(#35));";
+        for (slab, within) in [("#35=IFCROOF('f',$,'Roof',$,$,#6,#34,$,.FLAT_ROOF.);", 35), (part, 36)] {
+            let i = ifc(holed(slab, within).as_bytes(), "x").unwrap();
+            assert_eq!(i.skipped, Vec::<String>::new());
+            let Some(Element::Roof(roof)) = only(&i.model, "roof").first().copied() else { panic!("no roof") };
+            assert_eq!(roof.openings, [[P2(1000.0, 1000.0), P2(1000.0, 2000.0), P2(2500.0, 2000.0), P2(2500.0, 1000.0)]]);
+            assert_eq!(only(&i.model, "shaft").len(), 1);
+        }
     }
 
     #[test]
