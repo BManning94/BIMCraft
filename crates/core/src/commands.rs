@@ -153,13 +153,14 @@ pub static ALL: &[Command] = &[
         "{level?, boundary?: [[x,y],…], courtyards?: [[[x,y],…],…], slope?, overhang?, gables?: [edge, …], gable?, offset?, \
          extrusion?, openings?: [[[x,y],…],…], join?, type?} a roof on `level` (by default the one above the lowest), its \
          base `offset` mm above it. Over `boundary` or else the walls of the level below, `overhang` mm (500) past their \
-         faces, round any `courtyards` (holes in it, inside it and apart, with eaves of their own): flat at `slope` 0, else \
-         every edge sloping up at `slope` degrees (30), hips, valleys and ridges where the slopes meet, but the edges in \
-         `gables` (edge i runs from point i to the next, the courtyards' edges numbered on after the boundary's) left \
-         upright, gable ends; `gable` leaves a rectangle's short ends upright. Or with `extrusion` {line: [[x,y],[x,y]], \
-         profile: [[along, up],…], from?, to}: its underside's profile in the upright plane through `line`, along it from \
-         its start and up from the base, swept square to it from `from` (0) to `to` mm to its left. `openings` are holes \
-         through it in plan; with `join`, a roof it runs into, it ends where it meets that one's top",
+         faces, round any `courtyards` (holes in it, inside it and apart, with eaves of their own; over the walls, by \
+         default each loop of them standing free inside, joined to none of the outer ones and with no room in it): flat \
+         at `slope` 0, else every edge sloping up at `slope` degrees (30), hips, valleys and ridges where the slopes meet, \
+         but the edges in `gables` (edge i runs from point i to the next, the courtyards' edges numbered on after the \
+         boundary's) left upright, gable ends; `gable` leaves a rectangle's short ends upright. Or with `extrusion` {line: \
+         [[x,y],[x,y]], profile: [[along, up],…], from?, to}: its underside's profile in the upright plane through `line`, \
+         along it from its start and up from the base, swept square to it from `from` (0) to `to` mm to its left. \
+         `openings` are holes through it in plan; with `join`, a roof it runs into, it ends where it meets that one's top",
         roof,
     ),
     edit(
@@ -576,11 +577,15 @@ fn wall_at(m: &Model, level: Id, at: P2) -> Option<(Id, f64)> {
 /// The outline `floor` gives a floor on `level` by default: the outer outline of the walls that
 /// bound its rooms (of the largest piece), along their centre lines, counter-clockwise.
 pub fn floor_outline(m: &Model, level: Id) -> Option<Vec<P2>> {
-    let outer = geom::faces(&m.bounding_lines(level), TOL).into_iter().filter(|f| geom::area(f) < -TOL * TOL);
-    outer.min_by(|a, b| geom::area(a).total_cmp(&geom::area(b))).map(|mut f| {
-        f.reverse();
-        f
-    })
+    pieces(m, level).first().map(|f| f.iter().rev().copied().collect())
+}
+
+/// The outlines of the pieces the walls that bound `level`'s rooms make, along their centre lines,
+/// clockwise, the largest first.
+fn pieces(m: &Model, level: Id) -> Vec<Vec<P2>> {
+    let mut all: Vec<Vec<P2>> = geom::faces(&m.bounding_lines(level), TOL).into_iter().filter(|f| geom::area(f) < -TOL * TOL).collect();
+    all.sort_by(|a, b| geom::area(a).total_cmp(&geom::area(b)));
+    all
 }
 
 /// One past the largest number among `taken` ("1" when there is none).
@@ -1539,16 +1544,16 @@ fn roof(s: &mut Session, p: &Value) -> R {
     let extrusion: Option<Extrusion> = shaped(c, p, "extrusion", "{line: [[x,y],[x,y]], profile: [[along, up],…], from?, to}")?;
     let given = !absent(p.get("boundary"));
     let overhang = num(c, p, "overhang")?.unwrap_or(if given || extrusion.is_some() { 0.0 } else { 500.0 });
-    let boundary = match (given, &extrusion) {
-        (true, _) => points(c, p, "boundary")?,
-        (false, Some(_)) => Vec::new(),
+    let (boundary, found) = match (given, &extrusion) {
+        (true, _) => (points(c, p, "boundary")?, Vec::new()),
+        (false, Some(_)) => (Vec::new(), Vec::new()),
         (false, None) => roof_footprint(m, level, overhang).map_err(|e| bad(c, e))?,
     };
     let r = Roof {
         type_name,
         level,
         boundary,
-        courtyards: shaped(c, p, "courtyards", "a list of outlines [[[x,y],…],…]")?.unwrap_or_default(),
+        courtyards: shaped(c, p, "courtyards", "a list of outlines [[[x,y],…],…]")?.unwrap_or(found),
         slope: if extrusion.is_some() { 0.0 } else { num(c, p, "slope")?.unwrap_or(30.0) },
         overhang,
         gable: flag(c, p, "gable")?,
@@ -1666,12 +1671,18 @@ fn shaped<T: serde::de::DeserializeOwned>(c: &str, p: &Value, key: &str, shape: 
     }
 }
 
-/// The footprint `roof` gives a roof on `level` by default: the outline of the walls of the level
-/// below, `overhang` mm past their outer faces, counter-clockwise from its south-west corner.
-pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<Vec<P2>, String> {
+/// The footprint `roof` gives a roof on `level` by default, over the walls of the level below: their
+/// outline, `overhang` mm past their outer faces, counter-clockwise; and its courtyards, the loops
+/// of those walls standing free inside it, joined to none of the outer walls and with no room in
+/// them, `overhang` mm past their faces into each, clockwise; each ring from its south-west corner.
+/// A loop joined to the outer walls, or with a room in it, is rooms, and the roof runs over it, as
+/// it does over a courtyard too small to stay open past the overhang.
+pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<(Vec<P2>, Vec<Vec<P2>>), String> {
     let below = m.levels().into_iter().rev().find(|(_, l)| l.elevation < m.elevation(level) - TOL).map(|(id, _)| id);
     let below = below.ok_or_else(|| format!("{} has no level below to roof over; give `boundary`", level_name(m, level)))?;
-    let ring = floor_outline(m, below).ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
+    let pieces = pieces(m, below);
+    let (outer, inner) =
+        pieces.split_first().ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
     // ponytail: the thickest wall on the level sets where the faces are; per edge if outlines mix wall types.
     let face = m
         .elements
@@ -1681,12 +1692,45 @@ pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<Vec<P2>, St
             _ => None,
         })
         .fold(0.0, f64::max);
-    let mut ring: Vec<P2> = geom::corners(&geom::grow(&ring, face + overhang)).into_iter().map(micron).collect();
-    let south_west =
-        ring.iter().enumerate().min_by(|(_, a), (_, b)| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
-    let first = south_west.map_or(0, |(i, _)| i);
-    ring.rotate_left(first);
-    Ok(ring)
+    // How far the eaves are from the walls' centre lines: out from a ring running counter-clockwise,
+    // in from one running clockwise. A ring by its corners, to the micron, from its south-west corner.
+    let d = face + overhang;
+    let tidy = |ring: &[P2]| {
+        let mut ring: Vec<P2> = geom::corners(ring).into_iter().map(micron).collect();
+        let south_west =
+            ring.iter().enumerate().min_by(|(_, a), (_, b)| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
+        let first = south_west.map_or(0, |(i, _)| i);
+        ring.rotate_left(first);
+        ring
+    };
+    // The loops standing free inside the outline: the other pieces, inside it. Whether loop `a`
+    // stands inside another; the innermost loop round a point, and so the loops rooms are in.
+    let loops: Vec<&Vec<P2>> = inner.iter().filter(|f| f.iter().all(|q| geom::contains(outer, *q))).collect();
+    let nested = |a: usize| (0..loops.len()).any(|b| b != a && loops[a].iter().all(|q| geom::contains(loops[b], *q)));
+    let around = |p: P2| {
+        (0..loops.len()).filter(|&a| geom::contains(loops[a], p)).max_by(|&a, &b| geom::area(loops[a]).total_cmp(&geom::area(loops[b])))
+    };
+    let indoors: Vec<usize> = m
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Room(r) if r.level == below => around(r.point),
+            _ => None,
+        })
+        .collect();
+    // Courtyards: the outermost loops, outdoors, that stay open past the overhang: moved in, a loop
+    // too small for it turns inside out, its edges running back.
+    // ponytail: one pinched shut only in the middle keeps its edges' ways and crosses itself; check
+    // for crossings too if courtyards like that turn up.
+    let courtyards = (0..loops.len())
+        .filter(|&a| !nested(a) && !indoors.contains(&a))
+        .filter_map(|a| {
+            let c = geom::grow(loops[a], d);
+            let open = geom::ring_edges(loops[a]).zip(geom::ring_edges(&c)).all(|((p, q), (r, s))| (q - p).dot(s - r) > 0.0);
+            open.then(|| tidy(&c))
+        })
+        .collect();
+    Ok((tidy(&geom::grow(&outer.iter().rev().copied().collect::<Vec<P2>>(), d)), courtyards))
 }
 
 fn section(s: &mut Session, p: &Value) -> R {

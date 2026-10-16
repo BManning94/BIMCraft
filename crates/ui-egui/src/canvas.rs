@@ -1652,7 +1652,7 @@ impl BimApp {
             Tool::Roof => {
                 let on = m.level_above(level).unwrap_or(level);
                 if let (Some(slope), Some(overhang)) = (number(&self.roof_slope), m.units.parse(&self.roof_overhang))
-                    && let Ok(boundary) = roof_footprint(m, on, overhang)
+                    && let Ok((boundary, courtyards)) = roof_footprint(m, on, overhang)
                 {
                     let type_name =
                         self.types.get("roof").cloned().or_else(|| m.default_type("roof").map(String::from)).unwrap_or_default();
@@ -1660,6 +1660,7 @@ impl BimApp {
                         type_name,
                         level: on,
                         boundary,
+                        courtyards,
                         slope,
                         overhang,
                         gable: self.roof_gable,

@@ -1888,3 +1888,36 @@ fn roofs_slope_round_a_courtyard_up_to_a_ring_of_ridges() {
     assert_eq!((top(&s, 8000.0, 8000.0), element(&mut s, roof)["area_m2"].as_f64()), (None, Some(240.0)));
     assert!(top(&s, 8000.0, 5000.0).is_some());
 }
+
+#[test]
+fn roofs_over_the_walls_leave_a_loop_of_walls_standing_free_open_as_a_courtyard() {
+    let mut s = Session::new();
+    // A 16 m square house round a 4 m courtyard, its walls 200 mm thick: no wall joins the loop round
+    // the courtyard to the outer walls.
+    run(&mut s, "wall", json!({"points": [[0, 0], [16000, 0], [16000, 16000], [0, 16000]], "closed": true}));
+    run(&mut s, "wall", json!({"points": [[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]], "closed": true}));
+    let roof = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
+    let e = element(&mut s, roof);
+    // 500 mm past the walls' faces: out round the house, and in round the courtyard, clockwise from
+    // its south-west corner.
+    assert_eq!(e["boundary"][0], json!([-600.0, -600.0]));
+    assert_eq!(e["courtyards"], json!([[[6600.0, 6600.0], [6600.0, 9400.0], [9400.0, 9400.0], [9400.0, 6600.0]]]));
+    // Each wing 7.2 m from eaves to eaves, its ridge 3.6 m in from both, where the slopes have risen
+    // from 500 mm below the base: 3000 + 3100 tan 30°. Its area: 17.2² less 2.8².
+    assert_eq!((e["ridge"].as_f64(), e["area_m2"].as_f64()), (Some(4789.79), Some(288.0)), "{e}");
+    let top = |s: &Session, id: u64, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&id).copied();
+    assert_eq!(top(&s, roof, 8000.0, 8000.0), None, "the courtyard is open");
+    // Courtyards given are the roof's own; one too small to stay open past the overhang is roofed over.
+    let given = run(&mut s, "roof", json!({"courtyards": []}))["id"].as_u64().unwrap();
+    assert!(top(&s, given, 8000.0, 8000.0).is_some());
+    let wide = run(&mut s, "roof", json!({"overhang": 2100}))["id"].as_u64().unwrap();
+    assert_eq!((element(&mut s, wide)["courtyards"].clone(), top(&s, wide, 8000.0, 8000.0).is_some()), (Value::Null, true));
+    // A loop with a room in it is indoors, and so is one joined to the outer walls: rooms, roofed over.
+    let room = run(&mut s, "room", json!({"point": [8000, 8000], "name": "Hall"}))["id"].as_u64().unwrap();
+    let hall = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
+    assert_eq!((element(&mut s, hall)["courtyards"].clone(), top(&s, hall, 8000.0, 8000.0).is_some()), (Value::Null, true));
+    run(&mut s, "delete", json!({"ids": [room]}));
+    run(&mut s, "wall", json!({"points": [[8000, 0], [8000, 6000]]}));
+    let joined = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
+    assert_eq!((element(&mut s, joined)["courtyards"].clone(), top(&s, joined, 8000.0, 8000.0).is_some()), (Value::Null, true));
+}

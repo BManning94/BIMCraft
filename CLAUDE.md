@@ -77,6 +77,8 @@ A roof by footprint is the straight skeleton of its outline and its `courtyards`
 counter-clockwise, the courtyards clockwise, the roof to the left of every edge): each edge moves in at speed 1, a gable's at
 0, and its slope rises from it, reaching the roof's base `overhang` in from its eaves; a courtyard's edges number on after
 the outline's, and every ring keeps its numbers whichever way round it runs, so `gables` stay put through a mirror.
+Over the walls (`roof_footprint`), a loop of them standing free inside the outer ones, joined to none of them and with no
+room in it, is a courtyard; one joined to them, or with a room in it, is rooms, and the roof runs over it.
 `Model::roof_faces` are its slopes, each the loops round it in plan (a slope can close round a courtyard whose far side is a
 gable) with the plane of its underside, trimmed where it `join`s another; `Model::roof_pieces` are those less their holes
 and its `openings`, convex where cut. A floor's top is at its level plus `offset`,

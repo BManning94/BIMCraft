@@ -967,6 +967,18 @@ fn the_roof_tool_roofs_the_walls_of_the_plan_on_the_level_above() {
 }
 
 #[test]
+fn the_roof_tool_leaves_a_courtyard_open_inside_a_loop_of_walls_standing_free() {
+    let mut h = app(r#"wall {"points": [[0, 0], [16000, 0], [16000, 16000], [0, 16000]], "closed": true}
+wall {"points": [[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]], "closed": true}"#);
+    tool(&mut h, "Roof");
+    click(&mut h, P2(3000.0, 8000.0));
+    let roof = ids(&h, "roof");
+    assert_eq!(roof.len(), 1);
+    let courtyard = json!([[[6600.0, 6600.0], [6600.0, 9400.0], [9400.0, 9400.0], [9400.0, 6600.0]]]);
+    assert_eq!(field(&h, roof[0], "courtyards"), courtyard, "500 mm past the courtyard walls' faces");
+}
+
+#[test]
 fn opening_an_ifc_file_imports_it_and_says_what_came_in() {
     let mut h = app(SAMPLE);
     let dir = std::env::temp_dir().join(format!("bimcraft-ui-ifc-{}", std::process::id()));
