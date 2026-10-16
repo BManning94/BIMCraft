@@ -171,10 +171,12 @@ fn open(mut pts: Vec<P2>) -> Vec<P2> {
 
 /// The loops the edges of `faces` no two share make, each face turned counter-clockwise in plan: a
 /// region's outline counter-clockwise, its holes clockwise. An edge with another face's corner on it
-/// is two edges, there.
+/// is two edges, there. Each loop starts at its south-west corner, and they come in that order: as
+/// the same file reads the same.
 fn loops<'a>(faces: impl Iterator<Item = &'a Vec<P3>>) -> Vec<Vec<P2>> {
+    // Points by y, then x: in order, south-west first.
     type K = (i64, i64);
-    let key = |p: P2| -> K { ((p.0 * 10.0).round() as i64, (p.1 * 10.0).round() as i64) };
+    let key = |p: P2| -> K { ((p.1 * 10.0).round() as i64, (p.0 * 10.0).round() as i64) };
     let rings: Vec<Vec<P2>> = faces
         .map(|f| {
             let ring: Vec<P2> = f.iter().map(|p| P2(p[0], p[1])).collect();
@@ -183,7 +185,7 @@ fn loops<'a>(faces: impl Iterator<Item = &'a Vec<P3>>) -> Vec<Vec<P2>> {
         .collect();
     // ponytail: every corner against every edge, fine for a roof's or a slab's faces.
     let corners: Vec<P2> = rings.iter().flatten().copied().collect();
-    let mut edges: HashMap<(K, K), P2> = HashMap::new();
+    let mut edges: BTreeMap<(K, K), P2> = BTreeMap::new();
     for ring in &rings {
         for (a, b) in geom::ring_edges(ring) {
             let mut on: Vec<(f64, P2)> = corners
@@ -203,7 +205,7 @@ fn loops<'a>(faces: impl Iterator<Item = &'a Vec<P3>>) -> Vec<Vec<P2>> {
             }
         }
     }
-    let mut next: HashMap<K, (K, P2)> = edges.into_iter().map(|((ka, kb), a)| (ka, (kb, a))).collect();
+    let mut next: BTreeMap<K, (K, P2)> = edges.into_iter().map(|((ka, kb), a)| (ka, (kb, a))).collect();
     let mut out = Vec::new();
     while let Some(&start) = next.keys().next() {
         let (mut ring, mut k) = (Vec::new(), start);
@@ -704,7 +706,9 @@ fn units(f: &File) -> Result<(f64, f64), String> {
             _ => None,
         }
     }
-    let project = f.entities.values().find(|e| e.name == "IFCPROJECT").ok_or("it has no IfcProject")?;
+    // The first project, the one the name comes from.
+    let projects = f.entities.iter().filter(|(_, e)| e.name == "IFCPROJECT");
+    let (_, project) = projects.min_by_key(|(id, _)| **id).ok_or("it has no IfcProject")?;
     let assignment = reference(project.args.get(8)).and_then(|a| f.entities.get(&a));
     let (mut mm, mut rad) = (1.0, 1.0);
     for u in refs(assignment.and_then(|a| a.args.first())) {
@@ -2071,6 +2075,20 @@ ENDSEC;END-ISO-10303-21;",
             let Some(Element::Roof(roof)) = only(&i.model, "roof").first().copied() else { panic!("no roof") };
             assert_eq!(roof.openings, [[P2(1000.0, 1000.0), P2(1000.0, 2000.0), P2(2500.0, 2000.0), P2(2500.0, 1000.0)]]);
             assert_eq!(only(&i.model, "shaft").len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_file_reads_the_same_every_time() {
+        // Its slab's and its shaft's rings, and a second project, in metres, after its own: each
+        // read hashes afresh, so whatever came in a hash's order would change from read to read.
+        let more = "#60=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n#61=IFCUNITASSIGNMENT((#60));\n#62=IFCPROJECT('q',$,'Other',$,$,$,$,$,#61);";
+        let file = holed("#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.FLOOR.);", 35).replace("ENDSEC;END", &format!("{more}\nENDSEC;END"));
+        // Each read is a project of its own, its uid seeding its own GlobalIds; the rest the same.
+        let read = || Model { uid: 0, ..ifc(file.as_bytes(), "x").unwrap().model };
+        let first = read();
+        for _ in 0..8 {
+            assert_eq!(read(), first);
         }
     }
 
