@@ -632,6 +632,36 @@ fn properties_show_0_where_the_json_leaves_a_number_out_and_blank_where_it_is_no
 }
 
 #[test]
+fn clearing_a_sections_far_clip_offset_lets_it_see_all_there_is() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(&format!(
+        "{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000], \"depth\": 4000}}\nsection {{\"start\": [4000, -1000], \"end\": [4000, 7000]}}"
+    ));
+    // What the field holds, and the hint it shows while blank.
+    let clip = |h: &Harness<BimApp>| {
+        let n = h.get_by_role_and_label(Role::TextInput, "Far Clip Offset");
+        (n.value().unwrap_or_default(), n.accesskit_node().placeholder().filter(|p| !p.is_empty()).map(String::from))
+    };
+    let sections = ids(&h, "section");
+    h.state_mut().selection = sections[..1].to_vec();
+    h.run();
+    h.get_by_label("Far Clip Offset").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    key(&mut h, Key::Backspace);
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, sections[0], "depth"), Value::Null);
+    assert_eq!(clip(&h), (String::new(), Some("No Clip".into())), "blank, saying so");
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(field(&h, sections[0], "depth"), json!(4000.0));
+    // Two sections, one clipped: blank because they differ, so no hint that neither clips.
+    h.state_mut().selection = sections;
+    h.run();
+    assert_eq!(clip(&h), (String::new(), None));
+}
+
+#[test]
 fn the_palette_keeps_its_fields_and_apply_inside_it_whatever_their_labels() {
     use egui_kittest::kittest::{By, NodeT};
     let mut h = app(&format!("{BOX}\nfloor {{}}"));

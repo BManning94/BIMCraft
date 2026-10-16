@@ -39,8 +39,9 @@ enum Kind {
     TopLevel,
     /// A wall's height: typed when its top is unconnected, else what its levels make it.
     Height,
-    /// A number, or nothing (a plan's top at the level above): typed, or cleared.
-    Limit,
+    /// A length, or nothing, which its hint names when blank (a plan's top at the level above, a
+    /// view with no far clip): typed, or cleared.
+    Limit(&'static str),
     /// Whether a view is cropped: on crops it to what it shows (`crop`), off uncrops it.
     Crop,
     /// Derived from the rest; read only.
@@ -224,7 +225,7 @@ fn rows(category: &str) -> &'static [Row] {
         "section" | "elevation" => &[
             ("Identity Data", "name", "View Name", Text),
             ("Extents", "crop", "Crop View", Crop),
-            ("Extents", "depth", "Far Clip Offset", Length),
+            ("Extents", "depth", "Far Clip Offset", Limit("No Clip")),
             ("Other", "start", "Start", Point),
             ("Other", "end", "End", Point),
         ],
@@ -238,7 +239,7 @@ const PLAN: &[Row] = &[
     ("Extents", "id", "Associated Level", LevelName),
     ("Extents", "elevation", "Level Elevation", Length),
     ("Extents", "crop", "Crop View", Crop),
-    ("View Range", "view_range.top", "Top", Limit),
+    ("View Range", "view_range.top", "Top", Limit("Level Above")),
     ("View Range", "view_range.cut", "Cut Plane", Length),
     ("View Range", "view_range.bottom", "Bottom", Length),
     ("View Range", "view_range.depth", "View Depth", Length),
@@ -313,7 +314,7 @@ fn shown(kind: Kind, v: &Value, units: Units) -> String {
         v => v.as_f64().map_or_else(String::new, f),
     };
     match kind {
-        Length | LengthIf | Height | Limit | Point | LengthShown | Values => each(&|x| units.length(x)),
+        Length | LengthIf | Height | Limit(_) | Point | LengthShown | Values => each(&|x| units.length(x)),
         MetresShown => each(&|x| units.length(x * 1000.0)),
         AreaShown => each(&|x| {
             let (area, unit) = units.area(x * 1e6);
@@ -329,8 +330,8 @@ fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
     match kind {
         Number => number(s).map(|x| json!(x)).ok_or_else(|| tf("`{}` is not a number", &[s])),
         Length | LengthIf | Height => length(s).map(|x| json!(x)),
-        Limit if s.trim().is_empty() => Ok(Value::Null),
-        Limit => length(s).map(|x| json!(x)),
+        Limit(_) if s.trim().is_empty() => Ok(Value::Null),
+        Limit(_) => length(s).map(|x| json!(x)),
         // Lengths with feet and inches hold spaces: a comma parts x from y.
         Point => match s.split(',').collect::<Vec<_>>()[..] {
             [x, y] => Ok(json!([length(x)?, length(y)?])),
@@ -813,8 +814,12 @@ impl BimApp {
                                 r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, false, on, label));
                                 r.labelled_by(name.id);
                             }
-                            Text | Number | Length | LengthIf | Point | PaperPoint | Height | Limit => {
-                                let hint = if kind == Limit { t("Level Above") } else { "" };
+                            Text | Number | Length | LengthIf | Point | PaperPoint | Height | Limit(_) => {
+                                // Blank across a selection may be values that differ, not nothing.
+                                let hint = match kind {
+                                    Limit(hint) if ids.len() == 1 => t(hint),
+                                    _ => "",
+                                };
                                 if let Some(typed) = self.field(ui, id, key, shown(kind, val, units), name.id, hint) {
                                     change = Some((key, parse(kind, &typed, units)));
                                 }

@@ -680,6 +680,7 @@ const WORDS: &[[&str; 3]] = &[
     ["Max Ridge Height", "Altura máxima da cumeeira", "Altura máxima de cumbrera"],
     ["Gable Ends", "Empenas", "Hastiales"],
     ["Far Clip Offset", "Deslocamento do recorte distante", "Desfase del plano lejano"],
+    ["No Clip", "Sem recorte", "Sin recorte"],
     ["Associated Level", "Nível associado", "Nivel asociado"],
     ["Level Elevation", "Elevação do nível", "Elevación del nivel"],
     ["Top", "Superior", "Superior"],
