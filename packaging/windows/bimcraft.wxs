@@ -19,7 +19,9 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="BIMCraft" Manufacturer="IPedrax" Version="$(var.Version)" UpgradeCode="5D7C2E8B-3F4A-4C1E-9B6D-2A8F0E1C7B34" Scope="perMachine" Compressed="yes" Language="1033">
     <SummaryInformation Description="BIMCraft: building information modeling in pure Rust" />
-    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of BIMCraft is already installed." />
+    <!-- Whatever their language: 0.1.0 and 0.2.0 were language neutral, and an upgrade that only
+         looked for 1033 left them installed beside it. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes" IgnoreLanguage="yes" DowngradeErrorMessage="A newer version of BIMCraft is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Icon Id="BIMCraftIcon" SourceFile="assets\app-icon\bimcraft.ico" />
