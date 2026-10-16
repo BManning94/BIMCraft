@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{CEILING_HEIGHT, Element, Id, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
+use bimcraft_core::model::{CEILING_HEIGHT, DimKind, Element, Id, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
 use bimcraft_core::units::Units;
-use bimcraft_core::{schedule, stairs};
+use bimcraft_core::{element_json, render, schedule, stairs};
 use egui::containers::menu::{MenuButton, SubMenuButton};
 use egui::{
     Align, Align2, Area, CentralPanel, CollapsingHeader, Color32, ComboBox, Context, CornerRadius, Event, FontId, Frame, Grid, Id as UiId,
@@ -180,6 +180,30 @@ type Tools<'a> = &'a [(Icon, &'a str, &'a str, Tool)];
 /// The Modify panel's small buttons: icon, label, tooltip, the tool (none for Delete), enabled.
 type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
+/// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
+/// aliases, and what Keyboard Shortcuts (KS) calls them.
+const SHORTCUTS: [(&str, &str); 13] = [
+    ("MD", "Modify"),
+    ("MM", "Mirror Pick Axis"),
+    ("DM", "Mirror Draw Axis"),
+    ("AL", "Align"),
+    ("OF", "Offset"),
+    ("ZF", "Zoom to Fit"),
+    ("ZE", "Zoom to Fit"),
+    ("ZA", "Zoom to Fit"),
+    ("TL", "Thin Lines"),
+    ("CS", "Create Similar"),
+    ("PP", "Properties"),
+    ("SA", "Select All Instances"),
+    ("KS", "Keyboard Shortcuts"),
+];
+
+/// Every two-letter shortcut and what it does: the desktop's own, then the commands' aliases.
+fn shortcuts() -> Vec<(&'static str, &'static str)> {
+    let aliases = engine::commands().iter().flat_map(|c| c.aliases.iter().map(move |a| (*a, c.label)));
+    SHORTCUTS.into_iter().chain(aliases.filter(|(a, _)| !SHORTCUTS.iter().any(|(s, _)| s == a))).collect()
+}
+
 /// What an IFC import brought in, and the first few things it left out (the core's reasons, in
 /// English).
 fn import_note(file: &str, reply: &Value) -> String {
@@ -285,6 +309,10 @@ pub struct BimApp {
     tab_cycle: bool,
     show_properties: bool,
     show_browser: bool,
+    /// The Keyboard Shortcuts dialog is open (KS); the Manage tab drops its Project Units menu open
+    /// the next time it shows (UN).
+    show_shortcuts: bool,
+    open_units: bool,
     canvas: canvas::Canvas,
     orbit: orbit::Orbit,
     cut: section::Cut,
@@ -521,6 +549,8 @@ impl BimApp {
             tab_cycle: false,
             show_properties: true,
             show_browser: true,
+            show_shortcuts: false,
+            open_units: false,
             canvas: canvas::Canvas::default(),
             orbit: orbit::Orbit::default(),
             cut: section::Cut::default(),
@@ -781,6 +811,7 @@ impl BimApp {
             || self.parameters_dialog.is_some()
             || self.schedule_dialog.is_some()
             || self.new_schedule.is_some()
+            || self.show_shortcuts
             || self.pending.is_some()
         {
             return;
@@ -862,8 +893,8 @@ impl BimApp {
         }
     }
 
-    /// Revit's two-letter shortcuts: the commands' own (WA, DR, WN, RM, LL, GR, DE), plus MD
-    /// for Modify, ZF to zoom to fit and TL for Thin Lines.
+    /// Revit's two-letter shortcuts: the desktop's own ([`SHORTCUTS`]), then the commands' aliases
+    /// (WA, DR, CR…). Whether `typed` is one.
     fn shortcut(&mut self) -> bool {
         let tool = match self.typed.as_str() {
             "MD" => Tool::Modify,
@@ -871,12 +902,28 @@ impl BimApp {
             "DM" => Tool::Mirror { draw: true, start: None },
             "AL" => Tool::Align(None),
             "OF" => Tool::Offset,
-            "ZF" | "ZE" => {
+            "ZF" | "ZE" | "ZA" => {
                 self.fit();
                 return true;
             }
             "TL" => {
                 self.thin = !self.thin;
+                return true;
+            }
+            "CS" => {
+                self.create_similar();
+                return true;
+            }
+            "PP" => {
+                self.show_properties = !self.show_properties;
+                return true;
+            }
+            "SA" => {
+                self.select_all_instances();
+                return true;
+            }
+            "KS" => {
+                self.show_shortcuts = true;
                 return true;
             }
             code => match engine::find(code).map(|c| c.id) {
@@ -897,8 +944,15 @@ impl BimApp {
                 Some("tag") => Tool::Tag,
                 Some("column") => Tool::Column,
                 Some("component") => Tool::Component,
+                Some("section") => Tool::Section(None),
                 Some("delete") => {
                     self.delete();
+                    return true;
+                }
+                // Revit's opens the Project Units dialog; BIMCraft's is the Manage tab's menu.
+                Some("units") => {
+                    self.tab = Tab::Manage;
+                    self.open_units = true;
                     return true;
                 }
                 _ => return false,
@@ -906,6 +960,98 @@ impl BimApp {
         };
         self.set_tool(tool);
         true
+    }
+
+    /// Create Similar (CS): the tool that makes what's selected, one element, with its type picked.
+    fn create_similar(&mut self) {
+        let m = Arc::clone(&self.session.model);
+        let picked = match self.selection.as_slice() {
+            &[id] => m.elements.get(&id).map(|e| (id, e)),
+            _ => None,
+        };
+        let tool = match picked.map(|(_, e)| e) {
+            Some(Element::Wall(_)) => Tool::Wall(Vec::new()),
+            Some(Element::Door(_)) => Tool::Door,
+            Some(Element::Window(_)) => Tool::Window,
+            Some(Element::Floor(_)) => Tool::Floor,
+            Some(Element::Ceiling(_)) => Tool::Ceiling,
+            Some(Element::Shaft(_)) => Tool::Shaft(None),
+            Some(Element::Roof(r)) if r.extrusion.is_some() => Tool::ExtrusionRoof(Vec::new()),
+            Some(Element::Roof(_)) => Tool::Roof,
+            Some(Element::Column(_)) => Tool::Column,
+            Some(Element::Component(c)) => {
+                self.component = Some((c.family.clone(), c.type_name.clone()));
+                Tool::Component
+            }
+            Some(Element::Stair(_)) => Tool::Stair(Vec::new()),
+            Some(Element::Ramp(_)) => Tool::Ramp(Vec::new()),
+            Some(Element::Railing(_)) => Tool::Railing(Vec::new()),
+            Some(Element::Room(_)) => Tool::Room,
+            Some(Element::Level(_)) => Tool::Level,
+            Some(Element::Grid(_)) => Tool::Grid(None),
+            Some(Element::Dimension(d)) => match d.kind {
+                DimKind::Aligned => Tool::Dimension(Vec::new()),
+                DimKind::Angular => Tool::Angular(Vec::new()),
+                DimKind::Radial => Tool::Radial(None),
+            },
+            Some(Element::Text(_)) => Tool::Text,
+            Some(Element::Spot(_)) => Tool::Spot,
+            Some(Element::Tag(_)) => Tool::Tag,
+            Some(Element::Section(_)) => Tool::Section(None),
+            Some(Element::Elevation(_)) => Tool::Elevation,
+            // Nothing, several, or a sheet's viewport: nothing to place one like.
+            _ => {
+                self.status = Status { text: t("select one element to create one like it first").into(), error: true };
+                return;
+            }
+        };
+        if let Some((id, e)) = picked
+            && let Some(name) = element_json(&m, id)["type"].as_str()
+        {
+            self.types.insert(e.category(), name.to_string());
+        }
+        self.set_tool(tool);
+    }
+
+    /// Select All Instances (SA): every element the open view shows of a type selected, a
+    /// component's type being its family's.
+    fn select_all_instances(&mut self) {
+        let m = Arc::clone(&self.session.model);
+        let type_of = |id: &Id| {
+            let e = element_json(&m, *id);
+            e["type"].is_string().then(|| [e["category"].clone(), e["family"].clone(), e["type"].clone()])
+        };
+        let types: Vec<[Value; 3]> = self.selection.iter().filter_map(type_of).collect();
+        if types.is_empty() {
+            self.status = Status { text: t("select an element that has a type first").into(), error: true };
+            return;
+        }
+        let found = self.shown().into_iter().filter(|id| type_of(id).is_some_and(|k| types.contains(&k))).collect();
+        self.pick_up(found, Modifiers::NONE);
+    }
+
+    /// What the open view shows: what a plan draws, in its view range and crop region; what a
+    /// section or an elevation cuts and what its picture shows past its line; in 3D, the whole
+    /// model. Nothing on a sheet or in a schedule has a type to select.
+    fn shown(&mut self) -> BTreeSet<Id> {
+        let m = Arc::clone(&self.session.model);
+        let owners = |d: render::Drawing| d.owners.into_iter().flatten().collect::<BTreeSet<Id>>();
+        // Fitted at any size: what a view shows doesn't depend on it.
+        let (w, h) = (1600, 1000);
+        match self.sheet {
+            Sheet::Plan(level) => owners(render::plan(&m, level, w, h)),
+            Sheet::Ceiling(level) => owners(render::ceiling_plan(&m, level, w, h)),
+            Sheet::Section(id) => {
+                let view = render::section_fit(&m, id, w, h);
+                let scene = orbit::scene_of(&mut self.orbit.scene, &m);
+                // ponytail: the picture leaves out what's hidden behind something nearer; test the
+                // solids against the view's extent if SA should find those too.
+                let seen = render::section_image(&m, scene, id, view, &[]).map(|i| i.shows()).unwrap_or_default();
+                owners(render::section(&m, id, view)).into_iter().chain(seen).collect()
+            }
+            Sheet::View3D => m.elements.keys().copied().collect(),
+            Sheet::Paper(_) | Sheet::Schedule(_) | Sheet::Table(_) => BTreeSet::new(),
+        }
     }
 
     fn set_tool(&mut self, mut tool: Tool) {
@@ -1551,7 +1697,7 @@ impl BimApp {
             if big_button(ui, Icon::View3D, "3D View", self.sheet == Sheet::View3D, "Open the default 3D view").clicked() {
                 self.open_sheet(Sheet::View3D);
             }
-            let tip = "Section: click its start, then its end; it looks to the left of the line";
+            let tip = "Section (CR): click its start, then its end; it looks to the left of the line";
             if big_button(ui, Icon::Section, "Section", matches!(self.tool, Tool::Section(_)), tip).clicked() {
                 self.set_tool(Tool::Section(None));
             }
@@ -1644,6 +1790,9 @@ impl BimApp {
             let now = self.session.model.units;
             let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
             let r = big_button(ui, Icon::Units, "Project Units", false, &tip);
+            if std::mem::take(&mut self.open_units) {
+                Popup::open_id(ui.ctx(), Popup::default_response_id(&r));
+            }
             Popup::menu(&r).show(|ui| {
                 for u in Units::ALL {
                     if ui.selectable_label(u == now, t(u.label())).clicked() {
@@ -1668,7 +1817,7 @@ impl BimApp {
     fn modify_tab(&mut self, ui: &mut Ui) {
         self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
         panel(ui, "Properties", |ui| {
-            if big_button(ui, Icon::Properties, "Properties", self.show_properties, "Show or hide the Properties palette").clicked() {
+            if big_button(ui, Icon::Properties, "Properties", self.show_properties, "Properties (PP): show or hide the palette").clicked() {
                 self.show_properties = !self.show_properties;
             }
             let typed = self.type_subject().is_some();
@@ -2319,6 +2468,7 @@ impl BimApp {
         self.parameters_window(ctx);
         self.new_schedule_window(ctx);
         self.schedule_window(ctx);
+        self.shortcuts_window(ctx);
         let Some(pending) = self.pending else { return };
         #[derive(PartialEq)]
         enum Choice {

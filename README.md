@@ -77,7 +77,8 @@
 
 - **The workflow you know.** Revit's ribbon, the green contextual Modify tab, the Options Bar, Properties with the Type
   Selector and Edit Type, the Project Browser, views in tabs, and Revit's shortcuts: WA, DR, WN, RM, CL, DI, TG, MV, CO,
-  RO, MM, AL, TR, SL. Click to select, Ctrl adds, Shift takes away, Tab reaches what's underneath.
+  RO, MM, AL, TR, SL, CS, SA, and KS to list them all. Click to select, Ctrl adds, Shift takes away, Tab reaches what's
+  underneath.
 - **A real building model.** Doors and windows live in their walls, rooms find their boundaries from the walls around
   them, walls joined at a corner stay joined when one moves, dimensions and tags follow what they measure and name, and
   every change is checked against the model's rules and can be undone.
@@ -219,9 +220,10 @@ switches.
 | Schedules | View > Schedules > Schedule/Quantities: pick a category and name it. In Properties, a schedule's Fields, Filter and Sorting/Grouping each open Schedule Properties: add its category's fields, take them away and order them, give one a heading or Calculate totals, add a Calculated Value (`Area * 120`); filter its rows; sort them, and untick Itemize every instance for a row per group. The Room, Door, Window, Wall, Floor and Level Schedules open from the browser, and become the project's once changed |
 | Views | The Project Browser opens floor plans, ceiling plans, elevations, sections, the 3D view and schedules in tabs; View > Close Inactive closes the others |
 | Lay out sheets | View > Sheet makes one (A101, A102…); on it, Place View puts a view that's on no sheet yet: a plan, a section or an elevation at 1 : 100, the 3D view as it's turned on screen, or a schedule. Drag a view or a note to move it, set its scale in Properties, double-click it to open it. File > Export > Sheets as PDF prints them all |
-| Cut a section, add an elevation | View > Section: click its start and end; it looks to the left of the line, so drawn west to east it looks north. View > Elevation: click beside the building, and it looks at that side. Open them from the browser, or double-click their marks in a plan; in them, click to select what they cut or see |
+| Cut a section, add an elevation | View > Section (CR): click its start and end; it looks to the left of the line, so drawn west to east it looks north. View > Elevation: click beside the building, and it looks at that side. Open them from the browser, or double-click their marks in a plan; in them, click to select what they cut or see |
 | Look in 3D | The cube on the Quick Access Toolbar (or View > 3D View, or {3D} in the browser) opens the 3D view. Shift and the middle button orbit, as in Revit, and so does a drag; the middle button pans, the wheel zooms; Home in the navigation bar goes back to the south-east view. Click to select, as in plan |
-| Move around | The wheel zooms at the cursor, the middle button pans, the navigation bar or ZF zooms to fit; TL toggles Thin Lines |
+| Move around | The wheel zooms at the cursor, the middle button pans, the navigation bar or ZF (ZE, ZA) zooms to fit; TL toggles Thin Lines |
+| Shortcuts | Type a tool's two letters over a view, as in Revit (WA, DR, CR…). CS (Create Similar) starts the tool of the one element selected, with its type picked; SA selects every element of the selected ones' types that the view shows; PP shows or hides Properties; UN opens Project Units. KS lists them all |
 | Go dark | View > Dark Mode: the window, plans, sections and the 3D view go dark; sheets stay white paper |
 | Units | Manage > Project Units (UN): millimetres, centimetres, metres, inches, feet, or feet and inches. Dimensions, spot elevations, room areas, schedules, Properties and the Options Bar follow; fields read what's typed in those units, or in the unit typed with it, and so do lengths typed while drawing |
 | Language | View > User Interface > Language: English, Português (Brasil) or Español; the window starts in the system's language (on Windows and macOS, its display language). Manage > Project Language: the language the project's drawings print, and that new levels, views, sheets and rooms are named in. A new project takes the window's |
@@ -280,7 +282,7 @@ changes nothing.
 | `tag` | TG | `ids?` (without them, every door and window on the level not tagged yet), `level?`, `offset?`, `leader?` |
 | `text` | TX | `text`, `at` (its top left), `view?` (a level's plan by default; a section, an elevation, or a sheet by number), `size?` (mm on paper, 2.5), `angle?`, `leader?` |
 | `spot` | EL | `at`, `view?`, `host?`: in a plan, the top of what stands there; in a section or an elevation, the point's height |
-| `section` | | `start`, `end` (it looks to the left of the line), `depth?`, `name?` |
+| `section` | CR | `start`, `end` (it looks to the left of the line), `depth?`, `name?` |
 | `elevation` | | `facing?` (north, south, east or west: the side it shows), `at?`, or `start` and `end`; none of them: the four building elevations |
 | `sheet` | | `number?` (A101, A102… by default), `name?`, `size?` (A0 to A4; A3 by default) |
 | `place` | | `sheet` (its number), `view` (a level's, section's, elevation's, schedule's or 3D view's name: Room Schedule, `{3D}`…), `at?` (mm on the paper), `scale?` (100 for 1 : 100), `azimuth?` and `elevation?` for the 3D view |

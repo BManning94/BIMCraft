@@ -177,6 +177,12 @@ fn key(h: &mut Harness<BimApp>, k: Key) {
     h.run();
 }
 
+/// Letters typed over the view: a two-letter shortcut.
+fn shortcut(h: &mut Harness<BimApp>, letters: &str) {
+    h.event(Event::Text(letters.into()));
+    h.run();
+}
+
 fn ids(h: &Harness<BimApp>, category: &str) -> Vec<Id> {
     h.state().session.model.elements.iter().filter(|(_, e)| e.category() == category).map(|(id, _)| *id).collect()
 }
@@ -361,8 +367,136 @@ fn typed_shortcuts_pick_tools_like_revit() {
     h.event(Event::Text("tg".into()));
     h.run();
     assert!(matches!(h.state().tool, Tool::Tag));
+    shortcut(&mut h, "CR");
+    assert!(matches!(h.state().tool, Tool::Section(None)));
     key(&mut h, Key::Escape);
     assert!(matches!(h.state().tool, Tool::Modify));
+}
+
+#[test]
+fn create_similar_starts_the_selected_elements_tool_placing_its_type() {
+    let mut h = app(&format!(
+        "{BOX}\ndoor {{\"at\": [2000, 0], \"type\": \"Single 800 x 2100\"}}\n\
+         component {{\"family\": \"Table\", \"type\": \"1200 x 800\", \"at\": [4000, 3000]}}"
+    ));
+    shortcut(&mut h, "CS");
+    assert!(h.state().status.error, "nothing selected, nothing to create one like");
+    // The narrower door: the Door tool, placing that type.
+    click(&mut h, P2(2000.0, 0.0));
+    shortcut(&mut h, "CS");
+    assert!(matches!(h.state().tool, Tool::Door));
+    click(&mut h, P2(6000.0, 6000.0));
+    let doors = ids(&h, "door");
+    assert_eq!(doors.len(), 2);
+    assert_eq!(field(&h, doors[1], "type"), json!("Single 800 x 2100"));
+    // A table, by the edge of its top: the Component tool, placing its family's type.
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(4000.0, 2600.0));
+    shortcut(&mut h, "CS");
+    assert!(matches!(h.state().tool, Tool::Component));
+    click(&mut h, P2(4000.0, 4800.0));
+    let placed: Vec<(Value, Value)> = ids(&h, "component").into_iter().map(|id| (field(&h, id, "family"), field(&h, id, "type"))).collect();
+    assert_eq!(placed, vec![(json!("Table"), json!("1200 x 800")); 2]);
+}
+
+#[test]
+fn pp_shows_and_hides_the_properties_palette() {
+    let mut h = app(BOX);
+    assert!(h.query_by_label("Type Selector").is_some());
+    shortcut(&mut h, "PP");
+    assert!(h.query_by_label("Type Selector").is_none());
+    assert!(h.query_by_label("Floor Plans").is_some(), "the Project Browser stays");
+    shortcut(&mut h, "PP");
+    assert!(h.query_by_label("Type Selector").is_some());
+}
+
+#[test]
+fn zf_ze_and_za_zoom_to_fit() {
+    let mut h = app(SAMPLE);
+    let p = P2(0.0, 0.0);
+    press(&mut h, "Zoom to Fit");
+    let fitted = h.state().screen(p);
+    for letters in ["ZF", "ZE", "ZA"] {
+        h.hover_at(h.state().screen(P2(8000.0, 3500.0)));
+        h.event(Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            delta: vec2(0.0, 120.0),
+            phase: TouchPhase::Move,
+            modifiers: Modifiers::NONE,
+        });
+        h.run();
+        assert!((h.state().screen(p) - fitted).length() > 10.0, "zoomed in");
+        shortcut(&mut h, letters);
+        assert!((h.state().screen(p) - fitted).length() < 1.0, "{letters} fits the plan, as the navigation bar does");
+    }
+}
+
+#[test]
+fn sa_selects_every_element_of_the_selected_ones_type_the_view_shows() {
+    let mut h = app_at(
+        &format!(
+            "{BOX}\ndoor {{\"at\": [2000, 0]}}\ndoor {{\"at\": [6000, 0]}}\ndoor {{\"at\": [2000, 6000]}}\ndoor {{\"at\": [6000, 6000]}}\n\
+             door {{\"at\": [4000, 6000], \"type\": \"Single 800 x 2100\"}}\n\
+             wall {{\"points\": [[0, 0], [8000, 0]], \"level\": \"Level 2\"}}\ndoor {{\"at\": [2000, 0], \"level\": \"Level 2\"}}\n\
+             component {{\"family\": \"Desk\", \"type\": \"1200 x 600\", \"at\": [2000, 2000]}}\n\
+             component {{\"family\": \"Desk\", \"type\": \"1200 x 600\", \"at\": [2000, 4500]}}\n\
+             component {{\"family\": \"Wardrobe\", \"type\": \"1200 x 600\", \"at\": [5000, 2000]}}\n\
+             section {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"
+        ),
+        0.05,
+    );
+    shortcut(&mut h, "SA");
+    assert!(h.state().status.error, "nothing selected, no type to select");
+    // The doors as made: the south wall's two, the north wall's two, the narrower one, Level 2's.
+    let doors = ids(&h, "door");
+    // In Level 1's plan, the doors of the wider type on it: not the narrower one, nor Level 2's.
+    click(&mut h, P2(2000.0, 0.0));
+    shortcut(&mut h, "SA");
+    assert_eq!(h.state().selection, doors[..4]);
+    // A component's type is its family's: the desks, not the wardrobe of the same type name.
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(2000.0, 2000.0));
+    shortcut(&mut h, "SA");
+    let desks: Vec<Id> = ids(&h, "component").into_iter().filter(|id| field(&h, *id, "family") == json!("Desk")).collect();
+    assert_eq!(h.state().selection, desks);
+    // A section shows what lies past its line: the north wall's doors, not the south wall's behind it.
+    browse(&mut h, "Section 1");
+    click(&mut h, P2(3000.0, 1000.0));
+    assert_eq!(h.state().selection, [doors[2]], "the door the section shows there");
+    shortcut(&mut h, "SA");
+    assert_eq!(h.state().selection, doors[2..4]);
+}
+
+#[test]
+fn ks_lists_every_shortcut_and_every_one_it_lists_works() {
+    let mut h = app(BOX);
+    shortcut(&mut h, "KS");
+    for label in ["Create Similar", "CS", "Select All Instances", "SA", "CR", "WA", "KS", "ZF, ZE, ZA"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    shortcut(&mut h, "WA");
+    assert!(matches!(h.state().tool, Tool::Modify), "the dialog takes the keys while it's open");
+    press(&mut h, "Close");
+    assert!(h.query_by_label("Create Similar").is_none());
+    // UN, as Revit's opens Project Units: Manage's Project Units menu.
+    shortcut(&mut h, "UN");
+    press(&mut h, "Feet and inches");
+    assert_eq!(h.state().session.model.units.name(), "ft-in");
+    // Any two letters do something exactly when the dialog lists them, and it names each in every language.
+    let listed: Vec<&str> = crate::shortcuts().iter().map(|(letters, _)| *letters).collect();
+    for a in 'A'..='Z' {
+        for b in 'A'..='Z' {
+            let mut app = BimApp::new(Session::new());
+            app.typed = format!("{a}{b}");
+            assert_eq!(app.shortcut(), listed.contains(&format!("{a}{b}").as_str()), "{a}{b}");
+        }
+    }
+    use bimcraft_core::language::Language;
+    for (_, name) in crate::shortcuts() {
+        for l in [Language::Portuguese, Language::Spanish] {
+            assert!(crate::lang::translated(l, name).is_some(), "{name} in {l:?}");
+        }
+    }
 }
 
 #[test]
@@ -1323,10 +1457,12 @@ fn the_interface_speaks_spanish() {
 fn nothing_a_translated_interface_shows_is_left_in_english() {
     use bimcraft_core::language::Language;
     use egui_kittest::kittest::{By, NodeT};
-    // A label in English that the table translates is a string the window forgot to translate.
+    // A label in English that the table translates is a string the window forgot to translate: a
+    // widget's name, or a plain label's text, which egui gives screen readers as its value.
     let english = |h: &Harness<BimApp>, l: Language| -> Vec<String> {
-        h.query_all(By::new().predicate(move |n| n.label().is_some_and(|s| crate::lang::translated(l, &s).is_some_and(|x| x != s))))
-            .filter_map(|n| n.accesskit_node().label())
+        h.query_all(By::new())
+            .filter_map(|n| n.accesskit_node().label().or_else(|| n.accesskit_node().value()))
+            .filter(|s| crate::lang::translated(l, s).is_some_and(|x| x != s))
             .collect()
     };
     let extra = r#"parameter {"name": "Finish Height", "kind": "length", "categories": ["wall"]}
@@ -1381,6 +1517,10 @@ schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Len
             pick(&mut h, Role::Button, tr(tab));
             missed.extend(english(&h, l));
         }
+        press(&mut h, tr("Close"));
+        // Keyboard Shortcuts.
+        shortcut(&mut h, "KS");
+        missed.extend(english(&h, l));
         press(&mut h, tr("Close"));
         missed.sort();
         missed.dedup();

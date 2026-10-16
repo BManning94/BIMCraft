@@ -220,9 +220,9 @@ const WORDS: &[[&str; 3]] = &[
     ["3D View", "Vista 3D", "Vista 3D"],
     ["Open the default 3D view", "Abrir a vista 3D padrão", "Abrir la vista 3D predeterminada"],
     [
-        "Section: click its start, then its end; it looks to the left of the line",
-        "Corte: clique no início e depois no fim; ele olha para a esquerda da linha",
-        "Sección: haz clic en su inicio y luego en su final; mira hacia la izquierda de la línea",
+        "Section (CR): click its start, then its end; it looks to the left of the line",
+        "Corte (CR): clique no início e depois no fim; ele olha para a esquerda da linha",
+        "Sección (CR): haz clic en su inicio y luego en su final; mira hacia la izquierda de la línea",
     ],
     [
         "Elevation: click beside the building, on the side to look at",
@@ -268,7 +268,11 @@ const WORDS: &[[&str; 3]] = &[
     ["Inches", "Polegadas", "Pulgadas"],
     ["Feet", "Pés", "Pies"],
     ["Feet and inches", "Pés e polegadas", "Pies y pulgadas"],
-    ["Show or hide the Properties palette", "Mostrar ou ocultar a paleta Propriedades", "Mostrar u ocultar la paleta Propiedades"],
+    [
+        "Properties (PP): show or hide the palette",
+        "Propriedades (PP): mostrar ou ocultar a paleta",
+        "Propiedades (PP): mostrar u ocultar la paleta",
+    ],
     ["Type Properties", "Propriedades de tipo", "Propiedades de tipo"],
     ["Edit the type", "Editar o tipo", "Editar el tipo"],
     ["Align", "Alinhar", "Alinear"],
@@ -1072,6 +1076,23 @@ const WORDS: &[[&str; 3]] = &[
     ["And:", "E:", "Y:"],
     ["Comparison", "Comparação", "Comparación"],
     ["Order", "Ordem", "Orden"],
+    // Revit's shortcuts: Keyboard Shortcuts (KS), the names it gives those no ribbon button has, and what Create
+    // Similar and Select All Instances say when nothing fits.
+    ["Keyboard Shortcuts", "Atalhos de teclado", "Atajos de teclado"],
+    ["Create Similar", "Criar similar", "Crear similar"],
+    ["Select All Instances", "Selecionar todas as instâncias", "Seleccionar todos los ejemplares"],
+    ["Aligned Dimension", "Cota alinhada", "Cota alineada"],
+    ["Split", "Dividir", "Dividir"],
+    [
+        "select one element to create one like it first",
+        "selecione primeiro um elemento para criar outro igual",
+        "selecciona primero un elemento para crear otro igual",
+    ],
+    [
+        "select an element that has a type first",
+        "selecione primeiro um elemento que tenha um tipo",
+        "selecciona primero un elemento que tenga un tipo",
+    ],
 ];
 
 #[cfg(test)]

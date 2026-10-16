@@ -219,7 +219,7 @@ pub static ALL: &[Command] = &[
     edit(
         "section",
         "Section",
-        &[],
+        &["CR"],
         "{start: [x,y], end: [x,y], depth?, name?} a section view along the line, looking to its left (drawn west to east, it \
          looks north): it cuts the model at the line and sees `depth` mm past it, or everything",
         section,

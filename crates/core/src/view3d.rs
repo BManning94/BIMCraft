@@ -6,7 +6,7 @@
 //! pixel shows, for picking. Sections and elevations use the same pictures, clipped at their
 //! line and in hidden line, and cut the same solids.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::geom::{self, P2};
 use crate::model::{Element, Id, Layer, Model};
@@ -777,6 +777,11 @@ impl Image {
     pub fn pick(&self, x: f64, y: f64) -> Option<Id> {
         let t = *self.hit.get(self.index(x, y)?)?;
         self.owners.get(t as usize).copied()
+    }
+
+    /// Every element the picture shows.
+    pub fn shows(&self) -> BTreeSet<Id> {
+        self.hit.iter().filter_map(|t| self.owners.get(*t as usize).copied()).collect()
     }
 
     /// The colour of the pixel at `(x, y)`; the paper's, off the picture.
