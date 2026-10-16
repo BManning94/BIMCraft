@@ -1,34 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  BIMCraft's Windows installer, for the WiX Toolset 5. From the repository root, after a release
-  build of bimcraft and bimcraft-cli:
+  BIMCraft's Windows installer, for the WiX Toolset 5 (the wix .NET tool, 5.0.2) and its UI extension,
+  which draws the setup wizard: wix extension add -g WixToolset.UI.wixext/5.0.2
+  From the repository root, after a release build of bimcraft and bimcraft-cli for x86_64-pc-windows-msvc:
 
-    wix build packaging\windows\bimcraft.wxs -arch x64 -d Version=0.1.0 -o bimcraft-0.1.0-windows-x64.msi
+    wix build packaging\windows\bimcraft.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=0.2.0
+      -d BinDir=target\x86_64-pc-windows-msvc\release -o bimcraft-0.2.0-windows-x64.msi
 
-  It installs for every user into Program Files\BIMCraft: the app, the CLI and the licences, a
-  Start menu shortcut, and .bimcraft projects opening in BIMCraft. `DESKTOPSHORTCUT=1` adds a
-  desktop shortcut: msiexec /i bimcraft-0.1.0-windows-x64.msi DESKTOPSHORTCUT=1
-  A newer version upgrades an older one in place.
+  It works as CADCraft's installer does. It installs for every user into Program Files\BIMCraft: the
+  app, the CLI and the licences, a Start menu shortcut, .bimcraft projects opening in BIMCraft, and
+  BIMCraft offered under "Open with" for .ifc files, without taking over the user's default app. A
+  newer version upgrades an older one in place, and so does a rebuild of the same version.
+
+  Desktop shortcut: the setup wizard asks (unticked by default). A silent install leaves it out unless
+  asked: msiexec /i bimcraft-0.2.0-windows-x64.msi /qn DESKTOPSHORTCUT=1. An upgrade keeps the
+  previous choice unless DESKTOPSHORTCUT=1 or DESKTOPSHORTCUT=0 is given.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="BIMCraft" Manufacturer="IPedrax" Version="$(var.Version)" UpgradeCode="5D7C2E8B-3F4A-4C1E-9B6D-2A8F0E1C7B34" Scope="perMachine" Compressed="yes">
+  <Package Name="BIMCraft" Manufacturer="IPedrax" Version="$(var.Version)" UpgradeCode="5D7C2E8B-3F4A-4C1E-9B6D-2A8F0E1C7B34" Scope="perMachine" Compressed="yes" Language="1033">
     <SummaryInformation Description="BIMCraft: building information modeling in pure Rust" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of BIMCraft is already installed." />
-    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade AllowSameVersionUpgrades="yes" DowngradeErrorMessage="A newer version of BIMCraft is already installed." />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <Icon Id="BIMCraftIcon" SourceFile="assets\app-icon\bimcraft.ico" />
     <Property Id="ARPPRODUCTICON" Value="BIMCraftIcon" />
-    <Property Id="ARPURLINFOABOUT" Value="https://github.com/IPedrax/bimcraft" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/IPedrax/bimcraft/issues" />
-    <Property Id="DESKTOPSHORTCUT" Secure="yes" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/IPedrax/BIMCraft" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://github.com/IPedrax/BIMCraft/releases" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/IPedrax/BIMCraft/issues" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="BIMCraft" />
     </StandardDirectory>
 
+    <!-- "Create a desktop shortcut": the wizard's checkbox sets it to 1 (unticked, it's unset), and a
+         silent install passes DESKTOPSHORTCUT=1. Secure, so the elevated install sees the wizard's choice. -->
+    <Property Id="DESKTOPSHORTCUT" Secure="yes" />
+    <!-- The previous install's choice, from the shortcut's key path, so an upgrade keeps it unasked. -->
+    <Property Id="PREVIOUSDESKTOPSHORTCUT">
+      <RegistrySearch Id="PreviousDesktopShortcut" Root="HKCU" Key="Software\BIMCraft" Name="DesktopShortcut" Type="raw" />
+    </Property>
+    <!-- Only when DESKTOPSHORTCUT wasn't given; "first" runs it once (in the wizard's sequence when there
+         is one), so unticking the box isn't undone when the install runs. -->
+    <SetProperty Id="DESKTOPSHORTCUT" Value="1" After="AppSearch" Sequence="first"
+        Condition="NOT DESKTOPSHORTCUT AND PREVIOUSDESKTOPSHORTCUT = &quot;1&quot;" />
+
+    <UIRef Id="BIMCraftUI" />
+
     <Feature Id="Main" Title="BIMCraft" Level="1">
       <Component Id="App" Directory="INSTALLFOLDER">
-        <File Id="BimcraftExe" Source="target\release\bimcraft.exe" KeyPath="yes">
+        <File Id="BimcraftExe" Source="$(var.BinDir)\bimcraft.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="BIMCraft" Description="Building information modeling" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" Advertise="yes" />
         </File>
         <ProgId Id="BIMCraft.Project" Description="BIMCraft project" Icon="BIMCraftIcon" Advertise="yes">
@@ -36,9 +56,15 @@
             <Verb Id="open" Command="Open" Argument="&quot;%1&quot;" />
           </Extension>
         </ProgId>
+        <!-- Run as `bimcraft`, and listed under "Open with" for .ifc files as BIMCraft. -->
+        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\bimcraft.exe" Value="[#BimcraftExe]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\bimcraft.exe" Name="FriendlyAppName" Value="BIMCraft" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\bimcraft.exe\shell\open\command" Value="&quot;[#BimcraftExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.ifc\OpenWithProgids" Name="BIMCraft.Ifc" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\BIMCraft.Ifc\shell\open\command" Value="&quot;[#BimcraftExe]&quot; &quot;%1&quot;" Type="string" />
       </Component>
       <Component Id="Cli" Directory="INSTALLFOLDER">
-        <File Id="BimcraftCliExe" Source="target\release\bimcraft-cli.exe" KeyPath="yes" />
+        <File Id="BimcraftCliExe" Source="$(var.BinDir)\bimcraft-cli.exe" KeyPath="yes" />
       </Component>
       <Component Id="LicenceMit" Directory="INSTALLFOLDER">
         <File Id="LicenseMit" Source="LICENSE-MIT" KeyPath="yes" />
@@ -46,10 +72,77 @@
       <Component Id="LicenceApache" Directory="INSTALLFOLDER">
         <File Id="LicenseApache" Source="LICENSE-APACHE" KeyPath="yes" />
       </Component>
-      <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = 1">
-        <Shortcut Id="DesktopShortcut" Name="BIMCraft" Target="[INSTALLFOLDER]bimcraft.exe" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" />
-        <RegistryValue Root="HKLM" Key="Software\BIMCraft" Name="DesktopShortcut" Type="integer" Value="1" KeyPath="yes" />
+      <!-- A shortcut that isn't advertised needs a registry key path, and in a profile folder (the
+           desktop, which per-machine is the Public one) that key must be under HKCU (ICE38, ICE43, ICE57). -->
+      <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">
+        <Shortcut Id="DesktopShortcut" Name="BIMCraft" Description="Building information modeling" Target="[INSTALLFOLDER]bimcraft.exe" WorkingDirectory="INSTALLFOLDER" Icon="BIMCraftIcon" />
+        <RegistryValue Root="HKCU" Key="Software\BIMCraft" Name="DesktopShortcut" Value="1" Type="string" KeyPath="yes" />
       </Component>
     </Feature>
   </Package>
+
+  <!--
+    The setup wizard, as CADCraft's: WixUI_InstallDir's flow without the licence and folder pages,
+    plus a Shortcuts page.
+      install:     Welcome > Shortcuts > Ready to install > Progress > Finish
+      maintenance: Maintenance welcome > Repair or Remove > Ready > Progress > Finish
+  -->
+  <Fragment>
+    <UI Id="BIMCraftUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="DiskCostDlg" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <Dialog Id="ShortcutsDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="Choose where to start [ProductName] from." />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Shortcuts" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <Control Id="StartMenuText" Type="Text" X="20" Y="60" Width="330" Height="15" NoPrefix="yes" Text="[ProductName] will be added to the Start menu." />
+        <Control Id="DesktopShortcutCheckBox" Type="CheckBox" X="20" Y="85" Width="330" Height="17" Property="DESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a &amp;desktop shortcut" />
+      </Dialog>
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Condition="NOT Installed" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="ShortcutsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="ShortcutsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+
+      <!-- No "Change" in Apps and features: there is a single feature. -->
+      <Property Id="ARPNOMODIFY" Value="1" />
+    </UI>
+
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
 </Wix>

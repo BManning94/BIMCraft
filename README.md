@@ -348,10 +348,11 @@ IFC is the way in and out, and `.rvt` files will come in through Autodesk's own 
 |---|---|
 | x64 (64-bit Intel/AMD) | `bimcraft-<ver>-windows-x64.msi` |
 
-The installer puts BIMCraft and `bimcraft-cli` in Program Files for every user, adds BIMCraft to the Start menu, and opens
-`.bimcraft` projects in it; a newer version upgrades an older one. For a silent install with a desktop shortcut too:
-`msiexec /i bimcraft-<ver>-windows-x64.msi /qn DESKTOPSHORTCUT=1`. It isn't code-signed yet, so Windows SmartScreen asks
-before it runs: More info, then Run anyway.
+The installer is a short setup wizard. It puts BIMCraft and `bimcraft-cli` in Program Files for every user, adds BIMCraft
+to the Start menu, asks whether to put it on the desktop too, opens `.bimcraft` projects in it, and offers it under Open
+with for `.ifc` files. It needs no Visual C++ runtime, and a newer version upgrades an older one, keeping the desktop
+shortcut as it was. For a silent install with a desktop shortcut: `msiexec /i bimcraft-<ver>-windows-x64.msi /qn
+DESKTOPSHORTCUT=1`. It isn't code-signed yet, so Windows SmartScreen asks before it runs: More info, then Run anyway.
 
 Versions are published on the [releases page](https://github.com/IPedrax/bimcraft/releases) as they're tagged. Between
 releases, the Release workflow (Actions > Release > Run workflow) builds the installer for any commit, as that run's

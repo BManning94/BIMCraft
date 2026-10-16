@@ -23,24 +23,38 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # The C runtime linked in, as CADCraft does, so the exes run on a Windows without the Visual C++
+      # redistributable. Scoped to the target, so build scripts and proc macros are left as they are.
       - name: Build
-        run: cargo build --release -p bimcraft -p bimcraft-cli
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p bimcraft -p bimcraft-cli
 
-      - name: Icon
+      - name: Check
         shell: pwsh
         run: |
+          $bin = "$PWD\target\x86_64-pc-windows-msvc\release"
           # Explorer shows bimcraft.exe with the icon its build script links in: count it the way Explorer does.
           Add-Type -Namespace Win32 -Name Shell -MemberDefinition '[DllImport("shell32.dll", CharSet = CharSet.Unicode)] public static extern int ExtractIconExW(string file, int index, IntPtr large, IntPtr small, int n);'
-          $icons = [Win32.Shell]::ExtractIconExW("$PWD\target\release\bimcraft.exe", -1, [IntPtr]::Zero, [IntPtr]::Zero, 0)
+          $icons = [Win32.Shell]::ExtractIconExW("$bin\bimcraft.exe", -1, [IntPtr]::Zero, [IntPtr]::Zero, 0)
           if ($icons -ne 1) { throw "bimcraft.exe should carry one icon, not $icons" }
+          # This runner has the Visual C++ runtime, so a build needing it would pass here and fail on a clean PC.
+          # ponytail: looks for the DLL's name anywhere in the file, not just in the import table.
+          foreach ($exe in 'bimcraft.exe', 'bimcraft-cli.exe') {
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("$bin\$exe"))
+            if ($text.IndexOf('VCRUNTIME140', [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "$exe needs the Visual C++ runtime" }
+          }
 
       - name: Installer
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
           dotnet tool install --global wix --version 5.0.2
+          $wix = "$env:USERPROFILE\.dotnet\tools\wix.exe"
+          & $wix extension add -g WixToolset.UI.wixext/5.0.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $msi = "bimcraft-$version-windows-x64.msi"
-          & "$env:USERPROFILE\.dotnet\tools\wix.exe" build packaging/windows/bimcraft.wxs -arch x64 -d Version=$version -o $msi
+          & $wix build packaging/windows/bimcraft.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=$version -d BinDir=target\x86_64-pc-windows-msvc\release -o $msi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "MSI=$msi"
 
