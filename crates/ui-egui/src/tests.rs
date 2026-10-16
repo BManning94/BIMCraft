@@ -270,14 +270,14 @@ fn rooms_go_where_clicked_and_their_area_follows_the_walls() {
     click(&mut h, P2(2000.0, 3000.0));
     let room = ids(&h, "room")[0];
     assert_eq!(field(&h, room, "area_m2"), json!(48.0));
-    // A partition clicked a little off the walls' centre lines: its ends snap onto them, so it
-    // meets them and splits the room.
+    // A partition clicked a little off the walls' centre lines, away from their middles: its ends
+    // snap onto them, so it meets them and splits the room.
     tool(&mut h, "Wall");
-    click(&mut h, P2(4040.0, 30.0));
-    click(&mut h, P2(4040.0, 5970.0));
+    click(&mut h, P2(2040.0, 30.0));
+    click(&mut h, P2(2040.0, 5970.0));
     key(&mut h, Key::Enter);
-    assert_eq!(walls(&h).last(), Some(&(P2(4040.0, 0.0), P2(4040.0, 6000.0))));
-    assert_eq!(field(&h, room, "area_m2"), json!(24.24));
+    assert_eq!(walls(&h).last(), Some(&(P2(2040.0, 0.0), P2(2040.0, 6000.0))));
+    assert_eq!(field(&h, room, "area_m2"), json!(12.24));
 }
 
 #[test]
@@ -1522,6 +1522,15 @@ schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Len
         shortcut(&mut h, "KS");
         missed.extend(english(&h, l));
         press(&mut h, tr("Close"));
+        // Snaps, and the Measure tool with its prompt.
+        key(&mut h, Key::Escape);
+        press(&mut h, tr("Manage"));
+        press(&mut h, tr("Snaps"));
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Close"));
+        press(&mut h, tr("Annotate"));
+        press(&mut h, tr("Measure"));
+        missed.extend(english(&h, l));
         missed.sort();
         missed.dedup();
         assert!(missed.is_empty(), "{l:?}: left in English: {missed:?}");
@@ -2067,4 +2076,357 @@ fn a_new_schedule_named_as_another_view_stays_open_to_be_named_again() {
     type_into(&mut h, "Name:", "Wall Lengths");
     press(&mut h, "OK");
     assert_eq!(ids(&h, "schedule").len(), 1);
+}
+
+/// Move the cursor over the plan to a model point; what the tool's pick there would snap to.
+fn hover(h: &mut Harness<BimApp>, p: P2) -> Option<bimcraft_core::snap::Found> {
+    let at = h.state().screen(p);
+    h.hover_at(at);
+    h.run();
+    h.state().canvas.found.get()
+}
+
+/// Degrees from `a` to `b`, counter-clockwise from east.
+fn degrees(a: P2, b: P2) -> f64 {
+    (b.1 - a.1).atan2(b.0 - a.0).to_degrees()
+}
+
+#[test]
+fn walls_drawn_near_an_angle_guide_snap_onto_it_and_turn_exact_corners() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(3470.0, 2020.0));
+    key(&mut h, Key::Enter);
+    let (a, b) = walls(&h)[0];
+    assert!((degrees(a, b) - 30.0).abs() < 1e-3, "{a:?} {b:?}: 30.2° snaps onto 30°");
+    // 20° is no multiple of 15°, so it's free; but 90° from it is exact all the same.
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 3000.0));
+    click(&mut h, P2(3000.0, 4092.0));
+    let (p, q) = match &h.state().tool {
+        Tool::Wall(chain) => (chain[0], chain[1]),
+        t => panic!("{t:?}"),
+    };
+    assert!((degrees(p, q) - 20.0).abs() < 0.2, "{p:?} {q:?}");
+    let turn = (degrees(p, q) + 90.0).to_radians();
+    click(&mut h, q + P2(turn.cos(), turn.sin()) * 2000.0 + P2(25.0, 10.0));
+    key(&mut h, Key::Enter);
+    let m = walls(&h);
+    let (first, second) = (m[1], m[2]);
+    assert_eq!(first.1, second.0);
+    assert!((degrees(second.0, second.1) - degrees(first.0, first.1) - 90.0).abs() < 1e-2, "{first:?} {second:?}");
+}
+
+#[test]
+fn the_cursor_snaps_to_ends_middles_and_perpendicular_feet_and_the_pick_says_which() {
+    use bimcraft_core::snap::Kind;
+    let mut h = app(BOX);
+    tool(&mut h, "Wall");
+    let kind = |h: &mut Harness<BimApp>, p: P2| hover(h, p).map(|f| (f.kind, f.at));
+    assert_eq!(kind(&mut h, P2(8030.0, 20.0)), Some((Kind::Endpoint, P2(8000.0, 0.0))));
+    assert_eq!(kind(&mut h, P2(4030.0, 20.0)), Some((Kind::Midpoint, P2(4000.0, 0.0))));
+    assert_eq!(kind(&mut h, P2(2040.0, 30.0)), Some((Kind::Nearest, P2(2040.0, 0.0))));
+    assert_eq!(kind(&mut h, P2(4020.0, 3000.0)), Some((Kind::Free, P2(4020.0, 3000.0))));
+    // Not over a tool that picks points: nothing to say.
+    key(&mut h, Key::Escape);
+    // A second wall far off, so the view takes in where the first point goes.
+    let mut h = app(r#"wall {"points": [[0,0],[6000,2000]]}
+wall {"points": [[3000,5500],[4000,5500]]}"#);
+    tool(&mut h, "Wall");
+    click(&mut h, P2(1000.0, 4000.0));
+    let f = hover(&mut h, P2(2130.0, 680.0)).unwrap();
+    assert_eq!(f.kind, Kind::Perpendicular);
+    assert!(f.at.dist(P2(2100.0, 700.0)) < 1e-3, "{:?}", f.at);
+}
+
+#[test]
+fn manage_snaps_switches_each_snap_and_the_angle_steps() {
+    use bimcraft_core::snap::Kind;
+    let mut h = app(BOX);
+    press(&mut h, "Manage");
+    press(&mut h, "Snaps");
+    // The window takes the keys while it's open: a shortcut typed does nothing.
+    assert!(h.state().show_snaps && h.query_by_label("Object Snaps").is_some());
+    shortcut(&mut h, "WA");
+    assert_eq!(h.state().tool, Tool::Modify);
+    pick(&mut h, Role::CheckBox, "Midpoint");
+    press(&mut h, "Close");
+    assert!(!h.state().snaps.midpoint && h.state().snaps.endpoint);
+    tool(&mut h, "Wall");
+    assert_eq!(hover(&mut h, P2(4030.0, 20.0)).map(|f| f.kind), Some(Kind::Nearest), "no middle to stick to now");
+    // The angle steps: off, a drawn wall goes where the cursor does.
+    press(&mut h, "Manage");
+    press(&mut h, "Snaps");
+    pick(&mut h, Role::ComboBox, "Angle steps");
+    press(&mut h, "Off");
+    press(&mut h, "Close");
+    assert_eq!(h.state().snaps.angle, 0.0);
+    key(&mut h, Key::Escape);
+    let mut h = app("");
+    h.state_mut().snaps.angle = 0.0;
+    tool(&mut h, "Wall");
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(3470.0, 2020.0));
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h)[0].1, P2(3470.0, 2020.0));
+}
+
+#[test]
+fn the_measure_tool_lays_a_ruler_between_two_snapped_points_and_esc_takes_it_away() {
+    let mut h = app(BOX);
+    press(&mut h, "Annotate");
+    press(&mut h, "Measure");
+    assert_eq!(h.state().tool, Tool::Measure(None));
+    click(&mut h, P2(0.0, 0.0));
+    assert_eq!(h.state().tool, Tool::Measure(Some(P2(0.0, 0.0))));
+    click(&mut h, P2(3000.0, 4000.0));
+    assert_eq!(h.state().measured, Some((P2(0.0, 0.0), P2(3000.0, 4000.0))));
+    assert_eq!(h.state().tool, Tool::Measure(None), "ready for another");
+    key(&mut h, Key::Escape);
+    assert_eq!((h.state().measured, h.state().tool.clone()), (None, Tool::Measure(None)));
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().tool, Tool::Modify);
+    // ME is its shortcut, and a ruler left on show goes with the tool.
+    shortcut(&mut h, "ME");
+    assert_eq!(h.state().tool, Tool::Measure(None));
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(8000.0, 0.0));
+    assert!(h.state().measured.is_some());
+    tool(&mut h, "Wall");
+    assert_eq!(h.state().measured, None);
+}
+
+#[test]
+fn a_selected_walls_ends_are_grips_to_drag_and_ctrl_turns_it_about_the_other_end() {
+    let mut h = app(BOX);
+    click(&mut h, P2(2000.0, 0.0));
+    drag(&mut h, P2(8000.0, 0.0), P2(8000.0, -1000.0));
+    assert_eq!(walls(&h)[0], (P2(0.0, 0.0), P2(8000.0, -1000.0)));
+    assert_eq!(walls(&h)[1].0, P2(8000.0, -1000.0), "the wall joined there followed");
+    assert_eq!(h.state().selection, ids(&h, "wall")[..1], "still selected, to drag again");
+    // Ctrl keeps its length: it turns about its start toward the cursor.
+    let length = walls(&h)[0].0.dist(walls(&h)[0].1);
+    h.event(Event::ModifiersChanged(Modifiers::COMMAND));
+    h.run();
+    drag(&mut h, P2(8000.0, -1000.0), P2(4000.0, 1500.0));
+    h.event(Event::ModifiersChanged(Modifiers::NONE));
+    h.run();
+    let (a, b) = walls(&h)[0];
+    assert_eq!(a, P2(0.0, 0.0));
+    assert!((a.dist(b) - length).abs() < 1e-2, "{} {length}", a.dist(b));
+    assert!((degrees(a, b) - degrees(P2(0.0, 0.0), P2(4000.0, 1500.0))).abs() < 1e-2, "{b:?}");
+    // The start is a grip too, and the other end stays.
+    drag(&mut h, P2(0.0, 0.0), P2(-500.0, 200.0));
+    assert_eq!((walls(&h)[0].0, walls(&h)[0].1), (P2(-500.0, 200.0), b));
+    // A drag that starts away from the ends moves the wall, as it did, not one end.
+    let (a, b) = walls(&h)[0];
+    drag(&mut h, (a + b) * 0.5, (a + b) * 0.5 + P2(0.0, 500.0));
+    let (c, d) = walls(&h)[0];
+    assert!(c.1 > a.1 + 400.0 && d.1 > b.1 + 400.0, "{a:?} {b:?} -> {c:?} {d:?}: both ends went up");
+}
+
+#[test]
+fn a_selected_walls_angle_is_typed_to_turn_it_about_either_end() {
+    let mut h = app(BOX);
+    click(&mut h, P2(2000.0, 0.0));
+    h.get_by_label_contains("Turn the wall about its start").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("10".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    // The wall joined at its end stays joined: the corner slides up the wall it met.
+    let want = 8000.0 * 10f64.to_radians().tan();
+    let (a, b) = walls(&h)[0];
+    assert_eq!(a, P2(0.0, 0.0));
+    assert!(b.0 == 8000.0 && (b.1 - want).abs() < 1e-2, "{b:?}");
+    assert!((degrees(a, b) - 10.0).abs() < 1e-3);
+    assert_eq!(walls(&h)[1].0, b, "the wall joined at that end followed");
+    // About its end: the end stays, the start swings, level again.
+    h.get_by_label_contains("Turn the wall about its end").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("0".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    let (a2, b2) = walls(&h)[0];
+    assert_eq!(b2, b);
+    assert!(a2.0 == 0.0 && (a2.1 - want).abs() < 1e-2 && degrees(a2, b2).abs() < 1e-3, "{a2:?}");
+    // Not an angle: it says so, and nothing moves.
+    h.get_by_label_contains("Turn the wall about its start").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("steep".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    assert!(h.state().status.error && h.state().status.text.contains("steep"), "{:?}", h.state().status.text);
+    assert_eq!(walls(&h)[0], (a2, b2));
+}
+
+#[test]
+fn a_wall_with_nothing_joined_turns_about_an_end_at_its_own_length() {
+    let mut h = app(r#"wall {"points": [[0,0],[8000,0]]}
+wall {"points": [[0,6000],[1000,6000]]}"#);
+    click(&mut h, P2(2000.0, 0.0));
+    h.get_by_label_contains("Turn the wall about its start").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("30".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    let (a, b) = walls(&h)[0];
+    assert_eq!(a, P2(0.0, 0.0));
+    assert!((degrees(a, b) - 30.0).abs() < 1e-6 && (a.dist(b) - 8000.0).abs() < 1e-2, "{b:?}");
+}
+
+#[test]
+fn a_snap_shortcut_overrides_the_snaps_for_the_next_pick_only() {
+    use crate::Once;
+    use bimcraft_core::snap::Kind;
+    let mut h = app(BOX);
+    tool(&mut h, "Wall");
+    let kind = |h: &mut Harness<BimApp>, p: P2| hover(h, p).map(|f| f.kind);
+    // SE: ends alone; a middle beside the cursor is passed by.
+    shortcut(&mut h, "SE");
+    assert!(h.query_by_label("Snap: Endpoint (next point)").is_some(), "the status bar says so");
+    assert_eq!(kind(&mut h, P2(4030.0, 20.0)), Some(Kind::Free));
+    assert_eq!(kind(&mut h, P2(8030.0, 20.0)), Some(Kind::Endpoint));
+    shortcut(&mut h, "SM");
+    assert_eq!(kind(&mut h, P2(8030.0, 20.0)), Some(Kind::Free));
+    assert_eq!(kind(&mut h, P2(4030.0, 20.0)), Some(Kind::Midpoint));
+    // Each letter takes its own snap; SO takes none, SS puts them all back.
+    for (letters, once) in [
+        ("SE", Once::Only(Kind::Endpoint)),
+        ("SM", Once::Only(Kind::Midpoint)),
+        ("SI", Once::Only(Kind::Intersection)),
+        ("SC", Once::Only(Kind::Centre)),
+        ("SP", Once::Only(Kind::Perpendicular)),
+        ("SN", Once::Only(Kind::Nearest)),
+        ("SO", Once::Off),
+    ] {
+        shortcut(&mut h, letters);
+        assert_eq!(h.state().snap_once, Some(once), "{letters}");
+    }
+    assert!(h.query_by_label("Snaps off (next point)").is_some());
+    assert_eq!(kind(&mut h, P2(4030.0, 20.0)), Some(Kind::Free));
+    shortcut(&mut h, "SS");
+    assert_eq!(h.state().snap_once, None);
+    assert_eq!(kind(&mut h, P2(4030.0, 20.0)), Some(Kind::Midpoint));
+    // One pick: the click goes where it was, unsnapped, and the snaps are back.
+    shortcut(&mut h, "SO");
+    click(&mut h, P2(4030.0, 20.0));
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(4030.0, 20.0)]));
+    assert_eq!((h.state().snap_once, kind(&mut h, P2(8030.0, 20.0))), (None, Some(Kind::Endpoint)));
+    // Esc takes it away first, leaving the chain; a second Esc drops that.
+    shortcut(&mut h, "SO");
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().snap_once, None);
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(4030.0, 20.0)]), "the chain stays");
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().tool, Tool::Wall(Vec::new()));
+    // Another tool takes it away too.
+    shortcut(&mut h, "SE");
+    tool(&mut h, "Door");
+    assert_eq!(h.state().snap_once, None);
+    // And so does opening another view.
+    shortcut(&mut h, "SE");
+    browse(&mut h, "{3D}");
+    assert_eq!(h.state().snap_once, None);
+}
+
+#[test]
+fn a_snap_override_is_used_up_by_a_typed_length_and_by_enter_too() {
+    let mut h = app(BOX);
+    tool(&mut h, "Wall");
+    click(&mut h, P2(1000.0, 1000.0));
+    hover(&mut h, P2(4000.0, 1000.0));
+    shortcut(&mut h, "SO");
+    h.event(Event::Text("3000".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0), P2(4000.0, 1000.0)]), "3000 mm along");
+    assert_eq!(h.state().snap_once, None, "the typed point was the one");
+    shortcut(&mut h, "SE");
+    key(&mut h, Key::Enter);
+    assert_eq!(h.state().snap_once, None, "so was the Enter that built the walls");
+}
+
+#[test]
+fn a_ruler_stays_in_the_view_it_was_laid_in() {
+    let mut h = app(BOX);
+    shortcut(&mut h, "ME");
+    click(&mut h, P2(0.0, 0.0));
+    click(&mut h, P2(6000.0, 4000.0));
+    assert!(h.state().measured.is_some());
+    browse(&mut h, "{3D}");
+    assert_eq!(h.state().measured, None, "not carried to another view");
+    shortcut(&mut h, "ME");
+    assert_eq!(h.state().measured, None, "nor back from it");
+}
+
+#[test]
+fn committing_a_walls_angle_unchanged_turns_nothing() {
+    // 30.2044°, which the label reads as 30.2°.
+    let mut h = app(r#"wall {"points": [[0,0],[3470,2020]]}"#);
+    click(&mut h, P2(1735.0, 1010.0));
+    let before = (walls(&h), h.state().session.history().len());
+    h.get_by_label_contains("Turn the wall about its start").click();
+    h.run();
+    key(&mut h, Key::Enter);
+    assert_eq!((walls(&h), h.state().session.history().len()), before, "nothing moved, and no undo step");
+    // Typed over, it turns.
+    h.get_by_label_contains("Turn the wall about its start").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("30".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    let (a, b) = walls(&h)[0];
+    assert!((degrees(a, b) - 30.0).abs() < 1e-6, "{a:?} {b:?}");
+}
+
+#[test]
+fn an_arcs_through_point_sticks_to_what_is_there_but_not_to_angle_guides() {
+    use bimcraft_core::snap::Kind;
+    let mut h = app(BOX);
+    tool(&mut h, "Wall");
+    press(&mut h, "Start-End-Radius Arc");
+    click(&mut h, P2(1000.0, 3000.0));
+    click(&mut h, P2(5000.0, 3000.0));
+    // 90° up from its end is a guide for a line, not for the point an arc passes through.
+    let f = hover(&mut h, P2(5030.0, 4500.0)).unwrap();
+    assert_eq!((f.kind, f.at), (Kind::Free, P2(5030.0, 4500.0)));
+}
+
+#[test]
+fn new_keeps_the_snaps_as_they_were_set() {
+    let mut h = app(BOX);
+    h.state_mut().snaps.angle = 5.0;
+    h.state_mut().snaps.midpoint = false;
+    h.key_press_modifiers(Modifiers::COMMAND, Key::N);
+    h.run();
+    assert!(h.state().session.model.elements.values().all(|e| e.category() == "level"), "a new project");
+    assert_eq!((h.state().snaps.angle, h.state().snaps.midpoint), (5.0, false));
+}
+
+#[test]
+fn a_typed_length_too_long_is_refused_and_a_far_point_does_not_stall_the_guide() {
+    let mut h = app(BOX);
+    tool(&mut h, "Wall");
+    click(&mut h, P2(1000.0, 1000.0));
+    hover(&mut h, P2(4000.0, 1000.0));
+    // Past the largest coordinate: refused, the chain as it was.
+    h.event(Event::Text("2000000000".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    assert!(h.state().status.error, "{:?}", h.state().status.text);
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0)]));
+    // Within it, a point a million metres off: the dashed guide back from it is a screen long, not
+    // a dash for every ten pixels of the way.
+    h.event(Event::Text("900000000".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    assert!(matches!(&h.state().tool, Tool::Wall(chain) if chain.len() == 2), "{:?}", h.state().tool);
+    assert!(hover(&mut h, P2(3000.0, 1000.0)).is_some_and(|f| f.guide.is_some()), "its guide, drawn");
 }

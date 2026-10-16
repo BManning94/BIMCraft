@@ -22,6 +22,7 @@ use std::sync::Arc;
 use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
 use bimcraft_core::model::{CEILING_HEIGHT, DimKind, Element, Id, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
+use bimcraft_core::snap::{Kind as Snap, Snaps};
 use bimcraft_core::units::Units;
 use bimcraft_core::{element_json, render, schedule, stairs};
 use egui::containers::menu::{MenuButton, SubMenuButton};
@@ -104,6 +105,8 @@ pub enum Tool {
     Text,
     /// A spot elevation where clicked.
     Spot,
+    /// A ruler laid between two points: the first, once clicked.
+    Measure(Option<P2>),
     /// Tag the door or window clicked.
     Tag,
     /// A section: its start, once clicked.
@@ -152,6 +155,14 @@ pub struct Status {
     pub error: bool,
 }
 
+/// A snap override typed as a shortcut, for the next point picked: Revit's SE, SM, SI, SC, SP and
+/// SN (that snap alone), and SO (none).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Once {
+    Only(Snap),
+    Off,
+}
+
 /// The ribbon's tabs. `Context` is the contextual Modify tab of the tool or the selection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tab {
@@ -182,7 +193,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 13] = [
+const SHORTCUTS: [(&str, &str); 21] = [
     ("MD", "Modify"),
     ("MM", "Mirror Pick Axis"),
     ("DM", "Mirror Draw Axis"),
@@ -195,6 +206,14 @@ const SHORTCUTS: [(&str, &str); 13] = [
     ("CS", "Create Similar"),
     ("PP", "Properties"),
     ("SA", "Select All Instances"),
+    ("SE", "Snap to Endpoints"),
+    ("SM", "Snap to Midpoints"),
+    ("SI", "Snap to Intersections"),
+    ("SC", "Snap to Centres"),
+    ("SP", "Snap to Perpendiculars"),
+    ("SN", "Snap to Nearest"),
+    ("SO", "Snaps Off"),
+    ("SS", "Turn Snap Override Off"),
     ("KS", "Keyboard Shortcuts"),
 ];
 
@@ -305,6 +324,16 @@ pub struct BimApp {
     typed_length: String,
     /// A selected wall's temporary dimension being typed: the wall, the length so far.
     dim_edit: Option<(Id, String)>,
+    /// A selected wall's angle being typed: the wall, whether it turns about its start (else its
+    /// end), the angle so far.
+    angle_edit: Option<(Id, bool, String)>,
+    /// The snaps in force (Manage > Snaps), and whether their dialog is open.
+    snaps: Snaps,
+    show_snaps: bool,
+    /// An override of them for the next point picked, typed as a shortcut.
+    snap_once: Option<Once>,
+    /// The Measure tool's last ruler: where it starts and ends.
+    measured: Option<(P2, P2)>,
     /// Tab pressed over the plan, taken from egui's focus keys: cycle what's under the cursor.
     tab_cycle: bool,
     show_properties: bool,
@@ -550,6 +579,11 @@ impl BimApp {
             show_properties: true,
             show_browser: true,
             show_shortcuts: false,
+            angle_edit: None,
+            snaps: Snaps::default(),
+            show_snaps: false,
+            snap_once: None,
+            measured: None,
             open_units: false,
             canvas: canvas::Canvas::default(),
             orbit: orbit::Orbit::default(),
@@ -623,6 +657,7 @@ impl BimApp {
             Tool::Dimension(_) | Tool::Angular(_) | Tool::Radial(_) => Some("Place Dimensions"),
             Tool::Text => Some("Place Text"),
             Tool::Spot => Some("Spot Elevation"),
+            Tool::Measure(_) => Some("Measure"),
             Tool::Tag => Some("Tag"),
             Tool::Section(_) => Some("Section"),
             Tool::Elevation => Some("Elevation"),
@@ -812,6 +847,7 @@ impl BimApp {
             || self.schedule_dialog.is_some()
             || self.new_schedule.is_some()
             || self.show_shortcuts
+            || self.show_snaps
             || self.pending.is_some()
         {
             return;
@@ -849,6 +885,8 @@ impl BimApp {
                 (_, true) => self.finish_wall(level, false),
                 (_, false) => self.place_typed(level),
             }
+            // A snap override typed was for that point.
+            self.snap_once = None;
         }
         if !self.typed_length.is_empty() && pressed(Modifiers::NONE, Key::Backspace) {
             self.typed_length.pop();
@@ -926,6 +964,20 @@ impl BimApp {
                 self.show_shortcuts = true;
                 return true;
             }
+            // Revit's snap overrides: for the next point picked, that snap alone, or none.
+            "SE" | "SM" | "SI" | "SC" | "SP" | "SN" | "SO" | "SS" => {
+                self.snap_once = match self.typed.as_str() {
+                    "SE" => Some(Once::Only(Snap::Endpoint)),
+                    "SM" => Some(Once::Only(Snap::Midpoint)),
+                    "SI" => Some(Once::Only(Snap::Intersection)),
+                    "SC" => Some(Once::Only(Snap::Centre)),
+                    "SP" => Some(Once::Only(Snap::Perpendicular)),
+                    "SN" => Some(Once::Only(Snap::Nearest)),
+                    "SO" => Some(Once::Off),
+                    _ => None,
+                };
+                return true;
+            }
             code => match engine::find(code).map(|c| c.id) {
                 Some("wall") => Tool::Wall(Vec::new()),
                 Some("door") => Tool::Door,
@@ -945,6 +997,7 @@ impl BimApp {
                 Some("column") => Tool::Column,
                 Some("component") => Tool::Component,
                 Some("section") => Tool::Section(None),
+                Some("measure") => Tool::Measure(None),
                 Some("delete") => {
                     self.delete();
                     return true;
@@ -960,6 +1013,24 @@ impl BimApp {
         };
         self.set_tool(tool);
         true
+    }
+
+    /// The snaps in force for the next point picked: Manage > Snaps, unless a shortcut (SE, SM, SI,
+    /// SC, SP, SN, SO) has overridden them for it.
+    pub(crate) fn snaps_now(&self) -> Snaps {
+        match self.snap_once {
+            Some(Once::Only(kind)) => Snaps::only(kind),
+            Some(Once::Off) => Snaps::none(),
+            None => self.snaps,
+        }
+    }
+
+    /// What the status bar says of a snap override waiting for the next point.
+    fn snap_note(&self) -> Option<String> {
+        match self.snap_once? {
+            Once::Only(kind) => Some(tf("Snap: {} (next point)", &[t(kind.name())])),
+            Once::Off => Some(t("Snaps off (next point)").to_string()),
+        }
     }
 
     /// Create Similar (CS): the tool that makes what's selected, one element, with its type picked.
@@ -1087,6 +1158,10 @@ impl BimApp {
         }
         self.typed.clear();
         self.typed_length.clear();
+        if !matches!(tool, Tool::Measure(_)) {
+            self.measured = None;
+        }
+        self.snap_once = None;
         self.tool = tool;
     }
 
@@ -1192,6 +1267,10 @@ impl BimApp {
     /// selection.
     fn escape(&mut self) {
         self.typed.clear();
+        // A snap override waiting for its point goes first, leaving what's being drawn.
+        if self.snap_once.take().is_some() {
+            return;
+        }
         self.typed_length.clear();
         self.status = Status::default();
         self.tool = match std::mem::replace(&mut self.tool, Tool::Modify) {
@@ -1204,6 +1283,9 @@ impl BimApp {
             Tool::Angular(refs) if !refs.is_empty() => Tool::Angular(Vec::new()),
             Tool::Radial(Some(_)) => Tool::Radial(None),
             Tool::Section(Some(_)) => Tool::Section(None),
+            Tool::Measure(Some(_)) => Tool::Measure(None),
+            // The ruler laid goes first, then the tool.
+            Tool::Measure(None) if self.measured.take().is_some() => Tool::Measure(None),
             Tool::Stair(pts) if !pts.is_empty() => Tool::Stair(Vec::new()),
             Tool::Ramp(pts) if !pts.is_empty() => Tool::Ramp(Vec::new()),
             Tool::Railing(pts) if !pts.is_empty() => Tool::Railing(Vec::new()),
@@ -1240,6 +1322,9 @@ impl BimApp {
         self.sheet = sheet;
         self.selection.clear();
         self.typed_length.clear();
+        self.snap_once = None;
+        // A ruler belongs to the view it was laid in.
+        self.measured = None;
         // The tools that pick points work in plans (Text in sections and on sheets too, Spot
         // Elevation in sections); any other view takes clicks to select.
         let works = match sheet {
@@ -1256,7 +1341,7 @@ impl BimApp {
             Tool::Grid(start) => *start = None,
             Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
             Tool::Radial(r) => *r = None,
-            Tool::Section(start) | Tool::Shaft(start) => *start = None,
+            Tool::Section(start) | Tool::Shaft(start) | Tool::Measure(start) => *start = None,
             Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::ExtrusionRoof(pts) => pts.clear(),
             Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) | Tool::GableEdge => self.tool = Tool::Modify,
             _ => {}
@@ -1391,8 +1476,8 @@ impl BimApp {
     fn reopened(&mut self) {
         let mut fresh = BimApp::new(std::mem::take(&mut self.session));
         fresh.status = std::mem::take(&mut self.status);
-        (fresh.thin, fresh.show_properties, fresh.show_browser, fresh.lang) =
-            (self.thin, self.show_properties, self.show_browser, self.lang);
+        (fresh.thin, fresh.show_properties, fresh.show_browser, fresh.lang, fresh.snaps) =
+            (self.thin, self.show_properties, self.show_browser, self.lang, self.snaps);
         *self = fresh;
     }
 
@@ -1648,6 +1733,16 @@ impl BimApp {
             "Text",
             &[(Icon::Text, "Text", "Text (TX): type the note in the Options Bar, then click where it goes", Tool::Text)],
         );
+        self.tools(
+            ui,
+            "Measure",
+            &[(
+                Icon::Measure,
+                "Measure",
+                "Measure (ME): click two points; their length and angle read beside the ruler between them",
+                Tool::Measure(None),
+            )],
+        );
         panel(ui, "Tag", |ui| {
             let tip = "Tag by Category (TG): click a door or window to tag it with its mark";
             if big_button(ui, Icon::Tag, "Tag by Category", self.tool == Tool::Tag, tip).clicked() {
@@ -1786,6 +1881,10 @@ impl BimApp {
             let tip = "Project Parameters: values of your own each element of their categories holds, for schedules and IFC";
             if big_button(ui, Icon::Parameters, "Project Parameters", self.parameters_dialog.is_some(), tip).clicked() {
                 self.parameters_dialog = Some(properties::ParametersDialog::new(&self.session.model));
+            }
+            let tip = "Snaps: what a picked point sticks to (ends, middles, crossings, centres, perpendiculars), and the angles it steps by; SE, SM, SI, SC, SP and SN take one alone for the next point, SO none";
+            if big_button(ui, Icon::Snaps, "Snaps", self.show_snaps, tip).clicked() {
+                self.show_snaps = true;
             }
             let now = self.session.model.units;
             let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
@@ -2183,6 +2282,8 @@ impl BimApp {
             Tool::Dimension(refs) if refs.is_empty() => "Pick a wall face, centre line or end, a door, a window or a grid to measure from.",
             Tool::Dimension(refs) if refs.len() == 1 => "Pick the next reference, parallel to the first.",
             Tool::Dimension(_) => "Pick more references, or click away from them where the dimension line goes. Esc cancels.",
+            Tool::Measure(None) => "Click the ruler's start: points snap as they do drawing.",
+            Tool::Measure(Some(_)) => "Click its end: its length and angle read beside it. Esc cancels.",
             Tool::Tag => "Click a door or window to tag it with its mark.",
             Tool::Angular(refs) if refs.len() < 2 => "Pick a wall, a grid or another line; then one that meets it.",
             Tool::Angular(_) => "Click where the arc goes: the angle on that side. Esc cancels.",
@@ -2232,6 +2333,9 @@ impl BimApp {
                 if let Some(p) = self.canvas.cursor {
                     let u = self.session.model.units;
                     ui.monospace(format!("x {}  y {}", u.with_unit(p.0), u.with_unit(p.1)));
+                }
+                if let Some(note) = self.snap_note() {
+                    ui.label(RichText::new(note).color(pal().accent));
                 }
                 if self.dirty() {
                     ui.label(RichText::new(t("Unsaved changes")).color(pal().muted));
@@ -2465,6 +2569,7 @@ impl BimApp {
         self.type_properties(ctx);
         self.family_type_properties(ctx);
         self.materials_window(ctx);
+        self.snaps_window(ctx);
         self.parameters_window(ctx);
         self.new_schedule_window(ctx);
         self.schedule_window(ctx);

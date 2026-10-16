@@ -415,6 +415,35 @@ fn tags_name_doors_and_windows_and_go_where_they_go() {
 }
 
 #[test]
+fn measure_reads_the_length_parts_and_angle_between_two_points_and_changes_nothing() {
+    let mut s = Session::new();
+    house(&mut s);
+    let before = run(&mut s, "inspect", json!({}))["history"].clone();
+    let r = run(&mut s, "measure", json!({"from": [0, 0], "to": [3000, 4000]}));
+    assert_eq!((&r["length"], &r["dx"], &r["dy"], &r["angle"]), (&json!(5000.0), &json!(3000.0), &json!(4000.0), &json!(53.1301)));
+    // Any way round: 180° west, 270° south; a point on itself is nothing to measure but still reads.
+    assert_eq!(run(&mut s, "measure", json!({"from": [0, 0], "to": [-1000, 0]}))["angle"], json!(180.0));
+    assert_eq!(run(&mut s, "measure", json!({"from": [500, 500], "to": [500, -500]}))["angle"], json!(270.0));
+    assert_eq!(run(&mut s, "measure", json!({"from": [7, 7], "to": [7, 7]}))["length"], json!(0.0));
+    // Its ME shortcut runs it, and it's no undo step.
+    assert_eq!(bimcraft_core_find("ME"), Some("measure"));
+    assert_eq!(run(&mut s, "inspect", json!({}))["history"], before);
+    for (bad, says) in [
+        (json!({"from": [0, 0]}), "to"),
+        (json!({"to": [0, 0]}), "from"),
+        (json!({"from": [1e300, 0], "to": [0, 0]}), "from"),
+        (json!({"from": "x", "to": [0, 0]}), "from"),
+    ] {
+        let e = s.execute("measure", &bad).unwrap_err();
+        assert!(e.contains(says), "{bad}: {e}");
+    }
+}
+
+fn bimcraft_core_find(alias: &str) -> Option<&'static str> {
+    crate::engine::find(alias).map(|c| c.id)
+}
+
+#[test]
 fn project_parameters_give_the_elements_of_their_categories_values_of_their_own() {
     let mut s = Session::new();
     let ids = house(&mut s);
@@ -1202,6 +1231,8 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"category": "doors", "fields": [{"name": "Count", "total": true, "heading": 5}, {"name": "Z", "formula": "1/0", "total": true}]}),
         json!({"name": "Door Schedule", "category": "rooms", "path": "/nonexistent/x.csv"}),
         json!({"name": "W", "category": "walls", "fields": [{"name": "A", "formula": "B"}, {"name": "B", "formula": "C"}, {"name": "C", "formula": "A"}]}),
+        json!({"from": [1e300, -1e300], "to": [f64::MAX, 0]}),
+        json!({"from": [0, 0], "to": "x"}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {

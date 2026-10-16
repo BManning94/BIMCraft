@@ -20,7 +20,7 @@ use crate::model::{
 use crate::render::Drawing;
 use crate::units::Units;
 use crate::walls::{self, Axis, stacked};
-use crate::{pdf, render, schedule, sheet, stairs, view3d};
+use crate::{pdf, render, schedule, sheet, snap, stairs, view3d};
 
 type R = Result<Value, String>;
 
@@ -435,6 +435,15 @@ pub static ALL: &[Command] = &[
          left empty. Each one given replaces the last; `fields: []` goes back to its category's",
         schedule,
     ),
+    Command {
+        id: "measure",
+        label: "Measure",
+        aliases: &["ME"],
+        params: "{from: [x, y], to: [x, y]} what a ruler laid between two points reads (mm): its `length`, its parts `dx` and `dy`, \
+                 and its `angle` in degrees from east, counter-clockwise; it changes nothing",
+        run: measure,
+        undoable: false,
+    },
     other(
         "elements",
         "Elements",
@@ -1148,6 +1157,13 @@ fn schedule(s: &mut Session, p: &Value) -> R {
         out["totals"] = json!(totals);
     }
     Ok(out)
+}
+
+fn measure(_: &mut Session, p: &Value) -> R {
+    let c = "measure";
+    let r = snap::ruler(point_req(c, p, "from")?, point_req(c, p, "to")?);
+    let to = |x: f64, k: f64| (x * k).round() / k + 0.0;
+    Ok(json!({"length": to(r.length, 100.0), "dx": to(r.dx, 100.0), "dy": to(r.dy, 100.0), "angle": to(r.angle, 1e4)}))
 }
 
 fn undo(s: &mut Session, _: &Value) -> R {

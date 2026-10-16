@@ -106,6 +106,16 @@ m²), a field with no value leaving it with none (an unset yes or no is no). Fil
 them, so two that show the same are equal. The six schedules every project has (`schedule::VIEWS`) aren't elements
 until changed or placed (`schedule::standard`), and a schedule named as one of them, in any language or case, is that one; renaming a parameter renames it in schedules, but a formula naming it holds
 the rename back.
+A point picked in a plan lands where `snap::snap` says, the core's so every front end agrees: on the end, middle or centre of
+what's drawn (`Scene::of`), where two straight lines (walls, grids; not arcs) cross, the foot of the perpendicular from the last point
+to one, a guide through that point at
+a multiple of `Snaps::angle` from east or from the line before it (where the guide crosses a wall or grid it lands there, and a
+grid point lying on it beats a rounded length), a wall's centre line, else the nearest 10 mm. The desktop's `BimApp::snap` gives
+it the reach in px (`SNAP`, `PICK`) and the snaps in force (Manage > Snaps, kept while the window is open, or for one point
+a shortcut's override: `snap_once`, `Snaps::only`, `Snaps::none`); `found` and
+`show_snap` draw what a pick would land on, and a point that moves with the cursor goes through them. A selected wall's ends are
+grips (`grip_drag`): a drag runs `move` with `end`, Ctrl keeps the length; the angle beside each end runs `rotate` about it. A
+wall joined at the end that moves keeps its joint, which slides along the wall it meets, so lengths change.
 A family (`Model::families`, `family.rs`) is parameters, types that set them and forms in its own axes: x along a
 component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
 `yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;

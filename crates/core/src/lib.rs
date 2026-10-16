@@ -17,6 +17,7 @@ pub mod sample;
 pub mod schedule;
 pub mod sheet;
 pub mod skeleton;
+pub mod snap;
 pub mod stairs;
 pub mod step;
 pub mod units;

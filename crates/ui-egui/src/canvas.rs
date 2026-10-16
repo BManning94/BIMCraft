@@ -3,15 +3,16 @@
 //! selection (click, Ctrl adds, Shift takes away, Tab for what's underneath, boxes), dragging,
 //! the tools' points, temporary dimensions, and previews of what a click would do.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::f64::consts::PI;
 
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
     Column, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note,
-    RISER, Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag,
+    RISER, Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag, Wall,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
+use bimcraft_core::snap::{self, Found, Kind, Reach};
 use bimcraft_core::walls::{self, Axis};
 use bimcraft_core::{floor_outline, roof_footprint};
 use egui::{
@@ -65,6 +66,10 @@ pub struct Canvas {
     cycle: usize,
     /// A crop region's grip being dragged: the view, and which edge (see [`grips`]).
     crop_drag: Option<(Id, usize)>,
+    /// A selected wall's end being dragged: the wall, and whether it's its start.
+    grip: Option<(Id, bool)>,
+    /// What the last point a tool previewed snapped to this frame, if one did.
+    pub(crate) found: Cell<Option<Found>>,
 }
 
 impl Default for Canvas {
@@ -79,6 +84,8 @@ impl Default for Canvas {
             under: Vec::new(),
             cycle: 0,
             crop_drag: None,
+            grip: None,
+            found: Cell::new(None),
         }
     }
 }
@@ -324,6 +331,53 @@ fn ghost(p: &Painter, origin: Pos2, d: &Drawing, selected: &[Id], f: &dyn Fn(Pos
     }
 }
 
+/// A short reading drawn where a tool previews, on a soft background so it stays legible over
+/// what's drawn: `text` anchored at `at` as `align` says.
+fn tag(p: &Painter, at: Pos2, align: Align2, text: impl Into<String>) {
+    let galley = p.layout_no_wrap(text.into(), FontId::proportional(12.0), pal().accent);
+    let rect = align.anchor_size(at, galley.size());
+    p.rect_filled(rect.expand2(vec2(3.0, 1.0)), 2.0, pal().surface.gamma_multiply(0.85));
+    p.galley(rect.min, galley, pal().accent);
+}
+
+/// A ruler from `a` to `b`: its line, and its graduations at round lengths at least 10 px apart,
+/// every fifth longer.
+fn ruler_shapes(sc: &Scene, a: P2, b: P2) -> Vec<Shape> {
+    let (pa, pb) = (sc.screen(a), sc.screen(b));
+    let stroke = Stroke::new(1.0, pal().accent);
+    let mut shapes = vec![Shape::line_segment([pa, pb], Stroke::new(2.0, pal().accent))];
+    let len = pa.distance(pb);
+    if len < 30.0 {
+        return shapes;
+    }
+    let (u, step) = ((pb - pa) / len, (snap::graduation(sc.v.scale) * sc.v.scale) as f32);
+    let n = vec2(u.y, -u.x);
+    for k in 1..=((len / step) as usize).min(500) {
+        let (at, half) = (pa + u * (step * k as f32), if k % 5 == 0 { 7.0 } else { 3.5 });
+        shapes.push(Shape::line_segment([at - n * half, at + n * half], stroke));
+    }
+    shapes
+}
+
+/// The angle at `last` between the line back to `prev` and the line on to `next`, as a small arc.
+fn corner_arc(sc: &Scene, prev: P2, last: P2, next: P2) -> Option<Shape> {
+    let (c, a, b) = (sc.screen(last), sc.screen(prev) - sc.screen(last), sc.screen(next) - sc.screen(last));
+    if a.length() < 30.0 || b.length() < 30.0 {
+        return None;
+    }
+    let (a0, a1) = (a.y.atan2(a.x), b.y.atan2(b.x));
+    // The way round that's the smaller angle.
+    let mut sweep = a1 - a0;
+    while sweep > std::f32::consts::PI {
+        sweep -= std::f32::consts::TAU;
+    }
+    while sweep < -std::f32::consts::PI {
+        sweep += std::f32::consts::TAU;
+    }
+    let pts = (0..=12).map(|i| a0 + sweep * i as f32 / 12.0).map(|t| c + vec2(t.cos(), t.sin()) * 22.0).collect();
+    Some(Shape::line(pts, Stroke::new(1.0, pal().accent)))
+}
+
 /// What a preview draws on: the canvas, the model and its drawing, the level and the view.
 struct Scene<'a> {
     p: &'a Painter,
@@ -346,9 +400,10 @@ fn nearest_line(m: &Model, id: Id, p: P2) -> Option<(P2, P2)> {
 }
 
 /// Degrees from the ray `centre`→`from` to the ray `centre`→`to`, counter-clockwise, in
-/// (-180, 180]; each ray onto the nearest 15° when it's within 3° of one.
-fn angle_between(centre: P2, from: P2, to: P2) -> f64 {
-    let (a, b) = (snap_angle(from - centre), snap_angle(to - centre));
+/// (-180, 180]; each ray onto the nearest multiple of `inc` degrees when it's within a few
+/// degrees of one.
+fn angle_between(centre: P2, from: P2, to: P2, inc: f64) -> f64 {
+    let (a, b) = (snap_angle(from - centre, inc), snap_angle(to - centre, inc));
     let d = (b.1.atan2(b.0) - a.1.atan2(a.0)).to_degrees();
     if d > 180.0 {
         d - 360.0
@@ -393,19 +448,34 @@ fn micron(p: P2) -> P2 {
     P2((p.0 * 1e3).round() / 1e3, (p.1 * 1e3).round() / 1e3)
 }
 
-/// `d`'s direction, turned onto the nearest multiple of 15° when it's within 3° of one, as
-/// Revit's angle snaps do.
-fn snap_angle(d: P2) -> P2 {
+/// `d`'s direction, turned onto the nearest multiple of `inc` degrees when it's within 3° of one
+/// (less where they lie closer), as Revit's angle snaps do; `inc` outside 1 to 180 for none.
+fn snap_angle(d: P2, inc: f64) -> P2 {
     let a = d.1.atan2(d.0);
-    let near = (a / (PI / 12.0)).round() * (PI / 12.0);
-    let a = if (a - near).abs() <= 3f64.to_radians() { near } else { a };
+    if !(1.0..=180.0).contains(&inc) {
+        return P2(a.cos(), a.sin());
+    }
+    let step = inc.to_radians();
+    let near = (a / step).round() * step;
+    let a = if (a - near).abs() <= 3f64.to_radians().min(0.4 * step) { near } else { a };
     P2(a.cos(), a.sin())
+}
+
+/// `a` degrees turned into [0, 360).
+fn norm_turn(a: f64) -> f64 {
+    let a = a.rem_euclid(360.0);
+    if a >= 360.0 { 0.0 } else { a }
+}
+
+/// An angle as a ruler reads it: to the hundredth of a degree.
+fn degrees(a: f64) -> String {
+    format!("{}°", (a * 100.0).round() / 100.0 + 0.0)
 }
 
 /// The point a tool picked first, while it has one.
 fn start_of(tool: &Tool) -> &[P2] {
     match tool {
-        Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) => start.as_slice(),
+        Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::Measure(start) => start.as_slice(),
         _ => &[],
     }
 }
@@ -451,45 +521,77 @@ pub(crate) fn click_modifiers(ui: &Ui) -> Modifiers {
     })
 }
 
-/// Where a click at `at` lands when picking points (walls, grids, a move's): on a wall's end or
-/// a point of the chain within a few px, else on the centre line of the wall under the cursor
-/// (so walls meet), else on the nearest 10 mm. `square` keeps the step from the chain's last
-/// point horizontal or vertical.
-fn snap(m: &Model, level: Id, v: &View, at: (f32, f32), chain: &[P2], square: bool) -> P2 {
-    let mut p = v.mm(at);
-    if square && let Some(&from) = chain.last() {
-        if (p.0 - from.0).abs() > (p.1 - from.1).abs() {
-            p.1 = from.1;
-        } else {
-            p.0 = from.0;
+impl BimApp {
+    /// Where a point picked at pixel `at` lands, with the points `from` already picked: on what
+    /// the plan has there, a guide at an angle from the last of them, a wall's centre line, or the
+    /// nearest 10 mm, as Manage > Snaps says. `square` keeps the step from the last horizontal or
+    /// vertical.
+    pub(crate) fn snap(&self, m: &Model, level: Id, v: &View, at: (f32, f32), from: &[P2], square: bool) -> Found {
+        let reach = Reach { point: SNAP / v.scale, line: f64::from(PICK) / v.scale };
+        snap::snap(m, level, v.mm(at), reach, from, square, &self.snaps_now())
+    }
+
+    /// What a pick at pixel `q` would land on, shown: its marker and what it is, and the guide it
+    /// follows. The point.
+    fn found(&self, sc: &Scene, q: (f32, f32), from: &[P2], square: bool) -> P2 {
+        let f = self.snap(sc.m, sc.level, sc.v, q, from, square);
+        self.show_snap(sc, &f);
+        self.canvas.found.set(Some(f));
+        f.at
+    }
+
+    /// A snap's guide, dashed through the point it runs from and on past the snapped one; its
+    /// marker, by what it snapped to; and its name.
+    fn show_snap(&self, sc: &Scene, f: &Found) {
+        let (p, at) = (sc.p, sc.screen(f.at));
+        let (stroke, thin) = (Stroke::new(2.0, pal().accent), Stroke::new(1.0, pal().accent));
+        if let Some(g) = f.guide {
+            let a = sc.screen(g.from);
+            if a.distance(at) > 1.0 {
+                // Back to the point it runs from, but no further than a screen's width: past that it
+                // can't be seen, and a point far off would make a dash for every 10 px.
+                let u = (at - a).normalized();
+                let back = a.distance(at).min(4000.0) + 24.0;
+                p.extend(Shape::dashed_line(&[at - u * back, at + u * 28.0], thin, 6.0, 4.0));
+            }
+        }
+        match f.kind {
+            Kind::Endpoint => {
+                p.rect_stroke(Rect::from_center_size(at, vec2(11.0, 11.0)), 0.0, stroke, StrokeKind::Middle);
+            }
+            Kind::Midpoint => {
+                p.add(Shape::closed_line(vec![at + vec2(0.0, -6.0), at + vec2(6.0, 5.0), at + vec2(-6.0, 5.0)], stroke));
+            }
+            Kind::Intersection => {
+                p.line_segment([at + vec2(-6.0, -6.0), at + vec2(6.0, 6.0)], stroke);
+                p.line_segment([at + vec2(-6.0, 6.0), at + vec2(6.0, -6.0)], stroke);
+            }
+            Kind::Centre => {
+                p.circle_stroke(at, 6.0, stroke);
+            }
+            // A right angle's foot: a line, and one standing square on it.
+            Kind::Perpendicular => {
+                p.line_segment([at + vec2(-7.0, 5.0), at + vec2(7.0, 5.0)], stroke);
+                p.line_segment([at + vec2(0.0, 5.0), at + vec2(0.0, -6.0)], stroke);
+            }
+            Kind::Nearest => {
+                p.add(Shape::closed_line(
+                    vec![at + vec2(0.0, -6.0), at + vec2(6.0, 0.0), at + vec2(0.0, 6.0), at + vec2(-6.0, 0.0)],
+                    stroke,
+                ));
+            }
+            Kind::Angle => {
+                p.circle_filled(at, 3.0, pal().accent);
+            }
+            Kind::Free => {
+                p.rect_stroke(Rect::from_center_size(at, vec2(8.0, 8.0)), 0.0, stroke, StrokeKind::Middle);
+            }
+        }
+        if !matches!(f.kind, Kind::Free | Kind::Angle) {
+            tag(p, at + vec2(12.0, 14.0), Align2::LEFT_TOP, t(f.kind.name()));
         }
     }
-    let walls: Vec<(Axis, f64)> = m
-        .elements
-        .values()
-        .filter_map(|e| match e {
-            Element::Wall(w) if m.cut_by(w, level) => Some((Axis::of(w), m.thickness(w))),
-            _ => None,
-        })
-        .collect();
-    let near = SNAP / v.scale;
-    let ends = walls.iter().flat_map(|(a, _)| [a.start, a.end]).chain(chain.iter().copied());
-    if let Some(end) = ends.filter(|e| e.dist(p) <= near).min_by(|a, b| a.dist(p).total_cmp(&b.dist(p))) {
-        return end;
-    }
-    let on = walls
-        .iter()
-        .map(|(a, t)| (a, a.distance(p, 0.0) - t / 2.0))
-        .filter(|(_, d)| *d <= f64::from(PICK) / v.scale)
-        .min_by(|x, y| x.1.total_cmp(&y.1));
-    match on {
-        // Along the wall's line to the nearest 10 mm from its start.
-        Some((a, _)) => micron(a.at((a.project(p).0 / 10.0).round() * 10.0, 0.0)),
-        None => round(p),
-    }
-}
 
-impl BimApp {
     /// The plan of `level`, filling `ui`.
     pub(crate) fn canvas(&mut self, ui: &mut Ui, level: Id) {
         // Clicks and drags; never the keyboard, which the shortcuts need.
@@ -564,10 +666,13 @@ impl BimApp {
         };
 
         let crop = self.crop_grips(ui, &response, rect, &view, level);
+        self.canvas.found.set(None);
+        self.grip_drag(ui, &response, rect, &view, level);
         // A drag from an element moves the selection; from empty floor, it draws a selection box.
         if response.drag_started_by(PointerButton::Primary)
             && self.tool == Tool::Modify
             && self.canvas.crop_drag.is_none()
+            && self.canvas.grip.is_none()
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
             let o = (o.x - rect.min.x, o.y - rect.min.y);
@@ -607,6 +712,8 @@ impl BimApp {
             && let Some(at) = response.interact_pointer_pos()
         {
             self.click(&model, level, &view, (at.x - rect.min.x, at.y - rect.min.y), hovered, click_modifiers(ui));
+            // A snap override typed was for that point.
+            self.snap_once = None;
         }
 
         let p = ui.painter_at(rect);
@@ -647,6 +754,27 @@ impl BimApp {
             let scene = Scene { p: &p, m: &model, d: &d, level, v: &view };
             self.preview(&scene, q, hovered, mods.shift);
         }
+        // The Measure tool's ruler, as laid.
+        if let (Tool::Measure(_), Some((a, b))) = (&self.tool, self.measured) {
+            let scene = Scene { p: &p, m: &model, d: &d, level, v: &view };
+            p.extend(ruler_shapes(&scene, a, b));
+            let r = snap::ruler(a, b);
+            let units = model.units;
+            let text = format!(
+                "{}  {}  dx {}  dy {}",
+                units.with_unit(r.length),
+                degrees(r.angle),
+                units.with_unit(r.dx.abs()),
+                units.with_unit(r.dy.abs())
+            );
+            let (pa, pb) = (scene.screen(a), scene.screen(b));
+            let n = (pb - pa).normalized().rot90();
+            tag(&p, pa + (pb - pa) / 2.0 + n * 20.0, Align2::CENTER_CENTER, text);
+            for q in [pa, pb] {
+                p.rect_stroke(Rect::from_center_size(q, vec2(8.0, 8.0)), 0.0, Stroke::new(2.0, pal().accent), StrokeKind::Middle);
+            }
+        }
+        self.grip_overlay(ui, &model, &view, rect, level, &d);
         self.temporary_dimension(ui, &model, &view, rect);
         self.nav_bar(ui, rect, level);
     }
@@ -757,15 +885,32 @@ impl BimApp {
                     Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) => start.iter().copied().collect(),
                     _ => Vec::new(),
                 };
+                // The point an arc passes through follows no guide from the points before it.
+                let chain = if self.wall_arc && matches!(self.tool, Tool::Wall(_)) && chain.len() == 2 { Vec::new() } else { chain };
                 let square = mods.shift || (self.constrain && matches!(self.tool, Tool::Move(_) | Tool::Copy(_)));
-                self.place(level, snap(m, level, v, at, &chain, square));
+                self.place(level, self.snap(m, level, v, at, &chain, square).at);
             }
             &Tool::Rotate { centre, start, place } => {
                 self.tool = match (place, start) {
-                    (true, _) => Tool::Rotate { centre: snap(m, level, v, at, &[], false), start: None, place: false },
+                    (true, _) => Tool::Rotate { centre: self.snap(m, level, v, at, &[], false).at, start: None, place: false },
                     (false, None) => Tool::Rotate { centre, start: Some(v.mm(at)), place: false },
-                    (false, Some(from)) => return self.turn(centre, angle_between(centre, from, v.mm(at))),
+                    (false, Some(from)) => return self.turn(centre, angle_between(centre, from, v.mm(at), self.snaps.angle)),
                 };
+            }
+            // A ruler: its start, then its end, which stays on show until Esc or another start.
+            &Tool::Measure(first) => {
+                let p = self.snap(m, level, v, at, first.as_slice(), mods.shift).at;
+                match first {
+                    None => {
+                        self.measured = None;
+                        self.tool = Tool::Measure(Some(p));
+                    }
+                    Some(a) if a.dist(p) > TOL => {
+                        self.measured = Some((a, p));
+                        self.tool = Tool::Measure(None);
+                    }
+                    Some(_) => {}
+                }
             }
             Tool::Mirror { draw: false, .. } => {
                 if let Some(axis) = hovered.and_then(|id| nearest_line(m, id, v.mm(at))) {
@@ -773,7 +918,7 @@ impl BimApp {
                 }
             }
             &Tool::Mirror { draw: true, start } => {
-                let p = snap(m, level, v, at, start.as_slice(), mods.shift);
+                let p = self.snap(m, level, v, at, start.as_slice(), mods.shift).at;
                 match start {
                     None => self.tool = Tool::Mirror { draw: true, start: Some(p) },
                     Some(a) => self.reflect((a, p)),
@@ -794,7 +939,7 @@ impl BimApp {
             },
             Tool::Split => {
                 if let Some(id) = hovered {
-                    self.run("split", json!({"id": id, "at": point(snap(m, level, v, at, &[], false))}));
+                    self.run("split", json!({"id": id, "at": point(self.snap(m, level, v, at, &[], false).at)}));
                 }
             }
             Tool::Offset => {
@@ -874,7 +1019,7 @@ impl BimApp {
             }
             Tool::Component => {
                 if let Some((family, ty)) = self.placing() {
-                    let at = snap(m, level, v, at, &[], false);
+                    let at = self.snap(m, level, v, at, &[], false).at;
                     self.run(
                         "component",
                         json!({"family": family, "type": ty, "at": point(at), "level": level, "angle": self.component_angle}),
@@ -883,7 +1028,7 @@ impl BimApp {
             }
             Tool::Column => match top_params(m, level, self.column_top, &self.column_height) {
                 Ok(mut p) => {
-                    p["at"] = point(snap(m, level, v, at, &[], false));
+                    p["at"] = point(self.snap(m, level, v, at, &[], false).at);
                     p["level"] = json!(level);
                     let p = typed(self, "column", p);
                     self.run("column", p);
@@ -895,7 +1040,7 @@ impl BimApp {
             Tool::Stair(pts) | Tool::Ramp(pts) => {
                 let ramp = matches!(self.tool, Tool::Ramp(_));
                 let mut pts = pts.clone();
-                let p = snap(m, level, v, at, &pts, mods.shift);
+                let p = self.snap(m, level, v, at, &pts, mods.shift).at;
                 if pts.last().is_some_and(|l| l.dist(p) <= TOL) {
                     return;
                 }
@@ -923,7 +1068,7 @@ impl BimApp {
                     self.run("railing", p);
                 }
                 _ => {
-                    let p = snap(m, level, v, at, path, mods.shift);
+                    let p = self.snap(m, level, v, at, path, mods.shift).at;
                     if let Tool::Railing(path) = &mut self.tool
                         && path.last().is_none_or(|l| l.dist(p) > TOL)
                     {
@@ -949,7 +1094,7 @@ impl BimApp {
             // Its line's start and end, then how far across it's swept; once made, selected.
             Tool::ExtrusionRoof(pts) => {
                 let mut pts = pts.clone();
-                let p = snap(m, level, v, at, &pts, mods.shift);
+                let p = self.snap(m, level, v, at, &pts, mods.shift).at;
                 if pts.last().is_some_and(|l| l.dist(p) <= TOL) {
                     return;
                 }
@@ -1030,7 +1175,7 @@ impl BimApp {
             },
             // Two opposite corners of a rectangle.
             &Tool::Shaft(start) => {
-                let p = snap(m, level, v, at, start.as_slice(), false);
+                let p = self.snap(m, level, v, at, start.as_slice(), false).at;
                 match start {
                     None => self.tool = Tool::Shaft(Some(p)),
                     Some(a) if (a.0 - p.0).abs() > TOL && (a.1 - p.1).abs() > TOL => {
@@ -1051,7 +1196,7 @@ impl BimApp {
             // The selected floor's slope arrow, from its tail to its head; then Modify, the floor
             // still selected.
             &Tool::SlopeArrow(tail) => {
-                let p = snap(m, level, v, at, tail.as_slice(), mods.shift);
+                let p = self.snap(m, level, v, at, tail.as_slice(), mods.shift).at;
                 match (tail, self.selected_floor(), number(&self.floor_slope)) {
                     (None, ..) => self.tool = Tool::SlopeArrow(Some(p)),
                     (Some(a), Some(floor), Some(slope)) if a.dist(p) > TOL => {
@@ -1305,13 +1450,17 @@ impl BimApp {
         }
     }
 
-    /// The typed length, from the tool's base point toward the cursor (onto the nearest 15° when
-    /// close): Enter while a length is typed.
+    /// The typed length, from the tool's base point toward the cursor: along the guide the cursor
+    /// snapped to, else onto the nearest snap angle when close. Enter while a length is typed.
     pub(crate) fn place_typed(&mut self, level: Id) {
         let typed = std::mem::take(&mut self.typed_length);
         let (Some(base), Some(cursor)) = (self.base(), self.canvas.cursor) else { return };
+        let toward = match self.canvas.found.get() {
+            Some(f) if f.at.dist(base) > TOL => (f.at - base).unit(),
+            _ => snap_angle(cursor - base, self.snaps.angle),
+        };
         match self.session.model.units.parse(&typed) {
-            Some(len) if len > 0.0 => self.place(level, micron(base + snap_angle(cursor - base) * len)),
+            Some(len) if len > 0.0 && len <= MAX_COORD => self.place(level, micron(base + toward * len)),
             _ => self.status = Status { text: tf("`{}` is not a length", &[typed.trim()]), error: true },
         }
     }
@@ -1347,6 +1496,176 @@ impl BimApp {
         self.run("wall", p).is_some()
     }
 
+    /// The wall selected alone, with Modify: the one whose ends are grips.
+    fn gripped(&self) -> Option<Id> {
+        match (self.selection.as_slice(), &self.tool) {
+            (&[id], Tool::Modify) if self.session.model.wall(id).is_some() => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Where wall `w`'s start (else its end) goes for a drag to pixel `q`: what that snaps to from
+    /// the wall's other end; with Ctrl, along that line at the wall's own length, so it turns
+    /// about its other end.
+    fn grip_target(&self, m: &Model, level: Id, v: &View, (w, start): (&Wall, bool), q: (f32, f32), mods: Modifiers) -> (Found, P2) {
+        let fixed = if start { w.end } else { w.start };
+        let found = self.snap(m, level, v, q, &[fixed], mods.shift);
+        let at = if mods.command && fixed.dist(found.at) > TOL {
+            micron(fixed + (found.at - fixed).unit() * w.start.dist(w.end))
+        } else {
+            found.at
+        };
+        (found, at)
+    }
+
+    /// A drag from an end of the selected wall moves that end: its angle and length follow the
+    /// cursor, with the snaps and angle guides from the other end (Ctrl keeps the length); on
+    /// release, `move`, and the walls joined there follow.
+    fn grip_drag(&mut self, ui: &Ui, response: &Response, rect: Rect, view: &View, level: Id) {
+        let Some(id) = self.gripped() else {
+            self.canvas.grip = None;
+            return;
+        };
+        let m = std::sync::Arc::clone(&self.session.model);
+        let Some(w) = m.wall(id) else { return };
+        let at = |p: P2| pos(rect.min, view.px(p));
+        if response.drag_started_by(PointerButton::Primary)
+            && self.canvas.crop_drag.is_none()
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
+        {
+            let near = |p: P2| at(p).distance(o);
+            let nearest = [(true, w.start), (false, w.end)]
+                .into_iter()
+                .filter(|(_, p)| near(*p) <= 8.0)
+                .min_by(|a, b| near(a.1).total_cmp(&near(b.1)));
+            if let Some((start, _)) = nearest {
+                self.canvas.grip = Some((id, start));
+            }
+        }
+        let Some((held, start)) = self.canvas.grip else { return };
+        if held != id {
+            self.canvas.grip = None;
+            return;
+        }
+        if response.drag_stopped() {
+            self.canvas.grip = None;
+            if let Some(q) = ui.input(|i| i.pointer.latest_pos()) {
+                let mods = ui.input(|i| i.modifiers);
+                let (_, to) = self.grip_target(&m, level, view, (w, start), (q.x - rect.min.x, q.y - rect.min.y), mods);
+                self.snap_once = None;
+                let by = to - if start { w.start } else { w.end };
+                if by.length() > 1e-6 {
+                    self.run("move", json!({"ids": [id], "by": point(by), "end": if start { "start" } else { "end" }}));
+                }
+            }
+        }
+    }
+
+    /// The selected wall's grips at its ends and, beside each, its angle to click and type: it
+    /// turns about that end. Dragging one, the wall as it would stand, with its ruler.
+    fn grip_overlay(&mut self, ui: &mut Ui, m: &Model, v: &View, rect: Rect, level: Id, d: &Drawing) {
+        let Some(id) = self.gripped() else {
+            self.angle_edit = None;
+            return;
+        };
+        let Some(w) = m.wall(id) else { return };
+        let p = ui.painter_at(rect);
+        let at = |q: P2| pos(rect.min, v.px(q));
+        let held = self.canvas.grip.filter(|(g, _)| *g == id).map(|(_, start)| start);
+        let mut ends = [w.start, w.end];
+        if let (Some(start), Some(q)) = (held, ui.input(|i| i.pointer.latest_pos())) {
+            let (mods, q) = (ui.input(|i| i.modifiers), (q.x - rect.min.x, q.y - rect.min.y));
+            let (found, to) = self.grip_target(m, level, v, (w, start), q, mods);
+            let moved = Wall { start: if start { to } else { w.start }, end: if start { w.end } else { to }, ..w.clone() };
+            let sc = Scene { p: &p, m, d, level, v };
+            // The wall as it would stand: its outline, and the ruler from the end that stays.
+            // Its faces, where its location line puts them.
+            let (ext, int) = walls::faces(m, &moved);
+            let axis = Axis::of(&moved);
+            let (left, right) = (axis.points(0.0, axis.length(), ext), axis.points(0.0, axis.length(), int));
+            let ring: Vec<Pos2> = left.into_iter().chain(right.into_iter().rev()).map(&at).collect();
+            p.add(Shape::closed_line(ring, Stroke::new(1.0, pal().accent)));
+            let fixed = if start { w.end } else { w.start };
+            p.extend(ruler_shapes(&sc, fixed, to));
+            self.show_snap(&sc, &found);
+            self.canvas.found.set(Some(found));
+            let r = snap::ruler(fixed, to);
+            let reading = format!("{}  {}", m.units.with_unit(r.length), degrees(if start { norm_turn(r.angle + 180.0) } else { r.angle }));
+            tag(&p, at(to) + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, reading);
+            ends[usize::from(!start)] = to;
+        }
+        for (k, e) in ends.into_iter().enumerate() {
+            let r = Rect::from_center_size(at(e), vec2(9.0, 9.0));
+            let live = held.is_some_and(|s| s == (k == 0));
+            p.rect_filled(r, 1.0, if live { pal().accent } else { pal().surface });
+            p.rect_stroke(r, 1.0, Stroke::new(1.5, pal().accent), StrokeKind::Middle);
+        }
+        if held.is_none() {
+            self.wall_angles(ui, &p, id, w, v, rect);
+        }
+    }
+
+    /// A selected wall's angle beside each end, to click and type: the wall turns about that end,
+    /// to the angle typed (degrees from east, counter-clockwise).
+    fn wall_angles(&mut self, ui: &mut Ui, p: &Painter, id: Id, w: &Wall, v: &View, rect: Rect) {
+        let (a, b) = (pos(rect.min, v.px(w.start)), pos(rect.min, v.px(w.end)));
+        if a.distance(b) < 80.0 {
+            return;
+        }
+        let u = (b - a).normalized();
+        let angle = snap::ruler(w.start, w.end).angle;
+        let text = degrees(angle);
+        let font = FontId::proportional(12.0);
+        let (mut done, mut clicked) = (None, None);
+        for start in [true, false] {
+            let anchor = if start { a - u * 32.0 } else { b + u * 32.0 };
+            let size = p.layout_no_wrap(text.clone(), font.clone(), pal().accent).size() + vec2(10.0, 4.0);
+            let at = Rect::from_center_size(anchor, size);
+            let field = ui.id().with(("wall angle", id, start));
+            match &mut self.angle_edit {
+                Some((wall, which, typed)) if *wall == id && *which == start => {
+                    let edit = ui.put(at.expand2(vec2(18.0, 2.0)), TextEdit::singleline(typed).id(field).horizontal_align(Align::Center));
+                    if edit.lost_focus() {
+                        done = Some((start, ui.input(|i| !i.key_pressed(Key::Escape)).then(|| typed.clone())));
+                    } else if !edit.has_focus() {
+                        edit.request_focus();
+                    }
+                }
+                _ => {
+                    let r = ui.interact(at, field, Sense::click());
+                    let which = t(if start { "start" } else { "end" });
+                    r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Turn the wall about its {}: {}", &[which, &text])));
+                    p.rect_filled(at, 2.0, pal().surface);
+                    p.text(at.center(), Align2::CENTER_CENTER, &text, font.clone(), if r.hovered() { pal().hover } else { pal().accent });
+                    if r.clicked() {
+                        clicked = Some(start);
+                    }
+                }
+            }
+        }
+        if let Some(start) = clicked {
+            self.angle_edit = Some((id, start, text));
+        }
+        if let Some((start, typed)) = done {
+            self.angle_edit = None;
+            let Some(typed) = typed else { return };
+            match number(typed.trim().trim_end_matches('°')) {
+                Some(deg) => {
+                    let mut by = (deg - angle).rem_euclid(360.0);
+                    if by > 180.0 {
+                        by -= 360.0;
+                    }
+                    // The label reads to the hundredth: what it said, typed back, turns nothing.
+                    if by.abs() > 1e-9 && (deg - (angle * 100.0).round() / 100.0).abs() > 1e-9 {
+                        let about = if start { w.start } else { w.end };
+                        self.run("rotate", json!({"ids": [id], "about": point(about), "angle": by}));
+                    }
+                }
+                None => self.status = Status { text: tf("`{}` is not an angle", &[typed.trim()]), error: true },
+            }
+        }
+    }
+
     /// The selected wall's length as a temporary dimension beside it, as Revit shows one. A click
     /// on the number types a new length, which moves the wall's end (the walls joined there follow).
     fn temporary_dimension(&mut self, ui: &mut Ui, m: &Model, v: &View, rect: Rect) {
@@ -1354,7 +1673,9 @@ impl BimApp {
             self.dim_edit = None;
             return;
         };
-        let Some(w) = m.wall(id).filter(|_| self.tool == Tool::Modify && self.canvas.drag.is_none()) else { return };
+        let Some(w) = m.wall(id).filter(|_| self.tool == Tool::Modify && self.canvas.drag.is_none() && self.canvas.grip.is_none()) else {
+            return;
+        };
         let (a, b) = (pos(rect.min, v.px(w.start)), pos(rect.min, v.px(w.end)));
         let along = b - a;
         if along.length() < 24.0 {
@@ -1438,9 +1759,7 @@ impl BimApp {
         let cursor = pos(origin, q);
         let stroke = Stroke::new(2.0, pal().accent);
         let thin = Stroke::new(1.0, pal().accent);
-        let label = |at: Pos2, text: String| {
-            p.text(at + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, text, FontId::proportional(12.0), pal().accent);
-        };
+        let label = |at: Pos2, text: String| tag(p, at + vec2(12.0, -12.0), Align2::LEFT_BOTTOM, text);
         let dashed = |a: Pos2, b: Pos2| p.extend(Shape::dashed_line(&[a, b], thin, 8.0, 4.0));
         // An element a click would add, drawn as the plan would draw it.
         let sketched = |e: &Element| ghost(p, origin, &render::sketch(m, *v, m.next_id, e), &[m.next_id], &|pt| pt);
@@ -1451,7 +1770,7 @@ impl BimApp {
             // The roof a click would make, swept across to the cursor.
             Tool::ExtrusionRoof(pts) => {
                 let mut with = pts.clone();
-                with.push(snap(m, level, v, q, pts, false));
+                with.push(self.found(sc, q, pts, false));
                 if let Ok(r) = self.extrusion_roof(m, level, &with) {
                     sketched(&Element::Roof(r));
                 }
@@ -1472,7 +1791,7 @@ impl BimApp {
             Tool::Stair(pts) | Tool::Ramp(pts) => {
                 let ramp = matches!(self.tool, Tool::Ramp(_));
                 let mut with = pts.clone();
-                with.push(snap(m, level, v, q, pts, shift));
+                with.push(self.found(sc, q, pts, shift));
                 if let Ok((e, _)) = self.flight(m, level, &with, ramp) {
                     sketched(&e);
                     let first = match &e {
@@ -1488,12 +1807,16 @@ impl BimApp {
                 }
                 return;
             }
-            Tool::Grid(_) | Tool::Move(_) | Tool::Copy(_) | Tool::Section(None) | Tool::Shaft(None) | Tool::SlopeArrow(None) => {
-                start_of(&self.tool)
-            }
+            Tool::Grid(_)
+            | Tool::Move(_)
+            | Tool::Copy(_)
+            | Tool::Section(None)
+            | Tool::Shaft(None)
+            | Tool::SlopeArrow(None)
+            | Tool::Measure(_) => start_of(&self.tool),
             // The section a click would end, and the elevation a click would place.
             &Tool::Section(Some(start)) => {
-                let end = snap(m, level, v, q, &[start], shift);
+                let end = self.found(sc, q, &[start], shift);
                 sketched(&Element::Section(Section { name: m.free_view_name("Section", true), start, end, depth: None, crop: None }));
                 return;
             }
@@ -1521,7 +1844,7 @@ impl BimApp {
                 p.line_segment([c - vec2(8.0, 0.0), c + vec2(8.0, 0.0)], thin);
                 p.line_segment([c - vec2(0.0, 8.0), c + vec2(0.0, 8.0)], thin);
                 if let (Some(from), false) = (start, place) {
-                    let angle = angle_between(centre, from, v.mm(q));
+                    let angle = angle_between(centre, from, v.mm(q), self.snaps.angle);
                     p.line_segment([c, sc.screen(from)], thin);
                     p.line_segment([c, cursor], stroke);
                     ghost(&turned(c, angle));
@@ -1532,7 +1855,7 @@ impl BimApp {
             &Tool::Mirror { draw, start } => {
                 let axis = match (draw, start) {
                     (false, _) => hovered.and_then(|id| nearest_line(m, id, v.mm(q))).map(|(a, b)| (sc.screen(a), sc.screen(b))),
-                    (true, Some(a)) => Some((sc.screen(a), sc.screen(snap(m, level, v, q, &[a], shift)))),
+                    (true, Some(a)) => Some((sc.screen(a), sc.screen(self.found(sc, q, &[a], shift)))),
                     (true, None) => None,
                 };
                 if let Some((a, b)) = axis.filter(|(a, b)| a.distance(*b) > 1.0) {
@@ -1552,7 +1875,7 @@ impl BimApp {
             }
             Tool::Split => {
                 if hovered.is_some() {
-                    let at = sc.screen(snap(m, level, v, q, &[], false));
+                    let at = sc.screen(self.found(sc, q, &[], false));
                     p.line_segment([at - vec2(0.0, 9.0), at + vec2(0.0, 9.0)], stroke);
                     p.line_segment([at - vec2(9.0, 0.0), at + vec2(9.0, 0.0)], stroke);
                 }
@@ -1617,7 +1940,7 @@ impl BimApp {
             }
             Tool::Component => {
                 if let Some((family, type_name)) = self.placing() {
-                    let at = snap(m, level, v, q, &[], false);
+                    let at = self.found(sc, q, &[], false);
                     let angle = self.component_angle;
                     let c = Component { family, type_name, level, at, angle, offset: 0.0, mirrored: false, params: Default::default() };
                     sketched(&Element::Component(c));
@@ -1625,7 +1948,7 @@ impl BimApp {
                 return;
             }
             Tool::Column => {
-                let at = snap(m, level, v, q, &[], false);
+                let at = self.found(sc, q, &[], false);
                 let type_name =
                     self.types.get("column").cloned().or_else(|| m.default_type("column").map(String::from)).unwrap_or_default();
                 sketched(&Element::Column(Column {
@@ -1663,7 +1986,7 @@ impl BimApp {
             }
             // The shaft a click would make: the rectangle to the cursor, crossed.
             &Tool::Shaft(Some(a)) => {
-                let b = snap(m, level, v, q, &[a], false);
+                let b = self.found(sc, q, &[a], false);
                 let c = [a, P2(b.0, a.1), b, P2(a.0, b.1)].map(|pt| sc.screen(pt));
                 p.add(Shape::closed_line(c.to_vec(), stroke));
                 p.line_segment([c[0], c[2]], thin);
@@ -1672,7 +1995,7 @@ impl BimApp {
             }
             // The slope arrow a click would make, and its slope.
             &Tool::SlopeArrow(Some(tail)) => {
-                let (a, b) = (sc.screen(tail), sc.screen(snap(m, level, v, q, &[tail], shift)));
+                let (a, b) = (sc.screen(tail), sc.screen(self.found(sc, q, &[tail], shift)));
                 p.line_segment([a, b], stroke);
                 if a.distance(b) > 1.0 {
                     let (u, n) = ((b - a).normalized() * 10.0, (b - a).normalized().rot90() * 4.0);
@@ -1705,7 +2028,9 @@ impl BimApp {
             _ => return,
         };
         let square = shift || (self.constrain && matches!(self.tool, Tool::Move(_) | Tool::Copy(_)));
-        let next = snap(m, level, v, q, chain, square);
+        // The point an arc passes through follows no guide from the points before it.
+        let arc_through = self.wall_arc && matches!(self.tool, Tool::Wall(_)) && chain.len() == 2;
+        let next = self.found(sc, q, if arc_through { &[] } else { chain }, square);
         if let Tool::Move(Some(base)) | Tool::Copy(Some(base)) = &self.tool {
             let delta = sc.screen(next) - sc.screen(*base);
             ghost(&|pt| pt + delta);
@@ -1718,16 +2043,33 @@ impl BimApp {
             pts = axis.points(0.0, axis.length(), 0.0).into_iter().map(|pt| sc.screen(pt)).collect();
         }
         p.add(Shape::line(pts, stroke));
-        p.rect_stroke(Rect::from_center_size(sc.screen(next), vec2(8.0, 8.0)), 0.0, stroke, StrokeKind::Middle);
-        // The listening dimension: the length so far, or the one being typed; an arc's radius.
-        let arc = match (self.wall_arc && matches!(self.tool, Tool::Wall(_)), chain) {
+        // The ruler along the new line, and an arc at the corner it turns from the line before.
+        let arc_next = self.wall_arc && matches!(self.tool, Tool::Wall(_));
+        if let (Some(&last), false) = (chain.last(), arc_next) {
+            p.extend(ruler_shapes(sc, last, next));
+            if let [.., prev, l] = chain
+                && let Some(a) = corner_arc(sc, *prev, *l, next)
+            {
+                p.add(a);
+            }
+        }
+        // The listening dimension: the length so far and the angle (at the corner it turns, else from
+        // east), or the length being typed; an arc's radius.
+        let arc = match (arc_next, chain) {
             (true, &[start, end]) => Axis::new(start, end, walls::sweep_through(start, next, end)).radius(),
             _ => None,
+        };
+        let reading = |last: P2| {
+            let angle = match chain {
+                [.., prev, l] => snap::corner(*prev, *l, next),
+                _ => None,
+            };
+            format!("{}  {}", m.units.with_unit(last.dist(next)), degrees(angle.unwrap_or_else(|| snap::ruler(last, next).angle)))
         };
         match (chain.last(), self.typed_length.is_empty(), arc) {
             (Some(_), false, _) => label(sc.screen(next), format!("{} (Enter)", self.typed_length.trim())),
             (Some(_), true, Some(r)) => label(sc.screen(next), format!("R {}", m.units.with_unit(r))),
-            (Some(last), true, None) => label(sc.screen(next), m.units.with_unit(last.dist(next))),
+            (Some(last), true, None) => label(sc.screen(next), reading(*last)),
             (None, ..) => {}
         }
     }

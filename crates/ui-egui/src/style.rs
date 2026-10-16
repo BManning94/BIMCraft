@@ -205,6 +205,8 @@ pub enum Icon {
     Component,
     LoadFamily,
     Parameters,
+    Measure,
+    Snaps,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -522,6 +524,20 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
         Icon::Component => {
             vec![line(&[(7.0, 3.0), (7.0, 21.0)]), line(&[(7.0, 13.0), (18.0, 13.0), (18.0, 21.0)]), line(&[(4.0, 21.0), (21.0, 21.0)])]
         }
+        // A ruler: a bar with its graduations, longer every other one.
+        Icon::Measure => vec![
+            ring(&[(2.0, 8.0), (22.0, 8.0), (22.0, 16.0), (2.0, 16.0)]),
+            line(&[(6.0, 8.0), (6.0, 12.0)]),
+            line(&[(10.0, 8.0), (10.0, 14.0)]),
+            line(&[(14.0, 8.0), (14.0, 12.0)]),
+            line(&[(18.0, 8.0), (18.0, 14.0)]),
+        ],
+        // A point snapped to: a square on a cross-hair.
+        Icon::Snaps => vec![
+            ring(&[(7.0, 7.0), (17.0, 7.0), (17.0, 17.0), (7.0, 17.0)]),
+            line(&[(12.0, 2.0), (12.0, 22.0)]),
+            line(&[(2.0, 12.0), (22.0, 12.0)]),
+        ],
         // A tag, as a value hangs on what it's of.
         Icon::Parameters => {
             vec![ring(&[(3.0, 7.0), (14.0, 7.0), (21.0, 12.0), (14.0, 17.0), (3.0, 17.0)]), Shape::circle_stroke(at(7.5, 12.0), 1.8 * k, s)]

@@ -11,6 +11,7 @@ use bimcraft_core::element_json;
 use bimcraft_core::family::{Kind as Holds, Val};
 use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model, PARAMETER_CATEGORIES, ParameterKind, Pattern};
 use bimcraft_core::schedule::{self, Field, Filter, Op, Sort};
+use bimcraft_core::snap::Kind as Snap;
 use bimcraft_core::units::Units;
 use egui::{
     Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText,
@@ -1592,6 +1593,57 @@ impl BimApp {
         }
         if !(ok || cancel || r.should_close()) {
             self.family_dialog = Some(d);
+        }
+    }
+}
+
+/// The angles a direction snaps to multiples of, degrees: none, or every one of these.
+const ANGLE_STEPS: [f64; 6] = [0.0, 5.0, 15.0, 30.0, 45.0, 90.0];
+
+impl BimApp {
+    /// Manage > Snaps: what a picked point sticks to, and the angles a direction steps by. A change
+    /// is in force at once.
+    pub(crate) fn snaps_window(&mut self, ctx: &Context) {
+        if !self.show_snaps {
+            return;
+        }
+        let mut close = false;
+        let r = Modal::new(UiId::new("snaps")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new(t("Snaps")).heading());
+            ui.add_space(6.0);
+            ui.label(RichText::new(t("Object Snaps")).strong());
+            let s = &mut self.snaps;
+            let kinds: [(&mut bool, Snap, &str); 6] = [
+                (&mut s.endpoint, Snap::Endpoint, "The ends of walls, grids and what else is drawn, and the points picked so far"),
+                (&mut s.midpoint, Snap::Midpoint, "The middle of a wall, along its arc"),
+                (&mut s.intersection, Snap::Intersection, "Where two walls or grids cross"),
+                (&mut s.centre, Snap::Centre, "The centre of a curved wall, a column or a component"),
+                (&mut s.perpendicular, Snap::Perpendicular, "The foot of the perpendicular from the last point to a wall or grid"),
+                (&mut s.nearest, Snap::Nearest, "A wall's centre line, so a wall drawn on it meets it"),
+            ];
+            for (on, kind, tip) in kinds {
+                ui.checkbox(on, t(kind.name())).on_hover_text(t(tip));
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let label = ui.label(t("Angle steps"));
+                let now = if s.angle >= 1.0 { format!("{}°", s.angle) } else { t("Off").to_string() };
+                let c = ComboBox::from_id_salt("snap-angle").selected_text(now).width(110.0).show_ui(ui, |ui| {
+                    for step in ANGLE_STEPS {
+                        let name = if step >= 1.0 { format!("{step}°") } else { t("Off").to_string() };
+                        ui.selectable_value(&mut s.angle, step, name);
+                    }
+                });
+                c.response.labelled_by(label.id).on_hover_text(t(
+                    "A direction from the last point sticks to multiples of this angle, from east and from the line before; a dashed guide shows it",
+                ));
+            });
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+        });
+        if close || r.should_close() {
+            self.show_snaps = false;
         }
     }
 }
