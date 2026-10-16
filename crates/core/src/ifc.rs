@@ -377,13 +377,15 @@ pub fn export(m: &Model) -> String {
             Element::Floor(f) => {
                 let Some(&(_, storey)) = storeys.get(&f.level) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                // Level, its outline swept up to its top; sloped, a shell.
-                let (face, rise) = m.floor_slab(f);
+                // Level, its outline less its openings swept up to its top; sloped, a shell round each
+                // piece of it.
+                let depth = m.floor_depth(f);
                 let shape = if m.floor_top(f).g == P2(0.0, 0.0) {
-                    let profile = w.profile(&f.boundary, &[]);
-                    w.body(profile, f.offset - rise, rise, &[])
+                    let profile = w.profile(&f.boundary, &f.openings);
+                    w.body(profile, f.offset - depth, depth, &[])
                 } else {
-                    w.breps(&[face], m.elevation(f.level), rise)
+                    let faces: Vec<Vec<P3>> = m.floor_slabs(f).into_iter().map(|(face, _)| face).collect();
+                    w.breps(&faces, m.elevation(f.level), depth)
                 };
                 let ent = w.add(format!(
                     "IFCSLAB({},$,{},$,{},#{at},#{shape},'{id}',.FLOOR.)",
@@ -546,7 +548,7 @@ pub fn export(m: &Model) -> String {
     // outline swept up the shaft's whole height.
     for (&host, &(ent, at, z)) in &hosts {
         let slabs = match m.elements.get(&host) {
-            Some(Element::Floor(f)) => vec![m.floor_slab(f)],
+            Some(Element::Floor(f)) => m.floor_slabs(f),
             Some(Element::Ceiling(c)) => vec![m.ceiling_slab(c)],
             Some(Element::Roof(r)) => m.roof_slabs(r),
             _ => Vec::new(),

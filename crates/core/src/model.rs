@@ -232,9 +232,10 @@ pub struct Layer {
 /// Layers a wall type may have.
 pub const MAX_LAYERS: usize = 32;
 
-/// A slab under its top, along `boundary` (counter-clockwise): its top at its level, `offset` mm
-/// above it; with a slope arrow, from tail to head in plan, the top there and rising `slope`
-/// degrees toward the head (falling, negative). It's its type's thickness across its slope.
+/// A slab under its top, along `boundary` (counter-clockwise), open through its `openings` (holes
+/// inside it, apart): its top at its level, `offset` mm above it; with a slope arrow, from tail to
+/// head in plan, the top there and rising `slope` degrees toward the head (falling, negative). It's
+/// its type's thickness across its slope.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Floor {
@@ -242,6 +243,8 @@ pub struct Floor {
     pub type_name: String,
     pub level: Id,
     pub boundary: Vec<P2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openings: Vec<Vec<P2>>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub offset: f64,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -1304,11 +1307,12 @@ impl Model {
         self.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness) / f.slope.to_radians().cos()
     }
 
-    /// A floor's slab: its underside, a flat polygon in space, counter-clockwise; and how far its
-    /// top lies above that.
-    pub fn floor_slab(&self, f: &Floor) -> (Vec<[f64; 3]>, f64) {
+    /// A floor's slabs: its underside less its openings (in convex pieces once one cuts it), each a
+    /// flat polygon in space, counter-clockwise; and how far its top lies above that.
+    pub fn floor_slabs(&self, f: &Floor) -> Vec<(Vec<[f64; 3]>, f64)> {
         let (top, depth) = (self.floor_top(f), self.floor_depth(f));
-        (ccw(&f.boundary).iter().map(|q| [q.0, q.1, top.at(*q) - depth]).collect(), depth)
+        let under = walls::Plane { z: top.z - depth, ..top };
+        solid(&[ccw(&f.boundary)], &f.openings).into_iter().map(|ring| (under.lift(&ring), depth)).collect()
     }
 
     /// A ceiling's slab: its underside, counter-clockwise, and its thickness.
@@ -1811,6 +1815,13 @@ impl Model {
                     known(&who, &f.type_name, &self.types.floor)?;
                     level_ok(f.level)?;
                     boundary(&who, &f.boundary)?;
+                    if f.openings.iter().map(Vec::len).sum::<usize>() > MAX_POINTS {
+                        return Err(format!("{who}: its openings have more than {MAX_POINTS} points between them"));
+                    }
+                    for (i, o) in f.openings.iter().enumerate() {
+                        boundary(&format!("{who} opening {i}"), o)?;
+                    }
+                    holes(&who, "opening", &f.boundary, &f.openings)?;
                     coord(&format!("{who} offset"), f.offset)?;
                     if !(f.slope.is_finite() && f.slope.abs() <= MAX_SLOPE) {
                         return Err(format!("{who}: slope {}° isn't between -{MAX_SLOPE}° and {MAX_SLOPE}°", f.slope));
@@ -2113,7 +2124,7 @@ impl Model {
                     for (i, c) in r.courtyards.iter().enumerate() {
                         boundary(&format!("{who} courtyard {i}"), c)?;
                     }
-                    courtyards(&who, &r.boundary, &r.courtyards)?;
+                    holes(&who, "courtyard", &r.boundary, &r.courtyards)?;
                     self.roof_pieces(r).map_err(|e| format!("{who}: {e}"))?;
                 }
                 Element::Sheet(sh) => {
@@ -2273,21 +2284,22 @@ fn boundary(who: &str, ring: &[P2]) -> Result<(), String> {
     Ok(())
 }
 
-/// Courtyards: each inside `outline`, clear of it and of the others.
-fn courtyards(who: &str, outline: &[P2], courtyards: &[Vec<P2>]) -> Result<(), String> {
+/// Holes in an outline (a roof's courtyards, a floor's openings): each inside `outline`, clear of
+/// it and of the others.
+fn holes(who: &str, what: &str, outline: &[P2], rings: &[Vec<P2>]) -> Result<(), String> {
     // Whether `p` is inside `ring` (or outside it), more than TOL from its edges.
     let clear = |ring: &[P2], p: P2, inside: bool| {
         geom::contains(ring, p) == inside && geom::ring_edges(ring).all(|(a, b)| geom::dist_to_segment(p, a, b) > TOL)
     };
     let cross =
         |r: &[P2], s: &[P2]| geom::ring_edges(r).any(|(a, b)| geom::ring_edges(s).any(|(c, d)| geom::crossing(a, b, c, d).is_some()));
-    for (i, c) in courtyards.iter().enumerate() {
+    for (i, c) in rings.iter().enumerate() {
         if !c.iter().all(|p| clear(outline, *p, true)) || cross(c, outline) {
-            return Err(format!("{who}: courtyard {i} isn't inside its footprint"));
+            return Err(format!("{who}: {what} {i} isn't inside its outline"));
         }
-        for (j, o) in courtyards.iter().enumerate().skip(i + 1) {
+        for (j, o) in rings.iter().enumerate().skip(i + 1) {
             if !c.iter().all(|p| clear(o, *p, false)) || !o.iter().all(|p| clear(c, *p, false)) || cross(c, o) {
-                return Err(format!("{who}: courtyards {i} and {j} overlap"));
+                return Err(format!("{who}: {what}s {i} and {j} overlap"));
             }
         }
     }

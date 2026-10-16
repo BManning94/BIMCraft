@@ -645,8 +645,8 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
         range.cut = m.elevation(level) + CEILING_CUT;
         range.top = range.top.max(range.cut);
     }
-    // Floors whose tops it sees, from the cut plane down to the view depth: their outlines, the
-    // holes shafts cut in them, and a sloped one's slope arrow.
+    // Floors whose tops it sees, from the cut plane down to the view depth: their outlines and their
+    // openings', the holes shafts cut in them, and a sloped one's slope arrow.
     for (&id, e) in m.elements.iter().filter(|_| !up) {
         let Element::Floor(f) = e else { continue };
         let top = m.floor_top(f);
@@ -655,8 +655,10 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             continue;
         }
         d.owner = Some(id);
-        d.line(&f.boundary, 1.0, FAINT, true);
-        holes(&mut d, m, &m.floor_slab(f));
+        for ring in std::iter::once(&f.boundary).chain(&f.openings) {
+            d.line(ring, 1.0, FAINT, true);
+        }
+        holes(&mut d, m, &m.floor_slabs(f));
         if let Some([tail, head]) = f.arrow.filter(|_| f.slope != 0.0) {
             slope_arrow(&mut d, tail, head, f.slope);
         }
@@ -815,9 +817,10 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
     d
 }
 
-/// The outlines of the holes shafts cut in a floor's, a ceiling's or a roof's slab.
-fn holes(d: &mut Drawing, m: &Model, (face, rise): &(Vec<[f64; 3]>, f64)) {
-    for id in m.less_shafts(face, *rise).1 {
+/// The outlines of the holes shafts cut in a floor's or a ceiling's slabs.
+fn holes(d: &mut Drawing, m: &Model, slabs: &[(Vec<[f64; 3]>, f64)]) {
+    let cut: std::collections::BTreeSet<Id> = slabs.iter().flat_map(|(face, rise)| m.less_shafts(face, *rise).1).collect();
+    for id in cut {
         if let Some(Element::Shaft(sh)) = m.elements.get(&id) {
             d.line(&sh.boundary, 1.0, FAINT, true);
         }
@@ -852,7 +855,7 @@ fn shaft(d: &mut Drawing, ring: &[P2]) {
 fn ceiling(d: &mut Drawing, m: &Model, c: &Ceiling) {
     d.line(&c.boundary, 1.0, INK, true);
     let slab = m.ceiling_slab(c);
-    holes(d, m, &slab);
+    holes(d, m, std::slice::from_ref(&slab));
     let (Some(t), Some((lo, hi))) = (m.types.ceiling.get(&c.type_name), bounds(&c.boundary)) else { return };
     // ponytail: tiles square to the axes; a ceiling's own grid angle when rooms turn.
     if t.grid <= 0.0 || (hi.0 - lo.0).max(hi.1 - lo.1) / t.grid > 2000.0 {

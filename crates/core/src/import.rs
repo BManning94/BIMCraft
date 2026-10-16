@@ -11,11 +11,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
 
-use crate::commands::{micron, next_number};
+use crate::commands::{micron, next_number, tidy};
 use crate::geom::{self, P2};
 use crate::model::{
-    Ceiling, CeilingType, Column, ColumnType, Element, Extrusion, Floor, FloorType, Grid, Id, Landing, Level, MAX_TEXT, Model, Opening,
-    OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
+    Ceiling, CeilingType, Column, ColumnType, Element, Extrusion, Floor, FloorType, Grid, Id, Landing, Level, MAX_POINTS, MAX_TEXT, Model,
+    Opening, OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
 };
 use crate::stairs;
 use crate::step::{self, Entity, File, V};
@@ -219,23 +219,28 @@ fn loops<'a>(faces: impl Iterator<Item = &'a Vec<P3>>) -> Vec<Vec<P2>> {
 }
 
 /// The outline of the faces facing up, or down, whose points all lie within half a millimetre of
-/// `on`, a level or sloped plane: the largest of their loops, its corners counter-clockwise.
-fn outline(faces: &[Vec<P3>], on: Plane, up: bool) -> Option<Vec<P2>> {
+/// `on`, a level or sloped plane: the largest of their loops, its corners counter-clockwise; and
+/// the holes in it, clockwise.
+fn outline(faces: &[Vec<P3>], on: Plane, up: bool) -> Option<geom::Region> {
     let picked = faces.iter().filter(|f| {
         let n = normal(f);
         f.len() >= 3 && f.iter().all(|p| (p[2] - on.at(P2(p[0], p[1]))).abs() <= 0.5) && n[2].abs() >= 0.2 && (n[2] > 0.0) == up
     });
-    let best = loops(picked).into_iter().max_by(|a, b| geom::area(a).abs().total_cmp(&geom::area(b).abs()))?;
-    let mut ring = geom::corners(&best);
+    let mut rings: Vec<Vec<P2>> = loops(picked).into_iter().map(|l| geom::corners(&l)).filter(|l| l.len() >= 3).collect();
+    rings.sort_by(|a, b| geom::area(b).abs().total_cmp(&geom::area(a).abs()));
+    let mut rings = rings.into_iter();
+    let mut ring = rings.next()?;
     if geom::area(&ring) < 0.0 {
         ring.reverse();
     }
-    (ring.len() >= 3).then_some(ring)
+    let holes = rings.filter(|h| geom::area(h) < 0.0 && h.iter().all(|p| geom::contains(&ring, *p))).collect();
+    Some(geom::Region { outer: ring, holes })
 }
 
 /// A slab's top, sloped or level: the plane of its largest face turned up, and its outline in
-/// plan; and how far its underside, the plane of its largest face turned down, lies below it, plumb.
-fn top_of(faces: &[Vec<P3>]) -> Option<(Plane, Vec<P2>, f64)> {
+/// plan and the holes in it; and how far its underside, the plane of its largest face turned down,
+/// lies below it, plumb.
+fn top_of(faces: &[Vec<P3>]) -> Option<(Plane, geom::Region, f64)> {
     let largest = |up: bool| {
         faces
             .iter()
@@ -243,9 +248,9 @@ fn top_of(faces: &[Vec<P3>]) -> Option<(Plane, Vec<P2>, f64)> {
             .max_by(|a, b| area3(a).total_cmp(&area3(b)))
     };
     let (top, under) = (Plane::of(largest(true)?)?, Plane::of(largest(false)?)?);
-    let ring = outline(faces, top, true)?;
-    let q = *ring.first()?;
-    Some((top, ring, top.at(q) - under.at(q)))
+    let shape = outline(faces, top, true)?;
+    let q = *shape.outer.first()?;
+    Some((top, shape, top.at(q) - under.at(q)))
 }
 
 /// A point well inside a ring: the middle of the largest of the triangles that make it up.
@@ -496,6 +501,23 @@ impl<'a> Reader<'a> {
         }
     }
 
+    /// The holes in a profile with voids, in its own plane: as many as have at most [`MAX_POINTS`]
+    /// points between them.
+    fn voids(&self, id: Option<u64>, depth: usize) -> Vec<Vec<P2>> {
+        let Some(e) = id.and_then(|i| self.get(i)).filter(|e| e.name == "IFCARBITRARYPROFILEDEFWITHVOIDS") else { return Vec::new() };
+        let mut total = 0;
+        refs(e.args.get(3))
+            .into_iter()
+            .filter_map(|c| self.curve(Some(c), depth + 1))
+            .map(|pts| open(pts.into_iter().map(|p| P2(p[0], p[1])).collect()))
+            .filter(|h| h.len() >= 3)
+            .take_while(|h| {
+                total += h.len();
+                total <= MAX_POINTS
+            })
+            .collect()
+    }
+
     /// The faces of representation item `id`, as polygons in its own coordinates.
     fn faces(&self, id: u64, depth: usize, out: &mut Vec<Vec<P3>>) {
         let Some(e) = self.get(id) else { return };
@@ -514,7 +536,11 @@ impl<'a> Reader<'a> {
                 let pos = self.axes(reference(a(1)));
                 let up = mul(pos.dir(self.direction(reference(a(2))).unwrap_or([0.0, 0.0, 1.0])), length);
                 if ring.len() >= 3 {
-                    prism(out, ring.iter().map(|p| pos.at([p.0, p.1, 0.0])).collect(), up);
+                    // Round holes in its profile, in convex pieces.
+                    let voids = self.voids(reference(a(0)), depth + 1);
+                    for piece in voids.iter().fold(vec![ring], |parts, v| walls::minus(&parts, v)) {
+                        prism(out, piece.iter().map(|p| pos.at([p.0, p.1, 0.0])).collect(), up);
+                    }
                 }
             }
             // What a clipping cuts away doesn't change what the element is.
@@ -1044,7 +1070,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(w.ifc);
     }
 
-    // Floors: their top outline, and how thick they are below it.
+    // Floors: their top outline and the holes in it, and how thick they are below it.
     let in_whole = |id: u64, names: &[&str]| l.whole.get(&id).and_then(|w| e(*w)).is_some_and(|w| names.contains(&w.name.as_str()));
     let mut roofs: Vec<u64> = named(&["IFCROOF"]).into_iter().filter(|id| !l.whole.contains_key(id)).collect();
     for id in named(SLABS) {
@@ -1070,8 +1096,8 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         // Level at its highest, or sloped: then its slope arrow runs up it from its lowest corner,
         // all the way across.
-        let shape = outline(&faces, Plane::flat(z1), true).map(|ring| (Plane::flat(z1), ring, z1 - z0)).or_else(|| top_of(&faces));
-        let Some((top, ring, rise)) = shape else {
+        let shape = outline(&faces, Plane::flat(z1), true).map(|shape| (Plane::flat(z1), shape, z1 - z0)).or_else(|| top_of(&faces));
+        let Some((top, geom::Region { outer: ring, holes }, rise)) = shape else {
             leave(&mut skipped, &mut seen, id, "its top isn't flat");
             continue;
         };
@@ -1087,10 +1113,32 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let type_name = kind(&mut m.types.floor, &base, |k| (k.thickness - t).abs() < 0.05, FloorType { thickness: t });
         let z = top.at(tail);
         let level = level_near(z).unwrap_or_else(|| level_for(id, z));
+        // A hole where an opening voids the slab is the opening's, which comes in as a shaft (a mesh
+        // carries the holes cut in it). Each of the rest from its south-west corner, in order: as the
+        // same file reads the same.
+        let voided: Vec<Vec<P2>> = l
+            .host
+            .iter()
+            .filter(|(_, h)| **h == id)
+            .filter_map(|(o, _)| {
+                let faces = r.body(e(*o)?);
+                let (_, z1) = span(faces.iter().flatten().map(|p| p[2]))?;
+                Some(outline(&faces, Plane::flat(z1), true)?.outer)
+            })
+            .collect();
+        let same = |a: &[P2], b: &[P2]| a.len() == b.len() && a.iter().all(|p| b.iter().any(|q| q.dist(*p) < 1.0));
+        let mut openings: Vec<Vec<P2>> = holes
+            .into_iter()
+            .filter(|h| !voided.iter().any(|v| same(h, v)))
+            .map(|h| tidy(&h.into_iter().map(flat).collect::<Vec<P2>>()))
+            .collect();
+        openings
+            .sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
         let floor = Floor {
             type_name,
             level,
             boundary: ring.into_iter().map(flat).collect(),
+            openings,
             offset: ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0,
             slope: if arrow.is_some() { (tan.atan().to_degrees() * 1e6).round() / 1e6 } else { 0.0 },
             arrow,
@@ -1108,7 +1156,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
             continue;
         };
-        let Some(ring) = outline(&faces, Plane::flat(z1), true) else {
+        let Some(geom::Region { outer: ring, .. }) = outline(&faces, Plane::flat(z1), true) else {
             leave(&mut skipped, &mut seen, id, "its top isn't level");
             continue;
         };
@@ -1198,7 +1246,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let Some(o) = e(id).filter(|_| SLABS.contains(&host) || matches!(host, "IFCCOVERING" | "IFCROOF")) else { continue };
         let faces = r.body(o);
         let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else { continue };
-        let Some(ring) = outline(&faces, Plane::flat(z1), true) else { continue };
+        let Some(geom::Region { outer: ring, .. }) = outline(&faces, Plane::flat(z1), true) else { continue };
         let ring: Vec<P2> = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
         let alike = |(_, b, lo, hi): &(u64, Vec<P2>, f64, f64)| {
             (lo - z0).abs() < 1.0
@@ -1507,7 +1555,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let faces = r.body(s);
         let floor = span(faces.iter().flatten().map(|p| p[2])).map(|(z0, _)| z0);
         let footprint =
-            floor.and_then(|z0| outline(&faces, Plane::flat(z0), false)).and_then(|ring| inside(&ring)).map(|p| r.flat([p.0, p.1, 0.0]));
+            floor.and_then(|z0| outline(&faces, Plane::flat(z0), false)).and_then(|g| inside(&g.outer)).map(|p| r.flat([p.0, p.1, 0.0]));
         let Some(point) = footprint.or_else(|| faces.is_empty().then(|| r.flat(r.frame(s).o))) else {
             leave(&mut skipped, &mut seen, id, "its footprint isn't one BIMCraft can read");
             continue;
@@ -1829,7 +1877,7 @@ fn straight(r: &Reader, x: &Entity) -> Option<Vec<P3>> {
 
 /// A ramp's flight, from its sloping top: up its slope, across it, and how steep.
 fn ramp_from(r: &Reader, faces: &[Vec<P3>]) -> Result<RampRun, String> {
-    let (top, ring, _) = top_of(faces).ok_or("its top isn't one flat face BIMCraft can read")?;
+    let (top, geom::Region { outer: ring, .. }, _) = top_of(faces).ok_or("its top isn't one flat face BIMCraft can read")?;
     let tan = top.g.length();
     if tan < 1e-6 {
         return Err("its top is level".into());
@@ -1947,6 +1995,60 @@ ENDSEC;END-ISO-10303-21;"
         let Some(Element::Column(c)) = only(&i.model, "column").first().copied() else { panic!("no column") };
         let t = &i.model.types.column[&c.type_name];
         assert_eq!((c.at, c.angle, t.width, t.depth, t.round, c.height), (P2(3000.0, 4000.0), 90.0, 500.0, 300.0, false, 3000.0));
+    }
+
+    #[test]
+    fn holes_in_a_slab_come_in_as_its_openings_or_as_the_shafts_through_it() {
+        // A 6 x 4 m slab 200 mm thick, its profile round two holes, an opening element voiding it
+        // through the east one, as a mesh would carry it.
+        let rect = |id: u32, (x0, y0): (f64, f64), (x1, y1): (f64, f64)| {
+            let pts: Vec<String> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                .iter()
+                .enumerate()
+                .map(|(i, (x, y))| format!("#{}=IFCCARTESIANPOINT(({x:.1},{y:.1}));", id + 1 + i as u32))
+                .collect();
+            format!("{}\n#{id}=IFCPOLYLINE((#{},#{},#{},#{},#{}));", pts.join("\n"), id + 1, id + 2, id + 3, id + 4, id + 1)
+        };
+        let file = format!(
+            "ISO-10303-21;HEADER;FILE_SCHEMA(('IFC4'));ENDSEC;DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#2=IFCUNITASSIGNMENT((#1));
+#3=IFCPROJECT('p',$,'Holes',$,$,$,$,$,#2);
+#4=IFCCARTESIANPOINT((0.,0.,-200.));
+#5=IFCAXIS2PLACEMENT3D(#4,$,$);
+#6=IFCLOCALPLACEMENT($,#5);
+#7=IFCBUILDINGSTOREY('s',$,'Level 0',$,$,$,$,$,.ELEMENT.,0.);
+{}
+{}
+{}
+#30=IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,$,#10,(#20,#25));
+#31=IFCDIRECTION((0.,0.,1.));
+#32=IFCEXTRUDEDAREASOLID(#30,$,#31,200.);
+#33=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#32));
+#34=IFCPRODUCTDEFINITIONSHAPE($,$,(#33));
+#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.FLOOR.);
+#40=IFCCARTESIANPOINT((4500.,1500.));
+#41=IFCAXIS2PLACEMENT2D(#40,$);
+#42=IFCRECTANGLEPROFILEDEF(.AREA.,$,#41,1000.,1000.);
+#43=IFCEXTRUDEDAREASOLID(#42,$,#31,200.);
+#44=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#43));
+#45=IFCPRODUCTDEFINITIONSHAPE($,$,(#44));
+#46=IFCOPENINGELEMENT('o',$,'Hole',$,$,#6,#45,$,.OPENING.);
+#47=IFCRELVOIDSELEMENT('v',$,$,$,#35,#46);
+#50=IFCRELCONTAINEDINSPATIALSTRUCTURE('r',$,$,$,(#35),#7);
+ENDSEC;END-ISO-10303-21;",
+            rect(10, (0.0, 0.0), (6000.0, 4000.0)),
+            rect(20, (1000.0, 1000.0), (2500.0, 2000.0)),
+            rect(25, (4000.0, 1000.0), (5000.0, 2000.0)),
+        );
+        let i = ifc(file.as_bytes(), "x").unwrap();
+        assert_eq!(i.skipped, Vec::<String>::new());
+        let Some(Element::Floor(f)) = only(&i.model, "floor").first().copied() else { panic!("no floor") };
+        assert_eq!(f.openings, [[P2(1000.0, 1000.0), P2(1000.0, 2000.0), P2(2500.0, 2000.0), P2(2500.0, 1000.0)]]);
+        let Some(Element::Shaft(sh)) = only(&i.model, "shaft").first().copied() else { panic!("no shaft") };
+        assert_eq!(geom::area(&sh.boundary).abs(), 1_000_000.0);
+        let floor = i.model.elements.iter().find(|(_, e)| e.category() == "floor").map(|(id, _)| *id);
+        assert_eq!(crate::element_json(&i.model, floor.unwrap_or_default())["area_m2"], 21.5, "6 x 4 less 1.5 and 1");
     }
 
     #[test]

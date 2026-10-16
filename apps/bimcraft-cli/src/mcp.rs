@@ -16,7 +16,8 @@ const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "BIMCraft is a BIM modeler, a Revit-class building model. Lengths are millimetres; x east, y north, z up; \
 the model starts with Level 1 (0) and Level 2 (3000). Model with execute: wall {points: [[0,0],[8000,0],[8000,6000],[0,6000]], \
-closed: true}, door {at: [2000, 0]}, window {at: [8000, 3000]}, room {point: [4000, 3000], name: \"Living\"}, floor {}, \
+closed: true}, door {at: [2000, 0]}, window {at: [8000, 3000]}, room {point: [4000, 3000], name: \"Living\"}, floor {} (open \
+over a loop of walls standing free inside), \
 roof {} (on Level 2, over the walls below, hipped, open over a loop of them standing free inside; gables: [1, 3] stands \
 those edges upright; courtyards: [[[x,y],…]] slopes it round holes in it too), dormer {host: <roof id>, \
 at: [4000, 800]} (on its slope), column {at: [4000, 3000]}, stair {start: [1000, 1000], end: [1000, 2000], \
@@ -68,7 +69,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"view": {"type": ["string", "integer"]}, "ceiling": {"type": "boolean"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}}}},
         {"name": "new_model", "description": "Start an empty project with Level 1 and Level 2.",
          "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
-        {"name": "open", "description": "Open a .bimcraft project, or import an .ifc file (IFC2x3 or IFC4, from Revit or any BIM tool): its storeys, straight and curved walls with their doors and windows, floors (level or sloped), ceilings, rooms, columns, grids, stairs and ramps of straight runs with landings, railings, shafts and roofs (flat, sloping all round over any footprint with gable ends, courtyards and openings, or one profile swept across) come in measured from their geometry; the reply lists what was left out and why.",
+        {"name": "open", "description": "Open a .bimcraft project, or import an .ifc file (IFC2x3 or IFC4, from Revit or any BIM tool): its storeys, straight and curved walls with their doors and windows, floors (level or sloped, with their holes), ceilings, rooms, columns, grids, stairs and ramps of straight runs with landings, railings, shafts and roofs (flat, sloping all round over any footprint with gable ends, courtyards and openings, or one profile swept across) come in measured from their geometry; the reply lists what was left out and why.",
          "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
         {"name": "save", "description": "Save to .bimcraft (the project), or export by extension: .ifc (IFC4 for other BIM tools), .svg or .png (the lowest level's plan), .pdf (every sheet, a page each).",
          "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}}

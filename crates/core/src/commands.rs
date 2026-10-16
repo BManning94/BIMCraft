@@ -84,9 +84,11 @@ pub static ALL: &[Command] = &[
         "floor",
         "Floor",
         &[],
-        "{boundary?: [[x,y],…], level?, type?, offset?, slope?, arrow?: [[x,y],[x,y]]} a slab, its top at the level, or \
-         `offset` mm above it; no boundary = the outline of the level's walls. Sloped: its top rises `slope` degrees (negative, \
-         falls) along the slope arrow, from its tail, where it's at the offset, toward its head",
+        "{boundary?: [[x,y],…], openings?: [[[x,y],…],…], level?, type?, offset?, slope?, arrow?: [[x,y],[x,y]]} a slab, its \
+         top at the level, or `offset` mm above it, open through `openings` (holes inside it, apart); no boundary = the outline \
+         of the level's walls along their centre lines, open over each loop of them standing free inside, joined to none of \
+         the outer ones and with no room in it (a courtyard). Sloped: its top rises `slope` degrees (negative, falls) along \
+         the slope arrow, from its tail, where it's at the offset, toward its head",
         floor,
     ),
     edit(
@@ -574,18 +576,44 @@ fn wall_at(m: &Model, level: Id, at: P2) -> Option<(Id, f64)> {
         .map(|(id, w, _)| (id, along(w, at)))
 }
 
-/// The outline `floor` gives a floor on `level` by default: the outer outline of the walls that
-/// bound its rooms (of the largest piece), along their centre lines, counter-clockwise.
-pub fn floor_outline(m: &Model, level: Id) -> Option<Vec<P2>> {
-    pieces(m, level).first().map(|f| f.iter().rev().copied().collect())
+/// The outline `floor` gives a floor on `level` by default, along the centre lines of the walls
+/// that bound its rooms: the outer outline of the largest piece they make, counter-clockwise; and
+/// its courtyards, clockwise from their south-west corners: the loops of those walls standing free
+/// inside it, joined to none of the outer walls, with no room in them and in no other loop. A loop
+/// joined to the outer walls, or with a room in it, is rooms.
+pub fn floor_outline(m: &Model, level: Id) -> Option<(Vec<P2>, Vec<Vec<P2>>)> {
+    // Each piece's outline, clockwise, the largest first.
+    let mut pieces: Vec<Vec<P2>> = geom::faces(&m.bounding_lines(level), TOL).into_iter().filter(|f| geom::area(f) < -TOL * TOL).collect();
+    pieces.sort_by(|a, b| geom::area(a).total_cmp(&geom::area(b)));
+    let (outer, inner) = pieces.split_first()?;
+    // The loops standing free inside the outline: the other pieces, inside it. Whether loop `a`
+    // stands inside another; the innermost loop round a point, and so the loops rooms are in.
+    let loops: Vec<&Vec<P2>> = inner.iter().filter(|f| f.iter().all(|q| geom::contains(outer, *q))).collect();
+    let nested = |a: usize| (0..loops.len()).any(|b| b != a && loops[a].iter().all(|q| geom::contains(loops[b], *q)));
+    let around = |p: P2| {
+        (0..loops.len()).filter(|&a| geom::contains(loops[a], p)).max_by(|&a, &b| geom::area(loops[a]).total_cmp(&geom::area(loops[b])))
+    };
+    let indoors: Vec<usize> = m
+        .elements
+        .values()
+        .filter_map(|e| match e {
+            Element::Room(r) if r.level == level => around(r.point),
+            _ => None,
+        })
+        .collect();
+    // Courtyards: the outermost loops, outdoors.
+    let courtyards = (0..loops.len()).filter(|&a| !nested(a) && !indoors.contains(&a)).map(|a| tidy(loops[a])).collect();
+    Some((outer.iter().rev().copied().collect(), courtyards))
 }
 
-/// The outlines of the pieces the walls that bound `level`'s rooms make, along their centre lines,
-/// clockwise, the largest first.
-fn pieces(m: &Model, level: Id) -> Vec<Vec<P2>> {
-    let mut all: Vec<Vec<P2>> = geom::faces(&m.bounding_lines(level), TOL).into_iter().filter(|f| geom::area(f) < -TOL * TOL).collect();
-    all.sort_by(|a, b| geom::area(a).total_cmp(&geom::area(b)));
-    all
+/// A ring by its corners, to the micron, from its south-west corner.
+pub(crate) fn tidy(ring: &[P2]) -> Vec<P2> {
+    let mut ring: Vec<P2> = geom::corners(ring).into_iter().map(micron).collect();
+    let south_west =
+        ring.iter().enumerate().min_by(|(_, a), (_, b)| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
+    let first = south_west.map_or(0, |(i, _)| i);
+    ring.rotate_left(first);
+    ring
 }
 
 /// One past the largest number among `taken` ("1" when there is none).
@@ -704,10 +732,10 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("level".into(), json!(m.level_of(e)));
             extra.insert("at".into(), json!(m.anchor(t.host).map(|a| a + t.offset)));
         }
-        // Areas less the shafts through them.
+        // Areas less the openings and shafts through them.
         Element::Floor(f) => {
-            let (face, rise) = m.floor_slab(f);
-            extra.insert("area_m2".into(), json!(m2(area(&m.less_shafts(&face, rise).0))));
+            let left: f64 = m.floor_slabs(f).iter().map(|(face, rise)| area(&m.less_shafts(face, *rise).0)).sum();
+            extra.insert("area_m2".into(), json!(m2(left)));
             extra.insert("thickness".into(), json!(m.types.floor.get(&f.type_name).map_or(0.0, |t| t.thickness)));
             // How high its top is, at its lowest and its highest.
             let top = m.floor_top(f);
@@ -1158,14 +1186,15 @@ fn floor(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let level = level_param(c, m, p, "level")?;
     let type_name = type_param(c, p, m, "floor")?;
-    let mut boundary = if absent(p.get("boundary")) {
+    let (mut boundary, found) = if absent(p.get("boundary")) {
         floor_outline(m, level).ok_or_else(|| bad(c, format!("no walls enclose an area on {}; give `boundary`", level_name(m, level))))?
     } else {
-        points(c, p, "boundary")?
+        (points(c, p, "boundary")?, Vec::new())
     };
     if geom::area(&boundary) < 0.0 {
         boundary.reverse();
     }
+    let openings: Vec<Vec<P2>> = shaped(c, p, "openings", "a list of outlines [[[x,y],…],…]")?.unwrap_or(found);
     let arrow = match absent(p.get("arrow")) {
         true => None,
         false => match points(c, p, "arrow")?.as_slice() {
@@ -1174,8 +1203,9 @@ fn floor(s: &mut Session, p: &Value) -> R {
         },
     };
     let (offset, slope) = (num(c, p, "offset")?.unwrap_or(0.0), num(c, p, "slope")?.unwrap_or(0.0));
-    let area = m2(geom::area(&boundary));
-    let id = s.model_mut().insert(Element::Floor(Floor { type_name, level, boundary, offset, slope, arrow }));
+    // Its openings lie inside it and apart, or the model refuses it.
+    let area = m2(geom::area(&boundary) - openings.iter().map(|o| geom::area(o).abs()).sum::<f64>());
+    let id = s.model_mut().insert(Element::Floor(Floor { type_name, level, boundary, openings, offset, slope, arrow }));
     Ok(json!({"id": id, "area_m2": area}))
 }
 
@@ -1672,17 +1702,15 @@ fn shaped<T: serde::de::DeserializeOwned>(c: &str, p: &Value, key: &str, shape: 
 }
 
 /// The footprint `roof` gives a roof on `level` by default, over the walls of the level below: their
-/// outline, `overhang` mm past their outer faces, counter-clockwise; and its courtyards, the loops
-/// of those walls standing free inside it, joined to none of the outer walls and with no room in
-/// them, `overhang` mm past their faces into each, clockwise; each ring from its south-west corner.
-/// A loop joined to the outer walls, or with a room in it, is rooms, and the roof runs over it, as
-/// it does over a courtyard too small to stay open past the overhang.
+/// outline, `overhang` mm past their outer faces, counter-clockwise; and its courtyards, the ones
+/// `floor_outline` finds in those walls, `overhang` mm past their faces into each, clockwise; each
+/// ring from its south-west corner. Over a courtyard too small to stay open past the overhang, the
+/// roof runs on, as it does over rooms.
 pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<(Vec<P2>, Vec<Vec<P2>>), String> {
     let below = m.levels().into_iter().rev().find(|(_, l)| l.elevation < m.elevation(level) - TOL).map(|(id, _)| id);
     let below = below.ok_or_else(|| format!("{} has no level below to roof over; give `boundary`", level_name(m, level)))?;
-    let pieces = pieces(m, below);
-    let (outer, inner) =
-        pieces.split_first().ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
+    let (outline, loops) =
+        floor_outline(m, below).ok_or_else(|| format!("no walls enclose an area on {}; give `boundary`", level_name(m, below)))?;
     // ponytail: the thickest wall on the level sets where the faces are; per edge if outlines mix wall types.
     let face = m
         .elements
@@ -1693,44 +1721,21 @@ pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<(Vec<P2>, V
         })
         .fold(0.0, f64::max);
     // How far the eaves are from the walls' centre lines: out from a ring running counter-clockwise,
-    // in from one running clockwise. A ring by its corners, to the micron, from its south-west corner.
+    // in from one running clockwise.
     let d = face + overhang;
-    let tidy = |ring: &[P2]| {
-        let mut ring: Vec<P2> = geom::corners(ring).into_iter().map(micron).collect();
-        let south_west =
-            ring.iter().enumerate().min_by(|(_, a), (_, b)| (a.1, a.0).partial_cmp(&(b.1, b.0)).unwrap_or(std::cmp::Ordering::Equal));
-        let first = south_west.map_or(0, |(i, _)| i);
-        ring.rotate_left(first);
-        ring
-    };
-    // The loops standing free inside the outline: the other pieces, inside it. Whether loop `a`
-    // stands inside another; the innermost loop round a point, and so the loops rooms are in.
-    let loops: Vec<&Vec<P2>> = inner.iter().filter(|f| f.iter().all(|q| geom::contains(outer, *q))).collect();
-    let nested = |a: usize| (0..loops.len()).any(|b| b != a && loops[a].iter().all(|q| geom::contains(loops[b], *q)));
-    let around = |p: P2| {
-        (0..loops.len()).filter(|&a| geom::contains(loops[a], p)).max_by(|&a, &b| geom::area(loops[a]).total_cmp(&geom::area(loops[b])))
-    };
-    let indoors: Vec<usize> = m
-        .elements
-        .values()
-        .filter_map(|e| match e {
-            Element::Room(r) if r.level == below => around(r.point),
-            _ => None,
-        })
-        .collect();
-    // Courtyards: the outermost loops, outdoors, that stay open past the overhang: moved in, a loop
-    // too small for it turns inside out, its edges running back.
+    // The courtyards that stay open past the overhang: moved in, one too small for it turns inside
+    // out, its edges running back.
     // ponytail: one pinched shut only in the middle keeps its edges' ways and crosses itself; check
     // for crossings too if courtyards like that turn up.
-    let courtyards = (0..loops.len())
-        .filter(|&a| !nested(a) && !indoors.contains(&a))
-        .filter_map(|a| {
-            let c = geom::grow(loops[a], d);
-            let open = geom::ring_edges(loops[a]).zip(geom::ring_edges(&c)).all(|((p, q), (r, s))| (q - p).dot(s - r) > 0.0);
+    let courtyards = loops
+        .iter()
+        .filter_map(|l| {
+            let c = geom::grow(l, d);
+            let open = geom::ring_edges(l).zip(geom::ring_edges(&c)).all(|((p, q), (r, s))| (q - p).dot(s - r) > 0.0);
             open.then(|| tidy(&c))
         })
         .collect();
-    Ok((tidy(&geom::grow(&outer.iter().rev().copied().collect::<Vec<P2>>(), d)), courtyards))
+    Ok((tidy(&geom::grow(&outline, d)), courtyards))
 }
 
 fn section(s: &mut Session, p: &Value) -> R {
@@ -2207,7 +2212,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         Element::Wall(w) => (w.start, w.end) = if mo.mirror { (f(w.end), f(w.start)) } else { (f(w.start), f(w.end)) },
         Element::Grid(g) => (g.start, g.end) = (f(g.start), f(g.end)),
         Element::Floor(fl) => {
-            fl.boundary.iter_mut().for_each(|q| *q = f(*q));
+            fl.boundary.iter_mut().chain(fl.openings.iter_mut().flatten()).for_each(|q| *q = f(*q));
             // A mirror turns the outline clockwise; floors keep theirs counter-clockwise.
             if mo.mirror {
                 fl.boundary.reverse();

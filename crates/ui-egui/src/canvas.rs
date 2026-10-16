@@ -1612,10 +1612,12 @@ impl BimApp {
                 sketched(&Element::Column(Column { type_name, level, at, angle: 0.0, top_level: None, height: 0.0, base_offset: 0.0 }));
                 return;
             }
-            // The floor a click would make, under the walls.
+            // The floor a click would make, under the walls, open over their courtyards.
             Tool::Floor => {
-                if let Some(ring) = floor_outline(m, level) {
-                    p.add(Shape::closed_line(ring.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
+                if let Some((ring, courtyards)) = floor_outline(m, level) {
+                    for r in std::iter::once(&ring).chain(&courtyards) {
+                        p.add(Shape::closed_line(r.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
+                    }
                 }
                 return;
             }

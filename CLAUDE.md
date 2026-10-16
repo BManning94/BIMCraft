@@ -77,13 +77,15 @@ A roof by footprint is the straight skeleton of its outline and its `courtyards`
 counter-clockwise, the courtyards clockwise, the roof to the left of every edge): each edge moves in at speed 1, a gable's at
 0, and its slope rises from it, reaching the roof's base `overhang` in from its eaves; a courtyard's edges number on after
 the outline's, and every ring keeps its numbers whichever way round it runs, so `gables` stay put through a mirror.
-Over the walls (`roof_footprint`), a loop of them standing free inside the outer ones, joined to none of them and with no
-room in it, is a courtyard; one joined to them, or with a room in it, is rooms, and the roof runs over it.
+Over the walls (`floor_outline`, which `roof_footprint` grows by the overhang), a loop of them standing free inside the outer
+ones, joined to none of them and with no room in it, is a courtyard, open through the floor and the roof; one joined to them,
+or with a room in it, is rooms, and both run over it.
 `Model::roof_faces` are its slopes, each the loops round it in plan (a slope can close round a courtyard whose far side is a
 gable) with the plane of its underside, trimmed where it `join`s another; `Model::roof_pieces` are those less their holes
 and its `openings`, convex where cut. A floor's top is at its level plus `offset`,
 or with a slope arrow, there at the arrow's tail and rising `slope` degrees toward its head (`Model::floor_top`); it's its
-type's thickness across the slope, so plumb it's thicker. A ceiling's `offset` is its underside. A shaft cuts each floor,
+type's thickness across the slope, so plumb it's thicker. Its `openings` are holes inside it, apart, and `Model::floor_slabs`
+what's left, convex where cut. A ceiling's `offset` is its underside. A shaft cuts each floor,
 ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). A stair or a ramp
 is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): a landing after `at` risers (a ramp's, `at`
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to

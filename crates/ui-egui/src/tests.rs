@@ -1367,6 +1367,18 @@ fn floors_go_under_the_walls_and_a_slope_arrow_slopes_them() {
 }
 
 #[test]
+fn the_floor_tool_leaves_a_courtyard_open_inside_a_loop_of_walls_standing_free() {
+    let mut h = app(r#"wall {"points": [[0, 0], [16000, 0], [16000, 16000], [0, 16000]], "closed": true}
+wall {"points": [[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]], "closed": true}"#);
+    tool(&mut h, "Floor");
+    click(&mut h, P2(3000.0, 8000.0));
+    let floor = ids(&h, "floor");
+    assert_eq!(floor.len(), 1);
+    let courtyard = json!([[[6000.0, 6000.0], [6000.0, 10000.0], [10000.0, 10000.0], [10000.0, 6000.0]]]);
+    assert_eq!((field(&h, floor[0], "openings"), field(&h, floor[0], "area_m2")), (courtyard, json!(240.0)), "the loop's centre lines");
+}
+
+#[test]
 fn ceilings_go_in_the_room_clicked_and_show_in_its_ceiling_plan() {
     use egui_kittest::kittest::NodeT;
     let mut h = app(BOX);

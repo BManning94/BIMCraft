@@ -987,7 +987,7 @@ fn describe(m: &Model, id: u64) -> String {
     let keys: &[&str] = match e["category"].as_str() {
         Some("wall") => &["start", "end", "arc", "thickness", "base_offset", "height", "level", "top_level", "attach_top"],
         Some("door" | "window") => &["host", "offset", "width", "height", "sill"],
-        Some("floor") => &["level", "area_m2", "slope", "top"],
+        Some("floor") => &["level", "area_m2", "slope", "top", "openings"],
         Some("ceiling") => &["level", "offset", "thickness", "area_m2"],
         Some("shaft") => &["level", "base_offset", "top_level", "height", "boundary"],
         Some("room") => &["level", "name", "number", "area_m2"],
@@ -1070,14 +1070,16 @@ fn ifc_files_open_as_the_building_they_describe() {
     run(&mut s, "column", json!({"at": [8000, 5000], "angle": 30}));
     run(&mut s, "stair", json!({"start": [1000, 2000], "end": [2000, 2000], "width": 900}));
     run(&mut s, "wall", json!({"points": [[14000, 0], [18000, 0]], "arc": 90, "type": "Exterior - 300mm"}));
-    // A ramp rising north beside the house, a loft over the living room, and a shaft up through
-    // the living room's ceiling and the loft.
+    // A ramp rising north beside the house with a hole in it, a loft over the living room open over
+    // the stair, and a shaft up through the living room's ceiling and the loft.
+    let hole = json!([[[11500, 1500], [12500, 1500], [12500, 2500], [11500, 2500]]]);
     run(
         &mut s,
         "floor",
-        json!({"boundary": [[11000, 0], [13000, 0], [13000, 4000], [11000, 4000]], "slope": 4, "arrow": [[12000, 0], [12000, 4000]]}),
+        json!({"boundary": [[11000, 0], [13000, 0], [13000, 4000], [11000, 4000]], "slope": 4, "arrow": [[12000, 0], [12000, 4000]], "openings": hole}),
     );
-    run(&mut s, "floor", json!({"level": "Level 2", "boundary": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}));
+    let well = json!([[[1000, 1500], [3500, 1500], [3500, 2500], [1000, 2500]]]);
+    run(&mut s, "floor", json!({"level": "Level 2", "boundary": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]], "openings": well}));
     run(&mut s, "shaft", json!({"boundary": [[4000, 1000], [5000, 1000], [5000, 2000], [4000, 2000]]}));
     // A stair that turns back at a landing, with its railings; a ramp turning right at one; a railing along a path.
     let u =
@@ -1920,4 +1922,51 @@ fn roofs_over_the_walls_leave_a_loop_of_walls_standing_free_open_as_a_courtyard(
     run(&mut s, "wall", json!({"points": [[8000, 0], [8000, 6000]]}));
     let joined = run(&mut s, "roof", json!({}))["id"].as_u64().unwrap();
     assert_eq!((element(&mut s, joined)["courtyards"].clone(), top(&s, joined, 8000.0, 8000.0).is_some()), (Value::Null, true));
+}
+
+#[test]
+fn floors_over_the_walls_leave_a_loop_of_walls_standing_free_open_as_a_courtyard() {
+    let mut s = Session::new();
+    // A two-storey 16 m square house round a 4 m courtyard: on each level, no wall joins the loop
+    // round the courtyard to the outer walls.
+    for level in ["Level 1", "Level 2"] {
+        run(&mut s, "wall", json!({"level": level, "points": [[0, 0], [16000, 0], [16000, 16000], [0, 16000]], "closed": true}));
+        run(
+            &mut s,
+            "wall",
+            json!({"level": level, "points": [[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]], "closed": true}),
+        );
+    }
+    // Level 2's floor runs along the walls' centre lines, round the loop too, clockwise from its
+    // south-west corner: 16² less 4².
+    let made = run(&mut s, "floor", json!({"level": "Level 2"}));
+    let floor = made["id"].as_u64().unwrap();
+    let e = element(&mut s, floor);
+    let court = json!([[[6000.0, 6000.0], [6000.0, 10000.0], [10000.0, 10000.0], [10000.0, 6000.0]]]);
+    assert_eq!((made["area_m2"].as_f64(), e["area_m2"].as_f64(), e["openings"].clone()), (Some(240.0), Some(240.0), court), "{e}");
+    // Open over the courtyard in 3D, and in a section across it: cut in both wings, not between.
+    let top = |s: &Session, id: u64, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&id).copied();
+    assert_eq!((top(&s, floor, 8000.0, 8000.0), top(&s, floor, 8000.0, 3000.0)), (None, Some(3000.0)));
+    let sec = run(&mut s, "section", json!({"start": [8000, -2000], "end": [8000, 18000]}))["id"].as_u64().unwrap();
+    let view = crate::render::section_fit(&s.model, sec, 800, 600);
+    let d = crate::render::section(&s.model, sec, view);
+    let cut = |y: f64| d.pick(view.px(P2(y + 2000.0, 2900.0)), 1.0);
+    assert_eq!((cut(3000.0), cut(13000.0), cut(8000.0)), (Some(floor), Some(floor), None));
+    // In plan, the hole's edge, under the courtyard's walls.
+    let plan = crate::render::plan(&s.model, 2, 800, 600);
+    assert!(plan.pick_all(plan.view.px(P2(8000.0, 6000.0)), 2.0).contains(&floor), "the courtyard's edge");
+    // Openings given are the floor's own.
+    let given = run(&mut s, "floor", json!({"level": "Level 2", "openings": []}))["id"].as_u64().unwrap();
+    assert_eq!(top(&s, given, 8000.0, 8000.0), Some(3000.0));
+    // A loop with a room in it is indoors, and so is one joined to the outer walls: rooms, floored over.
+    let room = run(&mut s, "room", json!({"level": "Level 2", "point": [8000, 8000], "name": "Hall"}))["id"].as_u64().unwrap();
+    let hall = run(&mut s, "floor", json!({"level": "Level 2"}));
+    assert_eq!((element(&mut s, hall["id"].as_u64().unwrap())["openings"].clone(), hall["area_m2"].as_f64()), (Value::Null, Some(256.0)));
+    run(&mut s, "delete", json!({"ids": [room]}));
+    run(&mut s, "wall", json!({"level": "Level 2", "points": [[8000, 0], [8000, 6000]]}));
+    let joined = run(&mut s, "floor", json!({"level": "Level 2"}));
+    assert_eq!(
+        (element(&mut s, joined["id"].as_u64().unwrap())["openings"].clone(), joined["area_m2"].as_f64()),
+        (Value::Null, Some(256.0))
+    );
 }

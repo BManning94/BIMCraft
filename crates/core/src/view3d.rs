@@ -273,8 +273,9 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 curve: p.curve,
             })),
             Element::Floor(f) => {
-                let (face, rise) = m.floor_slab(f);
-                slabs(&mut out, m, id, SLAB, face, rise);
+                for (face, rise) in m.floor_slabs(f) {
+                    slabs(&mut out, m, id, SLAB, face, rise);
+                }
             }
             Element::Ceiling(c) => {
                 let (face, rise) = m.ceiling_slab(c);
