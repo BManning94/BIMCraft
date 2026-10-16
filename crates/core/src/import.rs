@@ -14,8 +14,9 @@ use std::f64::consts::PI;
 use crate::commands::{micron, next_number, tidy};
 use crate::geom::{self, P2};
 use crate::model::{
-    Ceiling, CeilingType, Column, ColumnType, Element, Extrusion, Floor, FloorType, Grid, Id, Landing, Level, MAX_POINTS, MAX_TEXT, Model,
-    Opening, OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
+    Ceiling, CeilingType, Column, ColumnType, Element, Extrusion, Floor, FloorType, Function, Grid, Id, Landing, Layer, Level, MAX_COORD,
+    MAX_LAYERS, MAX_POINTS, MAX_TEXT, Model, Opening, OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair,
+    TOL, Wall, WallType, culprit, heading,
 };
 use crate::stairs;
 use crate::step::{self, Entity, File, V};
@@ -735,6 +736,9 @@ struct Links {
     host: HashMap<u64, u64>,
     fills: HashMap<u64, u64>,
     type_name: HashMap<u64, String>,
+    /// An element's type, and what an element or a type is made of.
+    typed: HashMap<u64, u64>,
+    material: HashMap<u64, u64>,
 }
 
 impl Links {
@@ -769,6 +773,14 @@ impl Links {
                 "IFCRELDEFINESBYTYPE" => {
                     if let Some(name) = reference(a(5)).and_then(|t| f.entities.get(&t)).and_then(|t| text(t.args.get(2))) {
                         l.type_name.extend(refs(a(4)).into_iter().map(|x| (x, name.to_string())));
+                    }
+                    if let Some(t) = reference(a(5)) {
+                        l.typed.extend(refs(a(4)).into_iter().map(|x| (x, t)));
+                    }
+                }
+                "IFCRELASSOCIATESMATERIAL" => {
+                    if let Some(mat) = reference(a(5)) {
+                        l.material.extend(refs(a(4)).into_iter().map(|x| (x, mat)));
                     }
                 }
                 _ => {}
@@ -845,6 +857,95 @@ fn meet(walls: &mut [RawWall]) {
     }
 }
 
+/// Whether element `id`'s layer set usage stacks its layers up its own axis (`.POSITIVE.`), so its
+/// first is at its back: a wall's right, a slab's bottom; none without a usage.
+fn stacked_up(r: &Reader, l: &Links, id: u64) -> Option<bool> {
+    let usage = l.material.get(&id).and_then(|x| r.get(*x)).filter(|u| u.name == "IFCMATERIALLAYERSETUSAGE")?;
+    Some(enumeration(usage.args.get(2)) == Some("POSITIVE"))
+}
+
+/// The layers the file gives element `id`, or its type: its layer set's, each its material's name,
+/// its thickness, and what it does by its category; none unless they add up to `t` within a
+/// millimetre, nor where they wouldn't make a type.
+fn layers_of(r: &Reader, l: &Links, id: u64, t: f64) -> Vec<Layer> {
+    let Some(mut set) = l.material.get(&id).or_else(|| l.typed.get(&id).and_then(|ty| l.material.get(ty))).and_then(|x| r.get(*x)) else {
+        return Vec::new();
+    };
+    if set.name == "IFCMATERIALLAYERSETUSAGE" {
+        match r.at(set.args.first()) {
+            Some(x) => set = x,
+            None => return Vec::new(),
+        }
+    }
+    if set.name != "IFCMATERIALLAYERSET" || list(set.args.first()).len() > MAX_LAYERS {
+        return Vec::new();
+    }
+    let mut layers: Vec<Layer> = refs(set.args.first())
+        .into_iter()
+        .filter_map(|id| r.get(id))
+        .filter(|x| x.name == "IFCMATERIALLAYER")
+        .map(|x| {
+            let thickness = r.len(x.args.get(1)).map_or(f64::NAN, |t| (t * 100.0).round() / 100.0);
+            let function = match text(x.args.get(5)) {
+                _ if thickness == 0.0 => Function::Membrane,
+                Some("LoadBearing") => Function::Structure,
+                Some("Insulation") => Function::Thermal,
+                Some("Finish") => Function::Finish,
+                Some("Substrate") => Function::Substrate,
+                Some("Membrane") => Function::Membrane,
+                _ => Function::Substrate,
+            };
+            Layer { function, material: r.at(x.args.first()).and_then(|m| text(m.args.first())).map(clip).unwrap_or_default(), thickness }
+        })
+        .collect();
+    let sum: f64 = layers.iter().map(|l| l.thickness).sum();
+    if layers.is_empty()
+        || layers.len() > MAX_LAYERS
+        || layers.iter().any(|l| !(0.0..=MAX_COORD).contains(&l.thickness))
+        || (sum - t).abs() > 1.0
+    {
+        return Vec::new();
+    }
+    // A file that says nothing of what its layers do: the thickest carries the rest.
+    let told = refs(set.args.first()).into_iter().filter_map(|id| r.get(id)).any(|x| text(x.args.get(5)).is_some());
+    if !told
+        && let Some(k) = (0..layers.len()).max_by(|a, b| layers[*a].thickness.total_cmp(&layers[*b].thickness))
+        && let Some(l) = layers.get_mut(k)
+    {
+        l.function = Function::Structure;
+    }
+    layers
+}
+
+/// The colours a file shades its materials in, by their names: each material's surface style's.
+fn material_colours(r: &Reader) -> HashMap<String, [u8; 3]> {
+    let mut out = HashMap::new();
+    for e in r.f.entities.values().filter(|e| e.name == "IFCMATERIALDEFINITIONREPRESENTATION") {
+        let Some(name) = r.at(e.args.get(3)).and_then(|m| text(m.args.first())) else { continue };
+        let items = refs(e.args.get(2)).into_iter().filter_map(|rep| r.get(rep)).flat_map(|rep| refs(rep.args.get(3)));
+        // An item's styles, in IFC2x3 through style assignments; a surface style's, its shading.
+        let mut styles: Vec<u64> = items.filter_map(|i| r.get(i)).flat_map(|i| refs(i.args.get(1))).collect();
+        let mut seen = HashSet::new();
+        while let Some(id) = styles.pop() {
+            let Some(x) = r.get(id).filter(|_| seen.insert(id)) else { continue };
+            match x.name.as_str() {
+                "IFCPRESENTATIONSTYLEASSIGNMENT" => styles.extend(refs(x.args.first())),
+                "IFCSURFACESTYLE" => styles.extend(refs(x.args.get(2))),
+                "IFCSURFACESTYLESHADING" | "IFCSURFACESTYLERENDERING" => {
+                    if let Some(c) = r.at(x.args.first()).filter(|c| c.name == "IFCCOLOURRGB") {
+                        let byte = |i: usize| real(c.args.get(i)).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                        if let (Some(red), Some(green), Some(blue)) = (byte(1), byte(2), byte(3)) {
+                            out.insert(clip(name), [red, green, blue]);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// A type of `map` like `same` says, by `base` or `base (2)`, `base (3)`… made as `new` when
 /// there's none.
 fn kind<T>(map: &mut BTreeMap<String, T>, base: &str, same: impl Fn(&T) -> bool, new: T) -> String {
@@ -900,6 +1001,20 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         _ => P2(0.0, 0.0),
     };
     let r = Reader { f: &file, mm, rad, shift };
+    // What an element is made of: its layers, when they add up to how thick it is, and so how thick.
+    let made_of = |id: u64, t: f64| {
+        let layers = layers_of(&r, &l, id, t);
+        (if layers.is_empty() { t } else { layers.iter().map(|l| l.thickness).sum() }, layers)
+    };
+    // A slab's from the top down: the other way round where its usage stacks them up from its bottom.
+    let top_down = |id: u64, t: f64| {
+        let (t, mut layers) = made_of(id, t);
+        let up = r.get(id).is_some_and(|x| r.frame(x).z[2] >= 0.0);
+        if stacked_up(&r, &l, id) == Some(up) {
+            layers.reverse();
+        }
+        (t, layers)
+    };
     let e = |id: u64| r.get(id);
     let named = |names: &[&str]| -> Vec<u64> {
         ids.iter().copied().filter(|id| e(*id).is_some_and(|x| names.contains(&x.name.as_str()))).collect()
@@ -982,6 +1097,16 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let faces = r.body(w);
         let pts: Vec<P3> = faces.iter().flatten().copied().collect();
         let axis = r.axis(w);
+        let f = r.frame(w);
+        // BIMCraft lists a wall's layers from its left, its exterior: the wall runs so the file's
+        // first is there, which its usage stacks from across its own y, or up it from the other side.
+        let faced = |a: P2, b: P2| {
+            let side = P2(f.y[0], f.y[1]).dot((b - a).perp());
+            match stacked_up(&r, &l, id) {
+                Some(up) if (if up { -side } else { side }) < 0.0 => (b, a),
+                _ => (a, b),
+            }
+        };
         // A curved axis: the arc through its ends and its middle; the wall's line, the middle of its
         // body round the arc's centre, as thick as the body spreads.
         let bent: Vec<P2> = axis.iter().flatten().map(|x| r.flat(*x)).collect();
@@ -989,22 +1114,28 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             && bent.iter().any(|x| geom::dist_to_segment(*x, *p, *q) > 1.0)
         {
             let mid = bent.get(bent.len() / 2).copied().unwrap_or(*p);
-            let arc = walls::sweep_through(*p, mid, *q);
-            let radii = Axis::new(*p, *q, arc).centre().and_then(|c| Some((c, arc_faces(pts.iter().map(|x| r.flat(*x).dist(c)))?)));
+            let (p, q) = faced(*p, *q);
+            let arc = walls::sweep_through(p, mid, q);
+            let radii = Axis::new(p, q, arc).centre().and_then(|c| Some((c, arc_faces(pts.iter().map(|x| r.flat(*x).dist(c)))?)));
             let (Some((c, (r0, r1))), Some((z0, z1))) = (radii, span(pts.iter().map(|x| x[2]))) else {
                 leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
                 continue;
             };
             let t = ((r1 - r0) * 100.0).round() / 100.0;
             let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-            let type_name =
-                kind(&mut m.types.wall, &base, |k| (k.thickness - t).abs() < 0.05, WallType { thickness: t, layers: Vec::new() });
+            let (t, layers) = made_of(id, t);
+            let type_name = kind(
+                &mut m.types.wall,
+                &base,
+                |k| (k.thickness - t).abs() < 0.05 && k.layers == layers,
+                WallType { thickness: t, layers: layers.clone() },
+            );
             let on = |x: P2| micron(c + (x - c).unit() * ((r0 + r1) / 2.0));
             let arc = (arc * 1e6).round() / 1e6;
             raw.push(RawWall {
                 ifc: id,
-                start: on(*p),
-                end: on(*q),
+                start: on(p),
+                end: on(q),
                 arc,
                 t,
                 z: (z0, z1),
@@ -1014,7 +1145,6 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             });
             continue;
         }
-        let f = r.frame(w);
         let (a, b) = match axis.as_deref() {
             Some([p, .., q]) if r.flat(*p).dist(r.flat(*q)) > TOL => (r.flat(*p), r.flat(*q)),
             // No axis: along the wall's own x, as far as its body goes.
@@ -1027,6 +1157,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
                 }
             }
         };
+        let (a, b) = faced(a, b);
         let (u, n) = ((b - a).unit(), (b - a).unit().perp());
         let (Some((c0, c1)), Some((z0, z1))) = (span(pts.iter().map(|p| (r.flat(*p) - a).dot(n))), span(pts.iter().map(|p| p[2]))) else {
             leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
@@ -1040,7 +1171,13 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let t = (c1 - c0) * 100.0;
         let t = t.round() / 100.0;
         let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-        let type_name = kind(&mut m.types.wall, &base, |k| (k.thickness - t).abs() < 0.05, WallType { thickness: t, layers: Vec::new() });
+        let (t, layers) = made_of(id, t);
+        let type_name = kind(
+            &mut m.types.wall,
+            &base,
+            |k| (k.thickness - t).abs() < 0.05 && k.layers == layers,
+            WallType { thickness: t, layers: layers.clone() },
+        );
         raw.push(RawWall {
             ifc: id,
             start: micron(a + mid),
@@ -1153,7 +1290,13 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         });
         let t = ((rise * tan.atan().cos()) * 100.0).round() / 100.0;
         let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-        let type_name = kind(&mut m.types.floor, &base, |k| (k.thickness - t).abs() < 0.05, FloorType { thickness: t });
+        let (t, layers) = top_down(id, t);
+        let type_name = kind(
+            &mut m.types.floor,
+            &base,
+            |k| (k.thickness - t).abs() < 0.05 && k.layers == layers,
+            FloorType { thickness: t, layers: layers.clone() },
+        );
         let z = top.at(tail);
         let level = level_near(z).unwrap_or_else(|| level_for(id, z));
         let floor = Floor {
@@ -1185,7 +1328,13 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         };
         let t = ((z1 - z0) * 100.0).round() / 100.0;
         let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(t)));
-        let type_name = kind(&mut m.types.ceiling, &base, |k| (k.thickness - t).abs() < 0.05, CeilingType { thickness: t, grid: 0.0 });
+        let (t, layers) = top_down(id, t);
+        let type_name = kind(
+            &mut m.types.ceiling,
+            &base,
+            |k| (k.thickness - t).abs() < 0.05 && k.layers == layers,
+            CeilingType { thickness: t, grid: 0.0, layers: layers.clone() },
+        );
         let level = level_for(id, z0);
         let boundary = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
         let offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
@@ -1208,7 +1357,13 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         match roof_from(&r, &faces, &voided(id)) {
             Ok(rd) => {
                 let base = label(id).unwrap_or_else(|| format!("Imported - {}mm", num(rd.t)));
-                let type_name = kind(&mut m.types.roof, &base, |k| (k.thickness - rd.t).abs() < 0.05, RoofType { thickness: rd.t });
+                let (t, layers) = top_down(id, rd.t);
+                let type_name = kind(
+                    &mut m.types.roof,
+                    &base,
+                    |k| (k.thickness - t).abs() < 0.05 && k.layers == layers,
+                    RoofType { thickness: t, layers: layers.clone() },
+                );
                 let pitched = rd.slope > 0.0;
                 let level = if pitched { level_for(id, rd.z) } else { level_near(rd.z).unwrap_or_else(|| level_for(id, rd.z)) };
                 // A pitched one reaches its level `overhang` in from its eaves, or its eaves stand
@@ -1611,6 +1766,13 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         }
     }
 
+    // The materials the layers are made of, in the library, shaded as the file shades them.
+    m.adopt_materials();
+    for (name, colour) in material_colours(&r) {
+        if let Some(x) = m.materials.get_mut(&name) {
+            x.color = colour;
+        }
+    }
     // What breaks a rule is left out, with the rule; a wall takes its doors and windows along.
     for _ in 0..=m.elements.len() {
         let Err(error) = m.check() else { break };
@@ -2054,6 +2216,63 @@ ENDSEC;END-ISO-10303-21;",
             rect(20, (1000.0, 1000.0), (2500.0, 2000.0)),
             rect(25, (4000.0, 1000.0), (5000.0, 2000.0)),
         )
+    }
+
+    /// `file` with 150 mm of brick then 50 of plaster on element `#id`, its usage stacking them
+    /// along its own `axis` from where its offset starts them.
+    fn layered(file: &str, id: u32, axis: &str, offset: f64) -> String {
+        let set = "#80=IFCMATERIAL('Brick',$,$);
+#81=IFCMATERIAL('Plaster',$,$);
+#82=IFCMATERIALLAYER(#80,150.,$,$,$,'Finish',$);
+#83=IFCMATERIALLAYER(#81,50.,$,$,$,'LoadBearing',$);
+#84=IFCMATERIALLAYERSET((#82,#83),'Brick and plaster',$);";
+        let usage = format!(
+            "#85=IFCMATERIALLAYERSETUSAGE(#84,.{axis}.,.POSITIVE.,{offset:.1},$);\n#86=IFCRELASSOCIATESMATERIAL('m',$,$,$,(#{id}),#85);"
+        );
+        file.replace("ENDSEC;END", &format!("{set}\n{usage}\nENDSEC;END"))
+    }
+
+    #[test]
+    fn layers_stacked_up_an_elements_own_axis_start_from_its_back() {
+        // The wall runs north, its own y to the west: its first layer is east, so it runs south.
+        let i = ifc(layered(&meshes("0.,0.,0."), 19, "AXIS2", -100.0).as_bytes(), "x").unwrap();
+        let Some(Element::Wall(w)) = only(&i.model, "wall").first().copied() else { panic!("no wall") };
+        let names = |layers: &[Layer]| layers.iter().map(|l| l.material.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            (w.start, w.end, names(&i.model.types.wall[&w.type_name].layers)),
+            (P2(1000.0, 7000.0), P2(1000.0, 2000.0), vec!["Brick".into(), "Plaster".into()])
+        );
+        // The slab's first layer is at its bottom.
+        let i = ifc(layered(&holed("#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.FLOOR.);", 35), 35, "AXIS3", 0.0).as_bytes(), "x").unwrap();
+        let Some(Element::Floor(f)) = only(&i.model, "floor").first().copied() else { panic!("no floor") };
+        assert_eq!(names(&i.model.types.floor[&f.type_name].layers), ["Plaster", "Brick"]);
+    }
+
+    #[test]
+    fn a_style_that_holds_itself_shades_its_material_once() {
+        let style = "#90=IFCMATERIALDEFINITIONREPRESENTATION($,$,(#91),#80);
+#91=IFCSTYLEDREPRESENTATION($,'Style','Material',(#92));
+#92=IFCSTYLEDITEM($,(#93),$);
+#93=IFCSURFACESTYLE('Brick',.BOTH.,(#93,#94));
+#94=IFCSURFACESTYLESHADING(#95,$);
+#95=IFCCOLOURRGB($,1.,0.,0.);";
+        let file = layered(&meshes("0.,0.,0."), 19, "AXIS2", -100.0).replace("ENDSEC;END", &format!("{style}\nENDSEC;END"));
+        let i = ifc(file.as_bytes(), "x").unwrap();
+        assert_eq!(i.model.materials["Brick"].color, [255, 0, 0]);
+    }
+
+    #[test]
+    fn a_layer_of_no_thickness_is_a_membrane() {
+        let file = layered(&meshes("0.,0.,0."), 19, "AXIS2", -100.0)
+            .replace("IFCMATERIALLAYERSET((#82,#83)", "IFCMATERIALLAYERSET((#82,#87,#83)")
+            .replace("ENDSEC;END", "#87=IFCMATERIALLAYER(#81,0.,$,$,$,'Finish',$);\nENDSEC;END");
+        let i = ifc(file.as_bytes(), "x").unwrap();
+        let Some(Element::Wall(w)) = only(&i.model, "wall").first().copied() else { panic!("no wall") };
+        let layers = &i.model.types.wall[&w.type_name].layers;
+        assert_eq!(
+            layers.iter().map(|l| (l.function, l.thickness)).collect::<Vec<_>>(),
+            [(Function::Finish, 150.0), (Function::Membrane, 0.0), (Function::Structure, 50.0)]
+        );
     }
 
     #[test]

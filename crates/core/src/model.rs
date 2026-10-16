@@ -218,7 +218,8 @@ pub enum Function {
     Finish,
 }
 
-/// A layer of a compound wall type.
+/// A layer of a compound type: of a wall, from its exterior in; of a floor, a roof or a ceiling,
+/// from its top down. Its material is one of the project's library's, or none.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Layer {
@@ -229,8 +230,59 @@ pub struct Layer {
     pub thickness: f64,
 }
 
-/// Layers a wall type may have.
+/// Layers a type may have.
 pub const MAX_LAYERS: usize = 32;
+
+/// A material of the project's library: its colour in shaded views, the pattern its cut shows in
+/// plans and sections, and the one its surfaces show where a plan looks down on a floor or a
+/// ceiling plan up at a ceiling.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Material {
+    pub color: [u8; 3],
+    #[serde(default)]
+    pub cut: Pattern,
+    #[serde(default)]
+    pub surface: Pattern,
+}
+
+impl Default for Material {
+    fn default() -> Material {
+        Material { color: [200, 200, 200], cut: Pattern::None, surface: Pattern::None }
+    }
+}
+
+/// A drafting pattern, drawn in code: its lines a few pixels apart whatever the scale.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Pattern {
+    #[default]
+    None,
+    Solid,
+    Diagonal,
+    Crosshatch,
+    Horizontal,
+    Vertical,
+    Grid,
+    Brick,
+    Concrete,
+    Insulation,
+}
+
+impl Pattern {
+    pub const ALL: [Pattern; 10] = [
+        Pattern::None,
+        Pattern::Solid,
+        Pattern::Diagonal,
+        Pattern::Crosshatch,
+        Pattern::Horizontal,
+        Pattern::Vertical,
+        Pattern::Grid,
+        Pattern::Brick,
+        Pattern::Concrete,
+        Pattern::Insulation,
+    ];
+}
 
 /// A slab under its top, along `boundary` (counter-clockwise), open through its `openings` (holes
 /// inside it, apart): its top at its level, `offset` mm above it; with a slope arrow, from tail to
@@ -784,10 +836,13 @@ pub struct WallType {
     pub layers: Vec<Layer>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A floor type: how thick its floors are and, a compound one, its layers from the top down.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FloorType {
     pub thickness: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
 }
 
 /// A railing type: how high its rail stands, and how far apart its balusters are (0: none).
@@ -800,13 +855,15 @@ pub struct RailingType {
 }
 
 /// A ceiling type: how thick, and with `grid`, square tiles that wide, which its reflected ceiling
-/// plan draws.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// plan draws; a compound one, its layers from the top down.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CeilingType {
     pub thickness: f64,
     #[serde(default)]
     pub grid: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
 }
 
 /// A column type: `width` by `depth`, or round, `width` across.
@@ -819,10 +876,14 @@ pub struct ColumnType {
     pub round: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// A roof type: how thick its roofs are across their slope and, a compound one, its layers from
+/// the top down.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoofType {
     pub thickness: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<Layer>,
 }
 
 /// A door or window type. `sill` is a window's default sill height.
@@ -866,6 +927,9 @@ pub struct Model {
     pub language: Language,
     pub next_id: Id,
     pub types: Types,
+    /// What layers are made of, by name.
+    #[serde(default)]
+    pub materials: BTreeMap<String, Material>,
     pub elements: BTreeMap<Id, Element>,
 }
 
@@ -884,8 +948,25 @@ impl Model {
             language,
             next_id: 1,
             types: Types::default(),
+            materials: BTreeMap::new(),
             elements: BTreeMap::new(),
         };
+        // A library to start from: each material its colour, its cut's pattern and its surface's.
+        for (name, color, cut, surface) in [
+            ("Brick", [178, 92, 70], Pattern::Brick, Pattern::Brick),
+            ("Insulation", [232, 214, 140], Pattern::Insulation, Pattern::None),
+            ("Concrete block", [176, 176, 170], Pattern::Crosshatch, Pattern::None),
+            ("Plaster", [238, 234, 224], Pattern::None, Pattern::None),
+            ("Concrete", [188, 188, 182], Pattern::Concrete, Pattern::None),
+            ("Screed", [206, 200, 188], Pattern::Concrete, Pattern::None),
+            ("Timber", [196, 154, 102], Pattern::Diagonal, Pattern::Horizontal),
+            ("Gypsum board", [242, 242, 238], Pattern::None, Pattern::None),
+            ("Ceramic tile", [222, 220, 210], Pattern::Solid, Pattern::Grid),
+            ("Roof tiles", [170, 86, 64], Pattern::Solid, Pattern::Horizontal),
+            ("Membrane", [70, 70, 74], Pattern::Solid, Pattern::None),
+        ] {
+            m.materials.insert(language.word(name).into(), Material { color, cut, surface });
+        }
         for (n, t) in [("Generic - 200mm", 200.0), ("Interior - 100mm", 100.0)] {
             m.types.wall.insert(n.into(), WallType { thickness: t, layers: Vec::new() });
         }
@@ -898,7 +979,7 @@ impl Model {
             layer(Function::Finish, "Plaster", 10.0),
         ];
         m.types.wall.insert("Exterior - 300mm".into(), WallType { thickness: 300.0, layers });
-        m.types.floor.insert("Generic - 200mm".into(), FloorType { thickness: 200.0 });
+        m.types.floor.insert("Generic - 200mm".into(), FloorType { thickness: 200.0, layers: Vec::new() });
         for (n, w) in [("Single 900 x 2100", 900.0), ("Single 800 x 2100", 800.0)] {
             m.types.door.insert(n.into(), OpeningType { width: w, height: 2100.0, sill: 0.0 });
         }
@@ -907,14 +988,48 @@ impl Model {
         }
         m.types.column.insert("Rectangular 400 x 400".into(), ColumnType { width: 400.0, depth: 400.0, round: false });
         m.types.column.insert("Round 300".into(), ColumnType { width: 300.0, depth: 300.0, round: true });
-        m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0 });
-        m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0 });
-        m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0 });
+        m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0, layers: Vec::new() });
+        m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0, layers: Vec::new() });
+        m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0, layers: Vec::new() });
         m.types.railing.insert("Railing - 1000mm".into(), RailingType { height: 1000.0, spacing: 120.0 });
         let level = language.word("Level");
         m.insert(Element::Level(Level::new(format!("{level} 1"), 0.0)));
         m.insert(Element::Level(Level::new(format!("{level} 2"), 3000.0)));
         m
+    }
+
+    /// Every type that may have layers: its category, name, thickness and layers.
+    pub fn layered_types(&self) -> impl Iterator<Item = (&'static str, &str, f64, &[Layer])> + '_ {
+        let t = &self.types;
+        let walls = t.wall.iter().map(|(n, x)| ("wall", n.as_str(), x.thickness, x.layers.as_slice()));
+        let floors = t.floor.iter().map(|(n, x)| ("floor", n.as_str(), x.thickness, x.layers.as_slice()));
+        let roofs = t.roof.iter().map(|(n, x)| ("roof", n.as_str(), x.thickness, x.layers.as_slice()));
+        let ceilings = t.ceiling.iter().map(|(n, x)| ("ceiling", n.as_str(), x.thickness, x.layers.as_slice()));
+        walls.chain(floors).chain(roofs).chain(ceilings)
+    }
+
+    /// The layers of type `name` of `category`, a wall's from its exterior in, the others' from
+    /// the top down; none for a type without layers.
+    pub fn type_layers(&self, category: &str, name: &str) -> &[Layer] {
+        self.layered_types().find(|(c, n, ..)| *c == category && *n == name).map_or(&[], |(.., l)| l)
+    }
+
+    /// Every type's layers, to change.
+    pub fn layers_mut(&mut self) -> impl Iterator<Item = &mut Layer> {
+        let Types { wall, floor, roof, ceiling, .. } = &mut self.types;
+        (wall.values_mut().flat_map(|t| t.layers.iter_mut()))
+            .chain(floor.values_mut().flat_map(|t| t.layers.iter_mut()))
+            .chain(roof.values_mut().flat_map(|t| t.layers.iter_mut()))
+            .chain(ceiling.values_mut().flat_map(|t| t.layers.iter_mut()))
+    }
+
+    /// Every material the types' layers name that the library hasn't, put in it: what a project
+    /// from before the library, or a file from elsewhere, comes in with.
+    pub fn adopt_materials(&mut self) {
+        let named: Vec<String> = self.layered_types().flat_map(|(.., l)| l.iter().map(|l| l.material.clone())).collect();
+        for n in named.into_iter().filter(|n| !n.is_empty()) {
+            self.materials.entry(n).or_default();
+        }
     }
 
     /// Adds an element unchecked; the engine runs [`Model::check`] after every command.
@@ -1692,33 +1807,37 @@ impl Model {
                 coord(&format!("{cat} type `{n}` sill"), t.sill)?;
             }
         }
-        for (n, t) in &self.types.wall {
-            size(&format!("wall type `{n}` thickness"), t.thickness)?;
-            if t.layers.len() > MAX_LAYERS {
-                return Err(format!("wall type `{n}`: more than {MAX_LAYERS} layers"));
+        for n in self.materials.keys() {
+            text(&format!("material `{n}`"), "name", n)?;
+            if n.trim().is_empty() {
+                return Err("a material needs a name".into());
             }
-            for (i, l) in t.layers.iter().enumerate() {
-                let what = format!("wall type `{n}` layer {}", i + 1);
+        }
+        for (cat, n, thickness, layers) in self.layered_types() {
+            let who = format!("{cat} type `{n}`");
+            size(&format!("{who} thickness"), thickness)?;
+            if layers.len() > MAX_LAYERS {
+                return Err(format!("{who}: more than {MAX_LAYERS} layers"));
+            }
+            for (i, l) in layers.iter().enumerate() {
+                let what = format!("{who} layer {}", i + 1);
                 text(&what, "material", &l.material)?;
+                if !l.material.is_empty() && !self.materials.contains_key(&l.material) {
+                    return Err(format!("{what}: material `{}` isn't in the library; add it with `material`", l.material));
+                }
                 match l.function {
                     Function::Membrane if l.thickness == 0.0 => {}
                     _ => size(&format!("{what} thickness"), l.thickness)?,
                 }
             }
-            let sum: f64 = t.layers.iter().map(|l| l.thickness).sum();
-            if !t.layers.is_empty() && (sum - t.thickness).abs() > 1e-6 {
-                return Err(format!("wall type `{n}`: its layers add up to {sum} mm, not its thickness, {} mm", t.thickness));
+            let sum: f64 = layers.iter().map(|l| l.thickness).sum();
+            if !layers.is_empty() && (sum - thickness).abs() > 1e-6 {
+                return Err(format!("{who}: its layers add up to {sum} mm, not its thickness, {thickness} mm"));
             }
-        }
-        for (n, t) in &self.types.floor {
-            size(&format!("floor type `{n}` thickness"), t.thickness)?;
         }
         for (n, t) in &self.types.column {
             size(&format!("column type `{n}` width"), t.width)?;
             size(&format!("column type `{n}` depth"), t.depth)?;
-        }
-        for (n, t) in &self.types.roof {
-            size(&format!("roof type `{n}` thickness"), t.thickness)?;
         }
         for (n, t) in &self.types.railing {
             size(&format!("railing type `{n}` height"), t.height)?;
@@ -1727,7 +1846,6 @@ impl Model {
             }
         }
         for (n, t) in &self.types.ceiling {
-            size(&format!("ceiling type `{n}` thickness"), t.thickness)?;
             // A finer grid would draw a line every few pixels, and millions over a large ceiling.
             if !(t.grid == 0.0 || (100.0..=MAX_COORD).contains(&t.grid)) {
                 return Err(format!("ceiling type `{n}`: grid {} mm; its tiles are 100 mm or wider, or 0 for none", t.grid));

@@ -958,6 +958,32 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["Extrusion Start", "Início da extrusão", "Inicio de extrusión"],
     ["Extrusion End", "Fim da extrusão", "Fin de extrusión"],
+    // The materials library, and layered floors, roofs and ceilings.
+    ["Materials", "Materiais", "Materiales"],
+    ["Material:", "Material:", "Material:"],
+    [
+        "Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show",
+        "Materiais: a biblioteca do projeto, a cor de cada material em 3D e os padrões do seu corte e das suas superfícies",
+        "Materiales: la biblioteca del proyecto, el color de cada material en 3D y los patrones de su corte y sus superficies",
+    ],
+    ["Name", "Nome", "Nombre"],
+    ["Color", "Cor", "Color"],
+    ["Cut Pattern", "Padrão de corte", "Patrón de corte"],
+    ["Surface Pattern", "Padrão de superfície", "Patrón de superficie"],
+    ["Close", "Fechar", "Cerrar"],
+    ["(none)", "(nenhum)", "(ninguno)"],
+    ["Up", "Para cima", "Arriba"],
+    ["Down", "Para baixo", "Abajo"],
+    ["None", "Nenhum", "Ninguno"],
+    ["Solid Fill", "Preenchimento sólido", "Relleno sólido"],
+    ["Diagonal", "Diagonal", "Diagonal"],
+    ["Crosshatch", "Hachura cruzada", "Rayado cruzado"],
+    ["Horizontal", "Horizontal", "Horizontal"],
+    ["Vertical", "Vertical", "Vertical"],
+    ["Square Grid", "Quadriculado", "Cuadrícula"],
+    ["Brick", "Tijolo", "Ladrillo"],
+    ["Concrete", "Concreto", "Hormigón"],
+    ["Insulation", "Isolamento", "Aislamiento"],
 ];
 
 #[cfg(test)]

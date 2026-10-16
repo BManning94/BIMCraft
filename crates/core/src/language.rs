@@ -89,11 +89,18 @@ const WORDS: &[[&str; 3]] = &[
     ["Floor Schedule", "Tabela de pisos", "Tabla de pisos"],
     ["Level Schedule", "Tabela de níveis", "Tabla de niveles"],
     ["Ceiling Plan", "Planta de forro", "Plano de cielo raso"],
-    // Materials of the types a new project has.
+    // The materials library a new project has.
     ["Brick", "Tijolo", "Ladrillo"],
     ["Insulation", "Isolamento", "Aislamiento"],
     ["Concrete block", "Bloco de concreto", "Bloque de hormigón"],
     ["Plaster", "Reboco", "Enlucido"],
+    ["Concrete", "Concreto", "Hormigón"],
+    ["Screed", "Contrapiso", "Recrecido"],
+    ["Timber", "Madeira", "Madera"],
+    ["Gypsum board", "Placa de gesso", "Placa de yeso"],
+    ["Ceramic tile", "Cerâmica", "Baldosa cerámica"],
+    ["Roof tiles", "Telhas", "Tejas"],
+    ["Membrane", "Manta impermeável", "Lámina impermeable"],
     // What drawings print.
     ["UP", "SOBE", "SUBE"],
     ["DN", "DESCE", "BAJA"],

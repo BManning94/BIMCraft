@@ -68,7 +68,10 @@ a plan cuts (`Model::bounding`). In a section or an elevation, points run along 
 they're paper mm from its bottom left corner; notes and spot elevations live in those terms in their view.
 A wall's `start` and `end` are on its location line: its centre line unless `location` says otherwise (`walls::faces`).
 Its exterior is to the left of start to end, as in Revit, so walls drawn clockwise face out; a compound type lists its
-layers from the exterior in. A curved wall turns `arc` degrees, counter-clockwise positive (`walls::Axis`). Where walls meet,
+layers from the exterior in, and a floor, roof or ceiling type from the top down (IFC import turns a wall round, or a slab's
+layers over, by the way its layer set's usage stacks them). A layer's material is a name in the project's library
+(`Model::materials`): its colour shades the layer in 3D, its cut pattern is a drafting pattern (`GAP` px apart on screen and
+paper, where the layer is `PATTERN_ROOM` px wide), its surface pattern a model pattern (`MODULE` mm, its real size). A curved wall turns `arc` degrees, counter-clockwise positive (`walls::Axis`). Where walls meet,
 their faces meet in mitred caps at any angle, and a wall ending on another stops at its face (`walls::cap`); plans, 3D,
 sections and IFC all draw that outline (`walls::outline`, `walls::prisms`). Room areas are measured at the walls' centre
 lines, run on or back to meet at joins (`walls::centre_line`). An attached top or base follows the roof's or floor's plane

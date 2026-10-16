@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bimcraft_core::element_json;
-use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model};
+use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model, Pattern};
 use bimcraft_core::units::Units;
 use egui::{
     Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText,
@@ -387,8 +387,44 @@ enum Subject {
     Schedule,
 }
 
-/// A wall type's layer as typed: what it does, what it's made of, how thick.
+/// A type's layer as typed: what it does, what it's made of, how thick.
 type LayerRow = (Function, String, String);
+
+/// The categories whose types have layers: a wall's from its exterior in, the others' from the top down.
+const LAYERED: [&str; 4] = ["wall", "floor", "roof", "ceiling"];
+
+/// Each pattern as the Materials window names it.
+const PATTERNS: [(Pattern, &str); 10] = [
+    (Pattern::None, "None"),
+    (Pattern::Solid, "Solid Fill"),
+    (Pattern::Diagonal, "Diagonal"),
+    (Pattern::Crosshatch, "Crosshatch"),
+    (Pattern::Horizontal, "Horizontal"),
+    (Pattern::Vertical, "Vertical"),
+    (Pattern::Grid, "Square Grid"),
+    (Pattern::Brick, "Brick"),
+    (Pattern::Concrete, "Concrete"),
+    (Pattern::Insulation, "Insulation"),
+];
+
+fn pattern_name(p: Pattern) -> &'static str {
+    PATTERNS.iter().find(|(q, _)| *q == p).map_or("None", |(_, n)| n)
+}
+
+/// The Materials window: the library's materials, the one picked to edit, its name as typed (a
+/// rename once typed in), its colour as picked (applied once the mouse lets go).
+pub(crate) struct MaterialsDialog {
+    picked: String,
+    name: String,
+    color: Option<[u8; 3]>,
+}
+
+impl MaterialsDialog {
+    pub(crate) fn new(m: &Model) -> MaterialsDialog {
+        let picked = m.materials.keys().next().cloned().unwrap_or_default();
+        MaterialsDialog { name: picked.clone(), picked, color: None }
+    }
+}
 
 /// What a layer does, as the layer editor names it.
 const FUNCTIONS: [(Function, &str); 5] = [
@@ -403,8 +439,8 @@ fn function_name(f: Function) -> &'static str {
     FUNCTIONS.iter().find(|(g, _)| *g == f).map_or("Structure", |(_, n)| n)
 }
 
-/// The Type Properties dialog: a type of a category, and its parameters as typed; a wall type's
-/// layers, too.
+/// The Type Properties dialog: a type of a category, and its parameters as typed; a layered
+/// type's layers, too.
 pub(crate) struct TypeDialog {
     category: &'static str,
     name: String,
@@ -413,7 +449,8 @@ pub(crate) struct TypeDialog {
     fields: Vec<(&'static str, &'static str, String)>,
     /// The name being typed for a duplicate.
     duplicate: Option<String>,
-    /// A wall type's layers, exterior first, as typed, and as they were: changed, they make it.
+    /// A layered type's layers, exterior or top first, as typed, and as they were: changed, they
+    /// make it.
     layers: Vec<LayerRow>,
     layers_were: Vec<LayerRow>,
 }
@@ -435,29 +472,29 @@ impl TypeDialog {
         type_rows(category).iter().map(|(k, l)| (*k, *l, shown(Length, &types[category][name][k], m.units))).collect()
     }
 
-    /// A wall type's layers, as typed: one structure layer as thick as it, without any.
+    /// A layered type's layers, as typed: one structure layer as thick as it, without any.
     fn layers(m: &Model, category: &str, name: &str) -> Vec<LayerRow> {
-        let Some(t) = m.types.wall.get(name).filter(|_| category == "wall") else { return Vec::new() };
+        let Some((.., thickness, layers)) = m.layered_types().find(|(c, n, ..)| *c == category && *n == name) else { return Vec::new() };
         let typed = |l: &Layer| (l.function, l.material.clone(), m.units.length(l.thickness));
-        match t.layers.as_slice() {
-            [] => vec![(Function::Structure, String::new(), m.units.length(t.thickness))],
+        match layers {
+            [] => vec![(Function::Structure, String::new(), m.units.length(thickness))],
             layers => layers.iter().map(typed).collect(),
         }
     }
 
     /// The `type` command's parameters for the type as typed, or why they aren't lengths. Changed
-    /// layers make the type, and how thick it is.
-    fn params(&self, name: &str, units: Units) -> Result<Value, String> {
+    /// layers make the type, and how thick it is; `copy` sends them anyway, as a duplicate has them.
+    fn params(&self, name: &str, units: Units, copy: bool) -> Result<Value, String> {
         let mut p = json!({"category": self.category, "name": name});
-        if self.layers != self.layers_were {
+        let layered = copy || self.layers != self.layers_were;
+        if layered {
             let layers = self.layers.iter().map(|(function, material, typed)| {
                 let thickness = units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t("Thickness"), typed]))?;
                 Ok(json!({"function": function, "material": material.trim(), "thickness": thickness}))
             });
             p["layers"] = Value::Array(layers.collect::<Result<_, String>>()?);
-            return Ok(p);
         }
-        for (key, label, typed) in &self.fields {
+        for (key, label, typed) in self.fields.iter().filter(|(key, ..)| !(layered && *key == "thickness")) {
             p[*key] = json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t(label), typed]))?);
         }
         Ok(p)
@@ -827,8 +864,8 @@ impl BimApp {
         let names: Vec<String> = model.type_names(d.category).into_iter().map(String::from).collect();
         let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
         let r = Modal::new(UiId::new("type-properties")).show(ctx, |ui| {
-            // Wider for a wall type's layers.
-            ui.set_width(if d.category == "wall" { 560.0 } else { 400.0 });
+            // Wider for a type's layers.
+            ui.set_width(if LAYERED.contains(&d.category) { 560.0 } else { 400.0 });
             ui.label(RichText::new(t("Type Properties")).heading());
             ui.add_space(6.0);
             Grid::new("type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
@@ -871,9 +908,11 @@ impl BimApp {
                     ui.end_row();
                 }
             });
-            if d.category == "wall" {
+            if LAYERED.contains(&d.category) {
                 ui.add_space(6.0);
-                layer_editor(ui, &mut d.layers, model.units);
+                let materials: Vec<String> = model.materials.keys().cloned().collect();
+                let (out, inward) = if d.category == "wall" { ("Out", "In") } else { ("Up", "Down") };
+                layer_editor(ui, &mut d.layers, model.units, &materials, (out, inward));
             }
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -886,7 +925,8 @@ impl BimApp {
             d.show(&model, n);
         }
         if create && let Some(new) = d.duplicate.clone() {
-            let made = match d.params(new.trim(), model.units) {
+            let layered = !model.type_layers(d.category, &d.name).is_empty();
+            let made = match d.params(new.trim(), model.units, layered) {
                 Ok(p) => self.run("type", p).is_some(),
                 Err(e) => {
                     self.status = Status { text: e, error: true };
@@ -898,7 +938,7 @@ impl BimApp {
             }
         }
         if apply || ok {
-            let applied = match d.params(&d.name, model.units) {
+            let applied = match d.params(&d.name, model.units, false) {
                 Ok(p) => self.run("type", p).is_some(),
                 Err(e) => {
                     self.status = Status { text: e, error: true };
@@ -925,9 +965,98 @@ impl BimApp {
     }
 }
 
-/// A wall type's layers, exterior first: what each does, what it's made of, how thick; a new one
-/// on the outside, and each moved in or out, or taken away.
-fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units) {
+impl BimApp {
+    /// The Materials window: Manage > Materials, Revit's Material Browser. Each change is a
+    /// `material` command, undone like any other.
+    pub(crate) fn materials_window(&mut self, ctx: &Context) {
+        let Some(mut d) = self.materials_dialog.take() else { return };
+        let model = Arc::clone(&self.session.model);
+        let (mut close, mut run, mut picked): (bool, Option<Value>, Option<String>) = (false, None, None);
+        let released = ctx.input(|i| !i.pointer.any_down());
+        let r = Modal::new(UiId::new("materials")).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(RichText::new(t("Materials")).heading());
+            ui.add_space(6.0);
+            Grid::new("material-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                let l = ui.label(t("Material:"));
+                ui.horizontal(|ui| {
+                    let c = ComboBox::from_id_salt("material-name").selected_text(&d.picked).width(200.0).show_ui(ui, |ui| {
+                        for name in model.materials.keys() {
+                            if ui.selectable_label(*name == d.picked, name).clicked() {
+                                picked = Some(name.clone());
+                            }
+                        }
+                    });
+                    c.response.labelled_by(l.id);
+                    if ui.button(t("New")).clicked() {
+                        let fresh =
+                            (1..).map(|n| format!("{} {n}", t("Material"))).find(|n| !model.materials.contains_key(n)).unwrap_or_default();
+                        run = Some(json!({"name": fresh}));
+                        picked = Some(fresh);
+                    }
+                    if ui.add_enabled(model.materials.contains_key(&d.picked), Button::new(t("Delete"))).clicked() {
+                        run = Some(json!({"name": d.picked, "delete": true}));
+                        picked = model.materials.keys().find(|n| **n != d.picked).cloned();
+                    }
+                });
+                ui.end_row();
+            });
+            if let Some(m) = model.materials.get(&d.picked) {
+                ui.add_space(6.0);
+                Grid::new("material").num_columns(2).striped(true).spacing(vec2(12.0, 6.0)).min_col_width(130.0).show(ui, |ui| {
+                    let l = ui.label(t("Name"));
+                    let r = ui.add(TextEdit::singleline(&mut d.name).desired_width(200.0)).labelled_by(l.id);
+                    if r.lost_focus() && !d.name.trim().is_empty() && d.name.trim() != d.picked {
+                        run = Some(json!({"name": d.picked, "rename": d.name.trim()}));
+                        picked = Some(d.name.trim().to_string());
+                    }
+                    ui.end_row();
+                    let l = ui.label(t("Color"));
+                    let colour = d.color.get_or_insert(m.color);
+                    ui.color_edit_button_srgb(colour).labelled_by(l.id);
+                    if released && *colour != m.color {
+                        run = Some(json!({"name": d.picked, "color": *colour}));
+                    }
+                    ui.end_row();
+                    for (key, label, now) in [("cut", "Cut Pattern", m.cut), ("surface", "Surface Pattern", m.surface)] {
+                        let l = ui.label(t(label));
+                        let c = ComboBox::from_id_salt(("material-pattern", key)).selected_text(t(pattern_name(now))).width(160.0).show_ui(
+                            ui,
+                            |ui| {
+                                for (p, name) in PATTERNS {
+                                    if ui.selectable_label(p == now, t(name)).clicked() {
+                                        run = Some(json!({"name": d.picked, key: p}));
+                                    }
+                                }
+                            },
+                        );
+                        c.response.labelled_by(l.id);
+                        ui.end_row();
+                    }
+                });
+            }
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+        });
+        if let Some(p) = run {
+            self.run("material", p);
+        }
+        if let Some(n) = picked {
+            (d.name, d.picked, d.color) = (n.clone(), n, None);
+        } else if !self.session.model.materials.contains_key(&d.picked) {
+            d = MaterialsDialog::new(&self.session.model);
+        } else if d.color.is_some_and(|c| self.session.model.materials.get(&d.picked).is_some_and(|m| m.color == c)) {
+            d.color = None;
+        }
+        if !(close || r.should_close()) {
+            self.materials_dialog = Some(d);
+        }
+    }
+}
+
+/// A type's layers, exterior or top first: what each does, what it's made of (from the library),
+/// how thick; a new one on the outside, or on top, and each moved, or taken away.
+fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units, materials: &[String], (out, inward): (&str, &str)) {
     ui.label(RichText::new(t("Layers")).strong());
     let mut action: Option<(usize, i8)> = None;
     Grid::new("type-layers").num_columns(4).striped(true).spacing(vec2(8.0, 4.0)).show(ui, |ui| {
@@ -946,14 +1075,25 @@ fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units) {
                 }
             });
             c.response.labelled_by(function.id);
-            // Sized: in a grid, a field keeps to its column's width from the frame before.
-            ui.add_sized([150.0, 20.0], TextEdit::singleline(mat)).labelled_by(material.id);
+            let none = t("(none)");
+            let shown = if mat.is_empty() { none } else { mat.as_str() };
+            let c = ComboBox::from_id_salt(("layer-material", k)).selected_text(shown).width(150.0).show_ui(ui, |ui| {
+                if ui.selectable_label(mat.is_empty(), none).clicked() {
+                    mat.clear();
+                }
+                for n in materials {
+                    if ui.selectable_label(mat == n, n).clicked() {
+                        mat.clone_from(n);
+                    }
+                }
+            });
+            c.response.labelled_by(material.id);
             ui.add_sized([70.0, 20.0], TextEdit::singleline(typed).hint_text(units.name())).labelled_by(thickness.id);
             ui.horizontal(|ui| {
-                if ui.add_enabled(k > 0, Button::new(t("Out")).small()).clicked() {
+                if ui.add_enabled(k > 0, Button::new(t(out)).small()).clicked() {
                     action = Some((k, -1));
                 }
-                if ui.add_enabled(k < last, Button::new(t("In")).small()).clicked() {
+                if ui.add_enabled(k < last, Button::new(t(inward)).small()).clicked() {
                     action = Some((k, 1));
                 }
                 if ui.add_enabled(last > 0, Button::new(t("Delete")).small()).clicked() {

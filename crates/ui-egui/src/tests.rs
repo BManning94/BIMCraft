@@ -1331,10 +1331,11 @@ fn type_properties_build_a_wall_types_layers() {
     let nth = |h: &Harness<BimApp>, role: Role, label: &'static str, n: usize| {
         h.query_all(By::new().role(role).label(label)).nth(n).map(|n| n.accesskit_node().id()).unwrap()
     };
-    let field = nth(&h, Role::TextInput, "Material", 0);
-    h.get_by(|n| n.id() == field).focus();
+    // Its material from the library.
+    let pick = nth(&h, Role::ComboBox, "Material", 0);
+    h.get_by(|n| n.id() == pick).click();
     h.run();
-    h.get_by(|n| n.id() == field).type_text("Brick");
+    press(&mut h, "Brick");
     let thick = nth(&h, Role::TextInput, "Thickness", 0);
     h.get_by(|n| n.id() == thick).focus();
     h.run();
@@ -1345,6 +1346,19 @@ fn type_properties_build_a_wall_types_layers() {
     let t = &h.state().session.model.types.wall["Generic - 200mm"];
     assert_eq!((t.thickness, t.layers.len()), (300.0, 2));
     assert_eq!((t.layers[0].material.as_str(), t.layers[0].thickness, t.layers[1].thickness), ("Brick", 100.0, 200.0));
+}
+
+#[test]
+fn duplicate_copies_a_types_layers() {
+    let mut h = app(r#"wall {"points": [[0, 0], [8000, 0]], "type": "Exterior - 300mm"}"#);
+    click(&mut h, P2(4000.0, 0.0));
+    press(&mut h, "Edit Type");
+    press(&mut h, "Duplicate…");
+    type_into(&mut h, "New type", "Exterior copy");
+    press(&mut h, "Create");
+    press(&mut h, "OK");
+    let types = &h.state().session.model.types.wall;
+    assert_eq!(types["Exterior copy"].layers, types["Exterior - 300mm"].layers);
 }
 
 #[test]
@@ -1520,4 +1534,56 @@ fn gable_edge_stands_a_roof_edge_upright_and_slopes_it_again() {
     press(&mut h, "Gable Edge");
     click(&mut h, P2(25000.0, 3000.0));
     assert_eq!(field(&h, roof, "gables"), json!([4]));
+}
+
+#[test]
+fn the_materials_window_edits_the_projects_library() {
+    use bimcraft_core::model::Pattern;
+    let mut h = app(BOX);
+    press(&mut h, "Manage");
+    press(&mut h, "Materials");
+    // A new one, picked: its cut pattern, then its name.
+    press(&mut h, "New");
+    assert!(h.state().session.model.materials.contains_key("Material 1"));
+    h.get_by_role_and_label(Role::ComboBox, "Cut Pattern").click();
+    h.run();
+    press(&mut h, "Diagonal");
+    assert_eq!(h.state().session.model.materials["Material 1"].cut, Pattern::Diagonal);
+    type_into(&mut h, "Name", "Oak");
+    key(&mut h, Key::Enter);
+    let m = &h.state().session.model.materials;
+    assert!(m.contains_key("Oak") && !m.contains_key("Material 1"), "{:?}", m.keys().collect::<Vec<_>>());
+    press(&mut h, "Delete");
+    assert!(!h.state().session.model.materials.contains_key("Oak"));
+    press(&mut h, "Close");
+    assert!(h.query_by_label("Cut Pattern").is_none());
+}
+
+#[test]
+fn a_floor_types_layers_go_from_its_top_down() {
+    use egui_kittest::kittest::{By, NodeT};
+    let mut h = app(BOX);
+    tool(&mut h, "Floor");
+    click(&mut h, P2(4000.0, 3000.0));
+    press(&mut h, "Edit Type");
+    // A layer on top of its structure: tiles, 10 mm.
+    press(&mut h, "Insert Layer");
+    let first = |h: &Harness<BimApp>, role: Role, label: &'static str| {
+        h.query_all(By::new().role(role).label(label)).next().map(|n| n.accesskit_node().id()).unwrap()
+    };
+    let pick = first(&h, Role::ComboBox, "Material");
+    h.get_by(|n| n.id() == pick).click();
+    h.run();
+    press(&mut h, "Ceramic tile");
+    let thick = first(&h, Role::TextInput, "Thickness");
+    h.get_by(|n| n.id() == thick).focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.get_by(|n| n.id() == thick).type_text("10");
+    h.run();
+    assert!(h.get_all_by_label("Down").count() > 0 && h.query_by_label("In").is_none(), "a floor's layers move up and down");
+    press(&mut h, "OK");
+    let t = &h.state().session.model.types.floor["Generic - 200mm"];
+    assert_eq!((t.thickness, t.layers.len()), (210.0, 2));
+    assert_eq!((t.layers[0].material.as_str(), t.layers[0].thickness), ("Ceramic tile", 10.0));
 }

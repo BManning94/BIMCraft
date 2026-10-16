@@ -201,6 +201,7 @@ pub enum Icon {
     ExtrusionRoof,
     Dormer,
     GableEdge,
+    Materials,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -507,6 +508,13 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(5.0, 12.5), (18.0, 6.5)]),
             line(&[(14.2, 5.6), (18.0, 6.5), (16.0, 9.8)]),
         ],
+        // A sphere, lit from the top left: a material swatch.
+        Icon::Materials => {
+            let mut v = vec![Shape::circle_stroke(at(12.0, 12.0), 9.0 * k, s)];
+            v.push(Shape::line(arc(at(12.0, 12.0), 5.5 * k, 3.4, 4.6), s));
+            v.push(line(&[(3.0, 13.0), (21.0, 13.0)]));
+            v
+        }
         // A gable's profile, swept back.
         Icon::ExtrusionRoof => {
             vec![line(&[(2.0, 16.0), (8.0, 9.0), (14.0, 16.0)]), line(&[(8.0, 9.0), (16.0, 4.0), (22.0, 11.0), (14.0, 16.0)])]

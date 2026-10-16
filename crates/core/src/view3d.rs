@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use crate::geom::{self, P2};
-use crate::model::{Element, Id, Model};
+use crate::model::{Element, Id, Layer, Model};
 use crate::render::{PAPER, Rgb};
 use crate::stairs;
 use crate::walls::{self, Axis, Plane};
@@ -118,6 +118,13 @@ impl Solid {
     pub(crate) fn owner(&self) -> Id {
         match self {
             Solid::Box { owner, .. } | Solid::Slab { owner, .. } | Solid::Prism { owner, .. } => *owner,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn color(&self) -> Rgb {
+        match self {
+            Solid::Box { color, .. } | Solid::Slab { color, .. } | Solid::Prism { color, .. } => *color,
         }
     }
 
@@ -381,6 +388,74 @@ fn planes(tris: &[Tri]) -> Vec<usize> {
         .collect()
 }
 
+/// The model's solids as its pictures show them: an element of a compound type split into its
+/// layers, each in its material's colour; a slab's from the top down, a wall's from its exterior in.
+pub(crate) fn shaded(m: &Model) -> Vec<Solid> {
+    solids(m).into_iter().flat_map(|s| layered(m, s)).collect()
+}
+
+fn layered(m: &Model, s: Solid) -> Vec<Solid> {
+    let layers = match m.elements.get(&s.owner()) {
+        Some(Element::Wall(w)) => m.type_layers("wall", &w.type_name),
+        Some(Element::Floor(f)) => m.type_layers("floor", &f.type_name),
+        Some(Element::Roof(r)) => m.type_layers("roof", &r.type_name),
+        Some(Element::Ceiling(c)) => m.type_layers("ceiling", &c.type_name),
+        _ => &[],
+    };
+    let total: f64 = layers.iter().map(|l| l.thickness).sum();
+    if total <= 0.0 {
+        return vec![s];
+    }
+    let colour = |l: &Layer, or: Rgb| m.materials.get(&l.material).map_or(or, |x| Rgb(x.color[0], x.color[1], x.color[2]));
+    match s {
+        Solid::Slab { owner, color, face, rise } => {
+            let mut out = Vec::new();
+            let mut above = 0.0;
+            for l in layers {
+                let r = rise * l.thickness / total;
+                if r > 1e-9 {
+                    let lift = rise - above - r;
+                    let face = face.iter().map(|p| [p[0], p[1], p[2] + lift]).collect();
+                    out.push(Solid::Slab { owner, color: colour(l, color), face, rise: r });
+                }
+                above += r;
+            }
+            out
+        }
+        // Across the wall from its exterior face in, each layer between two of its boundaries; the
+        // outermost and innermost reach whatever lies past them.
+        Solid::Prism { owner, color, ring, bottom, top, curve } => {
+            let Some(w) = m.wall(owner) else { return vec![Solid::Prism { owner, color, ring, bottom, top, curve }] };
+            let (axis, b) = (Axis::of(w), walls::boundaries(m, w));
+            let off = |q: P2| axis.project(q).1;
+            let n = layers.len();
+            layers
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.thickness > 1e-9)
+                .filter_map(|(k, l)| {
+                    let mut part = ring.clone();
+                    if let Some(hi) = b.get(k).filter(|_| k > 0) {
+                        part = geom::clip(&part, |q| hi - off(q));
+                    }
+                    if let Some(lo) = b.get(k + 1).filter(|_| k + 1 < n) {
+                        part = geom::clip(&part, |q| off(q) - lo);
+                    }
+                    (part.len() >= 3 && geom::area(&part).abs() > 1e-6).then(|| Solid::Prism {
+                        owner,
+                        color: colour(l, color),
+                        ring: part,
+                        bottom,
+                        top,
+                        curve,
+                    })
+                })
+                .collect()
+        }
+        other => vec![other],
+    }
+}
+
 /// The model as triangles, each with its plane: what every picture of it is drawn from.
 pub struct Scene {
     tris: Vec<Tri>,
@@ -390,7 +465,7 @@ pub struct Scene {
 impl Scene {
     pub fn new(m: &Model) -> Scene {
         let mut tris = Vec::new();
-        for solid in solids(m) {
+        for solid in shaded(m) {
             solid.tris(&mut tris);
         }
         let planes = planes(&tris);

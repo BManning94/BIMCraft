@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::geom::{self, P2};
-use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Model, Railing, heading, mix};
+use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Layer, Model, Railing, heading, mix};
 use crate::stairs;
 use crate::view3d::P3;
 use crate::walls::{self, Axis};
@@ -34,6 +34,7 @@ const SHAFT_VOIDS: u64 = 14;
 const FLIGHT: u64 = 15;
 const LANDING: u64 = 16;
 const PARTS: u64 = 17;
+const SLAB_MATERIALS: u64 = 18;
 
 /// Part `i` of element `id`, for its GlobalId.
 fn part(id: Id, i: usize) -> u64 {
@@ -54,7 +55,8 @@ fn shape_of(landings: &[crate::model::Landing], kind: &str) -> String {
     format!(".{shape}_{kind}.")
 }
 
-/// A STEP string literal: `'` doubled, `\` doubled, anything outside printable ASCII as `\X2\…\X0\`.
+/// A STEP string literal: `'` doubled, `\` doubled, anything outside printable ASCII as `\X2\…\X0\`
+/// (UCS-2), or past it as `\X4\…\X0\` (UCS-4).
 fn s(text: &str) -> String {
     let mut out = String::from("'");
     for c in text.chars() {
@@ -62,12 +64,11 @@ fn s(text: &str) -> String {
             '\'' => out.push_str("''"),
             '\\' => out.push_str(r"\\"),
             ' '..='~' => out.push(c),
+            _ if u32::from(c) > 0xFFFF => {
+                let _ = write!(out, r"\X4\{:08X}\X0\", u32::from(c));
+            }
             _ => {
-                out.push_str(r"\X2\");
-                for unit in c.encode_utf16(&mut [0; 2]) {
-                    let _ = write!(out, "{unit:04X}");
-                }
-                out.push_str(r"\X0\");
+                let _ = write!(out, r"\X2\{:04X}\X0\", u32::from(c));
             }
         }
     }
@@ -114,9 +115,10 @@ struct Step {
     out: String,
     next: u64,
     uid: u64,
-    /// Shared: the origin placement, +Z, and the body context.
+    /// Shared: the origin placement, +Z, the model's context and its body subcontext.
     world: u64,
     z: u64,
+    context: u64,
     body: u64,
 }
 
@@ -130,6 +132,21 @@ impl Step {
 
     fn guid(&self, role: u64, id: u64) -> String {
         s(&guid(self.uid, role, id))
+    }
+
+    /// A material by name; one the library has, with its colour, for viewers to shade it in.
+    fn material(&mut self, m: &Model, name: &str) -> u64 {
+        let id = self.add(format!("IFCMATERIAL({},$,$)", s(name)));
+        if let Some(x) = m.materials.get(name) {
+            let [r, g, b] = x.color.map(|c| real(f64::from(c) / 255.0));
+            let colour = self.add(format!("IFCCOLOURRGB($,{r},{g},{b})"));
+            let shading = self.add(format!("IFCSURFACESTYLESHADING(#{colour},$)"));
+            let style = self.add(format!("IFCSURFACESTYLE({},.BOTH.,(#{shading}))", s(name)));
+            let item = self.add(format!("IFCSTYLEDITEM($,(#{style}),$)"));
+            let rep = self.add(format!("IFCSTYLEDREPRESENTATION(#{},'Style','Material',(#{item}))", self.context));
+            self.add(format!("IFCMATERIALDEFINITIONREPRESENTATION($,$,(#{rep}),#{id})"));
+        }
+        id
     }
 
     fn point(&mut self, p: P2) -> u64 {
@@ -285,11 +302,12 @@ impl Step {
 }
 
 pub fn export(m: &Model) -> String {
-    let mut w = Step { out: String::new(), next: 0, uid: m.uid, world: 0, z: 0, body: 0 };
+    let mut w = Step { out: String::new(), next: 0, uid: m.uid, world: 0, z: 0, context: 0, body: 0 };
     let origin = w.add("IFCCARTESIANPOINT((0.,0.,0.))");
     w.z = w.add("IFCDIRECTION((0.,0.,1.))");
     w.world = w.add(format!("IFCAXIS2PLACEMENT3D(#{origin},$,$)"));
     let ctx = w.add(format!("IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-05,#{},$)", w.world));
+    w.context = ctx;
     w.body = w.add(format!("IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Body','Model',*,*,*,*,#{ctx},$,.MODEL_VIEW.,$)"));
     let axis = w.add(format!("IFCGEOMETRICREPRESENTATIONSUBCONTEXT('Axis','Model',*,*,*,*,#{ctx},$,.GRAPH_VIEW.,$)"));
     let units = [
@@ -611,34 +629,63 @@ pub fn export(m: &Model) -> String {
         w.add(format!("IFCRELFILLSELEMENT({},$,$,$,#{opening},#{ent})", w.guid(FILLS, id)));
         contained.entry(wl.level).or_default().push(ent);
     }
-    // Compound wall types' layers: a layer set for each type, and for each type and line its walls
-    // stand on, the set's use, from their exterior faces in.
-    let mut materials: BTreeMap<&str, u64> = BTreeMap::new();
-    let mut sets: BTreeMap<&str, u64> = BTreeMap::new();
-    let used: std::collections::BTreeSet<&str> = placed.keys().filter_map(|id| m.wall(*id)).map(|wl| wl.type_name.as_str()).collect();
-    for (name, t) in m.types.wall.iter().filter(|(name, t)| !t.layers.is_empty() && used.contains(name.as_str())) {
-        let mut layers = Vec::new();
-        for l in &t.layers {
+    // Compound types' layers: a layer set for each type used, each layer's material once, with its
+    // colour for viewers to shade it in; for each wall type and line its walls stand on, the set's
+    // use, from their exterior faces in.
+    let mut materials: BTreeMap<String, u64> = BTreeMap::new();
+    let mut layer_set = |w: &mut Step, name: &str, layers: &[Layer]| -> u64 {
+        let mut ids = Vec::new();
+        for l in layers {
             let material = match l.material.trim() {
                 "" => "$".to_string(),
-                named => {
-                    let id = match materials.get(named) {
-                        Some(id) => *id,
-                        None => w.add(format!("IFCMATERIAL({},$,$)", s(named))),
-                    };
-                    materials.insert(named, id);
-                    format!("#{id}")
-                }
+                named => format!("#{}", *materials.entry(named.to_string()).or_insert_with(|| w.material(m, named))),
             };
             let category = match l.function {
                 Function::Structure => "'LoadBearing'",
                 Function::Thermal => "'Insulation'",
                 Function::Finish => "'Finish'",
-                Function::Substrate | Function::Membrane => "$",
+                Function::Substrate => "'Substrate'",
+                Function::Membrane => "'Membrane'",
             };
-            layers.push(w.add(format!("IFCMATERIALLAYER({material},{},$,$,$,{category},$)", real(l.thickness))));
+            ids.push(w.add(format!("IFCMATERIALLAYER({material},{},$,$,$,{category},$)", real(l.thickness))));
         }
-        sets.insert(name, w.add(format!("IFCMATERIALLAYERSET(({}),{},$)", refs(&layers), s(name))));
+        w.add(format!("IFCMATERIALLAYERSET(({}),{},$)", refs(&ids), s(name)))
+    };
+    let mut sets: BTreeMap<&str, u64> = BTreeMap::new();
+    let used: std::collections::BTreeSet<&str> = placed.keys().filter_map(|id| m.wall(*id)).map(|wl| wl.type_name.as_str()).collect();
+    for (name, t) in m.types.wall.iter().filter(|(name, t)| !t.layers.is_empty() && used.contains(name.as_str())) {
+        sets.insert(name, layer_set(&mut w, name, &t.layers));
+    }
+    // A compound floor's set, from its top down, for each type and how high its top is over its
+    // level; a roof's or a ceiling's set as it is.
+    let mut slab_uses: BTreeMap<(&str, &str, String), Vec<u64>> = BTreeMap::new();
+    for (&id, &(ent, ..)) in &hosts {
+        let (cat, name, offset) = match m.elements.get(&id) {
+            Some(Element::Floor(f)) => (
+                "floor",
+                f.type_name.as_str(),
+                real(m.floor_top(f).at(f.boundary.first().copied().unwrap_or_default()) - m.elevation(f.level)),
+            ),
+            Some(Element::Roof(r)) => ("roof", r.type_name.as_str(), String::new()),
+            Some(Element::Ceiling(c)) => ("ceiling", c.type_name.as_str(), String::new()),
+            _ => continue,
+        };
+        if !m.type_layers(cat, name).is_empty() {
+            slab_uses.entry((cat, name, offset)).or_default().push(ent);
+        }
+    }
+    let mut slab_sets: BTreeMap<(&str, &str), u64> = BTreeMap::new();
+    for (k, ((cat, name, offset), ents)) in slab_uses.into_iter().enumerate() {
+        let set = match slab_sets.get(&(cat, name)) {
+            Some(set) => *set,
+            None => {
+                let set = layer_set(&mut w, name, m.type_layers(cat, name));
+                slab_sets.insert((cat, name), set);
+                set
+            }
+        };
+        let relating = if cat == "floor" { w.add(format!("IFCMATERIALLAYERSETUSAGE(#{set},.AXIS3.,.NEGATIVE.,{offset},$)")) } else { set };
+        w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,({}),#{relating})", w.guid(SLAB_MATERIALS, k as u64), refs(&ents)));
     }
     let mut uses: BTreeMap<(&str, String), Vec<u64>> = BTreeMap::new();
     for (id, (ent, _)) in &placed {
@@ -682,6 +729,8 @@ mod tests {
         assert_eq!(s("it's"), "'it''s'");
         assert_eq!(s(r"a\b"), r"'a\\b'");
         assert_eq!(s("Área"), r"'\X2\00C1\X0\rea'");
+        // Past the Basic Multilingual Plane, UCS-4: as IFC readers expect, not UTF-16's surrogates.
+        assert_eq!(s("Tile 😀"), r"'Tile \X4\0001F600\X0\'");
         assert_eq!(s("x');#9=IFCWALL("), "'x'');#9=IFCWALL('", "a name can't end the string early");
     }
 
@@ -730,7 +779,7 @@ mod tests {
     fn compound_curved_and_attached_walls_export_their_layers_and_shapes() {
         let mut s = Session::new();
         s.script(
-            r#"type {"category": "wall", "name": "Cavity", "layers": [{"function": "finish", "material": "Brick", "thickness": 100}, {"function": "structure", "material": "Block", "thickness": 200}]}
+            r#"type {"category": "wall", "name": "Cavity", "layers": [{"function": "finish", "material": "Brick", "thickness": 100}, {"function": "structure", "material": "Concrete block", "thickness": 200}]}
                wall {"points": [[0, 0], [0, 6000], [8000, 6000], [8000, 0]], "type": "Cavity"}
                wall {"points": [[8000, 0], [0, 0]], "arc": -60, "type": "Cavity", "location": "interior-finish"}
                window {"at": [4000, -1100]}

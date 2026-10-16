@@ -294,6 +294,7 @@ pub struct BimApp {
     typed: String,
     pending: Option<Pending>,
     type_dialog: Option<properties::TypeDialog>,
+    materials_dialog: Option<properties::MaterialsDialog>,
     /// The Properties palette's folded groups.
     collapsed: BTreeSet<&'static str>,
     /// Where views show, last frame.
@@ -517,6 +518,7 @@ impl BimApp {
             typed: String::new(),
             pending: None,
             type_dialog: None,
+            materials_dialog: None,
             collapsed: BTreeSet::new(),
             view_rect: Rect::ZERO,
             closing: false,
@@ -746,7 +748,7 @@ impl BimApp {
 
     fn keys(&mut self, ctx: &Context) {
         // A dialog takes the keys while it's open.
-        if self.type_dialog.is_some() || self.pending.is_some() {
+        if self.type_dialog.is_some() || self.materials_dialog.is_some() || self.pending.is_some() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -1561,6 +1563,10 @@ impl BimApp {
     /// Manage: the project's settings, as Revit's tab has them.
     fn manage_tab(&mut self, ui: &mut Ui) {
         panel(ui, "Settings", |ui| {
+            let tip = "Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show";
+            if big_button(ui, Icon::Materials, "Materials", self.materials_dialog.is_some(), tip).clicked() {
+                self.materials_dialog = Some(properties::MaterialsDialog::new(&self.session.model));
+            }
             let now = self.session.model.units;
             let tip = tf("Project Units (UN): how lengths show and read; now {}", &[&t(now.label()).to_lowercase()]);
             let r = big_button(ui, Icon::Units, "Project Units", false, &tip);
@@ -2155,6 +2161,7 @@ impl BimApp {
 
     fn dialogs(&mut self, ctx: &Context) {
         self.type_properties(ctx);
+        self.materials_window(ctx);
         let Some(pending) = self.pending else { return };
         #[derive(PartialEq)]
         enum Choice {

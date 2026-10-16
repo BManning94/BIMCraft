@@ -13,7 +13,7 @@ use crate::language::Language;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Facing, Floor,
     FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Model, NOTE_SIZE, Note,
-    Opening, OpeningType, RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH,
+    Opening, OpeningType, Pattern, RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH,
     Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::render::Drawing;
@@ -270,8 +270,21 @@ pub static ALL: &[Command] = &[
          substrate|thermal|membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, \
          its core from its first structure layer to its last, and a new `thickness` goes to its structure. A ceiling type may \
          have `grid`: its square tiles' width, mm, which reflected ceiling plans draw (0, none); a railing type, `height` (its \
-         rail over what it runs along) and `spacing` (its balusters' centres, 0 for none)",
+         rail over what it runs along) and `spacing` (its balusters' centres, 0 for none). Floor, roof and ceiling types may \
+         have `layers` too, from the top down; a layer's `material` is one of the library's (see `material`)",
         edit_type,
+    ),
+    edit(
+        "material",
+        "Materials",
+        &[],
+        "{name, color?: \"#rrggbb\" | [r, g, b], cut?, surface?, rename?, delete?: true} a material of the project's library, \
+         created or changed: its colour in shaded 3D views, the pattern its cut shows in plans and sections (where a layer is \
+         wide enough to hold it), and the one its surfaces show at its size in the building (a floor's top in plan, a \
+         ceiling's underside in its ceiling plan). Patterns: none, solid, diagonal, crosshatch, horizontal, vertical, grid, brick, concrete, insulation. \
+         `rename` renames it, the layers using it following; `delete` takes it away, while no layer uses it. `inspect` lists \
+         the library",
+        material,
     ),
     edit(
         "flip",
@@ -837,7 +850,8 @@ fn open(s: &mut Session, p: &Value) -> R {
         return Ok(reply);
     }
     let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
-    let m: Model = serde_json::from_str(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
+    let mut m: Model = serde_json::from_str(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
+    m.adopt_materials();
     m.check().map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
     let name = m.name.clone();
     s.reset(m, Some(path.clone()));
@@ -1957,6 +1971,70 @@ fn place(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id, "at": at}))
 }
 
+fn material(s: &mut Session, p: &Value) -> R {
+    let c = "material";
+    let name = string(c, p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
+    let m = s.model_mut();
+    if flag(c, p, "delete")? {
+        if !m.materials.contains_key(&name) {
+            return Err(bad(c, format!("the library has no `{name}`")));
+        }
+        if let Some((cat, n, ..)) = m.layered_types().find(|(.., l)| l.iter().any(|l| l.material == name)) {
+            return Err(bad(c, format!("`{name}` is in {cat} type `{n}`'s layers; take it out of them first")));
+        }
+        m.materials.remove(&name);
+        return Ok(json!({"deleted": name}));
+    }
+    let mut mat = m.materials.get(&name).cloned().unwrap_or_default();
+    if let Some(v) = p.get("color").filter(|v| !v.is_null()) {
+        mat.color = colour(v).ok_or_else(|| bad(c, format!("`color` is \"#rrggbb\" or [r, g, b], each 0 to 255, not {v}")))?;
+    }
+    for (key, slot) in [("cut", &mut mat.cut), ("surface", &mut mat.surface)] {
+        if let Some(v) = p.get(key).filter(|v| !v.is_null()) {
+            *slot = serde_json::from_value(v.clone()).map_err(|_| {
+                let names: Vec<String> = Pattern::ALL.iter().map(|p| json!(p).as_str().unwrap_or_default().to_string()).collect();
+                bad(c, format!("`{key}`: {v} isn't a pattern; one of {}", names.join(", ")))
+            })?;
+        }
+    }
+    let name = match string(c, p, "rename")? {
+        Some(to) => {
+            let to = to.trim().to_string();
+            if to.is_empty() {
+                return Err(bad(c, "`rename` needs a name"));
+            }
+            if to != name && m.materials.contains_key(&to) {
+                return Err(bad(c, format!("the library already has `{to}`")));
+            }
+            m.materials.remove(&name);
+            m.layers_mut().filter(|l| l.material == name).for_each(|l| l.material.clone_from(&to));
+            to
+        }
+        None => name,
+    };
+    m.materials.insert(name.clone(), mat.clone());
+    Ok(json!({"name": name, "material": mat}))
+}
+
+/// `"#rrggbb"`, or `[r, g, b]`, each 0 to 255.
+fn colour(v: &Value) -> Option<[u8; 3]> {
+    match v {
+        Value::String(hex) => {
+            let hex = hex.strip_prefix('#').filter(|h| h.len() == 6 && h.is_ascii())?;
+            let byte = |i: usize| hex.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok());
+            Some([byte(0)?, byte(2)?, byte(4)?])
+        }
+        Value::Array(a) => match a.as_slice() {
+            [r, g, b] => {
+                let byte = |x: &Value| x.as_u64().and_then(|x| u8::try_from(x).ok());
+                Some([byte(r)?, byte(g)?, byte(b)?])
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn edit_type(s: &mut Session, p: &Value) -> R {
     let c = "type";
     let cat = category(&string(c, p, "category")?.ok_or_else(|| bad(c, "`category` is required: wall, floor, ceiling, door or window"))?);
@@ -1966,12 +2044,15 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
     let m = s.model_mut();
     let t = match cat.as_str() {
         "wall" => {
-            let t = wall_type(c, p, m.types.wall.get(&name), thickness, &need)?;
+            let (thickness, layers) = layered(c, p, m.types.wall.get(&name).map(|t| (t.thickness, t.layers.as_slice())), thickness, &need)?;
+            let t = WallType { thickness, layers };
             m.types.wall.insert(name.clone(), t.clone());
             json!(t)
         }
         "floor" => {
-            let t = FloorType { thickness: thickness.or(m.types.floor.get(&name).map(|t| t.thickness)).ok_or_else(|| need("thickness"))? };
+            let (thickness, layers) =
+                layered(c, p, m.types.floor.get(&name).map(|t| (t.thickness, t.layers.as_slice())), thickness, &need)?;
+            let t = FloorType { thickness, layers };
             m.types.floor.insert(name.clone(), t.clone());
             json!(t)
         }
@@ -1999,7 +2080,8 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             json!(t)
         }
         "roof" => {
-            let t = RoofType { thickness: thickness.or(m.types.roof.get(&name).map(|t| t.thickness)).ok_or_else(|| need("thickness"))? };
+            let (thickness, layers) = layered(c, p, m.types.roof.get(&name).map(|t| (t.thickness, t.layers.as_slice())), thickness, &need)?;
+            let t = RoofType { thickness, layers };
             m.types.roof.insert(name.clone(), t.clone());
             json!(t)
         }
@@ -2014,10 +2096,8 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
         }
         "ceiling" => {
             let old = m.types.ceiling.get(&name).cloned();
-            let t = CeilingType {
-                thickness: thickness.or(old.as_ref().map(|t| t.thickness)).ok_or_else(|| need("thickness"))?,
-                grid: num(c, p, "grid")?.or(old.as_ref().map(|t| t.grid)).unwrap_or(0.0),
-            };
+            let (thickness, layers) = layered(c, p, old.as_ref().map(|t| (t.thickness, t.layers.as_slice())), thickness, &need)?;
+            let t = CeilingType { thickness, grid: num(c, p, "grid")?.or(old.as_ref().map(|t| t.grid)).unwrap_or(0.0), layers };
             m.types.ceiling.insert(name.clone(), t.clone());
             json!(t)
         }
@@ -2026,15 +2106,16 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
     Ok(json!({"category": cat, "name": name, "type": t}))
 }
 
-/// A wall type from `type`'s params, over the one named that way already (`old`). With layers, it's
-/// as thick as they are; a new thickness alone goes to its first structure layer (else its thickest).
-fn wall_type(
+/// A layered type's thickness and layers from `type`'s params, over the one named that way already
+/// (`old`). With layers, it's as thick as they are; a new thickness alone goes to its first
+/// structure layer (else its thickest).
+fn layered(
     c: &str,
     p: &Value,
-    old: Option<&WallType>,
+    old: Option<(f64, &[Layer])>,
     thickness: Option<f64>,
     need: &dyn Fn(&str) -> String,
-) -> Result<WallType, String> {
+) -> Result<(f64, Vec<Layer>), String> {
     let layers: Option<Vec<Layer>> = match p.get("layers") {
         v if absent(v) => None,
         Some(v @ Value::Array(a)) if a.len() <= crate::model::MAX_LAYERS => {
@@ -2049,25 +2130,25 @@ fn wall_type(
             if let Some(t) = given.filter(|t| (t - sum).abs() > 1e-6) {
                 return Err(bad(c, format!("its layers add up to {sum} mm, not the {t} mm given")));
             }
-            Ok(WallType { thickness: sum, layers })
+            Ok((sum, layers))
         }
         (Some(_), None) => Err(need("thickness")),
-        (Some(_), Some(t)) => Ok(WallType { thickness: t, layers: Vec::new() }),
+        (Some(_), Some(t)) => Ok((t, Vec::new())),
         (None, Some(t)) => {
-            let mut layers = old.map(|o| o.layers.clone()).unwrap_or_default();
-            if let Some(o) = old.filter(|o| !o.layers.is_empty()) {
+            let mut layers = old.map(|(_, l)| l.to_vec()).unwrap_or_default();
+            if let Some((was, _)) = old.filter(|(_, l)| !l.is_empty()) {
                 let core = layers.iter().position(|l| l.function == crate::model::Function::Structure);
                 let k = core.or_else(|| (0..layers.len()).max_by(|a, b| layers[*a].thickness.total_cmp(&layers[*b].thickness)));
                 if let Some(l) = k.and_then(|k| layers.get_mut(k)) {
-                    l.thickness += t - o.thickness;
+                    l.thickness += t - was;
                     if l.thickness <= 0.0 {
                         return Err(bad(c, format!("at {t} mm its structure would be {} mm thick; change its layers", l.thickness)));
                     }
                 }
             }
-            Ok(WallType { thickness: t, layers })
+            Ok((t, layers))
         }
-        (None, None) => old.cloned().ok_or_else(|| need("thickness")),
+        (None, None) => old.map(|(t, l)| (t, l.to_vec())).ok_or_else(|| need("thickness")),
     }
 }
 
@@ -2766,7 +2847,7 @@ fn inspect(s: &mut Session, _: &Value) -> R {
     Ok(json!({
         "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
         "counts": counts,
-        "types": m.types, "warnings": warnings, "history": s.history(),
+        "types": m.types, "materials": m.materials, "warnings": warnings, "history": s.history(),
     }))
 }
 

@@ -504,6 +504,11 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"category": "wall", "name": "L", "layers": [{"thickness": 1e300}, {"thickness": 0, "function": "membrane"}]}),
         json!({"category": "wall", "name": "L", "layers": "x"}),
         json!({"category": "wall", "name": "Generic - 200mm", "layers": [{"thickness": 5, "material": "x", "extra": 1}]}),
+        json!({"name": "M", "color": "#zzzzzz", "cut": 5, "surface": "brick", "rename": "", "delete": "yes"}),
+        json!({"name": "Brick", "rename": "Brick", "color": [1, 2]}),
+        json!({"category": "floor", "name": "F", "layers": [{"thickness": 1e300, "material": "Concrete"}]}),
+        json!({"category": "roof", "name": "R", "layers": [{"thickness": 0, "function": "membrane"}]}),
+        json!({"category": "ceiling", "name": "C", "layers": "x", "grid": -5}),
         json!({"ids": [3, 4], "arc": 1e300}),
         json!({"id": 3, "location": "exterior-core", "arc": 179.99}),
         json!({"id": 3, "attach_top": 3}),
@@ -1389,8 +1394,10 @@ fn a_project_in_spanish_names_what_it_makes_in_spanish() {
     );
 }
 
-/// A cavity wall type, outside in: brick, insulation, block and plaster, 300 mm in all.
+/// A cavity wall type, outside in: brick, insulation, block and plaster, 300 mm in all; its
+/// insulation a material of its own.
 fn cavity(s: &mut Session) {
+    run(s, "material", json!({"name": "Mineral wool", "color": "#e6d68c", "cut": "insulation"}));
     let layers = json!([
         {"function": "finish", "material": "Brick", "thickness": 100},
         {"function": "thermal", "material": "Mineral wool", "thickness": 50},
@@ -2019,4 +2026,241 @@ fn ceilings_in_a_room_round_a_loop_of_walls_stop_at_its_faces() {
     let (rcp, tiled) = (crate::render::ceiling_plan(&s.model, 1, 800, 600), tiled["id"].as_u64().unwrap());
     let at = |x: f64, y: f64| rcp.pick_all(rcp.view.px(P2(x, y)), 2.0).contains(&tiled);
     assert_eq!((at(24000.0, 1800.0), at(23000.0, 4000.0), at(22400.0, 2400.0)), (true, true, false), "past the hole, and in it");
+}
+
+#[test]
+fn layers_pick_their_materials_from_the_projects_library() {
+    let mut s = Session::new();
+    // A new project's library: what its default types are made of, and more.
+    let lib = run(&mut s, "inspect", json!({}))["materials"].clone();
+    for name in ["Brick", "Insulation", "Concrete block", "Plaster", "Concrete", "Screed", "Timber", "Ceramic tile", "Roof tiles"] {
+        assert!(lib[name]["color"].is_array(), "{name}: {lib}");
+    }
+    assert_eq!((&lib["Brick"]["cut"], &lib["Insulation"]["cut"]), (&json!("brick"), &json!("insulation")));
+    // A material: its shading colour, the pattern its cut shows and the one its surfaces show.
+    let oak = run(&mut s, "material", json!({"name": "Oak", "color": "#a0703c", "cut": "diagonal"}));
+    assert_eq!(oak["material"], json!({"color": [160, 112, 60], "cut": "diagonal", "surface": "none"}));
+    let oak = run(&mut s, "material", json!({"name": "Oak", "surface": "horizontal", "color": [150, 100, 50]}));
+    assert_eq!(oak["material"], json!({"color": [150, 100, 50], "cut": "diagonal", "surface": "horizontal"}));
+    // Layers name one of its materials, or none.
+    let floor = |m: &str| json!({"category": "floor", "name": "Oak floor", "layers": [{"function": "finish", "material": m, "thickness": 20}, {"thickness": 180}]});
+    let e = s.execute("type", &floor("Oke")).unwrap_err();
+    assert!(e.contains("Oke") && e.contains("material"), "{e}");
+    run(&mut s, "type", floor("Oak"));
+    // Renamed, its layers follow it; while a layer uses it, it can't go.
+    run(&mut s, "material", json!({"name": "Oak", "rename": "European oak"}));
+    let t = run(&mut s, "inspect", json!({}))["types"]["floor"]["Oak floor"].clone();
+    assert_eq!(t["layers"][0]["material"], "European oak");
+    let e = s.execute("material", &json!({"name": "European oak", "delete": true})).unwrap_err();
+    assert!(e.contains("Oak floor"), "{e}");
+    run(&mut s, "material", json!({"name": "Timber", "delete": true}));
+    assert_eq!(run(&mut s, "inspect", json!({}))["materials"]["Timber"], Value::Null);
+    for (bad, says) in [
+        (json!({"name": "X", "color": "#12"}), "color"),
+        (json!({"name": "X", "color": [300, 0, 0]}), "color"),
+        (json!({"name": "X", "cut": "polka"}), "polka"),
+        (json!({"name": "Brick", "rename": "Plaster"}), "Plaster"),
+        (json!({"name": "Nothing", "delete": true}), "Nothing"),
+        (json!({"name": ""}), "name"),
+    ] {
+        let e = s.execute("material", &bad).unwrap_err();
+        assert!(e.contains(says), "{bad}: {e}");
+    }
+}
+
+#[test]
+fn floors_roofs_and_ceilings_are_built_of_layers_from_the_top_down() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    let tiled = json!([
+        {"function": "finish", "material": "Ceramic tile", "thickness": 10},
+        {"function": "substrate", "material": "Screed", "thickness": 40},
+        {"function": "structure", "material": "Concrete", "thickness": 200}
+    ]);
+    let t = run(&mut s, "type", json!({"category": "floor", "name": "Tiled 250", "layers": tiled}))["type"].clone();
+    assert_eq!(t["thickness"], 250.0);
+    // A new thickness goes to its structure, as a wall type's does.
+    let t = run(&mut s, "type", json!({"category": "floor", "name": "Tiled 250", "thickness": 300}))["type"].clone();
+    assert_eq!(t["layers"][2]["thickness"], 250.0);
+    let roof = json!([
+        {"function": "finish", "material": "Roof tiles", "thickness": 50},
+        {"function": "membrane", "material": "Membrane", "thickness": 0},
+        {"function": "thermal", "material": "Insulation", "thickness": 150},
+        {"function": "structure", "material": "Timber", "thickness": 100}
+    ]);
+    run(&mut s, "type", json!({"category": "roof", "name": "Tiled roof", "layers": roof}));
+    let board = json!([{"function": "substrate", "material": "Timber", "thickness": 25}, {"function": "finish", "material": "Gypsum board", "thickness": 13}]);
+    let t = run(&mut s, "type", json!({"category": "ceiling", "name": "Board", "layers": board, "grid": 600}))["type"].clone();
+    assert_eq!((&t["thickness"], &t["grid"]), (&json!(38.0), &json!(600.0)));
+    let e = s.execute("type", &json!({"category": "roof", "name": "Odd", "thickness": 10, "layers": [{"thickness": 50}]})).unwrap_err();
+    assert!(e.contains("50"), "{e}");
+    // In 3D each layer is a slab of its own, in its material's colour, the first on top.
+    let boundary = json!([[0, 0], [8000, 0], [8000, 6000], [0, 6000]]);
+    let floor = run(&mut s, "floor", json!({"level": "Level 2", "boundary": boundary, "type": "Tiled 250"}))["id"].as_u64().unwrap();
+    let r = run(&mut s, "roof", json!({"type": "Tiled roof"}))["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"ids": ids, "attach_top": r}));
+    let ceiling = run(&mut s, "ceiling", json!({"point": [4000, 3000], "type": "Board"}))["id"].as_u64().unwrap();
+    let solids = crate::view3d::shaded(&s.model);
+    let of = |id: u64| {
+        solids.iter().filter(|x| x.owner() == id).map(|x| (x.heights(), x.color())).map(|(h, c)| (h, [c.0, c.1, c.2])).collect::<Vec<_>>()
+    };
+    let colour = |name: &str| s.model.materials[name].color;
+    let floor_layers = of(floor);
+    assert_eq!(floor_layers.len(), 3, "{floor_layers:?}");
+    for (((lo, hi), c), (want, name)) in
+        floor_layers.iter().zip([((2990.0, 3000.0), "Ceramic tile"), ((2950.0, 2990.0), "Screed"), ((2700.0, 2950.0), "Concrete")])
+    {
+        assert!((lo - want.0).abs() < 1e-6 && (hi - want.1).abs() < 1e-6, "{name}: {lo} {hi}");
+        assert_eq!(*c, colour(name), "{name}");
+    }
+    // A roof's layers across its slope, the membrane none; a ceiling's, its underside 2600 mm up.
+    assert_eq!(of(r).iter().map(|(_, c)| *c).collect::<std::collections::BTreeSet<_>>().len(), 3);
+    let c = of(ceiling);
+    assert_eq!(c.len(), 2);
+    assert!((c[1].0.0 - 2600.0).abs() < 1e-6 && (c[0].0.1 - 2638.0).abs() < 1e-6, "{c:?}");
+    // A section through the floor: a thin line between each two of its layers.
+    run(&mut s, "section", json!({"start": [4000, -2000], "end": [4000, 8000]}));
+    let id = s.model.elements.iter().find(|(_, e)| matches!(e, crate::model::Element::Section(_))).map(|(id, _)| *id).unwrap();
+    let view = crate::render::section_fit(&s.model, id, 2000, 1500);
+    let d = crate::render::section(&s.model, id, view);
+    let thin = |z: f64| {
+        let y = view.px(P2(0.0, z)).1;
+        d.prims.iter().zip(&d.owners).any(|(p, o)| {
+            *o == Some(floor)
+                && matches!(p, crate::render::Prim::Line { pts, width, .. }
+                    if *width < 2.0 && pts.len() == 2 && pts.iter().all(|q| (q.1 - y).abs() < 0.5) && (pts[1].0 - pts[0].0).abs() > 50.0)
+        })
+    };
+    assert!(thin(2990.0) && thin(2950.0), "between its layers");
+    assert!(!thin(2970.0), "not across a layer");
+}
+
+#[test]
+fn cut_patterns_show_where_a_layer_is_wide_enough_to_hold_them() {
+    let mut s = Session::new();
+    cavity(&mut s);
+    let w = run(&mut s, "wall", json!({"points": [[0, 0], [6000, 0]], "type": "Cavity 300"}))["ids"][0].as_u64().unwrap();
+    // Close in, 2 px a millimetre: its brick (100 mm, to its left, north) holds a brick pattern's lines.
+    let lines = |scale: f64| {
+        let view = crate::render::View { scale, cx: 3000.0, cy: 0.0, width: 1200, height: 800 };
+        let d = crate::render::draw(&s.model, 1, view);
+        let (north, south) = (view.px(P2(3000.0, 150.0)).1, view.px(P2(3000.0, 50.0)).1);
+        d.prims
+            .iter()
+            .zip(&d.owners)
+            .filter(|(p, o)| {
+                **o == Some(w)
+                    && matches!(p, crate::render::Prim::Line { pts, width, .. }
+                        if *width < 1.0 && pts.iter().all(|q| q.1 >= north - 0.5 && q.1 <= south + 0.5))
+            })
+            .count()
+    };
+    assert!(lines(2.0) > 20, "close in: {}", lines(2.0));
+    // Far out, too thin for them: the layer is filled as before.
+    assert_eq!(lines(0.02), 0);
+}
+
+#[test]
+fn a_section_crossing_a_curved_wall_twice_shows_its_layers_at_both_cuts() {
+    let mut s = Session::new();
+    let w =
+        run(&mut s, "wall", json!({"points": [[0, 0], [4000, 0]], "arc": -170, "type": "Exterior - 300mm"}))["ids"][0].as_u64().unwrap();
+    run(&mut s, "section", json!({"start": [-500, 1000], "end": [4500, 1000]}));
+    let id = s.model.elements.iter().find(|(_, e)| matches!(e, crate::model::Element::Section(_))).map(|(id, _)| *id).unwrap();
+    let view = crate::render::section_fit(&s.model, id, 2000, 1500);
+    let d = crate::render::section(&s.model, id, view);
+    // The section runs west to east: the wall's west cut lies before its middle, its east cut past it.
+    let middle = view.px(P2(2500.0, 0.0)).0;
+    let hatched = |west: bool| {
+        d.prims.iter().zip(&d.owners).any(|(p, o)| {
+            *o == Some(w)
+                && matches!(p, crate::render::Prim::Line { pts, width, .. } if *width < 1.0 && pts.iter().all(|q| (q.0 < middle) == west))
+        })
+    };
+    assert!(hatched(true) && hatched(false), "west {}, east {}", hatched(true), hatched(false));
+}
+
+#[test]
+fn surface_patterns_keep_their_size_in_the_building() {
+    let mut s = Session::new();
+    let tiled = json!([{"function": "finish", "material": "Ceramic tile", "thickness": 10}, {"function": "structure", "material": "Concrete", "thickness": 200}]);
+    run(&mut s, "type", json!({"category": "floor", "name": "Tiled", "layers": tiled}));
+    let boundary = json!([[0, 0], [6000, 0], [6000, 4000], [0, 4000]]);
+    let f = run(&mut s, "floor", json!({"boundary": boundary, "type": "Tiled"}))["id"].as_u64().unwrap();
+    // Where the tiles' joints running east cross the plan, px down it.
+    let rows = |scale: f64| {
+        let view = crate::render::View { scale, cx: 3000.0, cy: 2000.0, width: 1200, height: 800 };
+        let d = crate::render::draw(&s.model, 1, view);
+        let mut ys: Vec<f32> = d
+            .prims
+            .iter()
+            .zip(&d.owners)
+            .filter_map(|(p, o)| match p {
+                crate::render::Prim::Line { pts, width, .. }
+                    if *o == Some(f)
+                        && *width < 1.0
+                        && pts.len() == 2
+                        && (pts[0].1 - pts[1].1).abs() < 1e-6
+                        && (pts[1].0 - pts[0].0).abs() > 1.0 =>
+                {
+                    Some(pts[0].1)
+                }
+                _ => None,
+            })
+            .collect();
+        ys.sort_by(f32::total_cmp);
+        ys
+    };
+    // A tile is 200 mm whatever the zoom: 40 px at 0.2 px a millimetre, 80 px at 0.4.
+    for scale in [0.2, 0.4] {
+        let ys = rows(scale);
+        assert!(ys.len() > 3 && ys.windows(2).all(|w| (f64::from(w[1] - w[0]) - 200.0 * scale).abs() < 0.01), "{scale}: {ys:?}");
+    }
+    // Far out, too fine to read: left out.
+    assert!(rows(0.02).is_empty());
+}
+
+#[test]
+fn materials_and_layers_go_to_ifc_and_come_back() {
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "material", json!({"name": "Oak", "color": "#a0703c", "cut": "diagonal"}));
+    let layers = json!([{"function": "finish", "material": "Oak", "thickness": 20}, {"function": "structure", "material": "Concrete", "thickness": 180}]);
+    run(&mut s, "type", json!({"category": "floor", "name": "Oak 200", "layers": layers}));
+    run(&mut s, "floor", json!({"type": "Oak 200"}));
+    let path = temp("materials.ifc");
+    run(&mut s, "save", json!({"path": path}));
+    let ifc = std::fs::read_to_string(&path).unwrap();
+    assert!(ifc.contains("IFCMATERIAL('Oak'") && ifc.contains("IFCMATERIALLAYERSET(") && ifc.contains("'Oak 200'"), "{ifc}");
+    // Its colour, for viewers to shade it.
+    assert!(ifc.contains("IFCCOLOURRGB($,0.627") && ifc.contains("IFCMATERIALDEFINITIONREPRESENTATION("), "{ifc}");
+    let mut t = Session::new();
+    run(&mut t, "open", json!({"path": path}));
+    let i = run(&mut t, "inspect", json!({}));
+    let ty = i["types"]["floor"].as_object().unwrap().values().find(|ty| ty["layers"].as_array().is_some_and(|l| l.len() == 2)).cloned();
+    let ty = ty.unwrap_or_else(|| panic!("{}", i["types"]["floor"]));
+    assert_eq!(
+        (&ty["layers"][0]["material"], &ty["layers"][0]["thickness"], &ty["layers"][1]["function"]),
+        (&json!("Oak"), &json!(20.0), &json!("structure"))
+    );
+    assert_eq!(i["materials"]["Oak"]["color"], json!([160, 112, 60]));
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_project_from_before_the_library_brings_its_layers_materials_into_it() {
+    let mut s = Session::new();
+    cavity(&mut s);
+    let path = temp("old.bimcraft");
+    run(&mut s, "save", json!({"path": path}));
+    // As an older BIMCraft saved it: no library, its layers' materials free text.
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    v.as_object_mut().unwrap().remove("materials");
+    v["types"]["wall"]["Cavity 300"]["layers"][1]["material"] = json!("Rock wool");
+    std::fs::write(&path, v.to_string()).unwrap();
+    let mut t = Session::new();
+    run(&mut t, "open", json!({"path": path}));
+    let lib = run(&mut t, "inspect", json!({}))["materials"].clone();
+    assert!(lib["Rock wool"]["color"].is_array() && lib["Brick"]["color"].is_array(), "{lib}");
+    let _ = std::fs::remove_file(path);
 }

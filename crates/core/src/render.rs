@@ -19,8 +19,8 @@ use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder,
 
 use crate::geom::{self, P2};
 use crate::model::{
-    CEILING_CUT, Ceiling, DimKind, Dimension, Element, Floor, Function, Id, Model, Note, Opening, PlanRange, Railing, Ramp, Roof, Section,
-    Shaft, Stair, TOL, Tag, Wall,
+    CEILING_CUT, Ceiling, DimKind, Dimension, Element, Floor, Function, Id, Layer, Model, Note, Opening, Pattern, PlanRange, Railing, Ramp,
+    Roof, Section, Shaft, Stair, TOL, Tag, Wall,
 };
 use crate::units::Units;
 use crate::view3d::{self, Camera, Clip, Image, Scene};
@@ -537,19 +537,55 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     }
     d.owner = None;
     d.fill(&cuts.values().flatten().cloned().collect::<Vec<_>>(), POCHE);
-    for (owner, rings) in cuts {
-        d.owner = Some(owner);
-        d.fill(&rings, POCHE);
+    for (owner, rings) in &cuts {
+        d.owner = Some(*owner);
+        d.fill(rings, POCHE);
     }
-    // A compound wall's layers where the line cuts it: a thin line up each boundary between two, as
-    // high as the wall stands there, around its openings.
+    // A compound wall's layers where the line cuts it: each its material's cut pattern, between where
+    // the line crosses its boundaries; a thin line up each boundary between two, as high as the wall
+    // stands there, around its openings.
     for (&wall, e) in &m.elements {
         let Element::Wall(w) = e else { continue };
-        if m.types.wall.get(&w.type_name).is_none_or(|t| t.layers.is_empty()) {
+        let layers = m.type_layers("wall", &w.type_name);
+        if layers.is_empty() {
             continue;
         }
         d.owner = Some(wall);
         let lines = walls::layer_lines(m, wall);
+        // Where the line crosses each boundary, along it: a curved wall it cuts twice, twice.
+        let crossings: Vec<Vec<f64>> = lines
+            .iter()
+            .map(|line| {
+                let mut xs: Vec<f64> = line
+                    .windows(2)
+                    .filter_map(|seg| {
+                        let &[p, q] = seg else { return None };
+                        let x = geom::line_intersection(v.start, v.end, p, q).filter(|x| geom::dist_to_segment(*x, p, q) < 1e-6)?;
+                        Some((x - v.start).dot(u))
+                    })
+                    .collect();
+                xs.sort_by(f64::total_cmp);
+                xs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+                xs
+            })
+            .collect();
+        for (k, layer) in layers.iter().enumerate() {
+            let (Some(a), Some(b)) = (crossings.get(k), crossings.get(k + 1)) else { continue };
+            // ponytail: a boundary the line only grazes leaves the layer in poché.
+            if a.len() != b.len() {
+                continue;
+            }
+            for (&s0, &s1) in a.iter().zip(b) {
+                let (s0, s1) = (s0.min(s1).max(0.0), s0.max(s1).min(len));
+                for r in cuts.get(&wall).into_iter().flatten() {
+                    let part = geom::clip(&geom::clip(r, |q| q.0 - s0), |q| s1 - q.0);
+                    if part.len() >= 3 {
+                        let room = (s1 - s0) * d.view.scale;
+                        cut_layer(&mut d, m, layer, &part, P2(1.0, 0.0), room);
+                    }
+                }
+            }
+        }
         for line in lines.iter().skip(1).take(lines.len().saturating_sub(2)) {
             for seg in line.windows(2) {
                 let &[p, q] = seg else { continue };
@@ -564,6 +600,36 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
                     let (z0, z1) = s.z_at(x);
                     d.line(&[P2(along, z0), P2(along, z1)], 1.0, INK, false);
                 }
+            }
+        }
+    }
+    // Each layer of a compound floor, roof or ceiling it cuts: its material's cut pattern, a thin
+    // line between each two, parallel to its faces.
+    for (&owner, rings) in &cuts {
+        let layers = match m.elements.get(&owner) {
+            Some(Element::Floor(f)) => m.type_layers("floor", &f.type_name),
+            Some(Element::Roof(r)) => m.type_layers("roof", &r.type_name),
+            Some(Element::Ceiling(c)) => m.type_layers("ceiling", &c.type_name),
+            _ => continue,
+        };
+        let total: f64 = layers.iter().map(|l| l.thickness).sum();
+        if total <= 0.0 {
+            continue;
+        }
+        d.owner = Some(owner);
+        for r in rings {
+            let &[a0, b0, b1, a1] = r.as_slice() else { continue };
+            // The line a fraction of the way down from its top to its bottom.
+            let at = |f: f64| (a1 + (a0 - a1) * f, b1 + (b0 - b1) * f);
+            let mut above = 0.0;
+            for (k, layer) in layers.iter().enumerate() {
+                let ((p, q), (p2, q2)) = (at(above / total), at((above + layer.thickness) / total));
+                let room = (p.1 - p2.1).abs() * d.view.scale;
+                cut_layer(&mut d, m, layer, &[p2, q2, q, p], (q - p).unit(), room);
+                if k > 0 {
+                    d.line(&[p, q], 1.0, INK, false);
+                }
+                above += layer.thickness;
             }
         }
     }
@@ -659,6 +725,14 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             d.line(ring, 1.0, FAINT, true);
         }
         holes(&mut d, m, &m.floor_slabs(f));
+        // Its top layer's surface pattern, faint.
+        if let Some(pattern) = m.type_layers("floor", &f.type_name).first().and_then(|l| m.materials.get(&l.material)).map(|x| x.surface) {
+            for (face, rise) in m.floor_slabs(f) {
+                for piece in m.less_shafts(&face, rise).0 {
+                    surface(&mut d, &piece, pattern, FAINT);
+                }
+            }
+        }
         if let Some([tail, head]) = f.arrow.filter(|_| f.slope != 0.0) {
             slope_arrow(&mut d, tail, head, f.slope);
         }
@@ -683,18 +757,22 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
         d.owner = Some(id);
         d.fill(&[o], POCHE);
     }
-    // A compound wall's layers: lighter where they aren't its structure, a thin line between each two.
+    // A compound wall's layers: each its material's cut pattern where it's wide enough to hold it,
+    // else lighter where it isn't the wall's structure; a thin line between each two.
     for (&id, e) in &m.elements {
         let Element::Wall(w) = e else { continue };
-        let Some(t) = m.types.wall.get(&w.type_name).filter(|t| !t.layers.is_empty() && m.spans(w, range.cut)) else { continue };
+        let layers = m.type_layers("wall", &w.type_name);
+        if layers.is_empty() || !m.spans(w, range.cut) {
+            continue;
+        }
         d.owner = Some(id);
         let lines = walls::layer_lines(m, id);
-        for (k, layer) in t.layers.iter().enumerate() {
-            if let (Function::Structure, _) | (_, None) = (layer.function, lines.get(k + 1)) {
-                continue;
-            }
-            let ring: Vec<P2> = lines.get(k).into_iter().flatten().chain(lines.get(k + 1).into_iter().flatten().rev()).copied().collect();
-            d.fill(&[ring], LIGHT_POCHE);
+        let along = (w.end - w.start).unit();
+        for (k, layer) in layers.iter().enumerate() {
+            let (Some(a), Some(b)) = (lines.get(k), lines.get(k + 1)) else { continue };
+            let ring: Vec<P2> = a.iter().chain(b.iter().rev()).copied().collect();
+            let room = layer.thickness * d.view.scale;
+            cut_layer(&mut d, m, layer, &ring, along, room);
         }
         for line in lines.iter().skip(1).take(lines.len().saturating_sub(2)) {
             d.line(line, 1.0, INK, false);
@@ -850,6 +928,155 @@ fn shaft(d: &mut Drawing, ring: &[P2]) {
     }
 }
 
+/// How far apart a cut pattern's lines are, px: a drafting pattern, the same on screen and on
+/// paper whatever the scale.
+const GAP: f64 = 6.0;
+/// How far apart a surface pattern's lines are, mm: a model pattern, its tiles and courses their
+/// size in the building (a tile 200 mm square, a brick 250 by 100).
+const MODULE: f64 = 100.0;
+/// How wide a layer is to be, px, to show its pattern: narrower, it's filled instead.
+const PATTERN_ROOM: f64 = 10.0;
+
+/// A layer where it's cut, along `ring`: where it's `room` px wide or more, its material's cut
+/// pattern over the paper, its courses along unit `u`; else, unless it's its element's structure
+/// (which stays poché), lighter.
+fn cut_layer(d: &mut Drawing, m: &Model, layer: &Layer, ring: &[P2], u: P2, room: f64) {
+    let pattern = m.materials.get(&layer.material).map_or(Pattern::None, |x| x.cut);
+    if pattern != Pattern::None && room >= PATTERN_ROOM {
+        d.fill(&[ring.to_vec()], PAPER);
+        let gap = GAP / d.view.scale;
+        hatch(d, ring, pattern, u, INK, gap);
+    } else if layer.function != Function::Structure {
+        d.fill(&[ring.to_vec()], LIGHT_POCHE);
+    }
+}
+
+/// A surface pattern over `ring`, where its lines are far enough apart to read.
+fn surface(d: &mut Drawing, ring: &[P2], pattern: Pattern, color: Rgb) {
+    if MODULE * d.view.scale >= GAP / 2.0 {
+        hatch(d, ring, pattern, P2(1.0, 0.0), color, MODULE);
+    }
+}
+
+/// `pattern` over `ring` (model mm), as far as the view shows it: its lines `gap` mm apart, thin,
+/// its courses along unit `u`; an insulation's zigzag along the ring's length, side to side.
+fn hatch(d: &mut Drawing, ring: &[P2], pattern: Pattern, u: P2, color: Rgb, gap: f64) {
+    let (w, h) = (d.view.width as f32, d.view.height as f32);
+    let (lo, hi) = (d.view.mm((0.0, h)), d.view.mm((w, 0.0)));
+    let ring = [(P2(1.0, 0.0), lo.0), (P2(-1.0, 0.0), -hi.0), (P2(0.0, 1.0), lo.1), (P2(0.0, -1.0), -hi.1)]
+        .into_iter()
+        .fold(ring.to_vec(), |r, (n, k)| geom::clip(&r, |q| q.dot(n) - k));
+    if ring.len() < 3 || pattern == Pattern::None {
+        return;
+    }
+    if pattern == Pattern::Solid {
+        d.fill(&[ring], color);
+        return;
+    }
+    let span = |dir: P2| ring.iter().map(|q| q.dot(dir)).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| (a.min(x), b.max(x)));
+    let n = u.perp();
+    let mut segment = |d: &mut Drawing, from: P2, dir: P2, s0: f64, s1: f64| {
+        for (a, b) in view3d::crossings(&ring, from, dir) {
+            let (a, b) = (a.max(s0), b.min(s1));
+            if b > a {
+                d.line(&[from + dir * a, from + dir * b], 0.5, color, false);
+            }
+        }
+    };
+    // Lines along `dir`, `step` apart across it, `shift` along it from line to line.
+    let lines = |d: &mut Drawing, dir: P2, step: f64, seg: &mut dyn FnMut(&mut Drawing, P2, P2, f64, f64)| {
+        let ((a0, _), (c0, c1)) = (span(dir), span(dir.perp()));
+        if (c1 - c0) / step > 2000.0 {
+            return;
+        }
+        let mut k = (c0 / step).ceil();
+        while k * step <= c1 {
+            seg(d, dir.perp() * (k * step) + dir * (a0 - 1.0), dir, f64::NEG_INFINITY, f64::INFINITY);
+            k += 1.0;
+        }
+    };
+    let turned = |deg: f64| {
+        let (sin, cos) = deg.to_radians().sin_cos();
+        P2(u.0 * cos - u.1 * sin, u.0 * sin + u.1 * cos)
+    };
+    match pattern {
+        Pattern::None | Pattern::Solid => {}
+        Pattern::Diagonal => lines(d, turned(45.0), gap, &mut segment),
+        Pattern::Crosshatch => {
+            lines(d, turned(45.0), gap * 1.4, &mut segment);
+            lines(d, turned(-45.0), gap * 1.4, &mut segment);
+        }
+        Pattern::Horizontal => lines(d, u, gap, &mut segment),
+        Pattern::Vertical => lines(d, n, gap, &mut segment),
+        Pattern::Grid => {
+            lines(d, u, gap * 2.0, &mut segment);
+            lines(d, n, gap * 2.0, &mut segment);
+        }
+        // Courses along `u`, their joints staggered half a brick from course to course.
+        Pattern::Brick => {
+            lines(d, u, gap, &mut segment);
+            let ((a0, a1), (c0, c1)) = (span(u), span(n));
+            if (a1 - a0) / gap * (c1 - c0) / gap > 40_000.0 {
+                return;
+            }
+            let mut k = (c0 / gap).floor();
+            while k * gap <= c1 {
+                let stagger = if (k as i64).rem_euclid(2) == 0 { 0.0 } else { gap * 1.25 };
+                let mut j = ((a0 - stagger) / (gap * 2.5)).floor();
+                while j * gap * 2.5 + stagger <= a1 {
+                    let from = u * (j * gap * 2.5 + stagger) + n * (k * gap);
+                    segment(d, from, n, 0.0, gap);
+                    j += 1.0;
+                }
+                k += 1.0;
+            }
+        }
+        // Stipple: a dot every so often, each nudged its own way.
+        Pattern::Concrete => {
+            let ((a0, a1), (c0, c1)) = (span(u), span(n));
+            let step = gap * 1.3;
+            if (a1 - a0) / step * (c1 - c0) / step > 40_000.0 {
+                return;
+            }
+            let dot = 0.8 / d.view.scale;
+            let mut k = (c0 / step).floor();
+            while k * step <= c1 {
+                let mut j = (a0 / step).floor();
+                while j * step <= a1 {
+                    let h = crate::model::mix((j as i64 as u64).wrapping_mul(0x9E37) ^ (k as i64 as u64));
+                    let (x, y) = ((h & 0xffff) as f64 / 65535.0, ((h >> 16) & 0xffff) as f64 / 65535.0);
+                    let at = u * ((j + x) * step) + n * ((k + y) * step);
+                    if geom::contains(&ring, at) {
+                        d.line(&[at, at + u * dot], 0.8, color, false);
+                    }
+                    j += 1.0;
+                }
+                k += 1.0;
+            }
+        }
+        // A batt's zigzag along the ring's longer way, touching its sides.
+        Pattern::Insulation => {
+            let (along, across) = if span(u).1 - span(u).0 >= span(n).1 - span(n).0 { (u, n) } else { (n, u) };
+            let ((a0, a1), (c0, c1)) = (span(along), span(across));
+            let wave = (c1 - c0).max(gap);
+            if (a1 - a0) / wave > 5000.0 {
+                return;
+            }
+            let mut i = 0.0;
+            while a0 + i * wave / 2.0 <= a1 {
+                let side = |i: f64| if (i as i64).rem_euclid(2) == 0 { c0 } else { c1 };
+                let (p, q) =
+                    (along * (a0 + i * wave / 2.0) + across * side(i), along * (a0 + (i + 1.0) * wave / 2.0) + across * side(i + 1.0));
+                let len = p.dist(q);
+                if len > 0.0 {
+                    segment(d, p, (q - p).unit(), 0.0, len);
+                }
+                i += 1.0;
+            }
+        }
+    }
+}
+
 /// A ceiling in its reflected ceiling plan: its outline and its openings', the holes shafts cut in
 /// it, and with a grid, its tiles: lines through its middle, a tile apart, stopping at the holes.
 fn ceiling(d: &mut Drawing, m: &Model, c: &Ceiling) {
@@ -858,6 +1085,14 @@ fn ceiling(d: &mut Drawing, m: &Model, c: &Ceiling) {
     }
     let slabs = m.ceiling_slabs(c);
     holes(d, m, &slabs);
+    // Its bottom layer's surface pattern.
+    if let Some(pattern) = m.type_layers("ceiling", &c.type_name).last().and_then(|l| m.materials.get(&l.material)).map(|x| x.surface) {
+        for (face, rise) in &slabs {
+            for piece in m.less_shafts(face, *rise).0 {
+                surface(d, &piece, pattern, INK);
+            }
+        }
+    }
     let (Some(t), Some((lo, hi))) = (m.types.ceiling.get(&c.type_name), bounds(&c.boundary)) else { return };
     // ponytail: tiles square to the axes; a ceiling's own grid angle when rooms turn.
     if t.grid <= 0.0 || (hi.0 - lo.0).max(hi.1 - lo.1) / t.grid > 2000.0 {
