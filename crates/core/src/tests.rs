@@ -541,6 +541,7 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"id": 3, "courtyards": [[[1000, 1000], [2000, 1000], [2000, 2000]], [[1000, 1000], [2000, 1000], [2000, 2000]]]}),
         json!({"courtyards": [[[1, 1]]], "slope": 1e-300}),
         json!({"courtyards": "x", "extrusion": {"line": [[0, 0], [1000, 0]], "profile": [[0, 0], [1000, 500]], "to": 1000}}),
+        json!({"point": [4000, 3000], "openings": [[[0, 0], [1e9, 0], [0, 1e9]], [[1, 1]]]}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -988,7 +989,7 @@ fn describe(m: &Model, id: u64) -> String {
         Some("wall") => &["start", "end", "arc", "thickness", "base_offset", "height", "level", "top_level", "attach_top"],
         Some("door" | "window") => &["host", "offset", "width", "height", "sill"],
         Some("floor") => &["level", "area_m2", "slope", "top", "openings"],
-        Some("ceiling") => &["level", "offset", "thickness", "area_m2"],
+        Some("ceiling") => &["level", "offset", "thickness", "area_m2", "openings"],
         Some("shaft") => &["level", "base_offset", "top_level", "height", "boundary"],
         Some("room") => &["level", "name", "number", "area_m2"],
         Some("column") => &["level", "at", "width", "depth", "round", "height", "base_offset"],
@@ -1081,6 +1082,9 @@ fn ifc_files_open_as_the_building_they_describe() {
     let well = json!([[[1000, 1500], [3500, 1500], [3500, 2500], [1000, 2500]]]);
     run(&mut s, "floor", json!({"level": "Level 2", "boundary": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]], "openings": well}));
     run(&mut s, "shaft", json!({"boundary": [[4000, 1000], [5000, 1000], [5000, 2000], [4000, 2000]]}));
+    // A ceiling round a hole, away from the house.
+    let hole = json!([[[81000, 1000], [82500, 1000], [82500, 2000], [81000, 2000]]]);
+    run(&mut s, "ceiling", json!({"boundary": [[80000, 0], [84000, 0], [84000, 4000], [80000, 4000]], "openings": hole}));
     // A stair that turns back at a landing, with its railings; a ramp turning right at one; a railing along a path.
     let u =
         run(&mut s, "stair", json!({"start": [20000, 0], "angle": 90, "width": 1100, "landings": [{"at": 9, "turn": 180}]}))["id"].clone();
@@ -1969,4 +1973,50 @@ fn floors_over_the_walls_leave_a_loop_of_walls_standing_free_open_as_a_courtyard
         (element(&mut s, joined["id"].as_u64().unwrap())["openings"].clone(), joined["area_m2"].as_f64()),
         (Value::Null, Some(256.0))
     );
+}
+
+#[test]
+fn ceilings_in_a_room_round_a_loop_of_walls_stop_at_its_faces() {
+    let mut s = Session::new();
+    // A 16 m square house round a 4 m courtyard, a loop of walls standing free inside: the room
+    // round it is a ring.
+    run(&mut s, "wall", json!({"points": [[0, 0], [16000, 0], [16000, 16000], [0, 16000]], "closed": true}));
+    run(&mut s, "wall", json!({"points": [[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]], "closed": true}));
+    // Out to the walls' faces, round the loop's too, clockwise from its south-west corner: 15.8² less 4.2².
+    let made = run(&mut s, "ceiling", json!({"point": [3000, 3000], "type": "Tile 600 x 600"}));
+    let id = made["id"].as_u64().unwrap();
+    let e = element(&mut s, id);
+    let island = json!([[[5900.0, 5900.0], [5900.0, 10100.0], [10100.0, 10100.0], [10100.0, 5900.0]]]);
+    assert_eq!((made["area_m2"].as_f64(), e["area_m2"].as_f64(), e["openings"].clone()), (Some(232.0), Some(232.0), island), "{e}");
+    // Open over the courtyard in 3D, and in a section across it: cut in both wings, not between.
+    let top = |s: &Session, x: f64, y: f64| crate::view3d::tops_at(&s.model, P2(x, y)).get(&id).copied();
+    assert_eq!((top(&s, 8000.0, 8000.0), top(&s, 8000.0, 3000.0)), (None, Some(2620.0)));
+    let sec = run(&mut s, "section", json!({"start": [8000, -2000], "end": [8000, 18000]}))["id"].as_u64().unwrap();
+    let view = crate::render::section_fit(&s.model, sec, 800, 600);
+    let d = crate::render::section(&s.model, sec, view);
+    let cut = |y: f64| d.pick(view.px(P2(y + 2000.0, 2610.0)), 1.0);
+    assert_eq!((cut(3000.0), cut(13000.0), cut(8000.0)), (Some(id), Some(id), None));
+    // Its reflected ceiling plan draws the hole's edge (between two tile lines), and its tiles stop
+    // there: a tile line runs through the middle of its box, across the south wing, not the courtyard.
+    let rcp = crate::render::ceiling_plan(&s.model, 1, 800, 600);
+    let at = |x: f64, y: f64| rcp.pick_all(rcp.view.px(P2(x, y)), 2.0).contains(&id);
+    assert_eq!((at(8300.0, 5900.0), at(8000.0, 3000.0), at(8000.0, 8000.0)), (true, true, false), "the hole's edge, a tile, the courtyard");
+    // Moved, its openings go with it.
+    run(&mut s, "move", json!({"ids": [id], "by": [0, 1000]}));
+    assert_eq!(element(&mut s, id)["openings"][0][0], json!([5900.0, 6900.0]));
+    // Sketched, its openings are the ones given, each inside it.
+    let square = json!([[20000, 0], [24800, 0], [24800, 4800], [20000, 4800]]);
+    let plain = run(&mut s, "ceiling", json!({"boundary": square}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, plain)["openings"], Value::Null);
+    run(&mut s, "delete", json!({"ids": [plain]}));
+    let out = json!([[[25000, 1000], [26000, 1000], [26000, 2000], [25000, 2000]]]);
+    assert!(s.execute("ceiling", &json!({"boundary": square, "openings": out})).unwrap_err().contains("isn't inside its outline"));
+    // Tiled from its middle, (22400, 2400), round a hole whose edges are on its grid: the tile lines
+    // along them run on past it, where the hole cuts the ceiling into pieces.
+    let hole = json!([[[21800, 1800], [23000, 1800], [23000, 3000], [21800, 3000]]]);
+    let tiled = run(&mut s, "ceiling", json!({"boundary": square, "openings": hole, "type": "Tile 600 x 600"}));
+    assert_eq!(tiled["area_m2"], 21.6);
+    let (rcp, tiled) = (crate::render::ceiling_plan(&s.model, 1, 800, 600), tiled["id"].as_u64().unwrap());
+    let at = |x: f64, y: f64| rcp.pick_all(rcp.view.px(P2(x, y)), 2.0).contains(&tiled);
+    assert_eq!((at(24000.0, 1800.0), at(23000.0, 4000.0), at(22400.0, 2400.0)), (true, true, false), "past the hole, and in it");
 }

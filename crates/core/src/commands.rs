@@ -95,8 +95,9 @@ pub static ALL: &[Command] = &[
         "ceiling",
         "Ceiling",
         &[],
-        "{point: [x,y] | boundary: [[x,y],…], level?, type?, offset?} a ceiling, its underside `offset` mm (2600) above the \
-         level: in the room around `point`, out to its walls' faces, or along `boundary`. Reflected ceiling plans show it",
+        "{point: [x,y] | boundary: [[x,y],…], openings?: [[[x,y],…],…], level?, type?, offset?} a ceiling, its underside \
+         `offset` mm (2600) above the level, open through `openings` (holes inside it, apart): in the room around `point`, out \
+         to its walls' faces and round the walls standing inside it, or along `boundary`. Reflected ceiling plans show it",
         ceiling,
     ),
     edit(
@@ -744,8 +745,8 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("top".into(), json!([hundredth(lo), hundredth(hi)]));
         }
         Element::Ceiling(cl) => {
-            let (face, rise) = m.ceiling_slab(cl);
-            extra.insert("area_m2".into(), json!(m2(area(&m.less_shafts(&face, rise).0))));
+            let left: f64 = m.ceiling_slabs(cl).iter().map(|(face, rise)| area(&m.less_shafts(face, *rise).0)).sum();
+            extra.insert("area_m2".into(), json!(m2(left)));
             if let Some(t) = m.types.ceiling.get(&cl.type_name) {
                 extra.insert("thickness".into(), json!(t.thickness));
                 extra.insert("grid".into(), json!(t.grid));
@@ -1214,20 +1215,26 @@ fn ceiling(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let level = level_param(c, m, p, "level")?;
     let type_name = type_param(c, p, m, "ceiling")?;
-    let mut boundary = match (absent(p.get("boundary")), point_opt(c, p, "point")?) {
-        (false, _) => points(c, p, "boundary")?,
-        // The room's free floor: what the walls' faces close around the point.
+    let (mut boundary, found) = match (absent(p.get("boundary")), point_opt(c, p, "point")?) {
+        (false, _) => (points(c, p, "boundary")?, Vec::new()),
+        // The room's free floor: what the walls' faces close around the point, and the walls standing
+        // inside it, clockwise as a floor's openings are.
         (true, Some(at)) => geom::region_at(&m.face_lines(level), at, TOL)
-            .map(|r| geom::corners(&r.outer).into_iter().map(micron).collect())
+            .map(|r| {
+                let holes = r.holes.iter().map(|h| tidy(&h.iter().rev().copied().collect::<Vec<P2>>())).collect();
+                (geom::corners(&r.outer).into_iter().map(micron).collect(), holes)
+            })
             .ok_or_else(|| bad(c, format!("no walls on {} close around [{}, {}]; give `boundary`", level_name(m, level), at.0, at.1)))?,
         (true, None) => return Err(bad(c, "`point` [x, y] in a room, or `boundary` [[x, y], …], is required")),
     };
     if geom::area(&boundary) < 0.0 {
         boundary.reverse();
     }
+    let openings: Vec<Vec<P2>> = shaped(c, p, "openings", "a list of outlines [[[x,y],…],…]")?.unwrap_or(found);
     let offset = num(c, p, "offset")?.unwrap_or(CEILING_HEIGHT);
-    let area = m2(geom::area(&boundary));
-    let id = s.model_mut().insert(Element::Ceiling(Ceiling { type_name, level, boundary, offset }));
+    // Its openings lie inside it and apart, or the model refuses it.
+    let area = m2(geom::area(&boundary) - openings.iter().map(|o| geom::area(o).abs()).sum::<f64>());
+    let id = s.model_mut().insert(Element::Ceiling(Ceiling { type_name, level, boundary, openings, offset }));
     Ok(json!({"id": id, "area_m2": area}))
 }
 
@@ -2219,7 +2226,13 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
             }
             fl.arrow = fl.arrow.map(|a| a.map(f));
         }
-        Element::Ceiling(Ceiling { boundary, .. }) | Element::Shaft(Shaft { boundary, .. }) => {
+        Element::Ceiling(cl) => {
+            cl.boundary.iter_mut().chain(cl.openings.iter_mut().flatten()).for_each(|q| *q = f(*q));
+            if mo.mirror {
+                cl.boundary.reverse();
+            }
+        }
+        Element::Shaft(Shaft { boundary, .. }) => {
             boundary.iter_mut().for_each(|q| *q = f(*q));
             if mo.mirror {
                 boundary.reverse();

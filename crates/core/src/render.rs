@@ -850,25 +850,29 @@ fn shaft(d: &mut Drawing, ring: &[P2]) {
     }
 }
 
-/// A ceiling in its reflected ceiling plan: its outline, the holes shafts cut in it, and with a
-/// grid, its tiles: lines through its middle, a tile apart.
+/// A ceiling in its reflected ceiling plan: its outline and its openings', the holes shafts cut in
+/// it, and with a grid, its tiles: lines through its middle, a tile apart, stopping at the holes.
 fn ceiling(d: &mut Drawing, m: &Model, c: &Ceiling) {
-    d.line(&c.boundary, 1.0, INK, true);
-    let slab = m.ceiling_slab(c);
-    holes(d, m, std::slice::from_ref(&slab));
+    for ring in std::iter::once(&c.boundary).chain(&c.openings) {
+        d.line(ring, 1.0, INK, true);
+    }
+    let slabs = m.ceiling_slabs(c);
+    holes(d, m, &slabs);
     let (Some(t), Some((lo, hi))) = (m.types.ceiling.get(&c.type_name), bounds(&c.boundary)) else { return };
     // ponytail: tiles square to the axes; a ceiling's own grid angle when rooms turn.
     if t.grid <= 0.0 || (hi.0 - lo.0).max(hi.1 - lo.1) / t.grid > 2000.0 {
         return;
     }
-    let pieces = m.less_shafts(&slab.0, slab.1).0;
+    let pieces: Vec<Vec<P2>> = slabs.iter().flat_map(|(face, rise)| m.less_shafts(face, *rise).0).collect();
     let mid = (lo + hi) * 0.5;
     for (u, across, (a, b)) in
         [(P2(0.0, 1.0), P2(1.0, 0.0), (lo.0 - mid.0, hi.0 - mid.0)), (P2(1.0, 0.0), P2(0.0, 1.0), (lo.1 - mid.1, hi.1 - mid.1))]
     {
         let n = ((a / t.grid).ceil() as i64, (b / t.grid).floor() as i64);
         for k in n.0..=n.1 {
-            let from = mid + across * (k as f64 * t.grid) - u * (hi - lo).length();
+            // A micron off the grid: a line along an edge between two pieces (where a hole cuts the
+            // ceiling up) pairs with neither and would vanish.
+            let from = mid + across * (k as f64 * t.grid + 1e-3) - u * (hi - lo).length();
             for piece in &pieces {
                 for (s0, s1) in view3d::crossings(piece, from, u) {
                     d.line(&[from + u * s0, from + u * s1], 1.0, INK, false);

@@ -1405,6 +1405,36 @@ fn ceilings_go_in_the_room_clicked_and_show_in_its_ceiling_plan() {
     assert!(h.query_by_label("Modify | Ceilings").is_some());
 }
 
+/// What the last frame painted as text: labels, and what the canvas writes beside the cursor.
+fn painted(h: &Harness<BimApp>) -> Vec<String> {
+    fn texts(s: &egui::Shape, out: &mut Vec<String>) {
+        match s {
+            egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| texts(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.output().shapes.iter().for_each(|c| texts(&c.shape, &mut out));
+    out
+}
+
+#[test]
+fn the_ceiling_tool_stops_at_the_faces_of_a_loop_of_walls_in_the_room() {
+    let mut h = app(r#"wall {"points": [[0, 0], [16000, 0], [16000, 16000], [0, 16000]], "closed": true}
+wall {"points": [[6000, 6000], [10000, 6000], [10000, 10000], [6000, 10000]], "closed": true}"#);
+    tool(&mut h, "Ceiling");
+    // Before the click, the ring the ceiling would fill and its area, 15.8² less 4.2².
+    h.hover_at(h.state().screen(P2(3000.0, 3000.0)));
+    h.run();
+    assert!(painted(&h).iter().any(|t| t == "232.00 m²"), "{:?}", painted(&h));
+    click(&mut h, P2(3000.0, 3000.0));
+    let c = ids(&h, "ceiling");
+    assert_eq!(c.len(), 1);
+    let island = json!([[[5900.0, 5900.0], [5900.0, 10100.0], [10100.0, 10100.0], [10100.0, 5900.0]]]);
+    assert_eq!((field(&h, c[0], "openings"), field(&h, c[0], "area_m2")), (island, json!(232.0)), "out to the loop's faces");
+}
+
 #[test]
 fn shaft_openings_take_two_corners_and_cut_the_floors_they_pass_through() {
     let mut h = app(&format!("{BOX}\nfloor {{\"level\": 2, \"boundary\": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]]}}"));

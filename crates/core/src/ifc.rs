@@ -399,8 +399,9 @@ pub fn export(m: &Model) -> String {
             Element::Ceiling(c) => {
                 let Some(&(_, storey)) = storeys.get(&c.level) else { continue };
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let profile = w.profile(&c.boundary, &[]);
-                let shape = w.body(profile, c.offset, m.ceiling_slab(c).1, &[]);
+                // Its outline less its openings swept up through its thickness.
+                let profile = w.profile(&c.boundary, &c.openings);
+                let shape = w.body(profile, c.offset, m.types.ceiling.get(&c.type_name).map_or(0.0, |t| t.thickness), &[]);
                 let ent = w.add(format!(
                     "IFCCOVERING({},$,{},$,{},#{at},#{shape},'{id}',.CEILING.)",
                     w.guid(ELEMENT, id),
@@ -549,7 +550,7 @@ pub fn export(m: &Model) -> String {
     for (&host, &(ent, at, z)) in &hosts {
         let slabs = match m.elements.get(&host) {
             Some(Element::Floor(f)) => m.floor_slabs(f),
-            Some(Element::Ceiling(c)) => vec![m.ceiling_slab(c)],
+            Some(Element::Ceiling(c)) => m.ceiling_slabs(c),
             Some(Element::Roof(r)) => m.roof_slabs(r),
             _ => Vec::new(),
         };

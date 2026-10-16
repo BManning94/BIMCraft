@@ -1098,6 +1098,20 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     let voided = |id: u64| -> Vec<Vec<P2>> {
         cuts.iter().filter(|(_, h, ..)| *h == id || l.whole.get(h) == Some(&id)).map(|(_, _, ring, ..)| ring.clone()).collect()
     };
+    // The holes in the top of slab or ceiling `id` that are its own openings, in plan: less those
+    // the openings through it cut, each from its south-west corner, in order: as the same file reads
+    // the same.
+    let openings_of = |id: u64, holes: Vec<Vec<P2>>| {
+        let cut = voided(id);
+        let mut openings: Vec<Vec<P2>> = holes
+            .into_iter()
+            .map(|h| tidy(&h.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect::<Vec<P2>>()))
+            .filter(|h| !cut.iter().any(|c| same(h, c)))
+            .collect();
+        openings
+            .sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
+        openings
+    };
 
     // Floors: their top outline and the holes in it, and how thick they are below it.
     let in_whole = |id: u64, names: &[&str]| l.whole.get(&id).and_then(|w| e(*w)).is_some_and(|w| names.contains(&w.name.as_str()));
@@ -1142,21 +1156,11 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let type_name = kind(&mut m.types.floor, &base, |k| (k.thickness - t).abs() < 0.05, FloorType { thickness: t });
         let z = top.at(tail);
         let level = level_near(z).unwrap_or_else(|| level_for(id, z));
-        // Its holes, less those the openings through it cut, each from its south-west corner, in
-        // order: as the same file reads the same.
-        let cut = voided(id);
-        let mut openings: Vec<Vec<P2>> = holes
-            .into_iter()
-            .map(|h| tidy(&h.into_iter().map(flat).collect::<Vec<P2>>()))
-            .filter(|h| !cut.iter().any(|c| same(h, c)))
-            .collect();
-        openings
-            .sort_by(|a, b| a.first().map(|p| (p.1, p.0)).partial_cmp(&b.first().map(|p| (p.1, p.0))).unwrap_or(std::cmp::Ordering::Equal));
         let floor = Floor {
             type_name,
             level,
             boundary: ring.into_iter().map(flat).collect(),
-            openings,
+            openings: openings_of(id, holes),
             offset: ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0,
             slope: if arrow.is_some() { (tan.atan().to_degrees() * 1e6).round() / 1e6 } else { 0.0 },
             arrow,
@@ -1166,7 +1170,8 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(id);
     }
 
-    // Ceilings: coverings that are, their underside's height and their thickness.
+    // Ceilings: coverings that are, their outline and the holes in it, their underside's height and
+    // their thickness.
     for id in named(&["IFCCOVERING"]) {
         let Some(c) = e(id).filter(|c| enumeration(c.args.get(8)) == Some("CEILING")) else { continue };
         let faces = r.body(c);
@@ -1174,7 +1179,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
             continue;
         };
-        let Some(geom::Region { outer: ring, .. }) = outline(&faces, Plane::flat(z1), true) else {
+        let Some(geom::Region { outer: ring, holes }) = outline(&faces, Plane::flat(z1), true) else {
             leave(&mut skipped, &mut seen, id, "its top isn't level");
             continue;
         };
@@ -1184,7 +1189,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let level = level_for(id, z0);
         let boundary = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
         let offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
-        let cid = m.insert(Element::Ceiling(Ceiling { type_name, level, boundary, offset }));
+        let cid = m.insert(Element::Ceiling(Ceiling { type_name, level, boundary, openings: openings_of(id, holes), offset }));
         from.insert(cid, who(id));
         seen.insert(id);
     }
@@ -2061,6 +2066,17 @@ ENDSEC;END-ISO-10303-21;",
         assert_eq!(geom::area(&sh.boundary).abs(), 1_000_000.0);
         let floor = i.model.elements.iter().find(|(_, e)| e.category() == "floor").map(|(id, _)| *id);
         assert_eq!(crate::element_json(&i.model, floor.unwrap_or_default())["area_m2"], 21.5, "6 x 4 less 1.5 and 1");
+    }
+
+    #[test]
+    fn holes_in_a_ceiling_come_in_as_its_openings_or_as_the_shafts_through_it() {
+        let i = ifc(holed("#35=IFCCOVERING('f',$,'Ceiling',$,$,#6,#34,$,.CEILING.);", 35).as_bytes(), "x").unwrap();
+        assert_eq!(i.skipped, Vec::<String>::new());
+        let Some(Element::Ceiling(c)) = only(&i.model, "ceiling").first().copied() else { panic!("no ceiling") };
+        assert_eq!(c.openings, [[P2(1000.0, 1000.0), P2(1000.0, 2000.0), P2(2500.0, 2000.0), P2(2500.0, 1000.0)]]);
+        assert_eq!(only(&i.model, "shaft").len(), 1);
+        let ceiling = i.model.elements.iter().find(|(_, e)| e.category() == "ceiling").map(|(id, _)| *id);
+        assert_eq!(crate::element_json(&i.model, ceiling.unwrap_or_default())["area_m2"], 21.5, "6 x 4 less 1.5 and 1");
     }
 
     #[test]

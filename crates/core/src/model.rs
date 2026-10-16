@@ -253,8 +253,8 @@ pub struct Floor {
     pub arrow: Option<[P2; 2]>,
 }
 
-/// A ceiling along `boundary` (counter-clockwise), its underside `offset` mm above its level, its
-/// type's thickness over that.
+/// A ceiling along `boundary` (counter-clockwise), open through its `openings` (holes inside it,
+/// apart), its underside `offset` mm above its level, its type's thickness over that.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Ceiling {
@@ -262,6 +262,8 @@ pub struct Ceiling {
     pub type_name: String,
     pub level: Id,
     pub boundary: Vec<P2>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub openings: Vec<Vec<P2>>,
     pub offset: f64,
 }
 
@@ -1315,11 +1317,12 @@ impl Model {
         solid(&[ccw(&f.boundary)], &f.openings).into_iter().map(|ring| (under.lift(&ring), depth)).collect()
     }
 
-    /// A ceiling's slab: its underside, counter-clockwise, and its thickness.
-    pub fn ceiling_slab(&self, c: &Ceiling) -> (Vec<[f64; 3]>, f64) {
-        let z = self.elevation(c.level) + c.offset;
+    /// A ceiling's slabs: its underside less its openings (in convex pieces once one cuts it), each
+    /// counter-clockwise; and its thickness.
+    pub fn ceiling_slabs(&self, c: &Ceiling) -> Vec<(Vec<[f64; 3]>, f64)> {
+        let under = walls::Plane::flat(self.elevation(c.level) + c.offset);
         let t = self.types.ceiling.get(&c.type_name).map_or(0.0, |t| t.thickness);
-        (ccw(&c.boundary).iter().map(|q| [q.0, q.1, z]).collect(), t)
+        solid(&[ccw(&c.boundary)], &c.openings).into_iter().map(|ring| (under.lift(&ring), t)).collect()
     }
 
     /// A floor's, a ceiling's or a roof's slab: `face`, a flat polygon in space, counter-clockwise,
@@ -1815,13 +1818,7 @@ impl Model {
                     known(&who, &f.type_name, &self.types.floor)?;
                     level_ok(f.level)?;
                     boundary(&who, &f.boundary)?;
-                    if f.openings.iter().map(Vec::len).sum::<usize>() > MAX_POINTS {
-                        return Err(format!("{who}: its openings have more than {MAX_POINTS} points between them"));
-                    }
-                    for (i, o) in f.openings.iter().enumerate() {
-                        boundary(&format!("{who} opening {i}"), o)?;
-                    }
-                    holes(&who, "opening", &f.boundary, &f.openings)?;
+                    openings(&who, &f.boundary, &f.openings)?;
                     coord(&format!("{who} offset"), f.offset)?;
                     if !(f.slope.is_finite() && f.slope.abs() <= MAX_SLOPE) {
                         return Err(format!("{who}: slope {}° isn't between -{MAX_SLOPE}° and {MAX_SLOPE}°", f.slope));
@@ -1840,6 +1837,7 @@ impl Model {
                     known(&who, &c.type_name, &self.types.ceiling)?;
                     level_ok(c.level)?;
                     boundary(&who, &c.boundary)?;
+                    openings(&who, &c.boundary, &c.openings)?;
                     coord(&format!("{who} offset"), c.offset)?;
                 }
                 Element::Shaft(sh) => {
@@ -2284,8 +2282,20 @@ fn boundary(who: &str, ring: &[P2]) -> Result<(), String> {
     Ok(())
 }
 
-/// Holes in an outline (a roof's courtyards, a floor's openings): each inside `outline`, clear of
-/// it and of the others.
+/// A floor's or a ceiling's openings: at most [`MAX_POINTS`] points between them, each an outline
+/// inside `outline`, clear of it and of the others.
+fn openings(who: &str, outline: &[P2], rings: &[Vec<P2>]) -> Result<(), String> {
+    if rings.iter().map(Vec::len).sum::<usize>() > MAX_POINTS {
+        return Err(format!("{who}: its openings have more than {MAX_POINTS} points between them"));
+    }
+    for (i, o) in rings.iter().enumerate() {
+        boundary(&format!("{who} opening {i}"), o)?;
+    }
+    holes(who, "opening", outline, rings)
+}
+
+/// Holes in an outline (a roof's courtyards, a floor's or a ceiling's openings): each inside
+/// `outline`, clear of it and of the others.
 fn holes(who: &str, what: &str, outline: &[P2], rings: &[Vec<P2>]) -> Result<(), String> {
     // Whether `p` is inside `ring` (or outside it), more than TOL from its edges.
     let clear = |ring: &[P2], p: P2, inside: bool| {

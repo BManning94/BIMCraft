@@ -278,8 +278,9 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 }
             }
             Element::Ceiling(c) => {
-                let (face, rise) = m.ceiling_slab(c);
-                slabs(&mut out, m, id, CEILING, face, rise);
+                for (face, rise) in m.ceiling_slabs(c) {
+                    slabs(&mut out, m, id, CEILING, face, rise);
+                }
             }
             Element::Column(col) => {
                 out.push(slab(id, WALL, &m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height)))

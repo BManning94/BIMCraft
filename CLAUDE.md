@@ -85,7 +85,8 @@ gable) with the plane of its underside, trimmed where it `join`s another; `Model
 and its `openings`, convex where cut. A floor's top is at its level plus `offset`,
 or with a slope arrow, there at the arrow's tail and rising `slope` degrees toward its head (`Model::floor_top`); it's its
 type's thickness across the slope, so plumb it's thicker. Its `openings` are holes inside it, apart, and `Model::floor_slabs`
-what's left, convex where cut. A ceiling's `offset` is its underside. A shaft cuts each floor,
+what's left, convex where cut. A ceiling's `offset` is its underside; its `openings` are holes as a floor's
+are, and `Model::ceiling_slabs` what's left. A shaft cuts each floor,
 ceiling and roof its span reaches into over its outline, all the way through (`Model::less_shafts`). A stair or a ramp
 is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): a landing after `at` risers (a ramp's, `at`
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to

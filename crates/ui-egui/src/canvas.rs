@@ -1621,11 +1621,14 @@ impl BimApp {
                 }
                 return;
             }
-            // The ceiling a click would make: the room's outline, out to its walls' faces.
+            // The ceiling a click would make: the room's outline, out to its walls' faces, round the
+            // walls standing inside it.
             Tool::Ceiling => {
                 if let Some(g) = geom::region_at(&m.face_lines(level), v.mm(q), TOL) {
-                    p.add(Shape::closed_line(g.outer.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
-                    let (area, unit) = m.units.area(geom::area(&g.outer).abs());
+                    for r in std::iter::once(&g.outer).chain(&g.holes) {
+                        p.add(Shape::closed_line(r.iter().map(|pt| sc.screen(*pt)).collect(), stroke));
+                    }
+                    let (area, unit) = m.units.area(g.area().abs());
                     label(cursor, format!("{area:.2} {unit}"));
                 }
                 return;
