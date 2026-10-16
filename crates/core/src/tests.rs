@@ -414,6 +414,288 @@ fn tags_name_doors_and_windows_and_go_where_they_go() {
     assert_eq!(count(&mut s, "tag"), 2);
 }
 
+/// A desk family: a top `Height` up, as wide and deep as its type says.
+fn desk(s: &mut Session) {
+    run(
+        s,
+        "family",
+        json!({
+            "name": "Work Desk",
+            "parameters": [
+                {"name": "Width", "value": 1200},
+                {"name": "Depth", "value": 600},
+                {"name": "Height", "instance": true, "value": 740},
+                {"name": "Top", "formula": "Height - 30"}
+            ],
+            "types": {"1200 x 600": {}, "1600 x 800": {"Width": 1600, "Depth": 800}},
+            "forms": [{"profile": [[0, 0], ["Width", 0], ["Width", "Depth"], [0, "Depth"]], "from": "Top", "to": "Height", "material": "Timber"}]
+        }),
+    );
+}
+
+#[test]
+fn components_place_a_familys_type_sized_by_its_parameters() {
+    let mut s = Session::new();
+    desk(&mut s);
+    let id = run(&mut s, "component", json!({"family": "Work Desk", "type": "1600 x 800", "at": [1000, 2000], "angle": 90}))["id"]
+        .as_u64()
+        .unwrap();
+    let e = crate::element_json(&s.model, id);
+    assert_eq!(
+        (&e["family"], &e["type"], &e["values"]["Width"], &e["values"]["Top"]),
+        (&json!("Work Desk"), &json!("1600 x 800"), &json!(1600.0), &json!(710.0))
+    );
+    let piece = |s: &Session| {
+        let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("no component") };
+        s.model.component_pieces(c).into_iter().next().unwrap()
+    };
+    // Turned a quarter: its x runs north.
+    let p = piece(&s);
+    assert_eq!((p.bottom, p.top), (710.0, 740.0));
+    let corners: Vec<P2> = p.outline.iter().map(|q| P2((q.0 * 1e6).round() / 1e6 + 0.0, (q.1 * 1e6).round() / 1e6 + 0.0)).collect();
+    assert_eq!(corners, [P2(1000.0, 2000.0), P2(1000.0, 3600.0), P2(200.0, 3600.0), P2(200.0, 2000.0)]);
+    // An instance parameter is the component's own; a type parameter its type's.
+    run(&mut s, "modify", json!({"id": id, "params": {"Height": 720}, "offset": 100}));
+    assert_eq!((piece(&s).bottom, piece(&s).top), (790.0, 820.0));
+    let e = s.execute("modify", &json!({"id": id, "params": {"Width": 5}})).unwrap_err();
+    assert!(e.contains("Width") && e.contains("type parameter"), "{e}");
+    let e = s.execute("modify", &json!({"id": id, "params": {"Height": "tall"}})).unwrap_err();
+    assert!(e.contains("Height") && e.contains("number"), "{e}");
+    let e = s.execute("family", &json!({"name": "Work Desk", "types": {"1600 x 800": {"Width": 0}}})).unwrap_err();
+    assert!(e.contains("no area"), "{e}");
+    // A family's types change every component of them; renamed, they follow; used, it stays.
+    run(&mut s, "family", json!({"name": "Work Desk", "types": {"1600 x 800": {"Width": 1700}}}));
+    assert_eq!(piece(&s).outline[1].1.round(), 3700.0);
+    assert_eq!(s.model.families["Work Desk"].types["1600 x 800"]["Depth"], json!(800), "a type's values merge");
+    run(&mut s, "family", json!({"name": "Work Desk", "rename": "Writing desk"}));
+    assert_eq!(crate::element_json(&s.model, id)["family"], json!("Writing desk"));
+    let e = s.execute("family", &json!({"name": "Writing desk", "delete": true})).unwrap_err();
+    assert!(e.contains(&id.to_string()), "{e}");
+    let e = s.execute("component", &json!({"family": "Work Desk", "at": [0, 0]})).unwrap_err();
+    assert!(e.contains("Writing desk"), "it lists the families there are: {e}");
+    // Placed without a type: the family's first.
+    let other = run(&mut s, "component", json!({"family": "Writing desk", "at": [0, 0]}))["id"].as_u64().unwrap();
+    assert_eq!(crate::element_json(&s.model, other)["type"], json!("1200 x 600"));
+    run(&mut s, "delete", json!({"ids": [id, other]}));
+    run(&mut s, "family", json!({"name": "Writing desk", "delete": true}));
+    assert!(!s.model.families.contains_key("Writing desk"));
+}
+
+#[test]
+fn a_family_loads_from_its_file() {
+    let mut s = Session::new();
+    desk(&mut s);
+    let saved = run(&mut s, "inspect", json!({}));
+    assert_eq!(saved["families"]["Work Desk"]["types"], json!(["1200 x 600", "1600 x 800"]));
+    // A family as `family` returns it, with its name, saved to a file and loaded by another project.
+    let mut f = run(&mut s, "family", json!({"name": "Work Desk"}))["family"].clone();
+    f["name"] = json!("Work Desk");
+    let path = std::env::temp_dir().join(format!("bimcraft-desk-{}.json", std::process::id()));
+    std::fs::write(&path, f.to_string()).unwrap();
+    let mut other = Session::new();
+    assert_eq!(run(&mut other, "family", json!({"path": path}))["name"], json!("Work Desk"));
+    assert_eq!(other.model.families["Work Desk"], s.model.families["Work Desk"]);
+    // Under another name.
+    run(&mut other, "family", json!({"path": path, "name": "Writing Table"}));
+    assert!(other.model.families.contains_key("Writing Table"));
+    std::fs::write(&path, "[1, 2]").unwrap();
+    assert!(other.execute("family", &json!({"path": path})).unwrap_err().contains("isn't an object"));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A table: a top 750 mm up over two legs, one square at a corner, one round.
+fn table(s: &mut Session) {
+    run(
+        s,
+        "family",
+        json!({"name": "Table", "types": {"A": {}}, "forms": [
+            {"profile": [[0, 0], [1000, 0], [1000, 600], [0, 600]], "from": 720, "to": 750, "material": "Timber"},
+            {"profile": [[0, 0], [50, 0], [50, 50], [0, 50]], "to": 720},
+            {"circle": {"centre": [960, 560], "radius": 25}, "to": 720}
+        ]}),
+    );
+}
+
+#[test]
+fn components_show_in_plan_from_above_in_3d_and_beyond_a_section() {
+    let mut s = Session::new();
+    table(&mut s);
+    let id = run(&mut s, "component", json!({"family": "Table", "at": [1000, 1000]}))["id"].as_u64().unwrap();
+    let view = crate::render::View { scale: 0.5, cx: 1500.0, cy: 1300.0, width: 1000, height: 800 };
+    let lines = |s: &Session| -> Vec<P2> {
+        let d = crate::render::draw(&s.model, 1, view);
+        d.prims
+            .iter()
+            .zip(&d.owners)
+            .filter_map(|(p, o)| match p {
+                crate::render::Prim::Line { pts, .. } if *o == Some(id) => Some(pts.iter().map(|q| view.mm(*q)).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    };
+    // From above: the top's edges; the legs under it, hidden.
+    let on_top = |p: &P2| {
+        (((p.0 - 1000.0).abs() < 3.0 || (p.0 - 2000.0).abs() < 3.0) && (997.0..=1603.0).contains(&p.1))
+            || (((p.1 - 1000.0).abs() < 3.0 || (p.1 - 1600.0).abs() < 3.0) && (997.0..=2003.0).contains(&p.0))
+    };
+    let seen = lines(&s);
+    assert!(!seen.is_empty() && seen.iter().all(on_top), "{seen:?}");
+    let d = crate::render::draw(&s.model, 1, view);
+    assert_eq!(d.pick(view.px(P2(1500.0, 1000.0)), 3.0), Some(id), "picked by its edge");
+    // Over the cut plane, a plan doesn't show it.
+    run(&mut s, "modify", json!({"id": id, "offset": 1500}));
+    assert!(lines(&s).is_empty());
+    run(&mut s, "modify", json!({"id": id, "offset": 0}));
+    // In 3D, each form a solid, the top in its material's colour.
+    let solids = crate::view3d::shaded(&s.model);
+    let colours: Vec<[u8; 3]> = solids.iter().filter(|x| x.owner() == id).map(|x| x.color()).map(|c| [c.0, c.1, c.2]).collect();
+    assert_eq!(colours.len(), 3);
+    assert!(colours.contains(&s.model.materials["Timber"].color), "{colours:?}");
+    // A section across it, looking north: it shows beyond the line, and none of it is cut.
+    let sec = run(&mut s, "section", json!({"start": [0, 1300], "end": [3000, 1300]}))["id"].as_u64().unwrap();
+    let sview = crate::render::section_fit(&s.model, sec, 1000, 800);
+    let d = crate::render::section(&s.model, sec, sview);
+    assert!(d.prims.iter().zip(&d.owners).all(|(p, o)| *o != Some(id) || !matches!(p, crate::render::Prim::Fill { .. })), "cut");
+    let (cam, clip) = crate::render::section_camera(&s.model, sec, sview).unwrap();
+    let image = crate::view3d::Scene::new(&s.model).cut(&cam, &clip, &[]);
+    let p = sview.px(P2(1500.0, 735.0));
+    assert_eq!(image.pick(f64::from(p.0), f64::from(p.1)), Some(id), "the top's middle, beyond the line");
+}
+
+#[test]
+fn a_new_project_comes_with_a_library_of_families() {
+    use crate::language::Language;
+    for language in Language::ALL {
+        let m = Model::new_in("x", language);
+        assert_eq!(m.check(), Ok(()), "{language:?}");
+        let names: Vec<&str> = m.families.keys().map(String::as_str).collect();
+        assert_eq!(names.len(), 10, "{names:?}");
+        // Every type of every family places and builds.
+        let mut s = Session::new();
+        s.reset(m.clone(), None);
+        for (family, f) in &m.families {
+            for t in f.types.keys() {
+                let id = run(&mut s, "component", json!({"family": family, "type": t, "at": [0, 0]}))["id"].as_u64().unwrap();
+                let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("no component") };
+                assert!(!s.model.component_pieces(c).is_empty(), "{family}: {t}");
+            }
+        }
+    }
+    let pt = Model::new_in("x", Language::Portuguese);
+    assert!(pt.families.contains_key("Cama") && pt.families["Cama"].parameters.iter().any(|p| p.name == "Largura"));
+    // A table's legs and a chair's legs and back stand within its top or its seat.
+    let m = Model::new("x");
+    for family in ["Table", "Chair"] {
+        let f = &m.families[family];
+        for t in f.types.keys() {
+            let pieces = f.pieces(&f.values(t, &Default::default()).unwrap()).unwrap();
+            let (lo, hi) = pieces[0].outline.iter().fold((P2(f64::MAX, f64::MAX), P2(f64::MIN, f64::MIN)), |(lo, hi), q| {
+                (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1)))
+            });
+            for q in pieces.iter().flat_map(|p| &p.outline) {
+                assert!(q.0 >= lo.0 - 1e-6 && q.0 <= hi.0 + 1e-6 && q.1 >= lo.1 - 1e-6 && q.1 <= hi.1 + 1e-6, "{family} {t}: {q:?}");
+            }
+        }
+    }
+    // A double bed has two pillows; a single bed, one.
+    let mut s = Session::new();
+    let bed = |s: &mut Session, t: &str| {
+        let id = run(s, "component", json!({"family": "Bed", "type": t, "at": [0, 0]}))["id"].as_u64().unwrap();
+        let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("no component") };
+        s.model.component_pieces(c).len()
+    };
+    assert_eq!(bed(&mut s, "1600 x 2000") - bed(&mut s, "900 x 2000"), 1);
+}
+
+#[test]
+fn a_family_file_brings_only_a_family_and_nulls_take_values_away() {
+    let mut s = Session::new();
+    // A file that says to delete or rename: only the family it holds comes in.
+    let path = std::env::temp_dir().join(format!("bimcraft-chair-{}.json", std::process::id()));
+    std::fs::write(&path, json!({"name": "Chair", "delete": true, "rename": "Gone", "types": {"Tall": {"Height": 1100}}}).to_string())
+        .unwrap();
+    run(&mut s, "family", json!({"path": path}));
+    let _ = std::fs::remove_file(&path);
+    assert!(s.model.families.contains_key("Chair") && !s.model.families.contains_key("Gone"));
+    assert_eq!(s.model.families["Chair"].types["Tall"]["Height"], json!(1100));
+    // A null in a new type, in a component's own values, or in `modify`: no value, the family's.
+    run(&mut s, "family", json!({"name": "Chair", "types": {"Low": {"Height": null, "Width": 500}}}));
+    assert_eq!(s.model.families["Chair"].types["Low"], std::collections::BTreeMap::from([("Width".to_string(), json!(500))]));
+    run(
+        &mut s,
+        "family",
+        json!({"name": "Stool", "parameters": [{"name": "Seat", "instance": true, "value": 450}], "types": {"A": {}}, "forms": [{"profile": [[0, 0], [400, 0], [400, 400], [0, 400]], "to": "Seat"}]}),
+    );
+    let id = run(&mut s, "component", json!({"family": "Stool", "at": [0, 0], "params": {"Seat": null}}))["id"].as_u64().unwrap();
+    run(&mut s, "modify", json!({"id": id, "params": {"Seat": null}}));
+    assert_eq!(crate::element_json(&s.model, id)["values"]["Seat"], json!(450.0));
+}
+
+#[test]
+fn an_undo_step_shares_a_familys_triangles() {
+    let mut s = Session::new();
+    let tri = json!([[0, 0, 0], [100, 0, 0], [0, 100, 0]]);
+    run(&mut s, "family", json!({"name": "Mesh", "types": {"A": {}}, "forms": [{"mesh": [tri, tri]}]}));
+    let copy = (*s.model).clone();
+    assert!(std::sync::Arc::ptr_eq(&copy.families["Mesh"].forms[0].mesh, &s.model.families["Mesh"].forms[0].mesh));
+}
+
+#[test]
+fn a_mirrored_component_is_its_familys_mirror_image() {
+    let mut s = Session::new();
+    // An L: what's mirrored shows.
+    run(
+        &mut s,
+        "family",
+        json!({"name": "L", "types": {"A": {}}, "forms": [{"profile": [[0, 0], [1000, 0], [1000, 300], [300, 300], [300, 1000], [0, 1000]], "to": 500}]}),
+    );
+    let id = run(&mut s, "component", json!({"family": "L", "at": [2000, 0]}))["id"].as_u64().unwrap();
+    let outline = |s: &Session, id: u64| {
+        let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("no component") };
+        let mut pts: Vec<(i64, i64)> =
+            s.model.component_pieces(c)[0].outline.iter().map(|q| (q.0.round() as i64, q.1.round() as i64)).collect();
+        pts.sort();
+        pts
+    };
+    let before = outline(&s, id);
+    run(&mut s, "mirror", json!({"ids": [id], "axis": [[0, 0], [0, 1000]]}));
+    let mirrored: Vec<(i64, i64)> = {
+        let mut m: Vec<(i64, i64)> = before.iter().map(|(x, y)| (-x, *y)).collect();
+        m.sort();
+        m
+    };
+    assert_eq!(outline(&s, id), mirrored);
+    assert_eq!(crate::element_json(&s.model, id)["mirrored"], json!(true));
+    // Turned and moved, it keeps its shape.
+    run(&mut s, "rotate", json!({"ids": [id], "about": [0, 0], "angle": 180}));
+    run(&mut s, "move", json!({"ids": [id], "by": [100, 0]}));
+    let turned: Vec<(i64, i64)> = {
+        let mut m: Vec<(i64, i64)> = mirrored.iter().map(|(x, y)| (-x + 100, -y)).collect();
+        m.sort();
+        m
+    };
+    assert_eq!(outline(&s, id), turned);
+    // Mirrored or not, a chair's triangles face out, and hold as much.
+    let volume = |s: &Session, id: u64| -> f64 {
+        let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("no component") };
+        s.model
+            .component_local_pieces(c)
+            .iter()
+            .flat_map(|p| &p.tris)
+            .map(|[a, b, c]| crate::view3d::dot(*a, crate::view3d::cross(*b, *c)) / 6.0)
+            .sum()
+    };
+    let chair = run(&mut s, "component", json!({"family": "Chair", "at": [0, 0]}))["id"].as_u64().unwrap();
+    let mirrored = run(&mut s, "component", json!({"family": "Chair", "at": [0, 0], "mirrored": true}))["id"].as_u64().unwrap();
+    assert!(
+        volume(&s, chair) > 0.0 && (volume(&s, chair) - volume(&s, mirrored)).abs() < 1e-3,
+        "{} {}",
+        volume(&s, chair),
+        volume(&s, mirrored)
+    );
+}
+
 #[test]
 fn hostile_params_never_panic_or_break_the_model() {
     let hostile = [
@@ -547,6 +829,15 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"courtyards": [[[1, 1]]], "slope": 1e-300}),
         json!({"courtyards": "x", "extrusion": {"line": [[0, 0], [1000, 0]], "profile": [[0, 0], [1000, 500]], "to": 1000}}),
         json!({"point": [4000, 3000], "openings": [[[0, 0], [1e9, 0], [0, 1e9]], [[1, 1]]]}),
+        json!({"family": "nowhere", "at": [0, 0]}),
+        json!({"family": 5, "type": [], "at": [1e300, 0], "angle": f64::MAX, "offset": -1e300, "params": "x"}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"profile": [[0, 0], [1e300, 0], [0, 1]], "to": 1}]}),
+        json!({"name": "F", "types": {"A": {}}, "parameters": [{"name": "W", "formula": "W + 1"}], "forms": [{"circle": {"centre": [0, 0], "radius": "W"}, "to": 1}]}),
+        json!({"name": "F", "types": {"A": {"Nope": 1}}, "forms": [{"profile": "x"}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"mesh": [[[0, 0, 0], [1e300, 0, 0], [0, 1, 0]]]}]}),
+        json!({"name": "F", "types": {}, "parameters": [{"name": " ", "kind": "material", "value": 5}]}),
+        json!({"name": "", "delete": true, "rename": ""}),
+        json!({"path": "/nonexistent/family.json"}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
@@ -2053,8 +2344,14 @@ fn layers_pick_their_materials_from_the_projects_library() {
     assert_eq!(t["layers"][0]["material"], "European oak");
     let e = s.execute("material", &json!({"name": "European oak", "delete": true})).unwrap_err();
     assert!(e.contains("Oak floor"), "{e}");
-    run(&mut s, "material", json!({"name": "Timber", "delete": true}));
-    assert_eq!(run(&mut s, "inspect", json!({}))["materials"]["Timber"], Value::Null);
+    run(&mut s, "material", json!({"name": "Gypsum board", "delete": true}));
+    assert_eq!(run(&mut s, "inspect", json!({}))["materials"]["Gypsum board"], Value::Null);
+    // The families use timber: it can't go, and renamed, they follow it.
+    let e = s.execute("material", &json!({"name": "Timber", "delete": true})).unwrap_err();
+    assert!(e.contains("family"), "{e}");
+    run(&mut s, "material", json!({"name": "Timber", "rename": "Pine"}));
+    let table = &s.model.families["Table"];
+    assert_eq!(table.parameters.iter().find(|p| p.name == "Material").map(|p| p.value.clone()), Some(json!("Pine")));
     for (bad, says) in [
         (json!({"name": "X", "color": "#12"}), "color"),
         (json!({"name": "X", "color": [300, 0, 0]}), "color"),

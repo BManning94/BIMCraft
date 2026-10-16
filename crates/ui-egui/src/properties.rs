@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bimcraft_core::element_json;
+use bimcraft_core::family::{Kind as Holds, Val};
 use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model, Pattern};
 use bimcraft_core::units::Units;
 use egui::{
@@ -177,6 +178,12 @@ fn rows(category: &str) -> &'static [Row] {
             ("Graphics", "scale", "View Scale (1 : n)", Number),
             ("Other", "at", "Location", PaperPoint),
         ],
+        "component" => &[
+            ("Constraints", "level", "Level", Level),
+            ("Constraints", "offset", "Height Offset From Level", Length),
+            ("Other", "at", "Location", Point),
+            ("Other", "angle", "Rotation (°)", Number),
+        ],
         "column" => &[
             ("Constraints", "level", "Base Level", Level),
             ("Constraints", "base_offset", "Base Offset", Length),
@@ -277,6 +284,7 @@ fn icon(category: &str) -> Icon {
         "schedule" => Icon::Schedule,
         "3d view" => Icon::View3D,
         "column" => Icon::Column,
+        "component" => Icon::Component,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,
         "floor" => Icon::Floor,
@@ -534,6 +542,7 @@ impl BimApp {
             ([], Tool::Section(_), _) => Subject::New("section"),
             ([], Tool::Elevation, _) => Subject::New("elevation"),
             ([], Tool::Column, _) => Subject::New("column"),
+            ([], Tool::Component, _) => Subject::New("component"),
             ([], Tool::Stair(_), _) => Subject::New("stair"),
             ([], Tool::Ramp(_), _) => Subject::New("ramp"),
             ([], Tool::Railing(_), _) => Subject::New("railing"),
@@ -559,7 +568,24 @@ impl BimApp {
         if names.len() == 1 { names.into_iter().next() } else { None }
     }
 
-    /// The type Edit Type opens: its category, its name, and the element on it.
+    /// The family and type of the selected components, while they share them; with none selected,
+    /// the Component tool's.
+    pub(crate) fn component_type(&self) -> Option<(String, String)> {
+        let m = &self.session.model;
+        if self.selection.is_empty() {
+            return self.placing();
+        }
+        let types: BTreeSet<(String, String)> = self
+            .selection
+            .iter()
+            .map(|id| match m.elements.get(id) {
+                Some(Element::Component(c)) => Some((c.family.clone(), c.type_name.clone())),
+                _ => None,
+            })
+            .collect::<Option<_>>()?;
+        if types.len() == 1 { types.into_iter().next() } else { None }
+    }
+
     /// The type Edit Type opens: its category, its name, and the selected elements on it.
     pub(crate) fn type_subject(&self) -> Option<(&'static str, String, Vec<Id>)> {
         let m = &self.session.model;
@@ -568,6 +594,9 @@ impl BimApp {
             Subject::Elements(category) | Subject::New(category) => category,
             Subject::Mixed(_) | Subject::Plan(_) | Subject::CeilingPlan | Subject::View3D | Subject::Schedule => return None,
         };
+        if category == "component" {
+            return self.component_type().map(|(_, ty)| (category, ty, self.selection.clone()));
+        }
         let name = match self.selection.is_empty() {
             false => self.shared_type(m),
             true => self.types.get(category).cloned().or_else(|| m.default_type(category).map(String::from)),
@@ -577,7 +606,10 @@ impl BimApp {
 
     pub(crate) fn edit_type(&mut self) {
         if let Some((category, name, elements)) = self.type_subject() {
-            self.type_dialog = Some(TypeDialog::new(&self.session.model, category, name, elements));
+            match self.component_type().filter(|_| category == "component") {
+                Some((family, ty)) => self.family_dialog = Some(FamilyDialog::new(&self.session.model, family, ty, elements)),
+                None => self.type_dialog = Some(TypeDialog::new(&self.session.model, category, name, elements)),
+            }
         }
     }
 
@@ -609,6 +641,7 @@ impl BimApp {
         ui.add_space(4.0);
         if !ids.is_empty() {
             self.parameters(ui, &model, &ids, rows);
+            self.component_parameters(ui, &model, &ids);
         }
         // A 3D view on a sheet: where it looks from, too.
         if let Subject::Element(id) = subject
@@ -642,7 +675,24 @@ impl BimApp {
             Subject::View3D => ("3d view", None),
             Subject::Schedule => ("schedule", None),
         };
-        let names: Vec<String> = model.type_names(category).into_iter().map(String::from).collect();
+        // A component's: its family over its type; every family's types to pick from.
+        let pairs: Vec<(String, String)> = if category == "component" {
+            model.families.iter().flat_map(|(f, x)| x.types.keys().map(move |t| (f.clone(), t.clone()))).collect()
+        } else {
+            Vec::new()
+        };
+        let label = |(f, t): &(String, String)| format!("{f}: {t}");
+        let picked_pair = (category == "component").then(|| self.component_type()).flatten();
+        let current = match &picked_pair {
+            Some(pair) => Some(label(pair)),
+            None if category == "component" => None,
+            None => current,
+        };
+        let names: Vec<String> = if category == "component" {
+            pairs.iter().map(label).collect()
+        } else {
+            model.type_names(category).into_iter().map(String::from).collect()
+        };
         let enabled = !names.is_empty();
         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), if enabled { Sense::click() } else { Sense::hover() });
         r.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, enabled, t("Type Selector")));
@@ -665,9 +715,13 @@ impl BimApp {
             Subject::Mixed(_) => t("Multiple Categories").to_string(),
             _ => lang::category(category, false),
         };
-        let first = if current.is_some() { rect.top() + 16.0 } else { rect.center().y };
+        let (family, below) = match &picked_pair {
+            Some((f, t)) => (f.clone(), Some(t.clone())),
+            None => (family, current.clone()),
+        };
+        let first = if below.is_some() { rect.top() + 16.0 } else { rect.center().y };
         p.text(egui::pos2(x, first), Align2::LEFT_CENTER, family, FontId::proportional(13.0), pal().text);
-        if let Some(t) = &current {
+        if let Some(t) = &below {
             p.text(egui::pos2(x, rect.top() + 34.0), Align2::LEFT_CENTER, t, FontId::proportional(12.5), pal().muted);
         }
         if enabled {
@@ -685,7 +739,14 @@ impl BimApp {
                 }
             }
         });
+        let pair = picked.as_ref().and_then(|n| pairs.iter().find(|p| label(p) == *n)).cloned();
         match (picked, subject) {
+            (Some(n), Subject::Element(_) | Subject::Elements(_)) if current.as_ref() != Some(&n) && pair.is_some() => {
+                if let Some((f, t)) = pair {
+                    self.run("modify", json!({"ids": self.selection, "family": f, "type": t}));
+                }
+            }
+            (Some(_), Subject::New("component")) => self.component = pair,
             (Some(n), Subject::Element(_) | Subject::Elements(_)) if current.as_ref() != Some(&n) => {
                 self.run("modify", json!({"ids": self.selection, "type": n}));
             }
@@ -850,16 +911,16 @@ impl BimApp {
 
     /// A text field that edits as the user types and commits once, when they press Enter or
     /// click away (Escape drops the edit): the text typed, if it changed.
-    fn field(&mut self, ui: &mut Ui, id: Id, key: &'static str, current: String, label: UiId, hint: &str) -> Option<String> {
+    fn field(&mut self, ui: &mut Ui, id: Id, key: &str, current: String, label: UiId, hint: &str) -> Option<String> {
         let wid = ui.make_persistent_id(("field", id, key));
         let focused = ui.memory(|m| m.has_focus(wid));
         let mut typed = match &self.edit {
-            Some((i, k, t)) if focused && *i == id && *k == key => t.clone(),
+            Some((i, k, t)) if focused && *i == id && k == key => t.clone(),
             _ => current.clone(),
         };
         let r = ui.add(TextEdit::singleline(&mut typed).id(wid).desired_width(f32::INFINITY).hint_text(hint)).labelled_by(label);
         if r.has_focus() {
-            self.edit = Some((id, key, typed));
+            self.edit = Some((id, key.to_string(), typed));
             return None;
         }
         if r.lost_focus() {
@@ -869,6 +930,90 @@ impl BimApp {
             }
         }
         None
+    }
+
+    /// The selected components' instance parameters, while they're of one family: as its
+    /// parameters name them, lengths and numbers under Dimensions, materials under Materials and
+    /// Finishes, yes or no under Other; what a formula works out, shown. An edit changes them all.
+    fn component_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
+        let families: BTreeSet<&str> = ids
+            .iter()
+            .filter_map(|id| match model.elements.get(id) {
+                Some(Element::Component(c)) => Some(c.family.as_str()),
+                _ => None,
+            })
+            .collect();
+        let families: Vec<&str> = families.into_iter().collect();
+        let (Some(&id), [name]) = (ids.first(), families.as_slice()) else { return };
+        let Some(f) =
+            model.families.get(*name).filter(|_| ids.iter().all(|i| model.elements.get(i).is_some_and(|e| e.category() == "component")))
+        else {
+            return;
+        };
+        let values: Vec<Value> = ids.iter().map(|i| element_json(model, *i)["values"].clone()).collect();
+        let shared = |k: &str| {
+            let v = values.first().map_or(&Value::Null, |v| &v[k]);
+            if values.iter().all(|x| &x[k] == v) { v.clone() } else { Value::Null }
+        };
+        let (units, materials): (Units, Vec<String>) = (model.units, model.materials.keys().cloned().collect());
+        let mut change: Option<(String, Result<Value, String>)> = None;
+        for (group, kinds) in [
+            ("Dimensions", &[Holds::Length, Holds::Number, Holds::Angle][..]),
+            ("Materials and Finishes", &[Holds::Material][..]),
+            ("Other", &[Holds::YesNo][..]),
+        ] {
+            let params: Vec<_> = f.parameters.iter().filter(|p| p.instance && kinds.contains(&p.kind)).collect();
+            if params.is_empty() {
+                continue;
+            }
+            let open = !self.collapsed.contains(group);
+            if group_header(ui, t(group), open) && !self.collapsed.remove(group) {
+                self.collapsed.insert(group);
+            }
+            if !open {
+                continue;
+            }
+            Frame::new().inner_margin(Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
+                Grid::new(("component", id, group)).num_columns(2).striped(true).min_col_width(124.0).show(ui, |ui| {
+                    for p in params {
+                        let val = shared(&p.name);
+                        let name = ui.label(&p.name);
+                        let kind = if p.kind == Holds::Length { Length } else { Number };
+                        match p.kind {
+                            _ if p.formula.is_some() => {
+                                ui.label(RichText::new(shown(kind, &val, units)).color(pal().muted));
+                            }
+                            Holds::YesNo => {
+                                let mut on = val.as_f64().is_some_and(|x| x != 0.0);
+                                let r = ui.checkbox(&mut on, "");
+                                r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, &p.name));
+                                if r.labelled_by(name.id).changed() {
+                                    change = Some((p.name.clone(), Ok(json!(on))));
+                                }
+                            }
+                            Holds::Material => {
+                                if let Some(m) = combo(ui, (id, &p.name), name.id, val.as_str().unwrap_or_default(), &materials) {
+                                    change = Some((p.name.clone(), Ok(json!(m))));
+                                }
+                            }
+                            Holds::Length | Holds::Number | Holds::Angle => {
+                                if let Some(typed) = self.field(ui, id, &p.name, shown(kind, &val, units), name.id, "") {
+                                    change = Some((p.name.clone(), parse(kind, &typed, units)));
+                                }
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
+        }
+        match change {
+            Some((key, Ok(val))) => {
+                self.run("modify", json!({"ids": ids, "params": {key: val}}));
+            }
+            Some((key, Err(e))) => self.status = Status { text: format!("{key}: {e}"), error: true },
+            None => {}
+        }
     }
 
     /// The Type Properties dialog, while it's open: the type's parameters, Duplicate, and OK,
@@ -1129,5 +1274,183 @@ fn layer_editor(ui: &mut Ui, layers: &mut Vec<LayerRow>, units: Units, materials
     // A finish 10 mm thick, on the exterior side.
     if ui.button(t("Insert Layer")).clicked() {
         layers.insert(0, (Function::Finish, String::new(), units.length(10.0)));
+    }
+}
+
+/// Type Properties for a family's type: its type parameters as typed (a length in the project's
+/// units, a material's name, yes or no), what its formulas work out shown; Duplicate, OK, Cancel
+/// and Apply, each a `family` command.
+pub(crate) struct FamilyDialog {
+    family: String,
+    name: String,
+    /// The components that were on the type when the dialog opened; OK puts them on the type shown.
+    elements: Vec<Id>,
+    /// Each type parameter: its name, what it holds, as typed, and whether a formula works it out.
+    fields: Vec<(String, Holds, String, bool)>,
+    /// The name being typed for a duplicate.
+    duplicate: Option<String>,
+}
+
+impl FamilyDialog {
+    pub(crate) fn new(m: &Model, family: String, name: String, elements: Vec<Id>) -> FamilyDialog {
+        let fields = m
+            .families
+            .get(&family)
+            .map(|f| {
+                let values = f.values(&name, &Default::default()).unwrap_or_default();
+                let typed = |p: &bimcraft_core::family::Parameter| match values.get(&p.name) {
+                    Some(Val::Number(x)) if p.kind == Holds::Length => m.units.length(*x),
+                    Some(Val::Number(x)) if p.kind == Holds::YesNo => (if *x != 0.0 { "1" } else { "0" }).to_string(),
+                    Some(Val::Number(x)) => format!("{}", (x * 1e6).round() / 1e6),
+                    Some(Val::Text(t)) => t.clone(),
+                    None => String::new(),
+                };
+                f.parameters.iter().filter(|p| !p.instance).map(|p| (p.name.clone(), p.kind, typed(p), p.formula.is_some())).collect()
+            })
+            .unwrap_or_default();
+        FamilyDialog { family, name, elements, fields, duplicate: None }
+    }
+
+    /// The dialog showing type `name` as the model has it now.
+    fn show(&mut self, m: &Model, name: String) {
+        *self = FamilyDialog::new(m, self.family.clone(), name, std::mem::take(&mut self.elements));
+    }
+
+    /// The `family` command's parameters setting type `name` to the values as typed, or why they
+    /// aren't what they hold.
+    fn params(&self, name: &str, units: Units) -> Result<Value, String> {
+        let mut set = serde_json::Map::new();
+        for (key, kind, typed, _) in self.fields.iter().filter(|f| !f.3) {
+            let v = match kind {
+                Holds::Length => json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[key, typed]))?),
+                Holds::Number | Holds::Angle => json!(number(typed).ok_or_else(|| tf("{}: `{}` is not a number", &[key, typed]))?),
+                Holds::YesNo => json!(typed == "1"),
+                Holds::Material => json!(typed),
+            };
+            set.insert(key.clone(), v);
+        }
+        Ok(json!({"name": self.family, "types": {name: set}}))
+    }
+}
+
+impl BimApp {
+    /// Type Properties for a family's type, while it's open.
+    pub(crate) fn family_type_properties(&mut self, ctx: &Context) {
+        let Some(mut d) = self.family_dialog.take() else { return };
+        let model = Arc::clone(&self.session.model);
+        let names: Vec<String> = model.families.get(&d.family).map(|f| f.types.keys().cloned().collect()).unwrap_or_default();
+        let materials: Vec<String> = model.materials.keys().cloned().collect();
+        let (mut ok, mut cancel, mut apply, mut create, mut switch) = (false, false, false, false, None);
+        let r = Modal::new(UiId::new("family-type-properties")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(RichText::new(t("Type Properties")).heading());
+            ui.add_space(6.0);
+            Grid::new("family-type-head").num_columns(2).spacing(vec2(12.0, 6.0)).show(ui, |ui| {
+                ui.label(t("Family:"));
+                ui.label(&d.family);
+                ui.end_row();
+                let l = ui.label(t("Type:"));
+                ui.horizontal(|ui| {
+                    let c = ComboBox::from_id_salt("family-type-name").selected_text(&d.name).width(200.0).show_ui(ui, |ui| {
+                        for n in &names {
+                            if ui.selectable_label(*n == d.name, n).clicked() {
+                                switch = Some(n.clone());
+                            }
+                        }
+                    });
+                    c.response.labelled_by(l.id);
+                    if d.duplicate.is_none() && ui.button(t("Duplicate…")).clicked() {
+                        d.duplicate = Some(format!("{} 2", d.name));
+                    }
+                });
+                ui.end_row();
+                if let Some(new) = &mut d.duplicate {
+                    let l = ui.label(t("New type"));
+                    ui.horizontal(|ui| {
+                        ui.add(TextEdit::singleline(new).desired_width(200.0)).labelled_by(l.id);
+                        create = ui.button(t("Create")).clicked();
+                    });
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            ui.label(RichText::new(t("Type Parameters")).strong());
+            Grid::new("family-type-parameters").num_columns(2).striped(true).min_col_width(150.0).show(ui, |ui| {
+                ui.label(RichText::new(t("Parameter")).color(pal().muted));
+                ui.label(RichText::new(t("Value")).color(pal().muted));
+                ui.end_row();
+                for (key, kind, typed, computed) in &mut d.fields {
+                    let l = ui.label(key.as_str());
+                    match kind {
+                        _ if *computed => {
+                            ui.label(RichText::new(typed.as_str()).color(pal().muted));
+                        }
+                        Holds::YesNo => {
+                            let mut on = typed == "1";
+                            let r = ui.checkbox(&mut on, "");
+                            r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, true, on, key.as_str()));
+                            if r.labelled_by(l.id).changed() {
+                                *typed = (if on { "1" } else { "0" }).to_string();
+                            }
+                        }
+                        Holds::Material => {
+                            if let Some(m) = combo(ui, (0, key.as_str()), l.id, typed, &materials) {
+                                *typed = m;
+                            }
+                        }
+                        _ => {
+                            ui.add(TextEdit::singleline(typed).desired_width(160.0)).labelled_by(l.id);
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                apply = ui.button(t("Apply")).clicked();
+                cancel = ui.button(t("Cancel")).clicked();
+                ok = ui.button(t("OK")).clicked();
+            });
+        });
+        if let Some(n) = switch {
+            d.show(&model, n);
+        }
+        if create && let Some(new) = d.duplicate.clone() {
+            let made = match d.params(new.trim(), model.units) {
+                Ok(p) => self.run("family", p).is_some(),
+                Err(e) => {
+                    self.status = Status { text: e, error: true };
+                    false
+                }
+            };
+            if made {
+                d.show(&self.session.model, new.trim().to_string());
+            }
+        }
+        if apply || ok {
+            let applied = match d.params(&d.name, model.units) {
+                Ok(p) => self.run("family", p).is_some(),
+                Err(e) => {
+                    self.status = Status { text: e, error: true };
+                    false
+                }
+            };
+            ok &= applied;
+            if applied {
+                let name = d.name.clone();
+                d.show(&Arc::clone(&self.session.model), name);
+            }
+        }
+        if ok {
+            let m = &self.session.model;
+            if d.elements.is_empty() {
+                self.component = Some((d.family.clone(), d.name.clone()));
+            } else if d.elements.iter().any(|id| element_json(m, *id)["type"].as_str() != Some(d.name.as_str())) {
+                self.run("modify", json!({"ids": d.elements, "type": d.name}));
+            }
+        }
+        if !(ok || cancel || r.should_close()) {
+            self.family_dialog = Some(d);
+        }
     }
 }

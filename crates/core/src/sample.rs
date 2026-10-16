@@ -1,7 +1,7 @@
 //! A small single-storey house built from commands: the demo (`bimcraft-cli run --sample`) and
 //! a test of the whole command set.
 
-pub const SAMPLE: &str = r#"# Sample house: 10 x 7 m, four rooms under a hipped roof and their ceilings, dimensioned and tagged, with elevations, a section, and three sheets.
+pub const SAMPLE: &str = r#"# Sample house: 10 x 7 m, four rooms under a hipped roof and their ceilings, furnished, dimensioned and tagged, with elevations, a section, and three sheets.
 new {"name": "Sample House"}
 grid {"start": [0, -1500], "end": [0, 8500]}
 grid {"start": [6000, -1500], "end": [6000, 8500]}
@@ -26,9 +26,9 @@ floor {}
 roof {}
 modify {"ids": [8, 9, 10, 11], "attach_top": 25}
 room {"point": [3000, 2000], "name": "Living"}
-room {"point": [3000, 5500], "name": "Kitchen"}
-room {"point": [8000, 5250], "name": "Bedroom"}
-room {"point": [8000, 1750], "name": "Study"}
+room {"point": [1500, 5000], "name": "Kitchen"}
+room {"point": [8400, 4200], "name": "Bedroom"}
+room {"point": [7600, 2600], "name": "Study"}
 # Overall sizes outside the walls, the grids' spacing, and every door and window tagged.
 dimension {"refs": [[-150, 3500], [10150, 3500]], "at": [5000, -1300]}
 dimension {"refs": [[5000, -150], [5000, 7150]], "at": [10900, 3500]}
@@ -55,4 +55,16 @@ ceiling {"point": [3000, 2000]}
 ceiling {"point": [3000, 5500], "type": "Tile 600 x 600"}
 ceiling {"point": [8000, 5250]}
 ceiling {"point": [8000, 1750]}
+# Furniture from the project's families: a sofa; a dining table, its chairs and a base cabinet; a bed and a wardrobe; a desk and its chair.
+component {"family": "Sofa", "type": "2000 x 900", "at": [3000, 3950]}
+component {"family": "Table", "type": "1200 x 800", "at": [4300, 5900]}
+component {"family": "Chair", "at": [4000, 5225], "angle": 180}
+component {"family": "Chair", "at": [4600, 5225], "angle": 180}
+component {"family": "Chair", "at": [4000, 6575]}
+component {"family": "Chair", "at": [4600, 6575]}
+component {"family": "Base Cabinet", "type": "1800 x 600", "at": [1200, 6850]}
+component {"family": "Bed", "type": "1600 x 2000", "at": [8000, 6850]}
+component {"family": "Wardrobe", "type": "1200 x 600", "at": [6050, 4200], "angle": 90}
+component {"family": "Desk", "type": "1400 x 700", "at": [9850, 1500], "angle": -90}
+component {"family": "Chair", "at": [8875, 1500], "angle": 90}
 "#;

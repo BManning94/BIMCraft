@@ -10,6 +10,7 @@ use std::f64::consts::{PI, TAU};
 
 use serde::{Deserialize, Serialize};
 
+use crate::family::{Family, Piece};
 use crate::geom::{self, P2, Region};
 use crate::language::Language;
 use crate::units::Units;
@@ -526,6 +527,27 @@ pub struct Column {
     pub base_offset: f64,
 }
 
+/// A family's type placed: at `at` on `level`, `offset` mm up from it, turned `angle` degrees
+/// (counter-clockwise from east) and, `mirrored`, flipped across its own x axis; `params`, its
+/// instance parameters' values where they aren't the family's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Component {
+    pub family: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub level: Id,
+    pub at: P2,
+    #[serde(default)]
+    pub angle: f64,
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mirrored: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
 /// A stair from `level` up to `top_level` (or `height` mm), climbing from the middle of its first
 /// riser at `start` toward `angle` degrees (counter-clockwise from east): as many risers as keep
 /// each no higher than `riser`, a tread `tread` deep between each two; in one straight run, or in
@@ -784,6 +806,7 @@ pub enum Element {
     Sheet(Sheet),
     Viewport(Viewport),
     Column(Column),
+    Component(Component),
     Stair(Stair),
     Ramp(Ramp),
     Railing(Railing),
@@ -817,6 +840,7 @@ impl Element {
             Element::Sheet(_) => "sheet",
             Element::Viewport(_) => "viewport",
             Element::Column(_) => "column",
+            Element::Component(_) => "component",
             Element::Stair(_) => "stair",
             Element::Ramp(_) => "ramp",
             Element::Railing(_) => "railing",
@@ -930,6 +954,9 @@ pub struct Model {
     /// What layers are made of, by name.
     #[serde(default)]
     pub materials: BTreeMap<String, Material>,
+    /// Its families, by name: what components place.
+    #[serde(default)]
+    pub families: BTreeMap<String, Family>,
     pub elements: BTreeMap<Id, Element>,
 }
 
@@ -949,6 +976,7 @@ impl Model {
             next_id: 1,
             types: Types::default(),
             materials: BTreeMap::new(),
+            families: BTreeMap::new(),
             elements: BTreeMap::new(),
         };
         // A library to start from: each material its colour, its cut's pattern and its surface's.
@@ -964,9 +992,12 @@ impl Model {
             ("Ceramic tile", [222, 220, 210], Pattern::Solid, Pattern::Grid),
             ("Roof tiles", [170, 86, 64], Pattern::Solid, Pattern::Horizontal),
             ("Membrane", [70, 70, 74], Pattern::Solid, Pattern::None),
+            ("Fabric", [176, 160, 136], Pattern::None, Pattern::None),
+            ("Porcelain", [244, 244, 240], Pattern::None, Pattern::None),
         ] {
             m.materials.insert(language.word(name).into(), Material { color, cut, surface });
         }
+        m.families = crate::family::library(language);
         for (n, t) in [("Generic - 200mm", 200.0), ("Interior - 100mm", 100.0)] {
             m.types.wall.insert(n.into(), WallType { thickness: t, layers: Vec::new() });
         }
@@ -1026,10 +1057,84 @@ impl Model {
     /// Every material the types' layers name that the library hasn't, put in it: what a project
     /// from before the library, or a file from elsewhere, comes in with.
     pub fn adopt_materials(&mut self) {
-        let named: Vec<String> = self.layered_types().flat_map(|(.., l)| l.iter().map(|l| l.material.clone())).collect();
+        let mut named: Vec<String> = self.layered_types().flat_map(|(.., l)| l.iter().map(|l| l.material.clone())).collect();
+        named.extend(self.families.values().flat_map(|f| f.materials()).map(String::from));
+        named.extend(self.elements.values().flat_map(|e| self.component_materials(e)).map(String::from));
         for n in named.into_iter().filter(|n| !n.is_empty()) {
             self.materials.entry(n).or_default();
         }
+    }
+
+    /// The materials component `e` names itself, in its material parameters.
+    fn component_materials<'a>(&self, e: &'a Element) -> Vec<&'a str> {
+        let Element::Component(c) = e else { return Vec::new() };
+        let Some(f) = self.families.get(&c.family) else { return Vec::new() };
+        c.params.iter().filter(|(k, _)| f.material_parameter(k)).filter_map(|(_, v)| v.as_str()).collect()
+    }
+
+    /// What names material `name` besides the types' layers: a family, or a component of one.
+    pub fn material_user(&self, name: &str) -> Option<String> {
+        if let Some((n, _)) = self.families.iter().find(|(_, f)| f.materials().contains(&name)) {
+            return Some(format!("family `{n}`"));
+        }
+        self.elements.iter().find(|(_, e)| self.component_materials(e).contains(&name)).map(|(id, _)| format!("component {id}"))
+    }
+
+    /// Material `from`, renamed `to` in the families and their components.
+    pub fn rename_material_in_families(&mut self, from: &str, to: &str) {
+        for f in self.families.values_mut() {
+            f.rename_material(from, to);
+        }
+        let Model { families, elements, .. } = self;
+        for e in elements.values_mut() {
+            if let Element::Component(c) = e
+                && let Some(f) = families.get(&c.family)
+            {
+                for (k, v) in c.params.iter_mut() {
+                    if f.material_parameter(k) && v.as_str() == Some(from) {
+                        *v = serde_json::Value::String(to.into());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Component `c`'s solids in its own axes, mirrored if it is: each visible form's triangles, its
+    /// outline seen from above, from its bottom to its top over its base, what it's made of; none
+    /// for one that doesn't build.
+    pub fn component_local_pieces(&self, c: &Component) -> Vec<Piece> {
+        let Some(f) = self.families.get(&c.family) else { return Vec::new() };
+        let Ok(pieces) = f.values(&c.type_name, &c.params).and_then(|v| f.pieces(&v)) else { return Vec::new() };
+        if !c.mirrored {
+            return pieces;
+        }
+        // Mirrored, its y turns about its x, and so do its triangles' and outlines' windings.
+        let flip = |p: [f64; 3]| [p[0], -p[1], p[2]];
+        pieces
+            .into_iter()
+            .map(|pc| Piece {
+                tris: pc.tris.iter().map(|[a, b, t]| [flip(*a), flip(*t), flip(*b)]).collect(),
+                outline: pc.outline.iter().rev().map(|q| P2(q.0, -q.1)).collect(),
+                ..pc
+            })
+            .collect()
+    }
+
+    /// Component `c`'s solids in the model: its own, turned and moved to where it stands.
+    pub fn component_pieces(&self, c: &Component) -> Vec<Piece> {
+        let base = self.elevation(c.level) + c.offset;
+        let (sin, cos) = c.angle.to_radians().sin_cos();
+        let place = |p: [f64; 3]| [c.at.0 + p[0] * cos - p[1] * sin, c.at.1 + p[0] * sin + p[1] * cos, base + p[2]];
+        self.component_local_pieces(c)
+            .into_iter()
+            .map(|pc| Piece {
+                tris: pc.tris.iter().map(|t| t.map(place)).collect(),
+                outline: pc.outline.iter().map(|q| place([q.0, q.1, 0.0])).map(|p| P2(p[0], p[1])).collect(),
+                bottom: base + pc.bottom,
+                top: base + pc.top,
+                ..pc
+            })
+            .collect()
     }
 
     /// Adds an element unchecked; the engine runs [`Model::check`] after every command.
@@ -1188,6 +1293,7 @@ impl Model {
             Element::Room(r) => Some(r.level),
             Element::Dimension(d) => Some(d.level),
             Element::Column(c) => Some(c.level),
+            Element::Component(c) => Some(c.level),
             Element::Stair(st) => Some(st.level),
             Element::Ramp(r) => Some(r.level),
             // On a stair or a ramp, its host's.
@@ -1813,6 +1919,13 @@ impl Model {
                 return Err("a material needs a name".into());
             }
         }
+        for (n, f) in &self.families {
+            text(&format!("family `{n}`"), "name", n)?;
+            if n.trim().is_empty() {
+                return Err("a family needs a name".into());
+            }
+            f.check(&|m| self.materials.contains_key(m)).map_err(|e| format!("family `{n}`: {e}"))?;
+        }
         for (cat, n, thickness, layers) in self.layered_types() {
             let who = format!("{cat} type `{n}`");
             size(&format!("{who} thickness"), thickness)?;
@@ -2106,6 +2219,39 @@ impl Model {
                     if !view_names.insert(v.name.as_str()) {
                         return Err(format!("{who}: another view is already named `{}`", v.name));
                     }
+                }
+                Element::Component(c) => {
+                    let f = self.families.get(&c.family).ok_or_else(|| {
+                        let names: Vec<&str> = self.families.keys().map(String::as_str).collect();
+                        format!("{who}: family `{}` doesn't exist (there are: {})", c.family, names.join(", "))
+                    })?;
+                    level_ok(c.level)?;
+                    point(&who, c.at)?;
+                    coord(&format!("{who} angle"), c.angle)?;
+                    coord(&format!("{who} offset"), c.offset)?;
+                    for (k, v) in &c.params {
+                        let p = f
+                            .parameters
+                            .iter()
+                            .find(|p| p.name == *k)
+                            .ok_or_else(|| format!("{who}: `{k}` isn't a parameter of `{}`", c.family))?;
+                        if !p.instance {
+                            return Err(format!(
+                                "{who}: `{k}` is a type parameter of `{}`; change it in its type, with `family`",
+                                c.family
+                            ));
+                        }
+                        if p.formula.is_some() {
+                            return Err(format!("{who}: `{k}` is worked out by its formula"));
+                        }
+                        if let crate::family::Val::Text(m) = crate::family::read(p, v).map_err(|e| format!("{who}: {e}"))?
+                            && !m.is_empty()
+                            && !self.materials.contains_key(&m)
+                        {
+                            return Err(format!("{who}: material `{m}` isn't in the library; add it with `material`"));
+                        }
+                    }
+                    f.values(&c.type_name, &c.params).and_then(|v| f.pieces(&v)).map_err(|e| format!("{who}: {e}"))?;
                 }
                 Element::Column(col) => {
                     known(&who, &col.type_name, &self.types.column)?;

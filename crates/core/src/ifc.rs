@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::family::Category;
 use crate::geom::{self, P2};
 use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Layer, Model, Railing, heading, mix};
 use crate::stairs;
@@ -35,6 +36,7 @@ const FLIGHT: u64 = 15;
 const LANDING: u64 = 16;
 const PARTS: u64 = 17;
 const SLAB_MATERIALS: u64 = 18;
+const COMPONENT_MATERIALS: u64 = 19;
 
 /// Part `i` of element `id`, for its GlobalId.
 fn part(id: Id, i: usize) -> u64 {
@@ -82,6 +84,12 @@ fn real(x: f64) -> String {
     format!("{x:.6}").trim_end_matches('0').to_string()
 }
 
+/// A direction's ratio: as a real, to twelve places, so a turn reads back to the millionth of a degree.
+fn ratio(x: f64) -> String {
+    let x = if x.is_finite() && x != 0.0 { x } else { 0.0 };
+    format!("{x:.12}").trim_end_matches('0').to_string()
+}
+
 /// A 22-character IFC GlobalId, the same for the same model, role and element on every export.
 fn guid(uid: u64, role: u64, id: u64) -> String {
     const CHARS: &[u8; 64] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$";
@@ -120,6 +128,8 @@ struct Step {
     z: u64,
     context: u64,
     body: u64,
+    /// Each material written: it, and the surface style its colour shades with.
+    materials: BTreeMap<String, (u64, Option<u64>)>,
 }
 
 impl Step {
@@ -134,10 +144,19 @@ impl Step {
         s(&guid(self.uid, role, id))
     }
 
-    /// A material by name; one the library has, with its colour, for viewers to shade it in.
+    /// A material by name, written once; one the library has, with its colour, for viewers to
+    /// shade it in.
     fn material(&mut self, m: &Model, name: &str) -> u64 {
+        self.material_style(m, name).0
+    }
+
+    /// A material by name, written once, and the surface style its colour shades with.
+    fn material_style(&mut self, m: &Model, name: &str) -> (u64, Option<u64>) {
+        if let Some(&written) = self.materials.get(name) {
+            return written;
+        }
         let id = self.add(format!("IFCMATERIAL({},$,$)", s(name)));
-        if let Some(x) = m.materials.get(name) {
+        let style = m.materials.get(name).map(|x| {
             let [r, g, b] = x.color.map(|c| real(f64::from(c) / 255.0));
             let colour = self.add(format!("IFCCOLOURRGB($,{r},{g},{b})"));
             let shading = self.add(format!("IFCSURFACESTYLESHADING(#{colour},$)"));
@@ -145,8 +164,38 @@ impl Step {
             let item = self.add(format!("IFCSTYLEDITEM($,(#{style}),$)"));
             let rep = self.add(format!("IFCSTYLEDREPRESENTATION(#{},'Style','Material',(#{item}))", self.context));
             self.add(format!("IFCMATERIALDEFINITIONREPRESENTATION($,$,(#{rep}),#{id})"));
+            style
+        });
+        self.materials.insert(name.to_string(), (id, style));
+        (id, style)
+    }
+
+    /// A closed surface of triangles, each corner written once.
+    fn faceset(&mut self, tris: &[[P3; 3]]) -> u64 {
+        let mut index: BTreeMap<[i64; 3], usize> = BTreeMap::new();
+        let mut pts: Vec<P3> = Vec::new();
+        let mut faces = Vec::new();
+        for t in tris {
+            let corners: Vec<usize> = t
+                .iter()
+                .map(|p| {
+                    *index.entry(p.map(|x| (x * 1e3).round() as i64)).or_insert_with(|| {
+                        pts.push(*p);
+                        pts.len()
+                    })
+                })
+                .collect();
+            if let [a, b, c] = corners[..]
+                && a != b
+                && b != c
+                && a != c
+            {
+                faces.push(format!("({a},{b},{c})"));
+            }
         }
-        id
+        let coords: Vec<String> = pts.iter().map(|p| format!("({},{},{})", real(p[0]), real(p[1]), real(p[2]))).collect();
+        let list = self.add(format!("IFCCARTESIANPOINTLIST3D(({}))", coords.join(",")));
+        self.add(format!("IFCTRIANGULATEDFACESET(#{list},$,.T.,({}),$)", faces.join(",")))
     }
 
     fn point(&mut self, p: P2) -> u64 {
@@ -158,7 +207,7 @@ impl Step {
         let o = self.add(format!("IFCCARTESIANPOINT(({},{},{}))", real(x), real(y), real(z)));
         match dir {
             Some(d) => {
-                let d = self.add(format!("IFCDIRECTION(({},{},0.))", real(d.0), real(d.1)));
+                let d = self.add(format!("IFCDIRECTION(({},{},0.))", ratio(d.0), ratio(d.1)));
                 self.add(format!("IFCAXIS2PLACEMENT3D(#{o},#{},#{d})", self.z))
             }
             None => self.add(format!("IFCAXIS2PLACEMENT3D(#{o},$,$)")),
@@ -302,7 +351,7 @@ impl Step {
 }
 
 pub fn export(m: &Model) -> String {
-    let mut w = Step { out: String::new(), next: 0, uid: m.uid, world: 0, z: 0, context: 0, body: 0 };
+    let mut w = Step { out: String::new(), next: 0, uid: m.uid, world: 0, z: 0, context: 0, body: 0, materials: BTreeMap::new() };
     let origin = w.add("IFCCARTESIANPOINT((0.,0.,0.))");
     w.z = w.add("IFCDIRECTION((0.,0.,1.))");
     w.world = w.add(format!("IFCAXIS2PLACEMENT3D(#{origin},$,$)"));
@@ -469,6 +518,54 @@ pub fn export(m: &Model) -> String {
                 ));
                 contained.entry(col.level).or_default().push(ent);
             }
+            // A component: its category's element, named by its family and type as Revit names them,
+            // each form a closed face set styled in its material's colour.
+            Element::Component(cp) => {
+                let (Some(&(_, storey)), Some(f)) = (storeys.get(&cp.level), m.families.get(&cp.family)) else { continue };
+                let pieces = m.component_local_pieces(cp);
+                if pieces.is_empty() {
+                    continue;
+                }
+                let at = w.place(Some(storey), (cp.at.0, cp.at.1, cp.offset), Some(heading(cp.angle)));
+                let mut items = Vec::new();
+                let mut made_of: Vec<u64> = Vec::new();
+                for piece in &pieces {
+                    let set = w.faceset(&piece.tris);
+                    if !piece.material.trim().is_empty() {
+                        let (material, style) = w.material_style(m, piece.material.trim());
+                        if let Some(style) = style {
+                            w.add(format!("IFCSTYLEDITEM(#{set},(#{style}),$)"));
+                        }
+                        if !made_of.contains(&material) {
+                            made_of.push(material);
+                        }
+                    }
+                    items.push(set);
+                }
+                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
+                let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+                let entity = match f.category {
+                    Category::Furniture | Category::Casework => "IFCFURNITURE",
+                    Category::Plumbing => "IFCSANITARYTERMINAL",
+                    Category::Lighting => "IFCLIGHTFIXTURE",
+                    Category::Generic => "IFCBUILDINGELEMENTPROXY",
+                };
+                let name = s(&format!("{}:{}", cp.family, cp.type_name));
+                let ent = w.add(format!("{entity}({},$,{name},$,{name},#{at},#{shape},'{id}',.NOTDEFINED.)", w.guid(ELEMENT, id)));
+                contained.entry(cp.level).or_default().push(ent);
+                // What it's made of: its material, or the set of them.
+                let relating = match made_of.as_slice() {
+                    [] => None,
+                    [one] => Some(*one),
+                    many => {
+                        let parts: Vec<u64> = many.iter().map(|x| w.add(format!("IFCMATERIALCONSTITUENT($,$,#{x},$,$)"))).collect();
+                        Some(w.add(format!("IFCMATERIALCONSTITUENTSET({},$,({}))", name, refs(&parts))))
+                    }
+                };
+                if let Some(r) = relating {
+                    w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{r})", w.guid(COMPONENT_MATERIALS, id)));
+                }
+            }
             Element::Stair(st) => {
                 let Some(&(_, storey)) = storeys.get(&st.level) else { continue };
                 let (_, each, _) = m.flight(st);
@@ -632,13 +729,12 @@ pub fn export(m: &Model) -> String {
     // Compound types' layers: a layer set for each type used, each layer's material once, with its
     // colour for viewers to shade it in; for each wall type and line its walls stand on, the set's
     // use, from their exterior faces in.
-    let mut materials: BTreeMap<String, u64> = BTreeMap::new();
-    let mut layer_set = |w: &mut Step, name: &str, layers: &[Layer]| -> u64 {
+    let layer_set = |w: &mut Step, name: &str, layers: &[Layer]| -> u64 {
         let mut ids = Vec::new();
         for l in layers {
             let material = match l.material.trim() {
                 "" => "$".to_string(),
-                named => format!("#{}", *materials.entry(named.to_string()).or_insert_with(|| w.material(m, named))),
+                named => format!("#{}", w.material(m, named)),
             };
             let category = match l.function {
                 Function::Structure => "'LoadBearing'",
@@ -773,6 +869,32 @@ mod tests {
         assert_eq!([n("IFCWALL"), n("IFCDOOR"), n("IFCWINDOW"), n("IFCSLAB"), n("IFCSPACE")], [7, 4, 5, 1, 4]);
         assert_eq!([n("IFCOPENINGELEMENT"), n("IFCRELVOIDSELEMENT"), n("IFCRELFILLSELEMENT")], [9, 9, 9]);
         assert!(f.contains("'Kitchen'"), "rooms keep their names");
+    }
+
+    #[test]
+    fn components_export_as_their_categorys_elements_with_their_materials() {
+        let mut s = Session::new();
+        s.script(
+            r#"component {"family": "Table", "type": "1600 x 900", "at": [2000, 3000], "angle": 30}
+               component {"family": "WC", "at": [500, 0], "mirrored": true}"#,
+        )
+        .unwrap();
+        let f = export(&s.model);
+        let n = |e: &str| f.matches(&format!("={e}(")).count();
+        assert_eq!([n("IFCFURNITURE"), n("IFCSANITARYTERMINAL")], [1, 1]);
+        assert!(f.contains("'Table:1600 x 900'"), "named by family and type, as Revit names them");
+        // Each form a closed face set: the table's top and four legs, the WC's three parts.
+        assert_eq!(n("IFCTRIANGULATEDFACESET"), 8);
+        // Each material once, its colour styling the forms made of it.
+        assert_eq!(n("IFCMATERIAL"), 2);
+        assert!(f.contains("IFCMATERIAL('Timber'") && f.contains("IFCMATERIAL('Porcelain'"));
+        assert_eq!([n("IFCSTYLEDITEM"), n("IFCRELASSOCIATESMATERIAL")], [2 + 8, 2]);
+        // In their storey.
+        let table = f.lines().find(|l| l.contains("=IFCFURNITURE(")).and_then(|l| l.split('=').next()).unwrap().to_string();
+        assert!(
+            f.lines().any(|l| l.contains("IFCRELCONTAINEDINSPATIALSTRUCTURE(") && l.contains(&format!("{table},"))
+                || l.contains(&format!("{table})")))
+        );
     }
 
     #[test]

@@ -10,13 +10,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use crate::commands::{micron, next_number, tidy};
+use crate::family::{Category, Expr, Family, Form, MAX_TRIANGLES, Parameter};
 use crate::geom::{self, P2};
 use crate::model::{
-    Ceiling, CeilingType, Column, ColumnType, Element, Extrusion, Floor, FloorType, Function, Grid, Id, Landing, Layer, Level, MAX_COORD,
-    MAX_LAYERS, MAX_POINTS, MAX_TEXT, Model, Opening, OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair,
-    TOL, Wall, WallType, culprit, heading,
+    Ceiling, CeilingType, Column, ColumnType, Component, Element, Extrusion, Floor, FloorType, Function, Grid, Id, Landing, Layer, Level,
+    MAX_COORD, MAX_LAYERS, MAX_POINTS, MAX_TEXT, Model, Opening, OpeningType, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft,
+    Side, Stair, TOL, Wall, WallType, culprit, heading,
 };
 use crate::stairs;
 use crate::step::{self, Entity, File, V};
@@ -152,7 +154,11 @@ fn area3(f: &[P3]) -> f64 {
 }
 
 /// A ring and its copy `up` from it, as faces turned out.
-fn prism(out: &mut Vec<Vec<P3>>, bottom: Vec<P3>, up: P3) {
+fn prism(out: &mut Vec<Vec<P3>>, mut bottom: Vec<P3>, up: P3) {
+    // Counter-clockwise round `up`, so its faces turn out whichever way its profile ran.
+    if dot(newell(&bottom), up) < 0.0 {
+        bottom.reverse();
+    }
     let top: Vec<P3> = bottom.iter().map(|p| add(*p, up)).collect();
     for ((a, b), (c, d)) in bottom.iter().zip(&top).zip(bottom.iter().zip(&top).cycle().skip(1)) {
         out.push(vec![*a, *c, *d, *b]);
@@ -649,6 +655,13 @@ impl<'a> Reader<'a> {
     /// A product's body as faces, in model coordinates: its Body representation, else any but a
     /// line or a footprint.
     fn body(&self, product: &Entity) -> Vec<Vec<P3>> {
+        let f = self.frame(product);
+        self.body_items(product).into_iter().flat_map(|(_, faces)| faces).map(|face| face.into_iter().map(|p| f.at(p)).collect()).collect()
+    }
+
+    /// A product's body item by item, each its faces in the product's own coordinates: its Body
+    /// representation's, else any but a line or a footprint's.
+    fn body_items(&self, product: &Entity) -> Vec<(u64, Vec<Vec<P3>>)> {
         let reps = self.reps(product);
         let items = |keep: &dyn Fn(&str) -> bool| {
             reps.iter().filter(|(i, _)| keep(&i.to_ascii_lowercase())).flat_map(|(_, it)| it.clone()).collect::<Vec<_>>()
@@ -657,12 +670,14 @@ impl<'a> Reader<'a> {
         if chosen.is_empty() {
             chosen = items(&|i| !matches!(i, "axis" | "footprint" | "annotation" | "plan" | "profile" | "reference" | "surface"));
         }
-        let mut out = Vec::new();
-        for item in chosen {
-            self.faces(item, 0, &mut out);
-        }
-        let f = self.frame(product);
-        out.into_iter().map(|face| face.into_iter().map(|p| f.at(p)).collect()).collect()
+        chosen
+            .into_iter()
+            .map(|item| {
+                let mut out = Vec::new();
+                self.faces(item, 0, &mut out);
+                (item, out)
+            })
+            .collect()
     }
 
     /// A product's Axis representation, in model coordinates.
@@ -918,25 +933,65 @@ fn layers_of(r: &Reader, l: &Links, id: u64, t: f64) -> Vec<Layer> {
 }
 
 /// The colours a file shades its materials in, by their names: each material's surface style's.
-fn material_colours(r: &Reader) -> HashMap<String, [u8; 3]> {
+fn material_colours(r: &Reader, ids: &[u64]) -> HashMap<String, [u8; 3]> {
     let mut out = HashMap::new();
-    for e in r.f.entities.values().filter(|e| e.name == "IFCMATERIALDEFINITIONREPRESENTATION") {
+    // Surface styles by their own names, which name materials as BIMCraft and Revit write them;
+    // then the materials' styles, over them.
+    for id in ids {
+        if let Some(x) = r.get(*id).filter(|x| x.name == "IFCSURFACESTYLE")
+            && let (Some(name), Some(c)) = (text(x.args.first()), colour(r, vec![*id]))
+        {
+            out.insert(clip(name), c);
+        }
+    }
+    for e in ids.iter().filter_map(|id| r.get(*id)).filter(|e| e.name == "IFCMATERIALDEFINITIONREPRESENTATION") {
         let Some(name) = r.at(e.args.get(3)).and_then(|m| text(m.args.first())) else { continue };
         let items = refs(e.args.get(2)).into_iter().filter_map(|rep| r.get(rep)).flat_map(|rep| refs(rep.args.get(3)));
-        // An item's styles, in IFC2x3 through style assignments; a surface style's, its shading.
-        let mut styles: Vec<u64> = items.filter_map(|i| r.get(i)).flat_map(|i| refs(i.args.get(1))).collect();
+        if let Some(c) = colour(r, items.filter_map(|i| r.get(i)).flat_map(|i| refs(i.args.get(1))).collect()) {
+            out.insert(clip(name), c);
+        }
+    }
+    out
+}
+
+/// The colour `styles` shade with: in IFC2x3 through style assignments; a surface style's, its
+/// shading's or its rendering's.
+fn colour(r: &Reader, mut styles: Vec<u64>) -> Option<[u8; 3]> {
+    let mut seen = HashSet::new();
+    while let Some(id) = styles.pop() {
+        let Some(x) = r.get(id).filter(|_| seen.insert(id)) else { continue };
+        match x.name.as_str() {
+            "IFCPRESENTATIONSTYLEASSIGNMENT" => styles.extend(refs(x.args.first())),
+            "IFCSURFACESTYLE" => styles.extend(refs(x.args.get(2))),
+            "IFCSURFACESTYLESHADING" | "IFCSURFACESTYLERENDERING" => {
+                if let Some(c) = r.at(x.args.first()).filter(|c| c.name == "IFCCOLOURRGB") {
+                    let byte = |i: usize| real(c.args.get(i)).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+                    if let (Some(red), Some(green), Some(blue)) = (byte(1), byte(2), byte(3)) {
+                        return Some([red, green, blue]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The name of the surface style each representation item is styled with: what a component's
+/// form made of it is made of.
+fn item_styles(r: &Reader, ids: &[u64]) -> HashMap<u64, String> {
+    let mut out = HashMap::new();
+    for e in ids.iter().filter_map(|id| r.get(*id)).filter(|e| e.name == "IFCSTYLEDITEM") {
+        let Some(item) = reference(e.args.first()) else { continue };
+        let mut styles = refs(e.args.get(1));
         let mut seen = HashSet::new();
         while let Some(id) = styles.pop() {
             let Some(x) = r.get(id).filter(|_| seen.insert(id)) else { continue };
             match x.name.as_str() {
                 "IFCPRESENTATIONSTYLEASSIGNMENT" => styles.extend(refs(x.args.first())),
-                "IFCSURFACESTYLE" => styles.extend(refs(x.args.get(2))),
-                "IFCSURFACESTYLESHADING" | "IFCSURFACESTYLERENDERING" => {
-                    if let Some(c) = r.at(x.args.first()).filter(|c| c.name == "IFCCOLOURRGB") {
-                        let byte = |i: usize| real(c.args.get(i)).map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
-                        if let (Some(red), Some(green), Some(blue)) = (byte(1), byte(2), byte(3)) {
-                            out.insert(clip(name), [red, green, blue]);
-                        }
+                "IFCSURFACESTYLE" => {
+                    if let Some(n) = text(x.args.first()) {
+                        out.entry(item).or_insert_with(|| clip(n));
                     }
                 }
                 _ => {}
@@ -944,6 +999,74 @@ fn material_colours(r: &Reader) -> HashMap<String, [u8; 3]> {
         }
     }
     out
+}
+
+/// The material the file associates element `id`, or its type, with, by name: a material's, or
+/// the first of a set's, a list's or a layer set's.
+fn element_material(r: &Reader, l: &Links, id: u64) -> Option<String> {
+    let mut at = l.material.get(&id).or_else(|| l.typed.get(&id).and_then(|t| l.material.get(t))).and_then(|x| r.get(*x))?;
+    for _ in 0..8 {
+        at = match at.name.as_str() {
+            "IFCMATERIAL" => return text(at.args.first()).map(clip),
+            "IFCMATERIALCONSTITUENTSET" => r.get(*refs(at.args.get(2)).first()?)?,
+            "IFCMATERIALCONSTITUENT" => r.at(at.args.get(2))?,
+            "IFCMATERIALLIST" | "IFCMATERIALLAYERSET" => r.get(*refs(at.args.first()).first()?)?,
+            "IFCMATERIALLAYERSETUSAGE" | "IFCMATERIALLAYER" => r.at(at.args.first())?,
+            _ => return None,
+        };
+    }
+    None
+}
+
+/// Triangle `t` read from its least corner on, turned as it is: so the same triangle reads the same.
+fn settled(t: [P3; 3]) -> [P3; 3] {
+    let least = |p: &P3, q: &P3| p[0].total_cmp(&q[0]).then(p[1].total_cmp(&q[1])).then(p[2].total_cmp(&q[2])).is_le();
+    let [a, b, c] = t;
+    if least(&a, &b) && least(&a, &c) {
+        [a, b, c]
+    } else if least(&b, &c) {
+        [b, c, a]
+    } else {
+        [c, a, b]
+    }
+}
+
+/// A key for forms' shapes and what they're made of: the same forms, the same key.
+fn shape_key(forms: &[Form]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in forms {
+        f.material.hash(&mut h);
+        f.mesh.iter().flatten().flatten().for_each(|x| x.to_bits().hash(&mut h));
+    }
+    h.finish()
+}
+
+/// Forms' mirror images across their x axis, as a mirrored component shows them.
+fn mirrored(forms: &[Form]) -> Vec<Form> {
+    let flip = |p: P3| [p[0], -p[1] + 0.0, p[2]];
+    forms
+        .iter()
+        .map(|f| Form { mesh: Arc::new(f.mesh.iter().map(|[a, b, c]| settled([flip(*a), flip(*c), flip(*b)])).collect()), ..f.clone() })
+        .collect()
+}
+
+/// A flat face's triangles, turned as it is: ears cut in its plane; past `MAX_PROFILE` corners,
+/// a fan.
+fn triangles(face: &[P3]) -> Vec<[P3; 3]> {
+    let n = normal(face);
+    if face.len() < 3 || dot(n, n) < 0.5 {
+        return Vec::new();
+    }
+    let pt = |i: usize| face.get(i).copied().unwrap_or_default();
+    if face.len() > crate::family::MAX_PROFILE {
+        // ponytail: a fan, wrong for a large face that isn't convex; ear-cut faster if files bring them.
+        return (1..face.len() - 1).map(|i| [pt(0), pt(i), pt(i + 1)]).collect();
+    }
+    let u = unit(cross(n, if n[0].abs() < 0.9 { [1.0, 0.0, 0.0] } else { [0.0, 1.0, 0.0] }));
+    let v = cross(n, u);
+    let ring: Vec<P2> = face.iter().map(|p| P2(dot(*p, u), dot(*p, v))).collect();
+    geom::triangulate(&ring).into_iter().map(|[a, b, c]| [pt(a), pt(b), pt(c)]).collect()
 }
 
 /// A type of `map` like `same` says, by `base` or `base (2)`, `base (3)`… made as `new` when
@@ -1492,6 +1615,131 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(id);
     }
 
+    // Furniture, sanitary terminals, light fixtures and proxies: components of families made of
+    // their bodies, each a mesh in its own axes stood upright, its faces grouped by what they're made
+    // of. A family for each name the file gives them ("Family:Type", as Revit and BIMCraft name
+    // them), a type for each type; the file's family over the library's of its name.
+    let styles = item_styles(&r, &ids);
+    // Each family: its category, its types in the order they came (each its forms and its shapes'
+    // key), the types by the name the file gives them, and how many forms it has.
+    #[derive(Default)]
+    struct Made {
+        category: Category,
+        types: Vec<(String, Vec<Form>, u64)>,
+        named: HashMap<String, Vec<usize>>,
+        names: HashSet<String>,
+        forms: usize,
+    }
+    let mut made: BTreeMap<String, Made> = BTreeMap::new();
+    let mut placed: Vec<(u64, String, String, bool, P2, f64, f64)> = Vec::new();
+    let kinds: [(&[&str], Category); 4] = [
+        (&["IFCFURNITURE", "IFCFURNISHINGELEMENT", "IFCSYSTEMFURNITUREELEMENT"], Category::Furniture),
+        (&["IFCSANITARYTERMINAL"], Category::Plumbing),
+        (&["IFCLIGHTFIXTURE"], Category::Lighting),
+        (&["IFCBUILDINGELEMENTPROXY"], Category::Generic),
+    ];
+    for (names, category) in kinds {
+        for id in named(names) {
+            let Some(x) = e(id) else { continue };
+            let f = r.frame(x);
+            let flat = |v: P3| unit([v[0], v[1], 0.0]);
+            let along = [flat(f.x), flat(f.y), [1.0, 0.0, 0.0]].into_iter().find(|v| dot(*v, *v) > 0.5).unwrap_or([1.0, 0.0, 0.0]);
+            let side = cross([0.0, 0.0, 1.0], along);
+            let local = |p: P3| {
+                let d = sub(f.at(p), f.o);
+                [dot(d, along), dot(d, side), d[2]].map(|v| (v * 1e3).round() / 1e3 + 0.0)
+            };
+            let fallback = element_material(&r, &l, id).unwrap_or_default();
+            let mut groups: BTreeMap<String, Vec<[P3; 3]>> = BTreeMap::new();
+            for (item, faces) in r.body_items(x) {
+                let tris = groups.entry(styles.get(&item).cloned().unwrap_or_else(|| fallback.clone())).or_default();
+                for face in faces {
+                    tris.extend(triangles(&face.into_iter().map(local).collect::<Vec<_>>()).into_iter().map(settled));
+                }
+            }
+            groups.retain(|_, t| !t.is_empty());
+            if groups.is_empty() {
+                leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
+                continue;
+            }
+            if groups.values().map(Vec::len).sum::<usize>() > MAX_TRIANGLES {
+                leave(&mut skipped, &mut seen, id, &format!("its body has more than {MAX_TRIANGLES} triangles"));
+                continue;
+            }
+            let forms: Vec<Form> =
+                groups.into_iter().map(|(material, mesh)| Form { mesh: Arc::new(mesh), material, ..Form::default() }).collect();
+            let name = label(id).or_else(|| text(x.args.get(2)).map(String::from)).unwrap_or_else(|| x.name.clone());
+            let mut parts = name.splitn(3, ':').map(str::trim);
+            let family = clip(parts.next().unwrap_or_default());
+            let base = clip(parts.next().unwrap_or(&family));
+            let fam = made.entry(family.clone()).or_insert_with(|| Made { category, ..Made::default() });
+            // A type of that name and shape, or its mirror image, found by its shapes' key; a type the
+            // file gives another shape is another type, while the family has room for its forms.
+            let flipped = mirrored(&forms);
+            let (key, flipped_key) = (shape_key(&forms), shape_key(&flipped));
+            let same = fam.named.get(&base).into_iter().flatten().find_map(|&i| {
+                let (t, fs, k) = fam.types.get(i)?;
+                (*k == key && *fs == forms)
+                    .then(|| (t.clone(), false))
+                    .or_else(|| (*k == flipped_key && *fs == flipped).then(|| (t.clone(), true)))
+            });
+            let pick = match same {
+                Some(pick) => pick,
+                None if fam.forms + forms.len() > crate::family::MAX_FORMS => {
+                    let why = format!("family `{family}` has more shapes than one family holds ({} forms)", crate::family::MAX_FORMS);
+                    leave(&mut skipped, &mut seen, id, &why);
+                    continue;
+                }
+                None => {
+                    let taken = fam.named.get(&base).map_or(0, Vec::len);
+                    let t = (taken + 1..)
+                        .map(|n| if n == 1 { base.clone() } else { format!("{base} ({n})") })
+                        .find(|t| !fam.names.contains(t))
+                        .unwrap_or_else(|| base.clone());
+                    fam.forms += forms.len();
+                    fam.names.insert(t.clone());
+                    fam.named.entry(base.clone()).or_default().push(fam.types.len());
+                    fam.types.push((t.clone(), forms, key));
+                    (t, false)
+                }
+            };
+            let (sin, cos) = (along[1], along[0]);
+            placed.push((id, family, pick.0, pick.1, r.flat(f.o), (sin.atan2(cos).to_degrees() * 1e6).round() / 1e6 + 0.0, f.o[2]));
+        }
+    }
+    let mut families: BTreeMap<String, Family> = BTreeMap::new();
+    for (name, Made { category, types, .. }) in made {
+        // Several types: each its own forms, shown by a parameter only its type sets.
+        let several = types.len() > 1;
+        let mut family = Family { category, ..Family::default() };
+        if several {
+            family.parameters.push(Parameter { name: "Variant".into(), kind: crate::family::Kind::Number, ..Parameter::default() });
+        }
+        for (k, (t, forms, _)) in (1..).zip(types) {
+            let set = if several { BTreeMap::from([("Variant".to_string(), serde_json::json!(k))]) } else { BTreeMap::new() };
+            family.types.insert(t, set);
+            family.forms.extend(forms.into_iter().map(|f| Form { visible: several.then(|| Expr::Formula(format!("Variant = {k}"))), ..f }));
+        }
+        families.insert(name, family);
+    }
+    // A family that isn't sound leaves its components out, with why: each checked once.
+    let unsound: HashMap<String, String> = families.iter().filter_map(|(n, f)| f.check(&|_| true).err().map(|e| (n.clone(), e))).collect();
+    for (id, family, type_name, mirrored, at, angle, z) in placed {
+        if let Some(why) = unsound.get(&family) {
+            leave(&mut skipped, &mut seen, id, why);
+            continue;
+        }
+        let level = level_for(id, z);
+        let offset = ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
+        let c = Component { family, type_name, level, at: micron(at), angle, offset, mirrored, params: BTreeMap::new() };
+        let cid = m.insert(Element::Component(c));
+        from.insert(cid, who(id));
+        seen.insert(id);
+    }
+    for (name, f) in families.into_iter().filter(|(n, _)| !unsound.contains_key(n)) {
+        m.families.insert(name, f);
+    }
+
     // Stairs: each flight measured from its treads, a landing between each two and the way the next
     // one turns there. The railings among a stair's parts come in along it.
     let mut railings_on: HashMap<u64, Id> = HashMap::new();
@@ -1768,7 +2016,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
 
     // The materials the layers are made of, in the library, shaded as the file shades them.
     m.adopt_materials();
-    for (name, colour) in material_colours(&r) {
+    for (name, colour) in material_colours(&r, &ids) {
         if let Some(x) = m.materials.get_mut(&name) {
             x.color = colour;
         }
@@ -2246,6 +2494,128 @@ ENDSEC;END-ISO-10303-21;",
         let i = ifc(layered(&holed("#35=IFCSLAB('f',$,'Slab',$,$,#6,#34,$,.FLOOR.);", 35), 35, "AXIS3", 0.0).as_bytes(), "x").unwrap();
         let Some(Element::Floor(f)) = only(&i.model, "floor").first().copied() else { panic!("no floor") };
         assert_eq!(names(&i.model.types.floor[&f.type_name].layers), ["Plaster", "Brick"]);
+    }
+
+    /// Each component's extent in the model: its outlines' corners and its heights, to the mm.
+    fn extent(m: &Model, c: &crate::model::Component) -> (i64, i64, i64, i64, i64, i64) {
+        let pieces = m.component_pieces(c);
+        let pts: Vec<P2> = pieces.iter().flat_map(|p| p.outline.clone()).collect();
+        let r = |x: f64| x.round() as i64;
+        let (x, y) = (span(pts.iter().map(|p| p.0)).unwrap_or_default(), span(pts.iter().map(|p| p.1)).unwrap_or_default());
+        let z = span(pieces.iter().flat_map(|p| [p.bottom, p.top])).unwrap_or_default();
+        (r(x.0), r(x.1), r(y.0), r(y.1), r(z.0), r(z.1))
+    }
+
+    #[test]
+    fn components_come_back_from_ifc_where_they_stood() {
+        let mut s = crate::engine::Session::new();
+        s.script(
+            r#"component {"family": "Table", "type": "1600 x 900", "at": [2000, 3000], "angle": 30}
+               component {"family": "WC", "at": [-500, 0]}
+               component {"family": "WC", "at": [500, 0], "mirrored": true, "offset": 50}
+               component {"family": "Bed", "at": [6000, 4000], "angle": -90}
+               level {"elevation": 3000, "name": "Level 3"}"#,
+        )
+        .unwrap();
+        let file = crate::ifc::export(&s.model);
+        let i = ifc(file.as_bytes(), "x").unwrap();
+        assert_eq!(i.skipped, Vec::<String>::new());
+        let comps = |m: &Model| -> Vec<crate::model::Component> {
+            m.elements.values().filter_map(|e| if let Element::Component(c) = e { Some(c.clone()) } else { None }).collect()
+        };
+        let (mut before, mut after) = (comps(&s.model), comps(&i.model));
+        before.sort_by(|a, b| a.family.cmp(&b.family));
+        after.sort_by(|a, b| a.family.cmp(&b.family));
+        assert_eq!(after.len(), 4);
+        for (a, b) in before.iter().zip(&after) {
+            assert_eq!((&a.family, &a.type_name, a.level), (&b.family, &b.type_name, b.level));
+            assert_eq!(extent(&s.model, a), extent(&i.model, b), "{} {}", a.family, a.type_name);
+        }
+        let of = |family: &str| after.iter().rfind(|c| c.family == family).unwrap();
+        assert_eq!((of("Table").angle, of("WC").offset), (30.0, 50.0));
+        // A mirror image of a type is that type, mirrored.
+        let mirrored: Vec<(&str, bool)> = after.iter().filter(|c| c.family == "WC").map(|c| (c.type_name.as_str(), c.mirrored)).collect();
+        assert_eq!(mirrored, [("400 x 650", false), ("400 x 650", true)]);
+        // Its forms, as the file had them: in their materials, which come in with their colours.
+        let bed = &i.model.families["Bed"];
+        let mut made_of: Vec<&str> = bed.forms.iter().map(|f| f.material.as_str()).collect();
+        made_of.sort_unstable();
+        made_of.dedup();
+        assert_eq!(made_of, ["Fabric", "Timber"]);
+        assert_eq!(i.model.materials["Fabric"].color, s.model.materials["Fabric"].color);
+    }
+
+    /// An IFC4 file in mm whose proxies are named `name` and are each a profile through `ring`'s
+    /// corners, scaled by its number, extruded `depth` along `dir`.
+    fn proxies(name: &str, n: usize, ring: &[(f64, f64)], dir: &str, depth: f64) -> String {
+        let mut out = String::from(
+            "ISO-10303-21;HEADER;FILE_SCHEMA(('IFC4'));ENDSEC;DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);
+#2=IFCUNITASSIGNMENT((#1));
+#3=IFCPROJECT('p',$,'Proxies',$,$,$,$,$,#2);
+#4=IFCCARTESIANPOINT((0.,0.,0.));
+#5=IFCAXIS2PLACEMENT3D(#4,$,$);
+#6=IFCLOCALPLACEMENT($,#5);
+#7=IFCBUILDINGSTOREY('s',$,'Level 0',$,$,#6,$,$,.ELEMENT.,0.);
+",
+        );
+        let mut ids = Vec::new();
+        for k in 0..n {
+            let base = 100 + k * 20;
+            let scale = 1.0 + k as f64 / 10.0;
+            let pts: Vec<String> = ring
+                .iter()
+                .enumerate()
+                .map(|(i, (x, y))| format!("#{}=IFCCARTESIANPOINT(({:.1},{:.1}));", base + i, x * scale, y * scale))
+                .collect();
+            let refs: Vec<String> = (0..ring.len()).chain([0]).map(|i| format!("#{}", base + i)).collect();
+            out.push_str(&format!(
+                "{}\n#{l}=IFCPOLYLINE(({}));\n#{pr}=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#{l});\n#{d}=IFCDIRECTION(({dir}));\n#{x}=IFCEXTRUDEDAREASOLID(#{pr},$,#{d},{depth:.1});\n#{rep}=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#{x}));\n#{sh}=IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}));\n#{at}=IFCCARTESIANPOINT(({}.,0.,0.));\n#{ax}=IFCAXIS2PLACEMENT3D(#{at},$,$);\n#{pl}=IFCLOCALPLACEMENT(#6,#{ax});\n#{e}=IFCBUILDINGELEMENTPROXY('g{k}',$,'{name}',$,$,#{pl},#{sh},$,.ELEMENT.);\n",
+                pts.join("\n"),
+                refs.join(","),
+                k * 3000,
+                l = base + 10,
+                pr = base + 11,
+                d = base + 12,
+                x = base + 13,
+                rep = base + 14,
+                sh = base + 15,
+                at = base + 16,
+                ax = base + 17,
+                pl = base + 18,
+                e = base + 19,
+            ));
+            ids.push(format!("#{}", base + 19));
+        }
+        out.push_str(&format!("#99=IFCRELCONTAINEDINSPATIALSTRUCTURE('r',$,$,$,({}),#7);\nENDSEC;END-ISO-10303-21;", ids.join(",")));
+        out
+    }
+
+    /// A closed surface's volume: its triangles' signed tetrahedra, positive while they face out.
+    fn volume(pieces: &[crate::family::Piece]) -> f64 {
+        pieces.iter().flat_map(|p| p.tris.iter()).map(|[a, b, c]| dot(*a, cross(*b, *c)) / 6.0).sum()
+    }
+
+    #[test]
+    fn a_clockwise_profile_or_a_downward_sweep_comes_in_turned_out() {
+        let clockwise = [(0.0, 0.0), (0.0, 300.0), (500.0, 300.0), (500.0, 0.0)];
+        for (dir, ring) in [("0.,0.,1.", &clockwise[..]), ("0.,0.,-1.", &[(0.0, 0.0), (500.0, 0.0), (500.0, 300.0), (0.0, 300.0)][..])] {
+            let i = ifc(proxies("Box", 1, ring, dir, 450.0).as_bytes(), "x").unwrap();
+            let Some(Element::Component(c)) = only(&i.model, "component").first().copied() else { panic!("no component") };
+            let v = volume(&i.model.component_local_pieces(c));
+            assert!((v - 500.0 * 300.0 * 450.0).abs() < 1.0, "{dir}: {v}");
+        }
+    }
+
+    #[test]
+    fn more_shapes_of_one_family_than_it_holds_leave_only_the_rest_out() {
+        let square = [(0.0, 0.0), (300.0, 0.0), (300.0, 300.0), (0.0, 300.0)];
+        let n = crate::family::MAX_FORMS + 3;
+        let i = ifc(proxies("Thing:A", n, &square, "0.,0.,1.", 400.0).as_bytes(), "x").unwrap();
+        assert_eq!(i.model.families["Thing"].types.len(), crate::family::MAX_FORMS);
+        assert_eq!(only(&i.model, "component").len(), crate::family::MAX_FORMS);
+        assert_eq!(i.skipped.len(), 3, "{:?}", i.skipped);
+        assert!(i.skipped.iter().all(|s| s.contains("Thing")), "{:?}", i.skipped);
     }
 
     #[test]

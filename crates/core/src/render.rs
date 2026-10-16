@@ -378,6 +378,7 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
                 extent.extend(boundary)
             }
             Element::Room(r) if r.level == level => extent.push(r.point),
+            Element::Component(c) if c.level == level => extent.extend(m.component_pieces(c).into_iter().flat_map(|p| p.outline)),
             Element::Grid(g) => extent.extend([g.start, g.end]),
             Element::Dimension(dm) if dm.level == level => extent.push(dm.at),
             Element::Section(v) | Element::Elevation(v) => extent.extend([v.start, v.end]),
@@ -411,6 +412,7 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
         Element::Section(v) => section_mark(&mut d, v),
         Element::Elevation(v) => elevation_mark(&mut d, v),
         Element::Column(col) => d.line(&m.column_outline(col), 2.0, INK, true),
+        Element::Component(c) => component(&mut d, &m.component_pieces(c)),
         Element::Stair(st) => stair(&mut d, m, st, st.level),
         Element::Ramp(r) => ramp(&mut d, m, r, r.level),
         Element::Railing(rl) => d.line(&stairs::railing(m, rl).into_iter().map(|(p, _)| p).collect::<Vec<_>>(), 1.5, INK, false),
@@ -737,6 +739,17 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             slope_arrow(&mut d, tail, head, f.slope);
         }
     }
+    // Components it sees, in projection, as Revit draws furniture: whole while any of one is under
+    // the cut plane and over the view depth.
+    for (&id, e) in m.elements.iter().filter(|_| !up) {
+        let Element::Component(c) = e else { continue };
+        let pieces = m.component_pieces(c);
+        let (bottom, top) = pieces.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.bottom), hi.max(p.top)));
+        if bottom < range.cut && top > range.depth {
+            d.owner = Some(id);
+            component(&mut d, &pieces);
+        }
+    }
     // Walls and columns below the cut plane, as seen from it; past the bottom, faint.
     for (id, o, top) in seen_below(m, &range).into_iter().filter(|_| !up) {
         d.owner = Some(id);
@@ -893,6 +906,39 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
     let at = (24.0 + font::width(&title, 16.0) / 2.0, view.height as f32 - 26.0);
     d.text(&title, at, 16.0, INK);
     d
+}
+
+/// A component seen from above: each of its forms' outlines, but where a higher form covers it (a
+/// table's top over its legs).
+fn component(d: &mut Drawing, pieces: &[crate::family::Piece]) {
+    for (i, p) in pieces.iter().enumerate() {
+        for (a, b) in geom::ring_edges(&p.outline) {
+            let len = a.dist(b);
+            if len < 1e-9 {
+                continue;
+            }
+            let u = (b - a) * (1.0 / len);
+            let mut hidden: Vec<(f64, f64)> = pieces
+                .iter()
+                .enumerate()
+                .filter(|(j, q)| *j != i && q.top > p.top + 1e-6)
+                .flat_map(|(_, q)| view3d::crossings(&q.outline, a, u))
+                .map(|(s0, s1)| (s0.max(0.0), s1.min(len)))
+                .filter(|(s0, s1)| s1 > s0)
+                .collect();
+            hidden.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let mut at = 0.0;
+            for (s0, s1) in hidden {
+                if s0 > at {
+                    d.line(&[a + u * at, a + u * s0], 1.0, INK, false);
+                }
+                at = f64::max(at, s1);
+            }
+            if at < len {
+                d.line(&[a + u * at, b], 1.0, INK, false);
+            }
+        }
+    }
 }
 
 /// The outlines of the holes shafts cut in a floor's or a ceiling's slabs.

@@ -202,6 +202,8 @@ pub enum Icon {
     Dormer,
     GableEdge,
     Materials,
+    Component,
+    LoadFamily,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -515,6 +517,16 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             v.push(line(&[(3.0, 13.0), (21.0, 13.0)]));
             v
         }
+        // A chair from its side: its back, its seat, its legs.
+        Icon::Component => {
+            vec![line(&[(7.0, 3.0), (7.0, 21.0)]), line(&[(7.0, 13.0), (18.0, 13.0), (18.0, 21.0)]), line(&[(4.0, 21.0), (21.0, 21.0)])]
+        }
+        // A box, and an arrow down into it.
+        Icon::LoadFamily => vec![
+            ring(&[(4.0, 12.0), (20.0, 12.0), (20.0, 21.0), (4.0, 21.0)]),
+            line(&[(12.0, 2.0), (12.0, 16.0)]),
+            line(&[(8.0, 12.0), (12.0, 16.0), (16.0, 12.0)]),
+        ],
         // A gable's profile, swept back.
         Icon::ExtrusionRoof => {
             vec![line(&[(2.0, 16.0), (8.0, 9.0), (14.0, 16.0)]), line(&[(8.0, 9.0), (16.0, 4.0), (22.0, 11.0), (14.0, 16.0)])]

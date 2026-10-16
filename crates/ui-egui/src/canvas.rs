@@ -8,8 +8,8 @@ use std::f64::consts::PI;
 
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
-    Column, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note, RISER,
-    Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag,
+    Column, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note,
+    RISER, Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::walls::{self, Axis};
@@ -872,6 +872,15 @@ impl BimApp {
                     }
                 }
             }
+            Tool::Component => {
+                if let Some((family, ty)) = self.placing() {
+                    let at = snap(m, level, v, at, &[], false);
+                    self.run(
+                        "component",
+                        json!({"family": family, "type": ty, "at": point(at), "level": level, "angle": self.component_angle}),
+                    );
+                }
+            }
             Tool::Column => match top_params(m, level, self.column_top, &self.column_height) {
                 Ok(mut p) => {
                     p["at"] = point(snap(m, level, v, at, &[], false));
@@ -1603,6 +1612,15 @@ impl BimApp {
             Tool::Spot => {
                 let at = round(v.mm(q));
                 sketched(&Element::Spot(Spot { view: level, at, host: m.spot_host(level, at) }));
+                return;
+            }
+            Tool::Component => {
+                if let Some((family, type_name)) = self.placing() {
+                    let at = snap(m, level, v, q, &[], false);
+                    let angle = self.component_angle;
+                    let c = Component { family, type_name, level, at, angle, offset: 0.0, mirrored: false, params: Default::default() };
+                    sketched(&Element::Component(c));
+                }
                 return;
             }
             Tool::Column => {

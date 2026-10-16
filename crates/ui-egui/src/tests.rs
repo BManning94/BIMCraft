@@ -1304,7 +1304,7 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             .filter_map(|n| n.accesskit_node().label())
             .collect()
     };
-    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}"));
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}"));
     // The probe finds what it looks for: in English, the same labels are all English.
     assert!(english(&h, Language::Spanish).contains(&"Architecture".to_string()));
     for l in [Language::Portuguese, Language::Spanish] {
@@ -1317,9 +1317,11 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             missed.extend(english(&h, l));
         }
         // A wall's Properties and its contextual tab; a door's; a roof's; the tools' Options Bars.
-        let tools = ["Wall", "Roof", "Roof by Extrusion", "Floor", "Ceiling", "Shaft", "Dormer", "Stair", "Ramp", "Railing"]
+        let tools = ["Wall", "Roof", "Roof by Extrusion", "Floor", "Ceiling", "Shaft", "Dormer", "Stair", "Ramp", "Railing", "Component"]
             .map(|t| (P2(0.0, 0.0), Some(t)));
-        for (at, tool) in [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(-600.0, 3000.0), None)].into_iter().chain(tools) {
+        // A wall, a door, a roof's edge, a WC's cistern.
+        let picks = [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(-600.0, 3000.0), None), (P2(4000.0, 5670.0), None)];
+        for (at, tool) in picks.into_iter().chain(tools) {
             key(&mut h, Key::Escape);
             if let Some(tool) = tool {
                 press(&mut h, tr("Architecture"));
@@ -1426,6 +1428,72 @@ fn duplicate_copies_a_types_layers() {
     press(&mut h, "OK");
     let types = &h.state().session.model.types.wall;
     assert_eq!(types["Exterior copy"].layers, types["Exterior - 300mm"].layers);
+}
+
+#[test]
+fn the_component_tool_places_a_familys_type_that_space_turns() {
+    let mut h = app(BOX);
+    tool(&mut h, "Component");
+    assert!(h.query_by_label("Modify | Place Component").is_some());
+    press(&mut h, "Type Selector");
+    press(&mut h, "Bed: 900 x 2000");
+    // A quarter turn before it goes down, as Revit's Space gives.
+    key(&mut h, Key::Space);
+    click(&mut h, P2(4000.0, 3000.0));
+    let c = ids(&h, "component");
+    assert_eq!(c.len(), 1);
+    assert_eq!(
+        (field(&h, c[0], "family"), field(&h, c[0], "type"), field(&h, c[0], "angle"), field(&h, c[0], "at")),
+        (json!("Bed"), json!("900 x 2000"), json!(90.0), json!([4000.0, 3000.0]))
+    );
+    // The Project Browser's families: a type of one, picked, is the one the tool places.
+    key(&mut h, Key::Escape);
+    for label in ["Families", "Table", "2000 x 1000"] {
+        h.get_by_label(label).click_accesskit();
+        h.run();
+    }
+    assert_eq!(h.state().tool, Tool::Component);
+    click(&mut h, P2(4000.0, 1500.0));
+    let c = ids(&h, "component");
+    assert_eq!((field(&h, c[1], "family"), field(&h, c[1], "type")), (json!("Table"), json!("2000 x 1000")));
+}
+
+#[test]
+fn rotate_turns_a_component_about_its_own_point() {
+    let mut h = app(&format!("{BOX}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}"));
+    let c = ids(&h, "component")[0];
+    click(&mut h, P2(4000.0, 5670.0));
+    assert_eq!(h.state().selection, [c]);
+    press(&mut h, "Rotate");
+    assert!(matches!(h.state().tool, Tool::Rotate { centre, .. } if centre == P2(4000.0, 5850.0)), "{:?}", h.state().tool);
+}
+
+#[test]
+fn properties_and_type_properties_edit_a_components_parameters() {
+    let stool = r#"family {"name": "Stool", "parameters": [{"name": "Seat", "instance": true, "value": 450}, {"name": "Size", "value": 400}], "types": {"A": {}}, "forms": [{"profile": [[0, 0], ["Size", 0], ["Size", "Size"], [0, "Size"]], "to": "Seat"}]}
+component {"family": "Stool", "at": [3000, 2000]}"#;
+    let mut h = app(&format!("{BOX}\n{stool}"));
+    let c = ids(&h, "component")[0];
+    // Picked by its outline.
+    click(&mut h, P2(3200.0, 2000.0));
+    assert_eq!(h.state().selection, [c]);
+    assert!(h.query_by_label("Modify | Components").is_some());
+    // Its instance parameter, in Properties.
+    type_into(&mut h, "Seat", "500");
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, c, "params")["Seat"], json!(500.0));
+    // Its type's, in Type Properties; Duplicate makes another, which OK puts it on.
+    press(&mut h, "Edit Type");
+    type_into(&mut h, "Size", "600");
+    press(&mut h, "OK");
+    assert_eq!(h.state().session.model.families["Stool"].types["A"]["Size"], json!(600.0));
+    press(&mut h, "Edit Type");
+    press(&mut h, "Duplicate…");
+    type_into(&mut h, "New type", "B");
+    press(&mut h, "Create");
+    press(&mut h, "OK");
+    assert_eq!(h.state().session.model.families["Stool"].types["B"]["Size"], json!(600.0));
+    assert_eq!(field(&h, c, "type"), json!("B"));
 }
 
 #[test]

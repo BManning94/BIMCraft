@@ -11,10 +11,11 @@ use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
 use crate::language::Language;
 use crate::model::{
-    CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Facing, Floor,
-    FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Model, NOTE_SIZE, Note,
-    Opening, OpeningType, Pattern, RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH,
-    Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
+    Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Model,
+    NOTE_SIZE, Note, Opening, OpeningType, Pattern, RAMP_SLOPE, RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType,
+    Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading,
+    paper,
 };
 use crate::render::Drawing;
 use crate::units::Units;
@@ -285,6 +286,33 @@ pub static ALL: &[Command] = &[
          `rename` renames it, the layers using it following; `delete` takes it away, while no layer uses it. `inspect` lists \
          the library",
         material,
+    ),
+    edit(
+        "family",
+        "Load Family",
+        &[],
+        "{name, category?: furniture|casework|plumbing|lighting|generic, parameters?: [{name, kind?: length|number|angle|yesno|\
+         material, instance?, value?, formula?}], types?: {type: {parameter: value}}, forms?: [{plane?: xy|xz|yz, profile?: [[a, \
+         b], …], circle?: {centre: [a, b], radius}, from?, to, material?, visible?}], rename?, delete?: true, path?} a family of \
+         the project's, BIMCraft's own parametric component: created, changed, or loaded from the .json file at `path` (a family \
+         as `inspect` shows it, with its `name`). Its forms are profiles drawn in its own axes (x along a component's angle, y \
+         to its left, z up from its base) and swept: `xy` up from `from` to `to`, `xz` along y, `yz` along x. Sizes are mm, or \
+         formulas over its parameters as Revit's are: `Width / 2`, `if(Depth > 600, 4, 2)`, with + - * / ^, < > = <= >=, if, \
+         and, or, not, min, max, abs, sqrt, round, roundup, rounddown, sin, cos, tan (degrees). A parameter is each type's, or \
+         with `instance` each component's. `types` merges into its types (a null takes one away); `parameters` and `forms` \
+         replace its own; `material` is a material's name or a material parameter's; `visible` a yes/no parameter or formula. \
+         `inspect` lists the families",
+        family,
+    ),
+    edit(
+        "component",
+        "Component",
+        &["CM"],
+        "{family, type?, at: [x,y], level?, angle?, offset?, mirrored?, params?: {parameter: value}} a family's type placed, its \
+         first by default: at a point on a level, turned `angle` degrees counter-clockwise, `offset` mm up from the level, and \
+         with `mirrored` flipped across its own x axis; `params` sets its instance parameters (`modify` merges into them, a null \
+         taking one back to the family's)",
+        component,
     ),
     edit(
         "flip",
@@ -681,6 +709,22 @@ pub fn element_json(m: &Model, id: Id) -> Value {
         }
         Element::Dimension(d) => {
             extra.insert("values".into(), json!(m.dimension_values(d).into_iter().map(hundredth).collect::<Vec<_>>()));
+        }
+        // Every parameter's value, worked out, and how high it reaches over its base.
+        Element::Component(cp) => {
+            if let Some(v) = m.families.get(&cp.family).and_then(|f| f.values(&cp.type_name, &cp.params).ok()) {
+                let values: Map<String, Value> = v
+                    .into_iter()
+                    .map(|(k, v)| match v {
+                        crate::family::Val::Number(x) => (k, json!(x)),
+                        crate::family::Val::Text(t) => (k, json!(t)),
+                    })
+                    .collect();
+                extra.insert("values".into(), Value::Object(values));
+            }
+            let base = m.elevation(cp.level) + cp.offset;
+            let top = m.component_pieces(cp).iter().map(|p| p.top).fold(base, f64::max);
+            extra.insert("height".into(), json!(hundredth(top - base)));
         }
         Element::Column(col) => {
             let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
@@ -1982,6 +2026,9 @@ fn material(s: &mut Session, p: &Value) -> R {
         if let Some((cat, n, ..)) = m.layered_types().find(|(.., l)| l.iter().any(|l| l.material == name)) {
             return Err(bad(c, format!("`{name}` is in {cat} type `{n}`'s layers; take it out of them first")));
         }
+        if let Some(user) = m.material_user(&name) {
+            return Err(bad(c, format!("`{name}` is in {user}; take it out of it first")));
+        }
         m.materials.remove(&name);
         return Ok(json!({"deleted": name}));
     }
@@ -2008,12 +2055,139 @@ fn material(s: &mut Session, p: &Value) -> R {
             }
             m.materials.remove(&name);
             m.layers_mut().filter(|l| l.material == name).for_each(|l| l.material.clone_from(&to));
+            m.rename_material_in_families(&name, &to);
             to
         }
         None => name,
     };
     m.materials.insert(name.clone(), mat.clone());
     Ok(json!({"name": name, "material": mat}))
+}
+
+fn family(s: &mut Session, p: &Value) -> R {
+    let c = "family";
+    // From a file: its fields under the name given, else its own, else the file's.
+    let mut p = p.clone();
+    if let Some(path) = string(c, &p, "path")? {
+        let path = PathBuf::from(path);
+        let size = std::fs::metadata(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
+        if size >= MAX_FILE {
+            return Err(bad(c, format!("{} is too large ({size} bytes)", path.display())));
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+        let loaded: Value = serde_json::from_str(&text).map_err(|e| bad(c, format!("{} is not a family: {e}", path.display())))?;
+        let Value::Object(mut fields) = loaded else {
+            return Err(bad(c, format!("{} is not a family: it isn't an object", path.display())));
+        };
+        let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p.get("name").filter(|v| !v.is_null()).cloned().or_else(|| fields.remove("name")).unwrap_or(json!(stem));
+        // Only the family it holds: what a file says to rename or delete isn't for it to say.
+        let mut family: Map<String, Value> =
+            ["category", "parameters", "types", "forms"].into_iter().filter_map(|k| fields.remove(k).map(|v| (k.to_string(), v))).collect();
+        family.insert("name".into(), name);
+        p = Value::Object(family);
+    }
+    let name =
+        string(c, &p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
+    let m = s.model_mut();
+    let users = |m: &Model, name: &str| -> Vec<Id> {
+        m.elements.iter().filter(|(_, e)| matches!(e, Element::Component(cp) if cp.family == name)).map(|(id, _)| *id).collect()
+    };
+    if flag(c, &p, "delete")? {
+        if !m.families.contains_key(&name) {
+            return Err(bad(c, format!("there's no family `{name}`")));
+        }
+        let used = users(m, &name);
+        if !used.is_empty() {
+            let ids: Vec<String> = used.iter().map(Id::to_string).collect();
+            return Err(bad(c, format!("components {} are of `{name}`; delete them first", ids.join(", "))));
+        }
+        m.families.remove(&name);
+        return Ok(json!({"deleted": name}));
+    }
+    let mut f = m.families.get(&name).cloned().unwrap_or_default();
+    let field = |key: &str, e: serde_json::Error| bad(c, format!("`{key}`: {e}"));
+    if let Some(v) = p.get("category").filter(|v| !v.is_null()) {
+        f.category = serde_json::from_value(v.clone()).map_err(|e| field("category", e))?;
+    }
+    if let Some(v) = p.get("parameters").filter(|v| !v.is_null()) {
+        f.parameters = serde_json::from_value(v.clone()).map_err(|e| field("parameters", e))?;
+    }
+    if let Some(v) = p.get("forms").filter(|v| !v.is_null()) {
+        f.forms = serde_json::from_value(v.clone()).map_err(|e| field("forms", e))?;
+    }
+    if let Some(v) = p.get("types").filter(|v| !v.is_null()) {
+        let mut types = serde_json::to_value(&f.types).map_err(|e| bad(c, e))?;
+        merge(&mut types, v);
+        f.types = serde_json::from_value(types).map_err(|e| field("types", e))?;
+    }
+    let name = match string(c, &p, "rename")? {
+        Some(to) => {
+            let to = to.trim().to_string();
+            if to.is_empty() {
+                return Err(bad(c, "`rename` needs a name"));
+            }
+            if to != name && m.families.contains_key(&to) {
+                return Err(bad(c, format!("there's a family `{to}` already")));
+            }
+            m.families.remove(&name);
+            for e in m.elements.values_mut() {
+                if let Element::Component(cp) = e
+                    && cp.family == name
+                {
+                    cp.family.clone_from(&to);
+                }
+            }
+            to
+        }
+        None => name,
+    };
+    m.families.insert(name.clone(), f.clone());
+    Ok(json!({"name": name, "family": f}))
+}
+
+fn component(s: &mut Session, p: &Value) -> R {
+    let c = "component";
+    let m = &s.model;
+    let family = string(c, p, "family")?.ok_or_else(|| bad(c, "`family` is required; `inspect` lists the families"))?;
+    let f = m.families.get(&family).ok_or_else(|| {
+        let names: Vec<&str> = m.families.keys().map(String::as_str).collect();
+        bad(c, format!("family `{family}` doesn't exist (there are: {})", names.join(", ")))
+    })?;
+    let type_name = match string(c, p, "type")? {
+        Some(t) => t,
+        None => f.types.keys().next().cloned().ok_or_else(|| bad(c, format!("family `{family}` has no type")))?,
+    };
+    let params = match p.get("params") {
+        Some(Value::Object(o)) => o.iter().filter(|(_, v)| !v.is_null()).map(|(k, v)| (k.clone(), v.clone())).collect(),
+        v if absent(v) => BTreeMap::new(),
+        v => return Err(bad(c, format!("`params` is {{parameter: value}}, not {}", v.unwrap_or(&Value::Null)))),
+    };
+    let comp = Component {
+        family,
+        type_name,
+        level: level_param(c, m, p, "level")?,
+        at: point_req(c, p, "at")?,
+        angle: num(c, p, "angle")?.unwrap_or(0.0),
+        offset: num(c, p, "offset")?.unwrap_or(0.0),
+        mirrored: flag(c, p, "mirrored")?,
+        params,
+    };
+    let id = s.model_mut().insert(Element::Component(comp));
+    Ok(json!({"id": id}))
+}
+
+/// The families, each its category, its types and its parameters' names.
+fn families(m: &Model) -> Value {
+    let all: Map<String, Value> = m
+        .families
+        .iter()
+        .map(|(n, f)| {
+            let parameters: Vec<&str> = f.parameters.iter().map(|p| p.name.as_str()).collect();
+            (n.clone(), json!({"category": f.category, "types": f.types.keys().collect::<Vec<_>>(), "parameters": parameters}))
+        })
+        .collect();
+    Value::Object(all)
 }
 
 /// `"#rrggbb"`, or `[r, g, b]`, each 0 to 255.
@@ -2174,7 +2348,9 @@ fn modify(s: &mut Session, p: &Value) -> R {
                 // Into a field that is an object (a plan's view range), the new one merges.
                 Some(old) if old.is_object() && val.is_object() => merge(old, &val),
                 _ => {
-                    obj.insert(k.clone(), val);
+                    let mut new = Value::Null;
+                    merge(&mut new, &val);
+                    obj.insert(k.clone(), new);
                 }
             }
         }
@@ -2219,17 +2395,22 @@ fn modify(s: &mut Session, p: &Value) -> R {
 /// `patch` merged into `into`, as JSON Merge Patch (RFC 7386) does: objects merge key by key, a
 /// null removes its key, anything else replaces what was there.
 fn merge(into: &mut Value, patch: &Value) {
-    match (into, patch) {
-        (Value::Object(a), Value::Object(b)) => {
-            for (k, v) in b {
-                if v.is_null() {
-                    a.remove(k);
-                } else {
-                    merge(a.entry(k.clone()).or_insert(Value::Null), v);
-                }
+    let Value::Object(b) = patch else {
+        *into = patch.clone();
+        return;
+    };
+    // Into what isn't an object yet, a new one: its nulls are values taken away, never kept.
+    if !into.is_object() {
+        *into = Value::Object(Map::new());
+    }
+    if let Value::Object(a) = into {
+        for (k, v) in b {
+            if v.is_null() {
+                a.remove(k);
+            } else {
+                merge(a.entry(k.clone()).or_insert(Value::Null), v);
             }
         }
-        (into, patch) => *into = patch.clone(),
     }
 }
 
@@ -2269,6 +2450,11 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         Element::Spot(sp) => sp.at = f(sp.at),
         Element::Viewport(v) => v.at = f(v.at),
         Element::Column(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
+        // A mirror image is the family's, flipped.
+        Element::Component(cp) => {
+            (cp.at, cp.angle) = turned(f, cp.at, cp.angle);
+            cp.mirrored ^= mo.mirror;
+        }
         // A mirror image turns the other way at its landings.
         Element::Stair(Stair { start, angle, landings, .. }) | Element::Ramp(Ramp { start, angle, landings, .. }) => {
             (*start, *angle) = turned(f, *start, *angle);
@@ -2847,7 +3033,7 @@ fn inspect(s: &mut Session, _: &Value) -> R {
     Ok(json!({
         "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
         "counts": counts,
-        "types": m.types, "materials": m.materials, "warnings": warnings, "history": s.history(),
+        "types": m.types, "materials": m.materials, "families": families(m), "warnings": warnings, "history": s.history(),
     }))
 }
 

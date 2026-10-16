@@ -95,3 +95,9 @@ is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): 
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to
 its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.
+A family (`Model::families`, `family.rs`) is parameters, types that set them and forms in its own axes: x along a
+component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
+`yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;
+`Model::component_pieces` are its forms where it stands. Plans draw them from above, a form's edges hidden under a higher
+form of the same component; sections show them beyond their line and never cut them (`Solid::Mesh` has no `across`); IFC
+writes each form as a closed face set, triangles turned out, and reads one family per family name the file gives.

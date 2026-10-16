@@ -6,7 +6,7 @@
 //! pixel shows, for picking. Sections and elevations use the same pictures, clipped at their
 //! line and in hidden line, and cut the same solids.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::geom::{self, P2};
 use crate::model::{Element, Id, Layer, Model};
@@ -31,6 +31,8 @@ const GLASS: Rgb = Rgb(166, 200, 228);
 const ROOF: Rgb = Rgb(176, 118, 96);
 const CEILING: Rgb = Rgb(244, 242, 236);
 const RAIL: Rgb = Rgb(120, 122, 128);
+/// A component's form made of nothing the library has.
+const COMPONENT: Rgb = Rgb(214, 204, 188);
 /// Room around a fitted model, px.
 const MARGIN: f64 = 30.0;
 
@@ -54,13 +56,13 @@ pub(crate) fn unit(a: P3) -> P3 {
     if l > 0.0 { mul(a, 1.0 / l) } else { [0.0; 3] }
 }
 
-/// A triangle of an element's surface; on a curved one, which (its element's, inside or outside),
-/// so the facets read as one.
+/// A triangle of an element's surface; on a curved one, which (its element's, and which of its
+/// curved surfaces: a wall's outside or inside, a component's form), so the facets read as one.
 struct Tri {
     p: [P3; 3],
     owner: Id,
     color: Rgb,
-    curve: Option<(Id, bool)>,
+    curve: Option<(Id, u32)>,
 }
 
 /// A wall's plan frame: its start, along it, and square to it.
@@ -97,12 +99,14 @@ impl Frame {
 
 /// A solid of the model: a box (a door's leaf, a window's glass, a stair's step); a slab: a flat
 /// face, level or sloped, and what lies up to `rise` mm above it (a floor, a column, a roof's
-/// slope); or a prism: a ring in plan from one plane up to another (a wall's part; of a curved
-/// wall, with its centre and its centre line's radius, its faces being one surface each).
+/// slope); a prism: a ring in plan from one plane up to another (a wall's part; of a curved wall,
+/// with its centre and its centre line's radius, its faces being one surface each); or triangles
+/// (a component's form, which sections show and don't cut), past `caps` one curved surface `round`.
 pub(crate) enum Solid {
     Box { owner: Id, color: Rgb, frame: Frame, a: (f64, f64), c: (f64, f64), z: (f64, f64) },
     Slab { owner: Id, color: Rgb, face: Vec<P3>, rise: f64 },
     Prism { owner: Id, color: Rgb, ring: Vec<P2>, bottom: Plane, top: Plane, curve: Option<(P2, f64)> },
+    Mesh { owner: Id, color: Rgb, tris: Vec<[P3; 3]>, caps: usize, round: Option<u32> },
 }
 
 /// A level slab: `ring` from `z.0` up to `z.1`.
@@ -117,14 +121,14 @@ fn plan(face: &[P3]) -> Vec<P2> {
 impl Solid {
     pub(crate) fn owner(&self) -> Id {
         match self {
-            Solid::Box { owner, .. } | Solid::Slab { owner, .. } | Solid::Prism { owner, .. } => *owner,
+            Solid::Box { owner, .. } | Solid::Slab { owner, .. } | Solid::Prism { owner, .. } | Solid::Mesh { owner, .. } => *owner,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn color(&self) -> Rgb {
         match self {
-            Solid::Box { color, .. } | Solid::Slab { color, .. } | Solid::Prism { color, .. } => *color,
+            Solid::Box { color, .. } | Solid::Slab { color, .. } | Solid::Prism { color, .. } | Solid::Mesh { color, .. } => *color,
         }
     }
 
@@ -139,6 +143,7 @@ impl Solid {
             Solid::Prism { ring, bottom, top, .. } => {
                 ring.iter().fold((f64::MAX, f64::MIN), |(lo, hi), q| (lo.min(bottom.at(*q)), hi.max(top.at(*q))))
             }
+            Solid::Mesh { tris, .. } => tris.iter().flatten().fold((f64::MAX, f64::MIN), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2]))),
         }
     }
 
@@ -154,6 +159,20 @@ impl Solid {
                 (z, z + rise)
             }
             Solid::Prism { bottom, top, .. } => (bottom.at(q), top.at(q)),
+            // Its triangles' heights over `q`, lowest and highest; off it, all of it.
+            Solid::Mesh { tris, .. } => {
+                let zs = tris.iter().filter_map(|[a, b, c]| {
+                    let (pa, pb, pc) = (P2(a[0], a[1]), P2(b[0], b[1]), P2(c[0], c[1]));
+                    let det = (pb - pa).cross(pc - pa);
+                    if det.abs() < 1e-9 {
+                        return None;
+                    }
+                    let (u, v) = ((q - pa).cross(pc - pa) / det, (pb - pa).cross(q - pa) / det);
+                    (u >= 0.0 && v >= 0.0 && u + v <= 1.0).then(|| a[2] + u * (b[2] - a[2]) + v * (c[2] - a[2]))
+                });
+                let (lo, hi) = zs.fold((f64::MAX, f64::MIN), |(lo, hi), z| (lo.min(z), hi.max(z)));
+                if lo <= hi { (lo, hi) } else { self.heights() }
+            }
         }
     }
 
@@ -166,6 +185,7 @@ impl Solid {
             }
             Solid::Slab { face, .. } => geom::contains(&plan(face), q),
             Solid::Prism { ring, .. } => geom::contains(ring, q),
+            Solid::Mesh { tris, .. } => tris.iter().any(|[a, b, c]| geom::contains(&[P2(a[0], a[1]), P2(b[0], b[1]), P2(c[0], c[1])], q)),
         }
     }
 
@@ -183,6 +203,7 @@ impl Solid {
             Solid::Prism { ring, bottom, top, .. } => {
                 out.extend(ring.iter().flat_map(|q| [[q.0, q.1, bottom.at(*q)], [q.0, q.1, top.at(*q)]]))
             }
+            Solid::Mesh { tris, .. } => out.extend(tris.iter().flatten()),
         }
         out
     }
@@ -207,6 +228,8 @@ impl Solid {
             }
             Solid::Slab { face, .. } => crossings(&plan(face), p, u),
             Solid::Prism { ring, .. } => crossings(ring, p, u),
+            // Shown beyond a section's line, as Revit shows furniture, and never cut.
+            Solid::Mesh { .. } => Vec::new(),
         }
     }
 
@@ -227,9 +250,15 @@ impl Solid {
                     // Along a curved wall's face (not across it, where it's cut), which face.
                     let curve = curve
                         .filter(|(c, _)| (b - a).unit().cross((a - *c).unit()).abs() > 0.5)
-                        .map(|(c, r)| (owner, ((a + b) * 0.5).dist(c) > r));
+                        .map(|(c, r)| (owner, u32::from(((a + b) * 0.5).dist(c) > r)));
                     out.push(Tri { p: [a0, b0, b1], owner, color, curve });
                     out.push(Tri { p: [a0, b1, a1], owner, color, curve });
+                }
+            }
+            Solid::Mesh { owner, color, tris, caps, round } => {
+                for (i, p) in tris.iter().enumerate() {
+                    let curve = round.filter(|_| i >= *caps).map(|k| (*owner, k));
+                    out.push(Tri { p: *p, owner: *owner, color: *color, curve });
                 }
             }
         }
@@ -291,6 +320,14 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
             }
             Element::Column(col) => {
                 out.push(slab(id, WALL, &m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height)))
+            }
+            // Each form in its material's colour; a round one's sides one surface, as a curved wall's are.
+            Element::Component(c) => {
+                for (k, piece) in (2..).zip(m.component_pieces(c)) {
+                    let color = m.materials.get(&piece.material).map_or(COMPONENT, |x| Rgb(x.color[0], x.color[1], x.color[2]));
+                    let round = piece.round.then_some(k);
+                    out.push(Solid::Mesh { owner: id, color, tris: piece.tris, caps: piece.caps, round });
+                }
             }
             // Each tread a block from the floor up to it, each landing a slab up to its top; the last
             // riser of a run climbs onto a landing, or the floor above.
@@ -365,8 +402,12 @@ fn prism(out: &mut Vec<Tri>, owner: Id, color: Rgb, face: &[P3], rise: f64) {
 /// Each triangle's plane, as an index the triangles lying in it (within half a millimetre) share;
 /// the facets of one face of a curved wall share one too.
 fn planes(tris: &[Tri]) -> Vec<usize> {
-    let mut found: Vec<(P3, f64)> = Vec::new();
-    let mut curves: BTreeMap<(Id, bool), usize> = BTreeMap::new();
+    // Planes by their normal, in cells wider than the tolerance, and a millimetre's slab of distance;
+    // a match is looked for in the nearer neighbouring cell on each axis and the slabs either side,
+    // so the tolerance holds across a cell's edge.
+    let mut found: HashMap<[i64; 4], Vec<(P3, f64, usize)>> = HashMap::new();
+    let mut count = 0;
+    let mut curves: BTreeMap<(Id, u32), usize> = BTreeMap::new();
     tris.iter()
         .map(|t| {
             if let Some(c) = t.curve {
@@ -374,16 +415,35 @@ fn planes(tris: &[Tri]) -> Vec<usize> {
                 return *curves.entry(c).or_insert(next);
             }
             let n = unit(cross(sub(t.p[1], t.p[0]), sub(t.p[2], t.p[0])));
+            count += 1;
+            // No area, no plane to share: its own.
+            if dot(n, n) < 0.5 {
+                return count - 1;
+            }
             let d = dot(n, t.p[0]);
-            // ponytail: a linear search per triangle; hash planes if models reach tens of thousands of faces.
-            let same = |(m, e): &(P3, f64)| {
-                let c = dot(*m, n);
-                (c > 1.0 - 1e-9 && (e - d).abs() < 0.5) || (c < -1.0 + 1e-9 && (e + d).abs() < 0.5)
-            };
-            found.iter().position(same).unwrap_or_else(|| {
-                found.push((n, d));
-                found.len() - 1
-            })
+            // A plane and its flip are one: each faces where its first ratio that isn't zero is positive.
+            let (n, d) = if n.iter().find(|x| x.abs() > 1e-9).is_some_and(|x| *x < 0.0) { (mul(n, -1.0), -d) } else { (n, d) };
+            let cell = n.map(|x| x * 1e4);
+            let q = cell.map(|x| x.round() as i64);
+            let near = |k: usize| [q[k], q[k] + if cell[k] < q[k] as f64 { -1 } else { 1 }];
+            let slab = d.floor() as i64;
+            for a in near(0) {
+                for b in near(1) {
+                    for c in near(2) {
+                        for s in slab - 1..=slab + 1 {
+                            let same = found
+                                .get(&[a, b, c, s])
+                                .and_then(|v| v.iter().find(|(m, e, _)| dot(*m, n) > 1.0 - 1e-9 && (e - d).abs() < 0.5));
+                            if let Some(&(_, _, id)) = same {
+                                count -= 1;
+                                return id;
+                            }
+                        }
+                    }
+                }
+            }
+            found.entry([q[0], q[1], q[2], slab]).or_default().push((n, d, count - 1));
+            count - 1
         })
         .collect()
 }
@@ -737,6 +797,26 @@ impl Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coplanar_triangles_share_a_plane_and_degenerate_ones_each_their_own() {
+        let tri = |p: [P3; 3]| Tri { p, owner: 1, color: EDGE, curve: None };
+        // A face's triangles a micron off its plane, as a file rounds them, are one plane;
+        // triangles with no area are each their own, and many of them stay quick.
+        let mut tris: Vec<Tri> = (0..200)
+            .map(|k| {
+                let (x, e) = (f64::from(k) * 100.0, f64::from(k % 7) * 1e-4);
+                tri([[x, 0.0, 1000.0 + e], [x + 100.0, 0.0, 1000.0], [x, 100.0, 1000.0 - e]])
+            })
+            .collect();
+        tris.extend((0..20_000).map(|k| tri([[f64::from(k), 0.0, 0.0]; 3])));
+        let started = std::time::Instant::now();
+        let ids = planes(&tris);
+        assert!(started.elapsed().as_secs_f64() < 1.0, "{:?}", started.elapsed());
+        assert!(ids.iter().take(200).all(|id| *id == ids[0]), "one plane");
+        let degenerate: std::collections::BTreeSet<usize> = ids.iter().skip(200).copied().collect();
+        assert_eq!(degenerate.len(), 20_000);
+    }
     use crate::engine::Session;
 
     /// The 8 x 6 m box of 200 mm walls on Level 1 (walls 3 south, 4 east, 5 north, 6 west), a door

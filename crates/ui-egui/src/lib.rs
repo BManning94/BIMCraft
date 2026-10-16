@@ -109,6 +109,8 @@ pub enum Tool {
     Elevation,
     /// A column where clicked.
     Column,
+    /// A family's type where clicked: the one picked, turned by Space.
+    Component,
     /// A stair: the points clicked, its start and where its first run ends; the next click, which
     /// way its next run turns from the landing.
     Stair(Vec<P2>),
@@ -287,7 +289,7 @@ pub struct BimApp {
     /// The model as last opened or saved: any other is unsaved.
     saved: Arc<Model>,
     /// The palette field being typed in: element, field, text so far.
-    edit: Option<(Id, &'static str, String)>,
+    edit: Option<(Id, String, String)>,
     /// The Level tool's elevation and name, as typed in the Options Bar.
     new_level: (String, String),
     /// The last letters typed over the plan, for two-letter shortcuts.
@@ -295,6 +297,10 @@ pub struct BimApp {
     pending: Option<Pending>,
     type_dialog: Option<properties::TypeDialog>,
     materials_dialog: Option<properties::MaterialsDialog>,
+    family_dialog: Option<properties::FamilyDialog>,
+    /// The family and type the Component tool places, as picked, and how far it's turned, degrees.
+    component: Option<(String, String)>,
+    component_angle: f64,
     /// The Properties palette's folded groups.
     collapsed: BTreeSet<&'static str>,
     /// Where views show, last frame.
@@ -519,6 +525,9 @@ impl BimApp {
             pending: None,
             type_dialog: None,
             materials_dialog: None,
+            family_dialog: None,
+            component: None,
+            component_angle: 0.0,
             collapsed: BTreeSet::new(),
             view_rect: Rect::ZERO,
             closing: false,
@@ -579,6 +588,7 @@ impl BimApp {
             Tool::Section(_) => Some("Section"),
             Tool::Elevation => Some("Elevation"),
             Tool::Column => Some("Place Column"),
+            Tool::Component => Some("Place Component"),
             Tool::Stair(_) => Some("Create Stair"),
             Tool::Ramp(_) => Some("Create Ramp"),
             Tool::Railing(_) => Some("Create Railing Path"),
@@ -748,7 +758,7 @@ impl BimApp {
 
     fn keys(&mut self, ctx: &Context) {
         // A dialog takes the keys while it's open.
-        if self.type_dialog.is_some() || self.materials_dialog.is_some() || self.pending.is_some() {
+        if self.type_dialog.is_some() || self.materials_dialog.is_some() || self.family_dialog.is_some() || self.pending.is_some() {
             return;
         }
         let pressed = |m: Modifiers, k: Key| ctx.input_mut(|i| i.consume_key(m, k));
@@ -793,6 +803,9 @@ impl BimApp {
         }
         if self.tool == Tool::Modify && pressed(Modifiers::NONE, Key::Space) {
             self.flip();
+        }
+        if self.tool == Tool::Component && pressed(Modifiers::NONE, Key::Space) {
+            self.component_angle = (self.component_angle + 90.0) % 360.0;
         }
         let typed: String = ctx.input(|i| {
             i.events
@@ -859,6 +872,7 @@ impl BimApp {
                 Some("spot") => Tool::Spot,
                 Some("tag") => Tool::Tag,
                 Some("column") => Tool::Column,
+                Some("component") => Tool::Component,
                 Some("delete") => {
                     self.delete();
                     return true;
@@ -972,6 +986,7 @@ impl BimApp {
                 Some(Element::Section(v) | Element::Elevation(v)) => pts.extend([v.start, v.end]),
                 Some(Element::Tag(t)) => pts.extend(m.anchor(t.host).map(|a| a + t.offset)),
                 Some(Element::Column(c)) => pts.push(c.at),
+                Some(Element::Component(c)) => pts.push(c.at),
                 Some(e @ (Element::Stair(_) | Element::Ramp(_))) => {
                     pts.extend(stairs::layout(m, e).into_iter().flat_map(|l| l.walk.into_iter().map(|(p, _)| p)));
                 }
@@ -1360,6 +1375,7 @@ impl BimApp {
                 (Icon::Door, "Door", "Door (DR): click a wall", Tool::Door),
                 (Icon::Window, "Window", "Window (WN): click a wall", Tool::Window),
                 (Icon::Column, "Column", "Column (CL): click where it stands", Tool::Column),
+                (Icon::Component, "Component", "Component (CM): a family's type, where you click; Space turns it", Tool::Component),
                 (Icon::Roof, "Roof", "Roof by Footprint: click inside the walls to roof them, on the level above", Tool::Roof),
                 (
                     Icon::ExtrusionRoof,
@@ -1665,6 +1681,20 @@ impl BimApp {
                 }
             });
         }
+        // Placing a component: Revit's Mode panel, which loads a family from a file.
+        if self.tool == Tool::Component {
+            panel(ui, "Mode", |ui| {
+                let tip = "Load Family: a family saved as a .json file, BIMCraft's own";
+                if big_button(ui, Icon::LoadFamily, "Load Family", false, tip).clicked()
+                    && let Some(path) = rfd::FileDialog::new().add_filter(t("BIMCraft family"), &["json"]).pick_file()
+                    && let Some(r) = self.run("family", json!({"path": path.to_string_lossy()}))
+                {
+                    let name = r["name"].as_str().unwrap_or_default().to_string();
+                    let first = r["family"]["types"].as_object().and_then(|t| t.keys().next().cloned()).unwrap_or_default();
+                    self.component = Some((name, first));
+                }
+            });
+        }
         // Walls selected: Revit's Modify Wall panel.
         let walls = self.selected_walls();
         if !walls.is_empty() && matches!(self.tool, Tool::Modify | Tool::Attach) {
@@ -1957,6 +1987,7 @@ impl BimApp {
             Tool::Section(Some(_)) => "Click the section's end.",
             Tool::Elevation => "Click beside the building: the elevation looks at the side you click by.",
             Tool::Column => "Click to place a column, as high as the Options Bar says.",
+            Tool::Component => "Click where the component goes; Space turns it a quarter turn.",
             Tool::Stair(pts) if pts.is_empty() => "Click where the stair starts: the middle of its first riser.",
             Tool::Stair(pts) if pts.len() == 1 => {
                 "Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels."
@@ -2096,9 +2127,37 @@ impl BimApp {
                 }
             });
         }
+        // Its families, each its types: one picked, the Component tool places it.
+        let mut place = None;
+        CollapsingHeader::new(t("Families")).default_open(false).show(ui, |ui| {
+            for (name, f) in &m.families {
+                CollapsingHeader::new(name).id_salt(("family", name)).default_open(false).show(ui, |ui| {
+                    for ty in f.types.keys() {
+                        let on = self.tool == Tool::Component && self.component.as_ref() == Some(&(name.clone(), ty.clone()));
+                        if ui.selectable_label(on, ty).clicked() {
+                            place = Some((name.clone(), ty.clone()));
+                        }
+                    }
+                });
+            }
+        });
         if let Some(sheet) = open {
             self.open_sheet(sheet);
         }
+        if let Some(picked) = place {
+            self.component = Some(picked);
+            self.set_tool(Tool::Component);
+        }
+    }
+
+    /// The family and type the Component tool places: the one picked, while its family has it, else
+    /// the first there is.
+    pub(crate) fn placing(&self) -> Option<(String, String)> {
+        let m = &self.session.model;
+        self.component
+            .clone()
+            .filter(|(f, t)| m.families.get(f).is_some_and(|f| f.types.contains_key(t)))
+            .or_else(|| m.families.iter().find_map(|(n, f)| f.types.keys().next().map(|t| (n.clone(), t.clone()))))
     }
 
     // ---------- the middle: view tabs, schedules ----------
@@ -2161,6 +2220,7 @@ impl BimApp {
 
     fn dialogs(&mut self, ctx: &Context) {
         self.type_properties(ctx);
+        self.family_type_properties(ctx);
         self.materials_window(ctx);
         let Some(pending) = self.pending else { return };
         #[derive(PartialEq)]

@@ -63,6 +63,7 @@ pub fn category(category: &str, several: bool) -> String {
         "sheet" => (["Sheet", "Folha", "Plano"], ["Sheets", "Folhas", "Planos"]),
         "viewport" => (["Viewport", "Janela de vista", "Vista en plano"], ["Viewports", "Janelas de vista", "Vistas en plano"]),
         "column" => (["Column", "Pilar", "Columna"], ["Columns", "Pilares", "Columnas"]),
+        "component" => (["Component", "Componente", "Componente"], ["Components", "Componentes", "Componentes"]),
         "stair" => (["Stair", "Escada", "Escalera"], ["Stairs", "Escadas", "Escaleras"]),
         "roof" => (["Roof", "Telhado", "Cubierta"], ["Roofs", "Telhados", "Cubiertas"]),
         "ceiling" => (["Ceiling", "Forro", "Cielo raso"], ["Ceilings", "Forros", "Cielos rasos"]),
@@ -961,6 +962,28 @@ const WORDS: &[[&str; 3]] = &[
     ["Extrusion End", "Fim da extrusão", "Fin de extrusión"],
     // The materials library, and layered floors, roofs and ceilings.
     ["Materials", "Materiais", "Materiales"],
+    ["Component", "Componente", "Componente"],
+    [
+        "Component (CM): a family's type, where you click; Space turns it",
+        "Componente (CM): um tipo de família, onde você clicar; Espaço o gira",
+        "Componente (CM): un tipo de familia, donde haga clic; Espacio lo gira",
+    ],
+    ["Place Component", "Inserir componente", "Colocar componente"],
+    [
+        "Click where the component goes; Space turns it a quarter turn.",
+        "Clique onde vai o componente; Espaço o gira um quarto de volta.",
+        "Haga clic donde va el componente; Espacio lo gira un cuarto de vuelta.",
+    ],
+    ["Mode", "Modo", "Modo"],
+    ["Load Family", "Carregar família", "Cargar familia"],
+    [
+        "Load Family: a family saved as a .json file, BIMCraft's own",
+        "Carregar família: uma família salva como arquivo .json, do próprio BIMCraft",
+        "Cargar familia: una familia guardada como archivo .json, propia de BIMCraft",
+    ],
+    ["BIMCraft family", "Família do BIMCraft", "Familia de BIMCraft"],
+    ["Families", "Famílias", "Familias"],
+    ["Materials and Finishes", "Materiais e acabamentos", "Materiales y acabados"],
     ["Material:", "Material:", "Material:"],
     [
         "Materials: the project's library, each material's colour in 3D and the patterns its cut and its surfaces show",

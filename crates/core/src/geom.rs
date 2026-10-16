@@ -108,6 +108,29 @@ pub fn grow(ring: &[P2], d: f64) -> Vec<P2> {
         .collect()
 }
 
+/// The convex hull round `points`, counter-clockwise (Andrew's monotone chain).
+pub fn hull(mut points: Vec<P2>) -> Vec<P2> {
+    points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    points.dedup_by(|a, b| a.dist(*b) < 1e-9);
+    if points.len() < 3 {
+        return points;
+    }
+    let mut out: Vec<P2> = Vec::with_capacity(points.len() + 1);
+    for pass in [false, true] {
+        let start = out.len();
+        let chain: Box<dyn Iterator<Item = &P2>> = if pass { Box::new(points.iter().rev()) } else { Box::new(points.iter()) };
+        for &p in chain {
+            while out.len() >= start + 2 && out.get(out.len() - 2).zip(out.last()).is_some_and(|(a, b)| (*b - *a).cross(p - *a) <= 0.0) {
+                out.pop();
+            }
+            out.push(p);
+        }
+        // Each chain's last point starts the other.
+        out.pop();
+    }
+    out
+}
+
 /// A simple ring cut into triangles, as indices into it, each counter-clockwise: ear clipping.
 /// A ring that crosses itself gets the ears there are; a point repeated in a row is one corner.
 pub fn triangulate(ring: &[P2]) -> Vec<[usize; 3]> {
