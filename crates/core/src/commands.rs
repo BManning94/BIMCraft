@@ -9,6 +9,7 @@ use serde_json::{Map, Value, json};
 
 use crate::engine::{Command, Run, Session};
 use crate::geom::{self, P2};
+use crate::graphics::{self, Graphics, Group, Look, Override, ViewTemplate};
 use crate::language::Language;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
@@ -434,6 +435,53 @@ pub static ALL: &[Command] = &[
          `grouped`, a row for each set of the sort fields' values: Count and totals summed, and a field whose values differ \
          left empty. Each one given replaces the last; `fields: []` goes back to its category's",
         schedule,
+    ),
+    edit(
+        "graphics",
+        "Visibility/Graphics",
+        &[],
+        "{view?: a level's, section's or elevation's name or id, or {3D} (the lowest level's plan unless given), hide?: [category, \
+         …], show?: […], hide_elements?: [id, …], show_elements?: […], categories?: {category: override | null, …}, elements?: \
+         {id: override | null, …}, filters?: [{filter, hidden?, projection?, cut?, halftone?, transparency?}, …], template?: \
+         name | null, reset?: true} what a view hides and how it draws the rest, as Revit's Visibility/Graphics does; with \
+         none of those, the view's settings as they are. A category hidden (walls, floors, rooms, grids, dimensions, levels…, \
+         in any case, singular or plural) leaves all its elements out of that view, and `hide_elements` the elements given. An \
+         override is {hidden?, projection?: style, cut?: style, halftone?, transparency?}, a style {color?, weight? (px, \
+         0.5 to 20; 1 px is 0.2 mm on a sheet), dash? (solid, dashed, dotted), fill?}, a colour [r, g, b] or \"#rrggbb\". \
+         Projection is what a plan sees below its cut plane, a section beyond its line and the annotation; cut is what the view \
+         cuts; `fill` is the cut's poché, or a 3D view's surface; in a 3D view, and in what a section sees beyond its line, a \
+         projection's `color` is the colour of the edges (weight and dash draw lines, and those are vectors). Halftone draws it \
+         halfway to the paper; transparency (percent) sees through it in a 3D view. Halftone and transparency only add: a \
+         filter or an element can lighten what its category doesn't, not take its category's away. Overrides merge into the last (null takes a field or the override away); an element's own \
+         beats the filters applied (the first prevailing), which beat the category's. `filters` replaces the list applied; \
+         `template` follows a view template; `reset` takes away all of the view's own settings",
+        view_graphics,
+    ),
+    edit(
+        "filter",
+        "View Filter",
+        &[],
+        "{name, categories?: [category, …], rules?: [{field, op, value}, …], delete?: true} a view filter, as Revit's parameter \
+         filters are: the elements of its categories (any a schedule can be of: walls, doors, rooms, components…) that hold \
+         every rule, a schedule filter's (`field` of the category, `op`: equals, not-equals, greater, greater-or-equal, less, \
+         less-or-equal, contains, not-contains, begins-with, not-begins-with, ends-with, not-ends-with, has-value, \
+         has-no-value; `value`), and every element of them without rules. A view applies it with `graphics {filters}`, \
+         hiding what it picks out or drawing it another way. Gone, views stop applying it. Replies with the filter and the ids \
+         it picks out; `name` alone reads one",
+        view_filter,
+    ),
+    edit(
+        "template",
+        "View Template",
+        &[],
+        "{name, from?: a level's, section's, elevation's or 3D view's name or id, controls?: [categories, filters, range], \
+         view_range?: {top?, cut?, bottom?, depth?}, hide?, show?, categories?, filters?, reset?, delete?: true} a view template, \
+         as Revit's: settings under a name for views to follow with `graphics {template}`. `from` takes a view's categories \
+         (hidden and overridden), filters and, a plan's, view range; `controls` is what views following it get from it \
+         (all three unless it says) and cannot change for themselves: its categories, its filters, a plan's view range. \
+         `hide`, `show`, `categories`, `filters` and `reset` change it as they change a view; `view_range` merges into its \
+         range. Changed, every view following it follows. Gone, they keep their own settings. `name` alone reads one",
+        view_template,
     ),
     Command {
         id: "measure",
@@ -1021,7 +1069,8 @@ fn render_view(s: &mut Session, p: &Value) -> R {
     if matches!(view, Some(Value::String(v)) if v.eq_ignore_ascii_case("{3D}") || v.eq_ignore_ascii_case("3D")) {
         let (azimuth, elevation) = (num(c, p, "azimuth")?.unwrap_or(view3d::AZIMUTH), num(c, p, "elevation")?.unwrap_or(view3d::ELEVATION));
         let scene = view3d::Scene::new(m);
-        let png = scene.render(&scene.fit(azimuth, elevation, w3, h3), &[]).png().map_err(|e| bad(c, e))?;
+        let look = m.default_3d().map_or_else(Look::default, |id| Look::of(m, id));
+        let png = scene.render_in(&scene.fit_in(azimuth, elevation, w3, h3, &look), &[], &look).png().map_err(|e| bad(c, e))?;
         return png_reply(
             c,
             p,
@@ -1157,6 +1206,401 @@ fn schedule(s: &mut Session, p: &Value) -> R {
         out["totals"] = json!(totals);
     }
     Ok(out)
+}
+
+/// A list of category names, as `key` gives them: each as views draw it.
+fn drawn_categories(c: &str, p: &Value, key: &str) -> Result<Vec<String>, String> {
+    let list = match p.get(key) {
+        v if absent(v) => return Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() <= graphics::MAX_ENTRIES => a,
+        Some(v) => return Err(bad(c, format!("`{key}` is a list of categories, [\"walls\", \"rooms\"…], not {v}"))),
+        None => return Ok(Vec::new()),
+    };
+    list.iter()
+        .map(|v| v.as_str().ok_or_else(|| bad(c, format!("`{key}`: {v} is not a category"))).and_then(|n| drawn_category(c, n)))
+        .collect()
+}
+
+/// The category `given` names, if views draw it.
+fn drawn_category(c: &str, given: &str) -> Result<String, String> {
+    let name = category(given);
+    if graphics::drawn(&name) {
+        Ok(name)
+    } else {
+        Err(bad(
+            c,
+            format!(
+                "`{given}` isn't a category views draw; there are: {}",
+                graphics::MODEL.iter().chain(&graphics::ANNOTATION).copied().collect::<Vec<_>>().join(", ")
+            ),
+        ))
+    }
+}
+
+/// A list of element ids, as `key` gives them: elements of the model that views draw.
+fn drawn_elements(c: &str, m: &Model, p: &Value, key: &str) -> Result<Vec<Id>, String> {
+    let list = match p.get(key) {
+        v if absent(v) => return Ok(Vec::new()),
+        Some(Value::Array(a)) if a.len() <= graphics::MAX_ENTRIES => a,
+        Some(v) => return Err(bad(c, format!("`{key}` is a list of element ids, not {v}"))),
+        None => return Ok(Vec::new()),
+    };
+    list.iter()
+        .map(|v| v.as_u64().ok_or_else(|| bad(c, format!("`{key}`: {v} is not an element id"))).and_then(|id| drawn_element(c, m, id)))
+        .collect()
+}
+
+/// `id` if it's an element views draw.
+fn drawn_element(c: &str, m: &Model, id: Id) -> Result<Id, String> {
+    match m.elements.get(&id) {
+        None => Err(bad(c, format!("no element {id}"))),
+        Some(e) if !graphics::drawn(e.category()) => Err(bad(c, format!("element {id} is a {}, and views don't draw those", e.category()))),
+        Some(_) => Ok(id),
+    }
+}
+
+/// `over` merged into what `key` of `from` holds, as JSON Merge Patch does: the override that comes
+/// of it.
+fn merged_override(c: &str, what: &str, from: Option<&Override>, patch: &Value) -> Result<Override, String> {
+    let mut now = serde_json::to_value(from.cloned().unwrap_or_default()).unwrap_or_default();
+    merge(&mut now, patch);
+    serde_json::from_value(now).map_err(|e| bad(c, format!("{what}: {e}")))
+}
+
+/// The changes `p` asks of graphics `g`, made: hiding and showing categories and elements,
+/// overrides, filters and the template to follow. Whether it changed any. A template's are its
+/// categories' and its filters' alone.
+fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: bool) -> Result<bool, String> {
+    let given = |k: &str| !absent(p.get(k));
+    let views_own = ["hide_elements", "show_elements", "elements"];
+    if of_template && let Some(k) = views_own.iter().find(|k| given(k)).or(p.get("template").map(|_| &"template")) {
+        return Err(bad(c, format!("`{k}` is a view's own; a template holds categories and filters")));
+    }
+    // The template the view will follow once this call is done: one named, or none, in the same call, rules.
+    let template_then = match p.get("template") {
+        Some(Value::Null) => None,
+        Some(Value::String(n)) => Some(n.clone()),
+        _ => g.template.clone(),
+    };
+    let controlled = template_then.as_ref().and_then(|n| m.view_templates.get(n));
+    let follows = |group: Group| controlled.filter(|t| t.controls.contains(&group)).map(|_| template_then.clone().unwrap_or_default());
+    let touches_categories = ["hide", "show", "categories"].iter().any(|k| given(k));
+    let touches_filters = given("filters");
+    if !flag(c, p, "reset")? {
+        for (touches, group, what) in [(touches_categories, Group::Categories, "categories"), (touches_filters, Group::Filters, "filters")]
+        {
+            if touches && let Some(t) = follows(group) {
+                return Err(bad(
+                    c,
+                    format!("its {what} follow view template `{t}`; change the template, or `template: null` to stop following it"),
+                ));
+            }
+        }
+    }
+    let changed =
+        views_own.iter().chain(&["hide", "show", "categories", "filters", "reset"]).any(|k| given(k)) || p.get("template").is_some();
+    if flag(c, p, "reset")? {
+        *g = Graphics::default();
+    }
+    for name in drawn_categories(c, p, "hide")? {
+        g.categories.entry(name).or_default().hidden = true;
+    }
+    for name in drawn_categories(c, p, "show")? {
+        if let Some(o) = g.categories.get_mut(&name) {
+            o.hidden = false;
+        }
+        g.categories.retain(|_, o| !o.is_empty());
+    }
+    for id in drawn_elements(c, m, p, "hide_elements")? {
+        g.elements.entry(id).or_default().hidden = true;
+    }
+    for id in drawn_elements(c, m, p, "show_elements")? {
+        if let Some(o) = g.elements.get_mut(&id) {
+            o.hidden = false;
+        }
+        g.elements.retain(|_, o| !o.is_empty());
+    }
+    match p.get("categories") {
+        v if absent(v) => {}
+        Some(Value::Object(o)) if o.len() <= graphics::MAX_ENTRIES => {
+            for (name, patch) in o {
+                let name = drawn_category(c, name)?;
+                let over = if patch.is_null() {
+                    Override::default()
+                } else {
+                    merged_override(c, &format!("category `{name}`"), g.categories.get(&name), patch)?
+                };
+                if over.is_empty() {
+                    g.categories.remove(&name)
+                } else {
+                    g.categories.insert(name, over)
+                };
+            }
+        }
+        Some(v) => return Err(bad(c, format!("`categories` is {{category: override}}, not {v}"))),
+        None => {}
+    }
+    match p.get("elements") {
+        v if absent(v) => {}
+        Some(Value::Object(o)) if o.len() <= graphics::MAX_ENTRIES => {
+            for (key, patch) in o {
+                let id = key.parse::<Id>().map_err(|_| bad(c, format!("`elements`: `{key}` is not an element id")))?;
+                let id = drawn_element(c, m, id)?;
+                let over = if patch.is_null() {
+                    Override::default()
+                } else {
+                    merged_override(c, &format!("element {id}"), g.elements.get(&id), patch)?
+                };
+                if over.is_empty() {
+                    g.elements.remove(&id)
+                } else {
+                    g.elements.insert(id, over)
+                };
+            }
+        }
+        Some(v) => return Err(bad(c, format!("`elements` is {{id: override}}, not {v}"))),
+        None => {}
+    }
+    match p.get("filters") {
+        v if absent(v) => {}
+        Some(Value::Array(a)) if a.len() <= graphics::MAX_APPLIED => {
+            g.filters = a
+                .iter()
+                .map(|f| serde_json::from_value(f.clone()).map_err(|e| bad(c, format!("filter {f}: {e}"))))
+                .collect::<Result<_, _>>()?;
+        }
+        Some(v) => {
+            return Err(bad(
+                c,
+                format!("`filters` is [{{filter, hidden?, projection?, cut?, …}}, …] (up to {}), not {v}", graphics::MAX_APPLIED),
+            ));
+        }
+        None => {}
+    }
+    match p.get("template") {
+        None => {}
+        Some(Value::Null) => g.template = None,
+        Some(Value::String(n)) => g.template = Some(n.clone()),
+        Some(v) => return Err(bad(c, format!("`template` is a view template's name, or null, not {v}"))),
+    }
+    Ok(changed)
+}
+
+/// A view's settings as the `graphics` command and the `template` command tell them: the
+/// categories hidden and overridden, and the filters applied.
+fn graphics_reply(g: &Graphics) -> Value {
+    let hidden: Vec<&String> = g.categories.iter().filter(|(_, o)| o.hidden).map(|(k, _)| k).collect();
+    json!({"hidden": hidden, "categories": g.categories, "filters": g.filters})
+}
+
+fn view_graphics(s: &mut Session, p: &Value) -> R {
+    let c = "graphics";
+    let is_3d = matches!(p.get("view"), Some(Value::String(n)) if n.eq_ignore_ascii_case("{3D}") || n.eq_ignore_ascii_case("3D"));
+    // The default 3D view is made when something first changes in it; asking after it, or changing nothing, makes none.
+    let mut view = if is_3d { s.model.default_3d() } else { Some(view_param(c, &s.model, p, false)?) };
+    let m = &s.model;
+    let was = match view {
+        Some(v) => graphics::graphics_of(m, v)
+            .cloned()
+            .ok_or_else(|| bad(c, format!("{} isn't a plan, a section, an elevation or a 3D view", view_title(m, v))))?,
+        None => Graphics::default(),
+    };
+    let mut g = was.clone();
+    edit_graphics(c, m, p, &mut g, false)?;
+    if g != was {
+        // ponytail: checked here too so a refusal names the command, and `Model::check` the rest.
+        g.check(&s.model).map_err(|e| bad(c, e))?;
+        let v = match view {
+            Some(v) => v,
+            None => s.model_mut().insert(Element::View3D(View3D {
+                name: "{3D}".into(),
+                azimuth: view3d::AZIMUTH,
+                elevation: view3d::ELEVATION,
+                graphics: Graphics::default(),
+            })),
+        };
+        set_graphics(s.model_mut(), v, g.clone());
+        view = Some(v);
+    }
+    let m = &s.model;
+    let in_force = g.resolved(m);
+    let mut reply = graphics_reply(&in_force);
+    let controlled: Vec<Group> =
+        g.template.as_ref().and_then(|n| m.view_templates.get(n)).map(|t| t.controls.iter().copied().collect()).unwrap_or_default();
+    reply["view"] = json!(view);
+    reply["name"] = json!(view.and_then(|v| m.view_name(v)).unwrap_or("{3D}"));
+    reply["hidden_elements"] =
+        json!(g.elements.iter().filter(|(id, o)| o.hidden && m.elements.contains_key(id)).map(|(id, _)| *id).collect::<Vec<_>>());
+    reply["elements"] = json!(g.elements);
+    reply["template"] = json!(g.template);
+    reply["controlled"] = json!(controlled);
+    Ok(reply)
+}
+
+/// ` (there are: a, b)`, or nothing when there are none.
+fn known_names(names: &[&str]) -> String {
+    if names.is_empty() { String::new() } else { format!(" (there are: {})", names.join(", ")) }
+}
+
+/// View `view`'s graphics, set.
+fn set_graphics(m: &mut Model, view: Id, g: Graphics) {
+    if let Some(slot) = m.elements.get_mut(&view).and_then(graphics::graphics_mut) {
+        *slot = g;
+    }
+}
+
+fn view_template(s: &mut Session, p: &Value) -> R {
+    let c = "template";
+    let name = string(c, p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
+    if flag(c, p, "delete")? {
+        let m = s.model_mut();
+        if m.view_templates.remove(&name).is_none() {
+            return Err(bad(c, format!("there's no view template `{name}`")));
+        }
+        // Its views keep their own settings; they follow nothing now.
+        for g in m.elements.values_mut().filter_map(graphics::graphics_mut) {
+            if g.template.as_ref() == Some(&name) {
+                g.template = None;
+            }
+        }
+        return Ok(json!({"name": name, "deleted": true}));
+    }
+    let m = &s.model;
+    let was = m.view_templates.get(&name).cloned();
+    let keys =
+        ["from", "controls", "view_range", "hide", "show", "categories", "filters", "reset", "hide_elements", "show_elements", "elements"];
+    let makes = keys.iter().any(|k| !absent(p.get(k))) || p.get("template").is_some();
+    if was.is_none() && !makes {
+        let there: Vec<&str> = m.view_templates.keys().map(String::as_str).collect();
+        return Err(bad(
+            c,
+            format!("there's no view template `{name}`; make one with `from` (a view), or `controls`{}", known_names(&there)),
+        ));
+    }
+    let mut t = was.clone().unwrap_or_else(|| ViewTemplate { controls: Group::ALL.into_iter().collect(), ..ViewTemplate::default() });
+    // Made from a view: what its graphics and its plan's view range are now.
+    if !absent(p.get("from")) {
+        let view = view_param(c, m, &json!({"view": p["from"]}), false)?;
+        let own = graphics::graphics_of(m, view).ok_or_else(|| {
+            bad(c, format!("{} isn't a plan, a section, an elevation or a 3D view; templates are made from those", view_title(m, view)))
+        })?;
+        let resolved = own.resolved(m);
+        t.graphics = Graphics { categories: resolved.categories.clone(), filters: resolved.filters.clone(), ..Graphics::default() };
+        t.view_range = match m.elements.get(&view) {
+            Some(Element::Level(_)) => Some(m.view_range_of(view)),
+            _ => None,
+        };
+    }
+    match p.get("controls") {
+        v if absent(v) => {}
+        Some(v) => {
+            t.controls = serde_json::from_value(v.clone()).map_err(|e| {
+                bad(
+                    c,
+                    format!(
+                        "`controls` is a list of what it controls: {}: {e}",
+                        Group::ALL.map(|g| format!("{g:?}").to_lowercase()).join(", ")
+                    ),
+                )
+            })?;
+        }
+        None => {}
+    }
+    match p.get("view_range") {
+        v if absent(v) => {}
+        Some(v @ Value::Object(_)) => {
+            let mut now = serde_json::to_value(t.view_range.unwrap_or_default()).unwrap_or_default();
+            merge(&mut now, v);
+            t.view_range = Some(serde_json::from_value(now).map_err(|e| bad(c, format!("`view_range`: {e}")))?);
+        }
+        Some(v) => return Err(bad(c, format!("`view_range` is {{top?, cut?, bottom?, depth?}} in mm, not {v}"))),
+        None => {}
+    }
+    edit_graphics(c, m, p, &mut t.graphics, true)?;
+    if was.as_ref() != Some(&t) {
+        s.model_mut().view_templates.insert(name.clone(), t.clone());
+        t.check(&s.model).map_err(|e| bad(c, e))?;
+    }
+    let m = &s.model;
+    let mut reply = graphics_reply(&t.graphics);
+    reply["name"] = json!(name);
+    reply["controls"] = json!(t.controls);
+    reply["view_range"] = json!(t.view_range);
+    reply["views"] = json!(
+        m.elements
+            .iter()
+            .filter(|(_, e)| graphics::graphics_of_element(e).is_some_and(|g| g.template.as_ref() == Some(&name)))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>()
+    );
+    Ok(reply)
+}
+
+fn view_filter(s: &mut Session, p: &Value) -> R {
+    let c = "filter";
+    let name = string(c, p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
+    if flag(c, p, "delete")? {
+        let m = s.model_mut();
+        if m.view_filters.remove(&name).is_none() {
+            return Err(bad(c, format!("there's no view filter `{name}`")));
+        }
+        for e in m.elements.values_mut() {
+            if let Some(g) = graphics::graphics_mut(e) {
+                g.filters.retain(|a| a.filter != name);
+            }
+        }
+        for t in m.view_templates.values_mut() {
+            t.graphics.filters.retain(|a| a.filter != name);
+        }
+        return Ok(json!({"name": name, "deleted": true}));
+    }
+    let was = s.model.view_filters.get(&name).cloned();
+    let mut f = was.clone().unwrap_or_default();
+    match p.get("categories") {
+        v if absent(v) => {
+            if was.is_none() {
+                return Err(bad(c, "a new filter needs `categories`, [\"walls\", \"doors\"…]"));
+            }
+        }
+        Some(Value::Array(a)) if a.len() <= 32 => {
+            f.categories = a
+                .iter()
+                .map(|v| {
+                    let given = v.as_str().ok_or_else(|| bad(c, format!("`categories`: {v} is not a category")))?;
+                    let name = category(given);
+                    if schedule::categories().contains(&name.as_str()) {
+                        Ok(name)
+                    } else {
+                        Err(bad(
+                            c,
+                            format!("`{given}` isn't a category filters pick from; there are: {}", schedule::categories().join(", ")),
+                        ))
+                    }
+                })
+                .collect::<Result<_, _>>()?;
+            f.categories.sort();
+            f.categories.dedup();
+        }
+        Some(v) => return Err(bad(c, format!("`categories` is a list of categories, [\"walls\", \"doors\"…], not {v}"))),
+        None => {}
+    }
+    match p.get("rules") {
+        v if absent(v) => {}
+        Some(Value::Array(a)) if a.len() <= schedule::MAX_FIELDS => {
+            f.rules = a
+                .iter()
+                .map(|r| serde_json::from_value(r.clone()).map_err(|e| bad(c, format!("rule {r}: {e}"))))
+                .collect::<Result<_, _>>()?;
+        }
+        Some(v) => return Err(bad(c, format!("`rules` is [{{field, op, value}}, …] (up to {}), not {v}", schedule::MAX_FIELDS))),
+        None => {}
+    }
+    if was.as_ref() != Some(&f) {
+        s.model_mut().view_filters.insert(name.clone(), f.clone());
+        // Refused here, not only by the check after, so it names the command.
+        f.check(&s.model).map_err(|e| bad(c, e))?;
+    }
+    Ok(json!({"name": name, "categories": f.categories, "rules": f.rules, "matches": f.matching(&s.model)}))
 }
 
 fn measure(_: &mut Session, p: &Value) -> R {
@@ -1549,10 +1993,17 @@ fn tag(s: &mut Session, p: &Value) -> R {
                 _ => None,
             })
             .collect();
+        // What the plan hides isn't tagged: its tag would hang there on nothing.
+        let look = Look::of(m, level);
         let open: Vec<Id> = m
             .elements
             .iter()
-            .filter(|(id, e)| matches!(e, Element::Door(_) | Element::Window(_)) && !tagged.contains(id) && m.level_of(e) == Some(level))
+            .filter(|(id, e)| {
+                matches!(e, Element::Door(_) | Element::Window(_))
+                    && !tagged.contains(id)
+                    && m.level_of(e) == Some(level)
+                    && look.shows(**id)
+            })
             .map(|(id, _)| *id)
             .collect();
         if open.is_empty() {
@@ -1955,7 +2406,14 @@ fn section(s: &mut Session, p: &Value) -> R {
         Some(n) => n,
         None => s.model.free_view_name(s.model.language.word("Section"), true),
     };
-    let id = s.model_mut().insert(Element::Section(Section { name: name.clone(), start, end, depth, crop: None }));
+    let id = s.model_mut().insert(Element::Section(Section {
+        name: name.clone(),
+        start,
+        end,
+        depth,
+        crop: None,
+        graphics: Graphics::default(),
+    }));
     Ok(json!({"id": id, "name": name}))
 }
 
@@ -1996,7 +2454,12 @@ fn elevation(s: &mut Session, p: &Value) -> R {
     let m = s.model_mut();
     let made: Vec<(Id, String)> = lines
         .into_iter()
-        .map(|(name, start, end)| (m.insert(Element::Elevation(Section { name: name.clone(), start, end, depth, crop: None })), name))
+        .map(|(name, start, end)| {
+            (
+                m.insert(Element::Elevation(Section { name: name.clone(), start, end, depth, crop: None, graphics: Graphics::default() })),
+                name,
+            )
+        })
         .collect();
     match made.as_slice() {
         [(id, name)] => Ok(json!({"id": id, "name": name})),
@@ -2140,6 +2603,7 @@ fn place(s: &mut Session, p: &Value) -> R {
                         name: n.clone(),
                         azimuth: num(c, p, "azimuth")?.unwrap_or(view3d::AZIMUTH),
                         elevation: num(c, p, "elevation")?.unwrap_or(view3d::ELEVATION),
+                        graphics: Graphics::default(),
                     })),
                     (None, _) => return Err(bad(c, format!("no level, section, elevation, schedule or 3D view named `{n}`"))),
                 }
@@ -2232,10 +2696,21 @@ fn parameter(s: &mut Session, p: &Value) -> R {
             }
         }
     };
+    // A view filter with a rule on it keeps it: taking it away would change what the filter picks out.
+    let in_use = |m: &Model, name: &str, gone: &[String]| {
+        m.view_filters
+            .iter()
+            .find(|(_, f)| f.categories.iter().any(|k| gone.contains(k)) && f.rules.iter().any(|r| r.field == name))
+            .map(|(n, _)| bad(c, format!("view filter `{n}` has a rule on `{name}`; take the rule off before the parameter goes")))
+    };
     if flag(c, p, "delete")? {
-        let Some(was) = m.parameters.remove(&name) else {
+        let Some(was) = m.parameters.get(&name).cloned() else {
             return Err(bad(c, format!("there's no parameter `{name}`")));
         };
+        if let Some(e) = in_use(m, &name, &was.categories) {
+            return Err(e);
+        }
+        m.parameters.remove(&name);
         clear(m, &name, &was.categories);
         return Ok(json!({"deleted": name}));
     }
@@ -2265,6 +2740,9 @@ fn parameter(s: &mut Session, p: &Value) -> R {
         list.sort();
         list.dedup();
         let gone: Vec<String> = param.categories.iter().filter(|k| !list.contains(k)).cloned().collect();
+        if let Some(e) = in_use(m, &name, &gone) {
+            return Err(e);
+        }
         clear(m, &name, &gone);
         param.categories = list;
     }
@@ -2278,6 +2756,9 @@ fn parameter(s: &mut Session, p: &Value) -> R {
                 return Err(bad(c, format!("there's a parameter `{to}` already")));
             }
             m.parameters.remove(&name);
+            for f in m.view_filters.values_mut().filter(|f| f.categories.iter().any(|k| param.categories.contains(k))) {
+                f.rules.iter_mut().filter(|r| r.field == name).for_each(|r| r.field = to.clone());
+            }
             for e in m.elements.values_mut() {
                 if let Element::Schedule(sc) = e {
                     if param.categories.contains(&category(&sc.of)) {
@@ -2435,7 +2916,7 @@ fn families(m: &Model) -> Value {
 }
 
 /// `"#rrggbb"`, or `[r, g, b]`, each 0 to 255.
-fn colour(v: &Value) -> Option<[u8; 3]> {
+pub(crate) fn colour(v: &Value) -> Option<[u8; 3]> {
     match v {
         Value::String(hex) => {
             let hex = hex.strip_prefix('#').filter(|h| h.len() == 6 && h.is_ascii())?;
@@ -2599,6 +3080,7 @@ fn modify(s: &mut Session, p: &Value) -> R {
             }
         }
         let mut e2 = serde_json::from_value::<Element>(v).map_err(|e| bad(c, format!("element {id}: {e}")))?;
+        graphics::check_followed(m, e, &e2).map_err(|err| bad(c, format!("element {id}: {err}")))?;
         // A wall put on another of its lines stays where it is: its line moves across it instead.
         if let (Element::Wall(old), Element::Wall(w)) = (e, &mut e2)
             && old.location != w.location
@@ -3225,6 +3707,10 @@ fn delete(s: &mut Session, p: &Value) -> R {
     for id in &gone {
         m.elements.remove(id);
     }
+    // No view keeps an override for what isn't there.
+    for g in m.elements.values_mut().filter_map(graphics::graphics_mut) {
+        g.elements.retain(|id, _| !gone.contains(id));
+    }
     for (id, d) in kept {
         m.elements.insert(id, Element::Dimension(d));
     }
@@ -3277,7 +3763,8 @@ fn inspect(s: &mut Session, _: &Value) -> R {
     Ok(json!({
         "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
         "counts": counts,
-        "types": m.types, "materials": m.materials, "families": families(m), "parameters": m.parameters, "warnings": warnings,
+        "types": m.types, "materials": m.materials, "families": families(m), "parameters": m.parameters,
+        "view_filters": m.view_filters, "view_templates": m.view_templates, "warnings": warnings,
         "history": s.history(),
     }))
 }

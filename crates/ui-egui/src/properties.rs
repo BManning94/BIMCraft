@@ -356,7 +356,7 @@ fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
 }
 
 /// A drop-down of `options`, named by `label`; the one picked, if it changed.
-fn combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, options: &[String]) -> Option<String> {
+pub(crate) fn combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, options: &[String]) -> Option<String> {
     let mut picked = None;
     let c = ComboBox::from_id_salt(salt).selected_text(current).width(ui.available_width()).show_ui(ui, |ui| {
         for o in options {
@@ -371,7 +371,7 @@ fn combo(ui: &mut Ui, salt: (Id, &str), label: UiId, current: &str, options: &[S
 
 /// A parameter group's header: a bar across the palette that folds the group, as Revit's do.
 /// Whether it was clicked.
-fn group_header(ui: &mut Ui, group: &str, open: bool) -> bool {
+pub(crate) fn group_header(ui: &mut Ui, group: &str, open: bool) -> bool {
     let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
     response.widget_info(|| WidgetInfo::selected(WidgetType::CollapsingHeader, true, open, group));
     let p = ui.painter();
@@ -655,6 +655,12 @@ impl BimApp {
             && let Some(bimcraft_core::model::Element::View3D(_)) = model.elements.get(&vp.view)
         {
             self.parameters(ui, &model, &[vp.view], self::rows("view3d"));
+        }
+        // A view's graphics: the template it follows, and its overrides.
+        let view_shown = matches!(subject, Subject::Plan(_) | Subject::CeilingPlan | Subject::View3D)
+            || (matches!(subject, Subject::Element(_)) && self.selection.is_empty() && matches!(self.sheet, Sheet::Section(_)));
+        if view_shown {
+            self.graphics_properties(ui);
         }
         ui.add_space(8.0);
         // Fields commit on Enter or when they lose the keyboard, which a click here does.
@@ -1648,6 +1654,112 @@ impl BimApp {
     }
 }
 
+impl BimApp {
+    /// The rows of a filter editor, as Schedule Properties' Filter tab and the Filters dialog have
+    /// them: each a field of `names`, how to compare it, and a value, with Remove, and Add Filter
+    /// under them. `kind_of` says what a field holds, and `key` names the element whose field is
+    /// being typed in. Whether `filters` changed.
+    pub(crate) fn filter_rows(
+        &mut self,
+        ui: &mut Ui,
+        key: Id,
+        filters: &mut Vec<Filter>,
+        names: &[String],
+        kind_of: &dyn Fn(&str) -> schedule::Kind,
+        units: Units,
+    ) -> bool {
+        let mut edited = false;
+        Grid::new("schedule-filters").num_columns(5).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+            let mut gone = None;
+            for (i, f) in filters.iter_mut().enumerate() {
+                let kind = kind_of(&f.field);
+                // Each row's caption names its field, its comparison and its value.
+                let caption = ui.label(t(if i == 0 { "Filter by:" } else { "And:" }));
+                let c = ComboBox::from_id_salt(("filter-field", i)).selected_text(t(&f.field)).width(170.0).show_ui(ui, |ui| {
+                    for n in names {
+                        if ui.selectable_label(*n == f.field, t(n)).clicked() && *n != f.field {
+                            (f.field, f.op, f.value) = (n.clone(), Op::HasValue, Value::Null);
+                            edited = true;
+                        }
+                    }
+                });
+                c.response.labelled_by(caption.id);
+                let now = OPS.iter().find(|(op, _)| *op == f.op).map_or("equals", |(_, n)| n);
+                let c = ComboBox::from_id_salt(("filter-op", i)).selected_text(t(now)).width(190.0).show_ui(ui, |ui| {
+                    for (op, label) in ops(kind) {
+                        if ui.selectable_label(op == f.op, t(label)).clicked() && op != f.op {
+                            f.op = op;
+                            let fits = match kind {
+                                schedule::Kind::Text => f.value.is_string(),
+                                schedule::Kind::YesNo => f.value.is_boolean(),
+                                _ => f.value.is_number(),
+                            };
+                            if !matches!(op, Op::HasValue | Op::HasNoValue) && !fits {
+                                f.value = blank(kind);
+                            }
+                            edited = true;
+                        }
+                    }
+                });
+                c.response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, t("Comparison")));
+                match (f.op, kind) {
+                    (Op::HasValue | Op::HasNoValue, _) => {
+                        ui.label("");
+                    }
+                    (_, schedule::Kind::YesNo) => {
+                        let now = if f.value.as_bool().unwrap_or(true) { "Yes" } else { "No" };
+                        let c = ComboBox::from_id_salt(("filter-yes", i)).selected_text(t(now)).width(120.0).show_ui(ui, |ui| {
+                            for (b, label) in [(true, "Yes"), (false, "No")] {
+                                if ui.selectable_label(f.value.as_bool() == Some(b), t(label)).clicked() {
+                                    f.value = json!(b);
+                                    edited = true;
+                                }
+                            }
+                        });
+                        c.response.labelled_by(caption.id);
+                    }
+                    (_, kind) => {
+                        let now = match (kind, f.value.as_f64()) {
+                            (schedule::Kind::Length, Some(x)) => units.length(x),
+                            (schedule::Kind::Area, Some(x)) => format!("{}", (units.area(x * 1e6).0 * 100.0).round() / 100.0),
+                            _ => text(&f.value),
+                        };
+                        // A field of its own width: a grid cell would only be as wide as the last frame's.
+                        let height = ui.spacing().interact_size.y;
+                        let typed = ui
+                            .allocate_ui(vec2(170.0, height), |ui| self.field(ui, key, &format!("filter.{i}"), now, caption.id, ""))
+                            .inner;
+                        if let Some(typed) = typed {
+                            match filter_value(kind, &typed, units) {
+                                Ok(v) => {
+                                    f.value = v;
+                                    edited = true;
+                                }
+                                Err(e) => self.status = Status { text: e, error: true },
+                            }
+                        }
+                    }
+                }
+                if ui.button(t("Remove")).clicked() {
+                    gone = Some(i);
+                }
+                ui.end_row();
+            }
+            if let Some(i) = gone {
+                filters.remove(i);
+                edited = true;
+            }
+        });
+        if ui.button(t("Add Filter")).clicked()
+            && let Some(first) = names.first()
+        {
+            filters.push(Filter { field: first.clone(), op: Op::HasValue, value: Value::Null });
+            edited = true;
+        }
+        edited
+    }
+}
+
 /// What a project parameter holds, as Project Parameters names it.
 const KINDS: [(ParameterKind, &str); 4] =
     [(ParameterKind::Text, "Text"), (ParameterKind::Number, "Number"), (ParameterKind::Length, "Length"), (ParameterKind::YesNo, "Yes/No")];
@@ -2091,91 +2203,7 @@ impl BimApp {
                 }
                 1 => {
                     let mut filters: Vec<Filter> = sc.filters.clone();
-                    let mut edited = false;
-                    Grid::new("schedule-filters").num_columns(5).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-                        let mut gone = None;
-                        for (i, f) in filters.iter_mut().enumerate() {
-                            let kind = kind_of(&fields, &f.field);
-                            // Each row's caption names its field, its comparison and its value.
-                            let caption = ui.label(t(if i == 0 { "Filter by:" } else { "And:" }));
-                            let c = ComboBox::from_id_salt(("filter-field", i)).selected_text(t(&f.field)).width(170.0).show_ui(ui, |ui| {
-                                for n in &names {
-                                    if ui.selectable_label(*n == f.field, t(n)).clicked() && *n != f.field {
-                                        (f.field, f.op, f.value) = (n.clone(), Op::HasValue, Value::Null);
-                                        edited = true;
-                                    }
-                                }
-                            });
-                            c.response.labelled_by(caption.id);
-                            let now = OPS.iter().find(|(op, _)| *op == f.op).map_or("equals", |(_, n)| n);
-                            let c = ComboBox::from_id_salt(("filter-op", i)).selected_text(t(now)).width(190.0).show_ui(ui, |ui| {
-                                for (op, label) in ops(kind) {
-                                    if ui.selectable_label(op == f.op, t(label)).clicked() && op != f.op {
-                                        f.op = op;
-                                        let fits = match kind {
-                                            schedule::Kind::Text => f.value.is_string(),
-                                            schedule::Kind::YesNo => f.value.is_boolean(),
-                                            _ => f.value.is_number(),
-                                        };
-                                        if !matches!(op, Op::HasValue | Op::HasNoValue) && !fits {
-                                            f.value = blank(kind);
-                                        }
-                                        edited = true;
-                                    }
-                                }
-                            });
-                            c.response.widget_info(|| WidgetInfo::labeled(WidgetType::ComboBox, true, t("Comparison")));
-                            match (f.op, kind) {
-                                (Op::HasValue | Op::HasNoValue, _) => {
-                                    ui.label("");
-                                }
-                                (_, schedule::Kind::YesNo) => {
-                                    let now = if f.value.as_bool().unwrap_or(true) { "Yes" } else { "No" };
-                                    let c =
-                                        ComboBox::from_id_salt(("filter-yes", i)).selected_text(t(now)).width(120.0).show_ui(ui, |ui| {
-                                            for (b, label) in [(true, "Yes"), (false, "No")] {
-                                                if ui.selectable_label(f.value.as_bool() == Some(b), t(label)).clicked() {
-                                                    f.value = json!(b);
-                                                    edited = true;
-                                                }
-                                            }
-                                        });
-                                    c.response.labelled_by(caption.id);
-                                }
-                                (_, kind) => {
-                                    let now = match (kind, f.value.as_f64()) {
-                                        (schedule::Kind::Length, Some(x)) => units.length(x),
-                                        (schedule::Kind::Area, Some(x)) => format!("{}", (units.area(x * 1e6).0 * 100.0).round() / 100.0),
-                                        _ => text(&f.value),
-                                    };
-                                    if let Some(typed) = self.field(ui, key, &format!("filter.{i}"), now, caption.id, "") {
-                                        match filter_value(kind, &typed, units) {
-                                            Ok(v) => {
-                                                f.value = v;
-                                                edited = true;
-                                            }
-                                            Err(e) => self.status = Status { text: e, error: true },
-                                        }
-                                    }
-                                }
-                            }
-                            if ui.button(t("Remove")).clicked() {
-                                gone = Some(i);
-                            }
-                            ui.end_row();
-                        }
-                        if let Some(i) = gone {
-                            filters.remove(i);
-                            edited = true;
-                        }
-                    });
-                    if ui.button(t("Add Filter")).clicked()
-                        && let Some(first) = names.first()
-                    {
-                        filters.push(Filter { field: first.clone(), op: Op::HasValue, value: Value::Null });
-                        edited = true;
-                    }
-                    if edited {
+                    if self.filter_rows(ui, key, &mut filters, &names, &|n| kind_of(&fields, n), units) {
                         change = Some(json!({"filters": filters}));
                     }
                 }

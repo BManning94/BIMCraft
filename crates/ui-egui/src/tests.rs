@@ -1531,6 +1531,32 @@ schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Len
         press(&mut h, tr("Annotate"));
         press(&mut h, tr("Measure"));
         missed.extend(english(&h, l));
+        // A plan's Properties with its Graphics group; Visibility/Graphics on every tab, with an override
+        // being edited; Filters; View Templates; and the Modify tab's View panel.
+        key(&mut h, Key::Escape);
+        topmost(&mut h, "Level 1");
+        missed.extend(english(&h, l));
+        shortcut(&mut h, "VV");
+        missed.extend(english(&h, l));
+        let over = tr("Override {}").replace("{}", &crate::lang::category("wall", true));
+        pick(&mut h, Role::Button, &over);
+        missed.extend(english(&h, l));
+        for tab in ["Annotation Categories", "Filters", "Elements"] {
+            press(&mut h, tr(tab));
+            missed.extend(english(&h, l));
+        }
+        press(&mut h, tr("Cancel"));
+        shortcut(&mut h, "FT");
+        press(&mut h, tr("New"));
+        press(&mut h, tr("Add Filter"));
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Close"));
+        shortcut(&mut h, "VT");
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Close"));
+        click(&mut h, P2(5000.0, 0.0));
+        missed.extend(english(&h, l));
+        key(&mut h, Key::Escape);
         missed.sort();
         missed.dedup();
         assert!(missed.is_empty(), "{l:?}: left in English: {missed:?}");
@@ -2429,4 +2455,225 @@ fn a_typed_length_too_long_is_refused_and_a_far_point_does_not_stall_the_guide()
     key(&mut h, Key::Enter);
     assert!(matches!(&h.state().tool, Tool::Wall(chain) if chain.len() == 2), "{:?}", h.state().tool);
     assert!(hover(&mut h, P2(3000.0, 1000.0)).is_some_and(|f| f.guide.is_some()), "its guide, drawn");
+}
+
+/// The graphics the plan of `level` holds.
+fn plan_graphics(h: &Harness<BimApp>, level: Id) -> bimcraft_core::graphics::Graphics {
+    bimcraft_core::graphics::graphics_of(&h.state().session.model, level).cloned().unwrap()
+}
+
+#[test]
+fn visibility_graphics_hides_and_overrides_by_category_in_the_active_view_alone() {
+    let mut h = app(&format!("{BOX}\nroom {{\"point\": [4000, 3000], \"name\": \"Living\"}}"));
+    shortcut(&mut h, "VV");
+    assert!(h.query_by_label("Visibility/Graphics Overrides for Floor Plan: Level 1").is_some());
+    // Edited in the dialog, a draft: nothing is the model's until Apply or OK.
+    pick(&mut h, Role::CheckBox, "Rooms");
+    assert!(plan_graphics(&h, 1).is_default());
+    // Walls drawn their own way: a cut line weight, overriding it with a box and its start.
+    pick(&mut h, Role::Button, "Override Walls");
+    pick(&mut h, Role::CheckBox, "Cut: Line weight");
+    pick(&mut h, Role::CheckBox, "Projection: Line color");
+    press(&mut h, "OK");
+    let g = plan_graphics(&h, 1);
+    assert!(h.query_by_label("Visibility/Graphics Overrides for Floor Plan: Level 1").is_none(), "OK closes it");
+    assert_eq!(g.categories["wall"].cut.weight, Some(4.0));
+    assert_eq!(g.categories["wall"].projection.color, Some([40, 40, 40]));
+    assert!(g.hides("room") && !g.hides("wall"));
+    // Level 2's plan is its own view.
+    assert!(plan_graphics(&h, 2).is_default());
+    // Cancel throws a draft away; unticking a box again takes the override back.
+    shortcut(&mut h, "VG");
+    pick(&mut h, Role::CheckBox, "Rooms");
+    press(&mut h, "Cancel");
+    assert!(plan_graphics(&h, 1).hides("room"));
+    shortcut(&mut h, "VV");
+    pick(&mut h, Role::CheckBox, "Rooms");
+    pick(&mut h, Role::Button, "Override Walls");
+    pick(&mut h, Role::CheckBox, "Cut: Line weight");
+    pick(&mut h, Role::CheckBox, "Projection: Line color");
+    press(&mut h, "OK");
+    assert!(plan_graphics(&h, 1).is_default(), "{:?}", plan_graphics(&h, 1));
+    // The annotation categories have a tab.
+    shortcut(&mut h, "VV");
+    press(&mut h, "Annotation Categories");
+    assert!(h.query_by_role_and_label(Role::CheckBox, "Grids").is_some() && h.query_by_role_and_label(Role::CheckBox, "Walls").is_none());
+    press(&mut h, "Cancel");
+}
+
+#[test]
+fn hide_element_hide_category_and_the_elements_tab_work_on_the_selection() {
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    click(&mut h, P2(4000.0, 0.0));
+    shortcut(&mut h, "EH");
+    assert!(h.state().selection.is_empty(), "what is hidden can't stay selected");
+    let g = plan_graphics(&h, 1);
+    assert_eq!(g.elements.keys().copied().collect::<Vec<_>>(), [walls[0]]);
+    assert!(g.elements[&walls[0]].hidden);
+    click(&mut h, P2(8000.0, 3000.0));
+    assert_eq!(h.state().selection, [walls[1]]);
+    shortcut(&mut h, "VH");
+    assert!(plan_graphics(&h, 1).hides("wall"));
+    // Unhide Elements: the Elements tab lists the one hidden; a box brings it back.
+    shortcut(&mut h, "EU");
+    assert!(h.query_by_role_and_label(Role::CheckBox, "Wall 3").is_some());
+    pick(&mut h, Role::CheckBox, "Wall 3");
+    press(&mut h, "OK");
+    assert!(plan_graphics(&h, 1).elements.is_empty(), "no entry for what's visible and plain");
+    // The Modify tab's panel does the same, and Override Graphics adds the selection to the list.
+    shortcut(&mut h, "VV");
+    pick(&mut h, Role::CheckBox, "Walls");
+    press(&mut h, "OK");
+    click(&mut h, P2(0.0, 3000.0));
+    press(&mut h, "Hide Element");
+    assert!(plan_graphics(&h, 1).elements[&walls[3]].hidden);
+    // Override Graphics by Element (EO): the selection goes on the Elements tab, picked, to be drawn its own way.
+    click(&mut h, P2(8000.0, 3000.0));
+    shortcut(&mut h, "EO");
+    assert!(h.query_by_role_and_label(Role::CheckBox, "Wall 4").is_some(), "listed, though it has no override yet");
+    assert!(h.query_by_label("Overrides for Wall 4").is_some(), "and picked");
+    pick(&mut h, Role::CheckBox, "Cut: Fill color");
+    press(&mut h, "OK");
+    assert_eq!(plan_graphics(&h, 1).elements[&walls[1]].cut.fill, Some([200, 200, 200]));
+    key(&mut h, Key::Escape);
+}
+
+#[test]
+fn filters_are_made_in_their_dialog_and_applied_by_a_view() {
+    let mut h = app(BOX);
+    shortcut(&mut h, "FT");
+    assert!(h.query_by_label("No filters yet: New makes one.").is_some());
+    press(&mut h, "New");
+    assert_eq!(h.state().session.model.view_filters["Filter 1"].categories, ["wall"]);
+    press(&mut h, "Add Filter");
+    pick(&mut h, Role::ComboBox, "Filter by:");
+    pick(&mut h, Role::Button, "Type");
+    pick(&mut h, Role::ComboBox, "Comparison");
+    press(&mut h, "equals");
+    type_role(&mut h, Role::TextInput, "Filter by:", "Generic - 200mm");
+    let f = h.state().session.model.view_filters["Filter 1"].clone();
+    assert_eq!((f.rules[0].field.as_str(), f.rules[0].value.clone()), ("Type", json!("Generic - 200mm")));
+    // Another category beside walls, and walls again.
+    pick(&mut h, Role::CheckBox, "Columns");
+    assert_eq!(h.state().session.model.view_filters["Filter 1"].categories, ["column", "wall"]);
+    pick(&mut h, Role::CheckBox, "Columns");
+    press(&mut h, "Close");
+    // The view applies it: hidden walls, and a colour for the cut.
+    shortcut(&mut h, "VV");
+    press(&mut h, "Filters");
+    pick(&mut h, Role::ComboBox, "Add filter:");
+    press(&mut h, "Filter 1");
+    pick(&mut h, Role::CheckBox, "Cut: Line color");
+    press(&mut h, "OK");
+    let g = plan_graphics(&h, 1);
+    assert_eq!((g.filters.len(), g.filters[0].filter.as_str()), (1, "Filter 1"));
+    assert_eq!(g.filters[0].over.cut.color, Some([40, 40, 40]));
+    // Visible no more: unticked in the list.
+    shortcut(&mut h, "VV");
+    press(&mut h, "Filters");
+    pick(&mut h, Role::CheckBox, "Filter 1");
+    press(&mut h, "OK");
+    assert!(plan_graphics(&h, 1).filters[0].over.hidden);
+    // Deleting the filter takes it from the view.
+    shortcut(&mut h, "FT");
+    press(&mut h, "Delete");
+    assert!(plan_graphics(&h, 1).filters.is_empty());
+    press(&mut h, "Close");
+}
+
+#[test]
+fn view_templates_are_made_from_a_view_and_followed_from_properties() {
+    let mut h = app(&format!("{BOX}\nroom {{\"point\": [4000, 3000], \"name\": \"Living\"}}"));
+    shortcut(&mut h, "VV");
+    pick(&mut h, Role::CheckBox, "Rooms");
+    press(&mut h, "OK");
+    shortcut(&mut h, "VT");
+    assert!(h.query_by_label("No view templates yet: Create from This View makes one.").is_some());
+    type_into(&mut h, "New template:", "Presentation");
+    press(&mut h, "Create from This View");
+    assert!(h.state().session.model.view_templates["Presentation"].graphics.hides("room"));
+    // What it controls, ticked and unticked.
+    pick(&mut h, Role::CheckBox, "View Range");
+    assert!(!h.state().session.model.view_templates["Presentation"].controls.contains(&bimcraft_core::graphics::Group::Range));
+    press(&mut h, "Close");
+    // Level 2 follows it from its Properties.
+    topmost(&mut h, "Level 2");
+    // It lies at the palette's foot, below where a pointer can reach.
+    h.get_by_role_and_label(Role::ComboBox, "View Template").click_accesskit();
+    h.run();
+    press(&mut h, "Presentation");
+    assert_eq!(plan_graphics(&h, 2).template.as_deref(), Some("Presentation"));
+    // Its dialog says where the categories are set, and shows them as the template has them.
+    shortcut(&mut h, "VV");
+    assert!(h.query_by_label("Categories, Filters follow view template Presentation: change them there.").is_some());
+    use egui_kittest::kittest::NodeT;
+    let rooms = h.get_by_role_and_label(Role::CheckBox, "Rooms").accesskit_node().toggled();
+    assert_eq!(rooms, Some(egui::accesskit::Toggled::False), "hidden, by the template");
+    press(&mut h, "Cancel");
+    // And Stop Following from the templates dialog.
+    shortcut(&mut h, "VT");
+    press(&mut h, "Stop Following in This View");
+    assert!(plan_graphics(&h, 2).template.is_none());
+    press(&mut h, "Close");
+}
+
+#[test]
+fn a_templates_controls_are_ticked_and_unticked_one_at_a_time() {
+    use bimcraft_core::graphics::Group;
+    let mut h = app(BOX);
+    h.state_mut().session.execute("template", &json!({"name": "T", "from": 1, "controls": ["categories"]})).unwrap();
+    shortcut(&mut h, "VT");
+    let controls = |h: &Harness<BimApp>| h.state().session.model.view_templates["T"].controls.iter().copied().collect::<Vec<_>>();
+    assert_eq!(controls(&h), [Group::Categories]);
+    pick(&mut h, Role::CheckBox, "Filters");
+    assert_eq!(controls(&h), [Group::Categories, Group::Filters]);
+    pick(&mut h, Role::CheckBox, "Categories");
+    assert_eq!(controls(&h), [Group::Filters], "the others stay as they were");
+    pick(&mut h, Role::CheckBox, "Filters");
+    assert!(controls(&h).is_empty());
+    pick(&mut h, Role::CheckBox, "View Range");
+    assert_eq!(controls(&h), [Group::Range]);
+    press(&mut h, "Close");
+}
+
+#[test]
+fn the_3d_view_leaves_out_what_its_graphics_hide() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
+    press(&mut h, "Default 3D View");
+    let at = h.state().screen3([5000.0, -100.0, 1500.0]);
+    click_at(&mut h, at);
+    assert_eq!(h.state().selection.len(), 1, "the south wall's face");
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "VV");
+    assert!(h.query_by_label("Visibility/Graphics Overrides for 3D View: {3D}").is_some());
+    pick(&mut h, Role::CheckBox, "Walls");
+    press(&mut h, "OK");
+    let id = h.state().session.model.default_3d().unwrap();
+    assert!(bimcraft_core::graphics::graphics_of(&h.state().session.model, id).unwrap().hides("wall"));
+    click_at(&mut h, at);
+    assert!(h.state().selection.is_empty(), "no wall to pick");
+}
+
+#[test]
+fn select_all_instances_in_3d_takes_what_the_view_shows_and_no_more() {
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    h.state_mut().session.execute("graphics", &json!({"view": "{3D}", "hide_elements": [walls[1], walls[2], walls[3]]})).unwrap();
+    press(&mut h, "Default 3D View");
+    let at = h.state().screen3([5000.0, -100.0, 1500.0]);
+    click_at(&mut h, at);
+    assert_eq!(h.state().selection, [walls[0]]);
+    shortcut(&mut h, "SA");
+    assert_eq!(h.state().selection, [walls[0]], "the walls it can't see aren't selected with it");
+    key(&mut h, Key::Escape);
+}
+
+#[test]
+fn sheets_and_schedules_have_no_graphics_to_override() {
+    let mut h = app(&format!("{BOX}\nsheet {{\"name\": \"Plans\"}}"));
+    browse(&mut h, "A101 - Plans");
+    shortcut(&mut h, "VV");
+    assert!(h.query_by_label("Visibility/Graphics Overrides for Sheet: Plans").is_none());
+    assert!(h.query_by_label("This view has no graphics to override.").is_some());
 }

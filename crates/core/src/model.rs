@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::family::{Family, Piece};
 use crate::geom::{self, P2, Region};
+use crate::graphics::{self, Graphics, ViewFilter, ViewTemplate};
 use crate::language::Language;
 use crate::units::Units;
 use crate::walls;
@@ -65,11 +66,14 @@ pub struct Level {
     pub view_range: ViewRange,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<[P2; 2]>,
+    /// What its plan hides and how it draws the rest.
+    #[serde(default, skip_serializing_if = "Graphics::is_default")]
+    pub graphics: Graphics,
 }
 
 impl Level {
     pub fn new(name: impl Into<String>, elevation: f64) -> Level {
-        Level { name: name.into(), elevation, view_range: ViewRange::default(), crop: None }
+        Level { name: name.into(), elevation, view_range: ViewRange::default(), crop: None, graphics: Graphics::default() }
     }
 }
 
@@ -526,6 +530,9 @@ pub struct View3D {
     pub name: String,
     pub azimuth: f64,
     pub elevation: f64,
+    /// What it hides and how it draws the rest.
+    #[serde(default, skip_serializing_if = "Graphics::is_default")]
+    pub graphics: Graphics,
 }
 
 /// A door's or window's tag, showing its mark in the plan of its wall's level, `offset` mm from
@@ -755,6 +762,9 @@ pub struct Section {
     pub depth: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crop: Option<[f64; 2]>,
+    /// What it hides and how it draws the rest.
+    #[serde(default, skip_serializing_if = "Graphics::is_default")]
+    pub graphics: Graphics,
 }
 
 impl Section {
@@ -1084,6 +1094,13 @@ pub struct Model {
     /// Its project parameters, by name: values each element of their categories may have.
     #[serde(default)]
     pub parameters: BTreeMap<String, ProjectParameter>,
+    /// Its view filters, by name: categories and rules that pick elements out for views to hide
+    /// or draw another way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub view_filters: BTreeMap<String, ViewFilter>,
+    /// Its view templates, by name: settings views follow.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub view_templates: BTreeMap<String, ViewTemplate>,
     pub elements: BTreeMap<Id, Element>,
 }
 
@@ -1105,6 +1122,8 @@ impl Model {
             materials: BTreeMap::new(),
             families: BTreeMap::new(),
             parameters: BTreeMap::new(),
+            view_filters: BTreeMap::new(),
+            view_templates: BTreeMap::new(),
             elements: BTreeMap::new(),
         };
         // A library to start from: each material its colour, its cut's pattern and its surface's.
@@ -1356,11 +1375,23 @@ impl Model {
         self.base_z(w) <= z && z < self.top_z(w)
     }
 
+    /// The view range `level`'s plan has: its own, unless a view template it follows controls it.
+    pub fn view_range_of(&self, level: Id) -> ViewRange {
+        let Some(l) = self.level(level) else { return ViewRange::default() };
+        l.graphics
+            .template
+            .as_ref()
+            .and_then(|n| self.view_templates.get(n))
+            .filter(|t| t.controls.contains(&graphics::Group::Range))
+            .and_then(|t| t.view_range)
+            .unwrap_or(l.view_range)
+    }
+
     /// The heights of the view range of `level`'s plan. A top that isn't set is the level above
     /// (none above: no limit), and never below the cut plane.
     pub fn plan_range(&self, level: Id) -> PlanRange {
         let z = self.elevation(level);
-        let r = self.level(level).map_or_else(ViewRange::default, |l| l.view_range);
+        let r = self.view_range_of(level);
         let above = || self.level_above(level).map_or(f64::INFINITY, |a| self.elevation(a));
         PlanRange { top: r.top.map_or_else(above, |t| z + t).max(z + r.cut), cut: z + r.cut, bottom: z + r.bottom, depth: z + r.depth }
     }
@@ -1717,6 +1748,11 @@ impl Model {
             Some(Element::Sheet(s)) => Some(s),
             _ => None,
         }
+    }
+
+    /// The default 3D view, `{3D}`: the 3D view of that name, once something has made it.
+    pub fn default_3d(&self) -> Option<Id> {
+        self.elements.iter().find_map(|(id, e)| matches!(e, Element::View3D(v) if v.name == "{3D}").then_some(*id))
     }
 
     /// The name of view `id`: a level's plan, a section, an elevation, a schedule or a 3D view;
@@ -2077,6 +2113,7 @@ impl Model {
                 return Err(format!("{who}: family `{f}` has a parameter of that name; name it otherwise"));
             }
         }
+        graphics::check_project(self)?;
         for (cat, n, thickness, layers) in self.layered_types() {
             let who = format!("{cat} type `{n}`");
             size(&format!("{who} thickness"), thickness)?;
@@ -2169,24 +2206,11 @@ impl Model {
                     if !level_names.insert(l.name.as_str()) {
                         return Err(format!("{who}: another level is already named `{}`", l.name));
                     }
-                    let r = &l.view_range;
-                    for (what, v) in [("cut", r.cut), ("bottom", r.bottom), ("depth", r.depth)].into_iter().chain(r.top.map(|t| ("top", t)))
-                    {
-                        coord(&format!("{who} view range {what}"), v)?;
-                    }
-                    if !(r.depth <= r.bottom && r.bottom <= r.cut && r.top.is_none_or(|t| r.cut <= t)) {
-                        return Err(format!(
-                            "{who}: its plan's view range runs top ≥ cut plane ≥ bottom ≥ view depth, not top {}, cut {}, bottom {}, \
-                             depth {}",
-                            r.top.map_or_else(|| "at the level above".into(), |t| t.to_string()),
-                            r.cut,
-                            r.bottom,
-                            r.depth
-                        ));
-                    }
+                    range_ok(&who, &l.view_range)?;
                     if let Some([a, b]) = l.crop {
                         crop(&who, a, b)?;
                     }
+                    l.graphics.check(self).map_err(|e| format!("{who}: {e}"))?;
                 }
                 Element::Grid(g) => {
                     text(&who, "name", &g.name)?;
@@ -2377,6 +2401,7 @@ impl Model {
                     if !(-89.0..=89.0).contains(&v.elevation) {
                         return Err(format!("{who}: elevation {}° isn't between -89° and 89°", v.elevation));
                     }
+                    v.graphics.check(self).map_err(|e| format!("{who}: {e}"))?;
                     if !view_names.insert(v.name.as_str()) {
                         return Err(format!("{who}: another view is already named `{}`", v.name));
                     }
@@ -2397,6 +2422,7 @@ impl Model {
                             return Err(format!("{who}: its crop runs from a bottom up to a top above it, not from {bottom} to {top}"));
                         }
                     }
+                    v.graphics.check(self).map_err(|e| format!("{who}: {e}"))?;
                     if !view_names.insert(v.name.as_str()) {
                         return Err(format!("{who}: another view is already named `{}`", v.name));
                     }
@@ -2638,6 +2664,24 @@ pub fn culprit(error: &str) -> Option<Id> {
 
 fn coord(what: &str, v: f64) -> Result<(), String> {
     if v.is_finite() && v.abs() <= MAX_COORD { Ok(()) } else { Err(format!("{what}: {v} is not a usable number")) }
+}
+
+/// Whether `r` is a view range that makes sense: usable numbers running top ≥ cut plane ≥ bottom ≥
+/// view depth.
+pub(crate) fn range_ok(who: &str, r: &ViewRange) -> Result<(), String> {
+    for (what, v) in [("cut", r.cut), ("bottom", r.bottom), ("depth", r.depth)].into_iter().chain(r.top.map(|t| ("top", t))) {
+        coord(&format!("{who} view range {what}"), v)?;
+    }
+    if !(r.depth <= r.bottom && r.bottom <= r.cut && r.top.is_none_or(|t| r.cut <= t)) {
+        return Err(format!(
+            "{who}: its plan's view range runs top ≥ cut plane ≥ bottom ≥ view depth, not top {}, cut {}, bottom {}, depth {}",
+            r.top.map_or_else(|| "at the level above".into(), |t| t.to_string()),
+            r.cut,
+            r.bottom,
+            r.depth
+        ));
+    }
+    Ok(())
 }
 
 fn size(what: &str, v: f64) -> Result<(), String> {

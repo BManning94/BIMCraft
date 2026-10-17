@@ -1817,7 +1817,14 @@ impl BimApp {
             // The section a click would end, and the elevation a click would place.
             &Tool::Section(Some(start)) => {
                 let end = self.found(sc, q, &[start], shift);
-                sketched(&Element::Section(Section { name: m.free_view_name("Section", true), start, end, depth: None, crop: None }));
+                sketched(&Element::Section(Section {
+                    name: m.free_view_name("Section", true),
+                    start,
+                    end,
+                    depth: None,
+                    crop: None,
+                    graphics: Default::default(),
+                }));
                 return;
             }
             Tool::Elevation => {
@@ -1826,7 +1833,7 @@ impl BimApp {
                     && let Some((start, end)) = m.elevation_line(f, Some(at))
                 {
                     let name = m.free_view_name(f.name(), false);
-                    sketched(&Element::Elevation(Section { name, start, end, depth: None, crop: None }));
+                    sketched(&Element::Elevation(Section { name, start, end, depth: None, crop: None, graphics: Default::default() }));
                 }
                 return;
             }

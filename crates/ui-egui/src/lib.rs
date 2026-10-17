@@ -6,6 +6,7 @@
 //! (plans, the 3D view, schedules), and the tool's prompt in the status bar.
 
 mod canvas;
+mod graphics;
 pub mod lang;
 mod orbit;
 mod paper;
@@ -193,7 +194,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 21] = [
+const SHORTCUTS: [(&str, &str); 29] = [
     ("MD", "Modify"),
     ("MM", "Mirror Pick Axis"),
     ("DM", "Mirror Draw Axis"),
@@ -214,6 +215,14 @@ const SHORTCUTS: [(&str, &str); 21] = [
     ("SN", "Snap to Nearest"),
     ("SO", "Snaps Off"),
     ("SS", "Turn Snap Override Off"),
+    ("VV", "Visibility/Graphics"),
+    ("VG", "Visibility/Graphics"),
+    ("EH", "Hide Element"),
+    ("VH", "Hide Category"),
+    ("EU", "Unhide Elements"),
+    ("EO", "Override Graphics by Element"),
+    ("FT", "Filters"),
+    ("VT", "View Templates"),
     ("KS", "Keyboard Shortcuts"),
 ];
 
@@ -360,6 +369,10 @@ pub struct BimApp {
     family_dialog: Option<properties::FamilyDialog>,
     parameters_dialog: Option<properties::ParametersDialog>,
     schedule_dialog: Option<properties::ScheduleDialog>,
+    /// Visibility/Graphics, Filters and View Templates, while they're open.
+    vg_dialog: Option<graphics::VgDialog>,
+    filters_dialog: Option<graphics::FiltersDialog>,
+    templates_dialog: Option<graphics::TemplatesDialog>,
     new_schedule: Option<properties::NewSchedule>,
     /// The family and type the Component tool places, as picked, and how far it's turned, degrees.
     component: Option<(String, String)>,
@@ -598,6 +611,9 @@ impl BimApp {
             family_dialog: None,
             parameters_dialog: None,
             schedule_dialog: None,
+            vg_dialog: None,
+            filters_dialog: None,
+            templates_dialog: None,
             new_schedule: None,
             component: None,
             component_angle: 0.0,
@@ -845,6 +861,9 @@ impl BimApp {
             || self.family_dialog.is_some()
             || self.parameters_dialog.is_some()
             || self.schedule_dialog.is_some()
+            || self.vg_dialog.is_some()
+            || self.filters_dialog.is_some()
+            || self.templates_dialog.is_some()
             || self.new_schedule.is_some()
             || self.show_shortcuts
             || self.show_snaps
@@ -962,6 +981,30 @@ impl BimApp {
             }
             "KS" => {
                 self.show_shortcuts = true;
+                return true;
+            }
+            "VV" | "VG" => {
+                self.open_graphics(0);
+                return true;
+            }
+            "EH" | "VH" => {
+                self.hide_selection(self.typed == "VH");
+                return true;
+            }
+            "EU" => {
+                self.open_graphics(3);
+                return true;
+            }
+            "EO" => {
+                self.override_selection();
+                return true;
+            }
+            "FT" => {
+                self.filters_dialog = Some(graphics::FiltersDialog::default());
+                return true;
+            }
+            "VT" => {
+                self.templates_dialog = Some(graphics::TemplatesDialog::default());
                 return true;
             }
             // Revit's snap overrides: for the next point picked, that snap alone, or none.
@@ -1103,7 +1146,7 @@ impl BimApp {
 
     /// What the open view shows: what a plan draws, in its view range and crop region; what a
     /// section or an elevation cuts and what its picture shows past its line; in 3D, the whole
-    /// model. Nothing on a sheet or in a schedule has a type to select.
+    /// model but for what is hidden. Nothing on a sheet or in a schedule has a type to select.
     fn shown(&mut self) -> BTreeSet<Id> {
         let m = Arc::clone(&self.session.model);
         let owners = |d: render::Drawing| d.owners.into_iter().flatten().collect::<BTreeSet<Id>>();
@@ -1120,7 +1163,12 @@ impl BimApp {
                 let seen = render::section_image(&m, scene, id, view, &[]).map(|i| i.shows()).unwrap_or_default();
                 owners(render::section(&m, id, view)).into_iter().chain(seen).collect()
             }
-            Sheet::View3D => m.elements.keys().copied().collect(),
+            // The whole model, but for what the default 3D view hides.
+            Sheet::View3D => {
+                let look =
+                    m.default_3d().map_or_else(bimcraft_core::graphics::Look::default, |id| bimcraft_core::graphics::Look::of(&m, id));
+                m.elements.keys().copied().filter(|id| look.shows(*id)).collect()
+            }
             Sheet::Paper(_) | Sheet::Schedule(_) | Sheet::Table(_) => BTreeSet::new(),
         }
     }
@@ -1763,6 +1811,23 @@ impl BimApp {
 
     fn view_tab(&mut self, ui: &mut Ui) {
         panel(ui, "Graphics", |ui| {
+            let tip = "Visibility/Graphics (VV): what this view hides, and how it draws the rest, by category, filter and element";
+            let on = self.graphic_view().is_some();
+            if ui
+                .add_enabled_ui(on, |ui| big_button(ui, Icon::Visibility, "Visibility/Graphics", self.vg_dialog.is_some(), tip))
+                .inner
+                .clicked()
+            {
+                self.open_graphics(0);
+            }
+            let tip = "Filters (FT): rules that pick out elements for a view to hide or draw another way";
+            if big_button(ui, Icon::Filter, "Filters", self.filters_dialog.is_some(), tip).clicked() {
+                self.filters_dialog = Some(graphics::FiltersDialog::default());
+            }
+            let tip = "View Templates (VT): a view's settings under a name, for other views to follow";
+            if big_button(ui, Icon::Template, "View Templates", self.templates_dialog.is_some(), tip).clicked() {
+                self.templates_dialog = Some(graphics::TemplatesDialog::default());
+            }
             if big_button(ui, Icon::ThinLines, "Thin Lines", self.thin, "Thin Lines (TL): every line one pixel wide").clicked() {
                 self.thin = !self.thin;
             }
@@ -1928,6 +1993,23 @@ impl BimApp {
                 self.edit_type();
             }
         });
+        // Hide in View, and Override Graphics: what the selection does in the view on screen.
+        if !self.selection.is_empty() && self.graphic_view().is_some() {
+            panel(ui, "View", |ui| {
+                let tip = "Hide Element (EH): leave the selected elements out of this view";
+                if big_button(ui, Icon::Visibility, "Hide Element", false, tip).clicked() {
+                    self.hide_selection(false);
+                }
+                let tip = "Hide Category (VH): leave every category the selection is of out of this view";
+                if big_button(ui, Icon::Visibility, "Hide Category", false, tip).clicked() {
+                    self.hide_selection(true);
+                }
+                let tip = "Override Graphics by Element (EO): draw the selected elements their own way in this view";
+                if big_button(ui, Icon::Visibility, "Override Graphics", false, tip).clicked() {
+                    self.override_selection();
+                }
+            });
+        }
         // Revit's Modify panel: small buttons in rows. Those taking the selection need one.
         let some = !self.selection.is_empty();
         // The button lit while its tool is on (the two Mirrors told apart by how they take the axis).
@@ -2573,6 +2655,9 @@ impl BimApp {
         self.parameters_window(ctx);
         self.new_schedule_window(ctx);
         self.schedule_window(ctx);
+        self.graphics_window(ctx);
+        self.filters_window(ctx);
+        self.templates_window(ctx);
         self.shortcuts_window(ctx);
         let Some(pending) = self.pending else { return };
         #[derive(PartialEq)]

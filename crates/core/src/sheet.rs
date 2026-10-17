@@ -6,6 +6,7 @@
 //! size its lettering makes it. Text notes go on the paper itself.
 
 use crate::geom::P2;
+use crate::graphics::Look;
 use crate::language::Language;
 use crate::model::{Element, Id, Model, Schedule, Sheet, Viewport, paper};
 use crate::render::{self, Drawing, PAPER, Prim, Rgb, View};
@@ -49,7 +50,7 @@ fn framing(m: &Model, view: Id, scale: f64) -> Option<View> {
             return Some(View { scale: 1.0, cx: 0.0, cy: 0.0, width, height });
         }
         Element::View3D(v) => {
-            let cam = view3d::camera(m, v.azimuth, v.elevation, k, ROOM * DENSITY);
+            let cam = view3d::camera_in(m, v.azimuth, v.elevation, k, ROOM * DENSITY, &Look::of(m, view));
             return Some(View { scale: k, cx: 0.0, cy: 0.0, width: cam.width, height: cam.height });
         }
         _ => return None,
@@ -249,8 +250,8 @@ pub fn draw(m: &Model, id: Id) -> Option<Drawing> {
                 continue;
             }
             Some(Element::View3D(v)) => {
-                let cam = view3d::camera(m, v.azimuth, v.elevation, view.scale, ROOM * DENSITY);
-                let img = scene.get_or_insert_with(|| view3d::Scene::new(m)).render(&cam, &[]);
+                let cam = view3d::camera_in(m, v.azimuth, v.elevation, view.scale, ROOM * DENSITY, &Look::of(m, vp.view));
+                let img = scene.get_or_insert_with(|| view3d::Scene::new(m)).render_in(&cam, &[], &Look::of(m, vp.view));
                 d.push(Prim::Image { at: (ox, oy), width: img.width, height: img.height, rgba: img.rgba });
                 Drawing::new(view)
             }

@@ -361,41 +361,82 @@ pub fn check(m: &Model, sc: &Schedule) -> Result<(), String> {
         return Err(format!("field `{}` holds {}; only numbers, lengths and areas total", f.name, holding(k)));
     }
     for flt in &sc.filters {
-        let k = *kinds.get(flt.field.as_str()).ok_or_else(|| format!("filter: {}", unknown(&flt.field)))?;
-        let who = format!("filter on `{}`", flt.field);
-        let text_op =
-            matches!(flt.op, Op::Contains | Op::NotContains | Op::BeginsWith | Op::NotBeginsWith | Op::EndsWith | Op::NotEndsWith);
-        if text_op && k != Kind::Text {
-            return Err(format!("{who}: it holds {}, and only text contains, begins or ends", holding(k)));
-        }
-        if k == Kind::YesNo && !matches!(flt.op, Op::Equals | Op::NotEquals | Op::HasValue | Op::HasNoValue) {
-            return Err(format!("{who}: yes or no only equals or doesn't"));
-        }
-        let fits = match (flt.op, k, &flt.value) {
-            // Read by none, it's still small.
-            (Op::HasValue | Op::HasNoValue, _, v) => match v {
-                Value::Null | Value::Bool(_) => true,
-                Value::String(s) => s.chars().count() <= MAX_TEXT,
-                v => v.as_f64().is_some_and(|x| x.is_finite() && x.abs() <= MAX_COORD),
-            },
-            (_, Kind::Text, Value::String(s)) => s.chars().count() <= MAX_TEXT,
-            (_, Kind::YesNo, Value::Bool(_)) => true,
-            (_, Kind::Number | Kind::Length | Kind::Area, v) => v.as_f64().is_some_and(|x| x.is_finite() && x.abs() <= MAX_COORD),
-            _ => false,
-        };
-        if !fits {
-            let unit = match k {
-                Kind::Length => " (mm)",
-                Kind::Area => " (m²)",
-                _ => "",
-            };
-            return Err(format!("{who}: it compares {}{unit}, not {}", holding(k), flt.value));
-        }
+        check_filter(flt, &kinds, &unknown)?;
     }
     if let Some(s) = sc.sort.iter().find(|s| !kinds.contains_key(s.field.as_str())) {
         return Err(format!("sorting: {}", unknown(&s.field)));
     }
     Ok(())
+}
+
+/// Whether filter `flt` is sound for fields of these `kinds`: a field there is, compared as what it
+/// holds can be, with a value of that kind.
+fn check_filter(flt: &Filter, kinds: &BTreeMap<&str, Kind>, unknown: &dyn Fn(&str) -> String) -> Result<(), String> {
+    let k = *kinds.get(flt.field.as_str()).ok_or_else(|| format!("filter: {}", unknown(&flt.field)))?;
+    let who = format!("filter on `{}`", flt.field);
+    let text_op = matches!(flt.op, Op::Contains | Op::NotContains | Op::BeginsWith | Op::NotBeginsWith | Op::EndsWith | Op::NotEndsWith);
+    if text_op && k != Kind::Text {
+        return Err(format!("{who}: it holds {}, and only text contains, begins or ends", holding(k)));
+    }
+    if k == Kind::YesNo && !matches!(flt.op, Op::Equals | Op::NotEquals | Op::HasValue | Op::HasNoValue) {
+        return Err(format!("{who}: yes or no only equals or doesn't"));
+    }
+    let fits = match (flt.op, k, &flt.value) {
+        // Read by none, it's still small.
+        (Op::HasValue | Op::HasNoValue, _, v) => match v {
+            Value::Null | Value::Bool(_) => true,
+            Value::String(s) => s.chars().count() <= MAX_TEXT,
+            v => v.as_f64().is_some_and(|x| x.is_finite() && x.abs() <= MAX_COORD),
+        },
+        (_, Kind::Text, Value::String(s)) => s.chars().count() <= MAX_TEXT,
+        (_, Kind::YesNo, Value::Bool(_)) => true,
+        (_, Kind::Number | Kind::Length | Kind::Area, v) => v.as_f64().is_some_and(|x| x.is_finite() && x.abs() <= MAX_COORD),
+        _ => false,
+    };
+    if !fits {
+        let unit = match k {
+            Kind::Length => " (mm)",
+            Kind::Area => " (m²)",
+            _ => "",
+        };
+        return Err(format!("{who}: it compares {}{unit}, not {}", holding(k), flt.value));
+    }
+    Ok(())
+}
+
+/// Whether `rules` are sound for the elements of each category in `cats`: filters on fields every
+/// one of them has.
+pub fn check_rules(m: &Model, cats: &[String], rules: &[Filter]) -> Result<(), String> {
+    if rules.len() > MAX_FIELDS {
+        return Err(format!("it has {} rules; a filter has up to {MAX_FIELDS}", rules.len()));
+    }
+    for cat in cats {
+        let available = fields(m, cat);
+        let kinds: BTreeMap<&str, Kind> = available.iter().map(|(n, k)| (n.as_str(), *k)).collect();
+        let unknown = |n: &str| {
+            let names: Vec<&str> = available.iter().map(|(n, _)| n.as_str()).collect();
+            format!("`{n}` isn't a field of {cat}s; there are: {}", names.join(", "))
+        };
+        for flt in rules {
+            check_filter(flt, &kinds, &unknown)?;
+        }
+    }
+    Ok(())
+}
+
+/// The elements of categories `cats` that hold every one of `rules`.
+pub fn picks(m: &Model, cats: &[String], rules: &[Filter]) -> BTreeSet<Id> {
+    let kinds: BTreeMap<&str, BTreeMap<String, Kind>> = cats.iter().map(|c| (c.as_str(), fields(m, c).into_iter().collect())).collect();
+    let formulas = BTreeMap::new();
+    let mut out = BTreeSet::new();
+    for (&id, e) in &m.elements {
+        let Some(of) = kinds.get(e.category()) else { continue };
+        let mut row = Row { m, e, json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
+        if rules.iter().all(|f| keeps(f, &row.get(&f.field), of.get(&f.field).copied(), m.units)) {
+            out.insert(id);
+        }
+    }
+    out
 }
 
 /// Calculated field `name`'s formula, and those of the calculated fields it reads, each reading

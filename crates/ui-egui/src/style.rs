@@ -207,6 +207,8 @@ pub enum Icon {
     Parameters,
     Measure,
     Snaps,
+    Visibility,
+    Template,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -537,6 +539,18 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(7.0, 7.0), (17.0, 7.0), (17.0, 17.0), (7.0, 17.0)]),
             line(&[(12.0, 2.0), (12.0, 22.0)]),
             line(&[(2.0, 12.0), (22.0, 12.0)]),
+        ],
+        // An eye: what a view shows.
+        Icon::Visibility => vec![
+            ring(&[(2.0, 12.0), (7.0, 7.0), (12.0, 5.5), (17.0, 7.0), (22.0, 12.0), (17.0, 17.0), (12.0, 18.5), (7.0, 17.0)]),
+            Shape::circle_stroke(at(12.0, 12.0), 3.0 * k, s),
+        ],
+        // A page, a corner turned down, and its lines of settings.
+        Icon::Template => vec![
+            ring(&[(5.0, 2.0), (15.0, 2.0), (19.0, 6.0), (19.0, 22.0), (5.0, 22.0)]),
+            line(&[(15.0, 2.0), (15.0, 6.0), (19.0, 6.0)]),
+            line(&[(8.0, 11.0), (16.0, 11.0)]),
+            line(&[(8.0, 15.0), (16.0, 15.0)]),
         ],
         // A tag, as a value hangs on what it's of.
         Icon::Parameters => {

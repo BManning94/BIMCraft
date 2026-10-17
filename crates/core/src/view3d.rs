@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::geom::{self, P2};
+use crate::graphics::Look;
 use crate::model::{Element, Id, Layer, Model};
 use crate::render::{PAPER, Rgb};
 use crate::stairs;
@@ -534,9 +535,14 @@ impl Scene {
 
     /// A view of the whole model from `azimuth` and `elevation` (degrees), fitted into the picture.
     pub fn fit(&self, azimuth: f64, elevation: f64, width: u32, height: u32) -> Camera {
+        self.fit_in(azimuth, elevation, width, height, &Look::default())
+    }
+
+    /// A view of what `look` shows of the model, fitted into the picture.
+    pub fn fit_in(&self, azimuth: f64, elevation: f64, width: u32, height: u32, look: &Look) -> Camera {
         let mut cam = Camera { azimuth, elevation: elevation.clamp(-89.0, 89.0), scale: 1.0, target: [0.0; 3], width, height };
         let room = |px: u32| (f64::from(px) - 2.0 * MARGIN).max(1.0);
-        let pts: Vec<P3> = self.tris.iter().flat_map(|t| t.p).collect();
+        let pts: Vec<P3> = self.tris.iter().filter(|t| look.shows(t.owner)).flat_map(|t| t.p).collect();
         let Some((target, w, h)) = extent(&cam, &pts) else {
             cam.scale = room(width).min(room(height)) / 10_000.0;
             return cam;
@@ -548,21 +554,40 @@ impl Scene {
 
     /// The picture `cam` takes. Elements in `tints` show halfway to their tint, and their edges in it.
     pub fn render(&self, cam: &Camera, tints: &[(Id, Rgb)]) -> Image {
-        self.picture(cam, None, tints)
+        self.render_in(cam, tints, &Look::default())
+    }
+
+    /// The picture `cam` takes of what `look` shows, in the colours it gives.
+    pub fn render_in(&self, cam: &Camera, tints: &[(Id, Rgb)], look: &Look) -> Image {
+        self.picture(cam, None, tints, look)
     }
 
     /// A section's or an elevation's picture: what `clip` keeps, in hidden line (faces the paper's
     /// colour, edges dark), for the cut to be drawn over.
     pub fn cut(&self, cam: &Camera, clip: &Clip, tints: &[(Id, Rgb)]) -> Image {
-        self.picture(cam, Some(clip), tints)
+        self.cut_in(cam, clip, tints, &Look::default())
     }
 
-    fn picture(&self, cam: &Camera, clip: Option<&Clip>, tints: &[(Id, Rgb)]) -> Image {
-        let (w, h) = (cam.width.clamp(1, MAX_SIDE) as usize, cam.height.clamp(1, MAX_SIDE) as usize);
-        let (back, right, up) = cam.axes();
-        let mut depth = vec![f32::NEG_INFINITY; w * h];
-        let mut hit = vec![u32::MAX; w * h];
+    /// A section's or an elevation's picture of what `look` shows.
+    pub fn cut_in(&self, cam: &Camera, clip: &Clip, tints: &[(Id, Rgb)], look: &Look) -> Image {
+        self.picture(cam, Some(clip), tints, look)
+    }
+
+    /// The triangles `keep` takes, drawn into `into`'s depths and hits: the nearest at each pixel of a
+    /// `size` picture through `cam`; with `front`, only where they are nearer than its depths.
+    fn raster(
+        &self,
+        cam: &Camera,
+        clip: Option<&Clip>,
+        (w, h): (usize, usize),
+        keep: impl Fn(&Tri) -> bool,
+        front: Option<&[f32]>,
+        (depth, hit): (&mut [f32], &mut [u32]),
+    ) {
         for (i, t) in self.tris.iter().enumerate() {
+            if !keep(t) {
+                continue;
+            }
             let [a, b, c] = t.p.map(|p| cam.project(p));
             let area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
             // Edge-on (or not a number): nothing to fill.
@@ -592,6 +617,9 @@ impl Scene {
                     }
                     let z = z as f32;
                     let k = py * w + px;
+                    if front.is_some_and(|f| f.get(k).is_some_and(|d| z <= *d)) {
+                        continue;
+                    }
                     if let (Some(d), Some(s)) = (depth.get_mut(k), hit.get_mut(k))
                         && z > *d
                     {
@@ -599,6 +627,27 @@ impl Scene {
                     }
                 }
             }
+        }
+    }
+
+    fn picture(&self, cam: &Camera, clip: Option<&Clip>, tints: &[(Id, Rgb)], look: &Look) -> Image {
+        let plain = look.is_plain();
+        let (w, h) = (cam.width.clamp(1, MAX_SIDE) as usize, cam.height.clamp(1, MAX_SIDE) as usize);
+        let (back, right, up) = cam.axes();
+        // What the view sees through is drawn over what lies behind it, after the opaque surfaces: the
+        // nearest of them at each pixel, where nothing opaque is nearer. (Not in a section's hidden line.)
+        let see_through = |t: &Tri| clip.is_none() && !plain && look.transparency(t.owner) > 0;
+        let shown = |t: &Tri| plain || look.shows(t.owner);
+        let mut depth = vec![f32::NEG_INFINITY; w * h];
+        let mut hit = vec![u32::MAX; w * h];
+        self.raster(cam, clip, (w, h), |t| shown(t) && !see_through(t), None, (&mut depth, &mut hit));
+        // Only a picture with something in it to see through needs the second pass, and its buffers.
+        let through_any = !plain && self.tris.iter().any(|t| shown(t) && see_through(t));
+        let mut seen = Vec::new();
+        if through_any {
+            let mut near = vec![f32::NEG_INFINITY; w * h];
+            seen = vec![u32::MAX; w * h];
+            self.raster(cam, clip, (w, h), |t| shown(t) && see_through(t), Some(&depth), (&mut near, &mut seen));
         }
         // Lit from over the viewer's left shoulder; a face turned away from the light keeps 62%.
         let light = unit(add(add(mul(right, -0.35), mul(up, 0.55)), mul(back, 0.75)));
@@ -610,11 +659,13 @@ impl Scene {
                 let n = if dot(n, back) < 0.0 { mul(n, -1.0) } else { n };
                 let k = 0.62 + 0.38 * dot(n, light).max(0.0);
                 let c = |v: u8| (f64::from(v) * k).round() as u8;
-                if clip.is_some() { PAPER } else { Rgb(c(t.color.0), c(t.color.1), c(t.color.2)) }
+                let color = if plain { t.color } else { look.surface(t.owner, t.color) };
+                if clip.is_some() { PAPER } else { Rgb(c(color.0), c(color.1), c(color.2)) }
             })
             .collect();
         let tints: BTreeMap<Id, Rgb> = tints.iter().copied().collect();
         let tri = |k: usize| hit.get(k).map(|&t| t as usize).filter(|t| *t < self.tris.len());
+        let through = |k: usize| seen.get(k).map(|&t| t as usize).filter(|t| *t < self.tris.len());
         let plane = |k: usize| tri(k).and_then(|t| self.planes.get(t)).copied();
         let mut rgba = Vec::with_capacity(w * h * 4);
         for py in 0..h {
@@ -622,14 +673,31 @@ impl Scene {
                 let k = py * w + px;
                 let here = plane(k);
                 let edge = (px + 1 < w && plane(k + 1) != here) || (py + 1 < h && plane(k + w) != here);
-                let tint = tri(k).and_then(|t| self.tris.get(t)).and_then(|t| tints.get(&t.owner));
+                let owner_at = |k: usize| tri(k).and_then(|t| self.tris.get(t)).map(|t| t.owner);
+                let tint = owner_at(k).and_then(|o| tints.get(&o));
+                // An edge is drawn in the colour the view gives the edges of what it bounds.
+                let edge_of = || [k, k + 1, k + w].into_iter().find_map(owner_at).map_or(EDGE, |o| look.edge(o, EDGE));
                 let c = match (edge, tri(k).and_then(|t| shade.get(t))) {
-                    (true, _) => tint.copied().unwrap_or(EDGE),
+                    (true, _) => tint.copied().unwrap_or_else(edge_of),
                     (false, Some(s)) => tint.map_or(*s, |c| mix(*s, *c)),
                     (false, None) => PAPER,
                 };
+                // Over it, the nearest surface seen through, as much of it as the view lets show (and a
+                // tinted one always a little, or selecting it would show nothing).
+                let c = match through(k).and_then(|t| Some((shade.get(t)?, self.tris.get(t)?.owner))) {
+                    Some((s, owner)) => {
+                        let tint = tints.get(&owner);
+                        let weight = 1.0 - f64::from(look.transparency(owner)) / 100.0;
+                        blend(c, tint.map_or(*s, |c| mix(*s, *c)), if tint.is_some() { weight.max(0.35) } else { weight })
+                    }
+                    None => c,
+                };
                 rgba.extend([c.0, c.1, c.2, 255]);
             }
+        }
+        // What a pixel shows, for picking: a surface seen through is the one in front.
+        if through_any {
+            hit = hit.iter().zip(&seen).map(|(h, s)| if *s == u32::MAX { *h } else { *s }).collect();
         }
         Image { width: w as u32, height: h as u32, rgba, hit, owners: self.tris.iter().map(|t| t.owner).collect() }
     }
@@ -667,8 +735,13 @@ fn extent(cam: &Camera, pts: &[P3]) -> Option<(P3, f64, f64)> {
 /// The whole model from `azimuth` and `elevation` at `scale` px per mm: the picture as large as
 /// that makes it (up to [`MAX_SIDE`] a side), `room` px clear around it. A 3D view on a sheet.
 pub fn camera(m: &Model, azimuth: f64, elevation: f64, scale: f64, room: f64) -> Camera {
+    camera_in(m, azimuth, elevation, scale, room, &Look::default())
+}
+
+/// [`camera`] for what `look` shows of the model.
+pub fn camera_in(m: &Model, azimuth: f64, elevation: f64, scale: f64, room: f64, look: &Look) -> Camera {
     let mut cam = Camera { azimuth, elevation: elevation.clamp(-89.0, 89.0), scale, target: [0.0; 3], width: 1, height: 1 };
-    let pts: Vec<P3> = solids(m).iter().flat_map(Solid::corners).collect();
+    let pts: Vec<P3> = solids(m).iter().filter(|s| look.shows(s.owner())).flat_map(Solid::corners).collect();
     if let Some((target, w, h)) = extent(&cam, &pts) {
         let side = |d: f64| (d * scale + 2.0 * room).ceil().clamp(1.0, f64::from(MAX_SIDE)) as u32;
         (cam.target, cam.width, cam.height) = (target, side(w), side(h));
@@ -685,6 +758,12 @@ pub(crate) fn tops_at(m: &Model, p: P2) -> BTreeMap<Id, f64> {
         *top = f64::max(*top, z);
     }
     tops
+}
+
+/// `a`, and `b` over it: `b` as much as `weight` (0 to 1) says.
+fn blend(a: Rgb, b: Rgb, weight: f64) -> Rgb {
+    let m = |x: u8, y: u8| (f64::from(x) + (f64::from(y) - f64::from(x)) * weight.clamp(0.0, 1.0)).round() as u8;
+    Rgb(m(a.0, b.0), m(a.1, b.1), m(a.2, b.2))
 }
 
 /// Halfway from `a` to `b`.

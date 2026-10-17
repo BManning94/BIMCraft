@@ -5,6 +5,7 @@
 //! numbers and graduations are here too, so every front end reads them alike.
 
 use crate::geom::{self, P2};
+use crate::graphics::Look;
 use crate::model::{Element, Id, Model, TOL};
 use crate::walls::Axis;
 
@@ -147,9 +148,9 @@ struct Scene {
 }
 
 impl Scene {
-    /// What `level`'s plan has within `window` mm of `p`: a cheap look at each element's extent
-    /// first, so a plan of thousands of walls costs a few microseconds a wall.
-    fn of(m: &Model, level: Id, p: P2, window: f64) -> Scene {
+    /// What `level`'s plan has within `window` mm of `p`, but for what `look` hides: a cheap look at
+    /// each element's extent first, so a plan of thousands of walls costs a few microseconds a wall.
+    fn of(m: &Model, level: Id, p: P2, window: f64, look: &Look) -> Scene {
         let mut s = Scene { points: Vec::new(), lines: Vec::new(), walls: Vec::new() };
         let above = m.level_above(level);
         // Whether the box round `pts` lies within `window` of `p`.
@@ -160,7 +161,7 @@ impl Scene {
             p.0 >= lo.0 - window && p.0 <= hi.0 + window && p.1 >= lo.1 - window && p.1 <= hi.1 + window
         };
         let ring = |pts: &[P2]| if near(pts) { pts.iter().map(|q| (*q, Kind::Endpoint)).collect::<Vec<_>>() } else { Vec::new() };
-        for e in m.elements.values() {
+        for e in m.elements.iter().filter(|(id, _)| look.shows(**id)).map(|(_, e)| e) {
             match e {
                 Element::Wall(w) => {
                     let a = Axis::of(w);
@@ -294,7 +295,7 @@ pub fn snap(m: &Model, level: Id, p: P2, reach: Reach, from: &[P2], square: bool
             (p.0, pinned) = (f.0, Some((false, f.0)));
         }
     }
-    let scene = Scene::of(m, level, p, reach.point.max(reach.line) + MAX_HALF_THICKNESS);
+    let scene = Scene::of(m, level, p, reach.point.max(reach.line) + MAX_HALF_THICKNESS, &Look::of(m, level));
     let by_distance = |a: &P2, b: &P2| a.dist(p).total_cmp(&b.dist(p));
     // The lines that pass near the cursor: what it can cross, or stand square to.
     let mut near: Vec<(P2, P2)> = scene.lines.iter().copied().filter(|(a, b)| geom::dist_to_segment(p, *a, *b) <= reach.point).collect();

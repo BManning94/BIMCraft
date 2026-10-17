@@ -122,3 +122,14 @@ component's angle, y to its left, z up from its base; a form is a profile in a s
 `Model::component_pieces` are its forms where it stands. Plans draw them from above, a form's edges hidden under a higher
 form of the same component; sections show them beyond their line and never cut them (`Solid::Mesh` has no `across`); IFC
 writes each form as a closed face set, triangles turned out, and reads one family per family name the file gives.
+A view's graphics (`graphics.rs`; `Level`, `Section` and `View3D` each hold `graphics`) hide and override by category, by view
+filter (`Model::view_filters`: categories and a schedule filter's rules, `schedule::picks`) and by element: an element's own beats
+the filters' (the first applied prevailing), which beat the category's, and hiding by any of them hides. `Look::of` resolves a
+view to what it hides and how it paints the rest; the drawing code asks `look.shows(id)` wherever it loops over elements (plans,
+sections, `cut_outlines`, `seen_below`, `view3d::Scene::picture`) and `look.dress` recolours the finished `Drawing` by owner and
+by `Part` (`Drawing::part` marks what is drawn as projection, cut, lettering or hatching (and the lines between layers), so a
+new drawing of what a view cuts sets `Part::Cut`; a hidden door's opening is drawn owned by none, the wall's; the cut walls' union fill has no owner and takes its colour at the draw site, `cut_unions`). A view template
+(`Model::view_templates`) controls groups of the views that follow it (categories, filters, a plan's view range through
+`Model::view_range_of`), and they can't change those (`graphics` and `modify` refuse). Snaps, Tag All, the desktop's Select All
+Instances and the framing of sections and 3D views take what `Look` shows too. A level's ceiling plan is its plan's view;
+transparency shows in 3D only.

@@ -7,6 +7,7 @@ pub mod engine;
 pub mod family;
 mod font;
 pub mod geom;
+pub mod graphics;
 pub mod ifc;
 pub mod import;
 pub mod language;
