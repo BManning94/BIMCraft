@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and package BIMCraft for Linux (<arch> is x86_64 or aarch64, the host's):
+# Build and package BIMCraft for Linux (<arch> is x86_64 or aarch64, the host's, or riscv64 cross-built):
 #
 #   $DIST/bimcraft-<version>-linux-<arch>.AppImage        any distro with glibc >= the build host's
 #   $DIST/bimcraft-<version>-linux-<arch>.AppImage.zsync  its delta updates (needs zsyncmake)
@@ -13,6 +13,11 @@
 # AppImage (downloaded into $CARGO_TARGET_DIR if missing). Build on an old distro (CI: Ubuntu
 # 22.04, glibc 2.35) so the binaries run on newer ones. Optional: desktop-file-validate and
 # appstreamcli check the metadata; zsyncmake (the zsync package) writes the AppImage's .zsync.
+#
+# riscv64 is cross-built, and only as deb, rpm and tar (appimagetool has no riscv64 runtime). Set
+# CROSS_ARCH=riscv64, CROSS_TARGET=riscv64gc-unknown-linux-gnu and CROSS_COMPILE=riscv64-linux-gnu-
+# (the binutils prefix), and EMULATOR=qemu-riscv64 (with QEMU_LD_PREFIX at the cross sysroot) to run
+# the result once. CI does it on Ubuntu 24.04, so the packages need glibc 2.39 or later.
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
@@ -25,16 +30,20 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --skip-build) SKIP_BUILD=1; shift ;;
     --formats) FORMATS="$2"; shift 2 ;;
-    -h | --help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-ARCH="$(uname -m)"
+ARCH="${CROSS_ARCH:-$(uname -m)}"
 case "$ARCH" in
   x86_64) DEB_ARCH=amd64 ;;
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
+  riscv64) DEB_ARCH=riscv64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
+esac
+case " $FORMATS " in
+  *" appimage "*) [ -z "${CROSS_TARGET:-}" ] || { echo "error: no AppImage for a cross build: --formats \"deb rpm tar\"" >&2; exit 2; } ;;
 esac
 export BIMCRAFT_MAINTAINER="${BIMCRAFT_MAINTAINER:-IPedrax <https://github.com/IPedrax/BIMCraft>}"
 BASENAME="bimcraft-$VERSION-linux-$ARCH"
@@ -42,9 +51,13 @@ BASENAME="bimcraft-$VERSION-linux-$ARCH"
 echo "==> BIMCraft $VERSION for Linux $ARCH ($FORMATS)"
 
 if [ "$SKIP_BUILD" = 0 ]; then
-  (cd "$ROOT" && cargo build --release --locked -p bimcraft -p bimcraft-cli)
+  if [ -n "${CROSS_TARGET:-}" ]; then
+    (cd "$ROOT" && cargo build --release --locked -p bimcraft -p bimcraft-cli --target "$CROSS_TARGET")
+  else
+    (cd "$ROOT" && cargo build --release --locked -p bimcraft -p bimcraft-cli)
+  fi
 fi
-BIN="$CARGO_TARGET_DIR/release"
+BIN="$CARGO_TARGET_DIR/${CROSS_TARGET:+$CROSS_TARGET/}release"
 WORK="$CARGO_TARGET_DIR/linux-package"
 STAGE="$WORK/root"
 rm -rf "$WORK"
@@ -52,7 +65,7 @@ rm -rf "$WORK"
 # ---- a tree every format is made from ----------------------------------------------------------
 install -Dm755 "$BIN/bimcraft" "$STAGE/usr/bin/bimcraft"
 install -Dm755 "$BIN/bimcraft-cli" "$STAGE/usr/bin/bimcraft-cli"
-strip "$STAGE/usr/bin/bimcraft" "$STAGE/usr/bin/bimcraft-cli"
+"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/bimcraft" "$STAGE/usr/bin/bimcraft-cli"
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
@@ -86,6 +99,8 @@ if has deb || has rpm; then
   export NFPM_ARCH="$DEB_ARCH"
   # nfpm expands environment variables in fields like `version` and `arch`, but not in `src`.
   sed "s|\${STAGE}|$STAGE|g" "$HERE/nfpm.yaml" >"$WORK/nfpm.yaml"
+  # Built on Ubuntu 24.04, the riscv64 binaries need glibc 2.39; the others, built on 22.04, 2.35.
+  [ "$ARCH" != riscv64 ] || sed -i 's/libc6 (>= 2.35)/libc6 (>= 2.39)/' "$WORK/nfpm.yaml"
   for fmt in deb rpm; do
     if has "$fmt"; then (cd "$ROOT" && nfpm package -f "$WORK/nfpm.yaml" -p "$fmt" -t "$DIST/$BASENAME.$fmt"); fi
   done
@@ -131,7 +146,12 @@ if has appimage; then
   fi
 fi
 
-"$STAGE/usr/bin/bimcraft-cli" --version
-"$STAGE/usr/bin/bimcraft" --version
+if [ -z "${CROSS_TARGET:-}" ]; then
+  "$STAGE/usr/bin/bimcraft-cli" --version
+  "$STAGE/usr/bin/bimcraft" --version
+elif [ -n "${EMULATOR:-}" ]; then
+  "$EMULATOR" "$STAGE/usr/bin/bimcraft-cli" --version
+  "$EMULATOR" "$STAGE/usr/bin/bimcraft" --version
+fi
 echo "==> done"
 ls -lh "$DIST"

@@ -437,17 +437,24 @@ DESKTOPSHORTCUT=1`. It isn't code-signed yet, so Windows SmartScreen asks before
 
 ### Linux
 
-| Build | Packages |
-|---|---|
-| x86_64 | `bimcraft-<ver>-linux-x86_64.AppImage`, `.deb`, `.rpm`, `.tar.gz` |
-| aarch64 (64-bit Arm) | `bimcraft-<ver>-linux-aarch64.AppImage`, `.deb`, `.rpm`, `.tar.gz` |
+| Format | x86_64 | aarch64 (64-bit Arm) | Notes |
+|---|---|---|---|
+| AppImage | `bimcraft-<ver>-linux-x86_64.AppImage` | `bimcraft-<ver>-linux-aarch64.AppImage` | Runs anywhere; updates itself with [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) (`.zsync` files) |
+| Flatpak | `bimcraft-<ver>-linux-x86_64.flatpak` | `bimcraft-<ver>-linux-aarch64.flatpak` | Sandboxed; `flatpak install --user <file>` |
+| Debian, Ubuntu | `bimcraft-<ver>-linux-x86_64.deb` | `bimcraft-<ver>-linux-aarch64.deb` | `sudo apt install ./<file>` |
+| Fedora, RHEL, openSUSE | `bimcraft-<ver>-linux-x86_64.rpm` | `bimcraft-<ver>-linux-aarch64.rpm` | `sudo dnf install ./<file>` |
+| Arch | `bimcraft-<ver>-linux-x86_64.pkg.tar.zst` | `bimcraft-<ver>-linux-aarch64.pkg.tar.zst` | `sudo pacman -U <file>` |
+| Tarball | `bimcraft-<ver>-linux-x86_64.tar.gz` | `bimcraft-<ver>-linux-aarch64.tar.gz` | Unpack anywhere |
 
-They run on any distro with glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36 and after). The AppImage runs as it
-is, with nothing installed and no FUSE needed (`chmod +x`, then run it), and AppImageUpdate or AppImageLauncher bring it
-up to date from the `.zsync` next to it, downloading only what changed. The `.deb` (`sudo apt install
-./bimcraft-<ver>-linux-x86_64.deb`) and the `.rpm` (`sudo dnf install ./bimcraft-<ver>-linux-x86_64.rpm`) put
-`bimcraft` and `bimcraft-cli` on the path, add BIMCraft to the applications menu and open `.bimcraft` projects and
-`.ifc` files in it. The `.tar.gz` holds the same tree (`bin/`, `share/`) to unpack anywhere.
+RISC-V (riscv64): `bimcraft-<ver>-linux-riscv64.deb`, `.rpm` and `.tar.gz`, cross-compiled; they need glibc 2.39 or later
+(Ubuntu 24.04, Debian 13).
+
+The others run on any distro with glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36 and after). The AppImage runs
+as it is, with nothing installed and no FUSE needed (`chmod +x`, then run it), and AppImageUpdate or AppImageLauncher
+bring it up to date from the `.zsync` next to it, downloading only what changed. The Flatpak runs in a sandbox that
+reaches the display, the GPU and your Documents folder, and opens any other file through the file chooser. The `.deb`, the
+`.rpm` and the Arch package put `bimcraft` and `bimcraft-cli` on the path, add BIMCraft to the applications menu and open
+`.bimcraft` projects and `.ifc` files in it. The tarball holds the same tree (`bin/`, `share/`).
 
 ### macOS
 
@@ -463,7 +470,8 @@ Control-click it, then Open (on macOS 15, System Settings > Privacy & Security >
 Versions are published on the [releases page](https://github.com/IPedrax/bimcraft/releases) as they're tagged, with a
 `SHA256SUMS` of every file. Between releases, the Release workflow (Actions > Release > Run workflow) builds them all
 for any commit, as that run's artifacts. The scripts behind them are in `packaging/` (`linux/package.sh`,
-`macos/package.sh`, each with its `--help`), and run on your own machine too.
+`linux/flatpak-bundle.sh`, `linux/arch-package.sh`, `macos/package.sh`, each with its `--help`), and run on your own
+machine too.
 
 ## License and credits
 

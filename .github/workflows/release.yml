@@ -1,7 +1,8 @@
 # The installers: on a version tag (v0.1.0) each platform's job tests and packages BIMCraft, and the
 # last job publishes them all as that tag's release; run by hand, they stay as the run's artifacts.
 #   Windows  bimcraft-<version>-windows-x64.msi
-#   Linux    bimcraft-<version>-linux-<x86_64|aarch64>.{AppImage,AppImage.zsync,deb,rpm,tar.gz}
+#   Linux    bimcraft-<version>-linux-<x86_64|aarch64>.{AppImage,AppImage.zsync,deb,rpm,tar.gz,flatpak,pkg.tar.zst}
+#            bimcraft-<version>-linux-riscv64.{deb,rpm,tar.gz}
 #   macOS    bimcraft-<version>-macos-universal.dmg, bimcraft-cli-<version>-macos-universal.zip
 name: Release
 
@@ -86,8 +87,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev libx11-dev \
             libxrandr-dev libxi-dev libgl1-mesa-dev desktop-file-utils appstream zsync
-          curl -fsSL -o nfpm.deb "https://github.com/goreleaser/nfpm/releases/download/v2.43.0/nfpm_2.43.0_${{ matrix.deb }}.deb"
-          sudo dpkg -i nfpm.deb && rm nfpm.deb
+          packaging/linux/install-nfpm.sh ${{ matrix.deb }}
 
       - name: Rust
         run: rustup update stable && rustup default stable
@@ -103,12 +103,138 @@ jobs:
           dpkg-deb --info dist/release/*.deb
           dpkg-deb --contents dist/release/*.deb | grep -E 'usr/bin/|metainfo|applications|mime'
           rpm -qip dist/release/*.rpm
-          chmod +x dist/release/*.AppImage
-          APPIMAGE_EXTRACT_AND_RUN=1 dist/release/*.AppImage --version
+          for appimage in dist/release/*.AppImage; do
+            chmod +x "$appimage"
+            APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" --version
+          done
 
       - uses: actions/upload-artifact@v4
         with:
           name: bimcraft-linux-${{ matrix.arch }}
+          path: dist/release/*
+          if-no-files-found: error
+
+  # The Flatpak and the Arch package repackage the Linux job's tarball: the same binaries as the
+  # AppImage, the deb and the rpm.
+  flatpak:
+    name: Flatpak ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bimcraft-linux-${{ matrix.arch }}
+          path: dist/linux
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
+          # Ubuntu 24.04 turns unprivileged user namespaces off, which flatpak-builder's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Builds the bundle, installs it per user and runs bimcraft-cli --version inside its sandbox.
+      - name: Build and check the bundle
+        run: packaging/linux/flatpak-bundle.sh dist/linux/bimcraft-*-linux-${{ matrix.arch }}.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bimcraft-flatpak-${{ matrix.arch }}
+          path: dist/release/*.flatpak
+          if-no-files-found: error
+
+  arch:
+    name: Arch ${{ matrix.arch }}
+    needs: linux
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: bimcraft-linux-${{ matrix.arch }}
+          path: dist/linux
+
+      # makepkg exists only on Arch and refuses root: an Arch container, and an ordinary user in it.
+      # The package holds only the tarball's files, so this x86_64 runner makes the aarch64 one too.
+      - name: Build the package
+        run: |
+          mkdir -p dist/release && chmod 777 dist/release
+          docker run --rm -i -e TARGET="${{ matrix.arch }}" -e SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            -v "$PWD:/work" -w /work archlinux:base-devel bash -s <<'EOF'
+          set -euo pipefail
+          useradd -m builder
+          su builder -c "cd /work && DIST=/work/dist/release CARGO_TARGET_DIR=/tmp/target packaging/linux/arch-package.sh --arch $TARGET dist/linux/bimcraft-*-linux-$TARGET.tar.gz"
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bimcraft-arch-${{ matrix.arch }}
+          path: dist/release/*.pkg.tar.zst
+          if-no-files-found: error
+
+  linux-riscv64:
+    name: Linux riscv64
+    # Cross-built on Ubuntu 24.04, whose ports archive has the riscv64 libraries to build against: the
+    # packages need glibc 2.39 or later. No AppImage: appimagetool has no riscv64 runtime.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          . /etc/os-release
+          sudo dpkg --add-architecture riscv64
+          # The archive's sources keep to amd64; riscv64 comes from the ports archive.
+          sudo sed -i '/^Types: deb/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+          for suite in "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-security"; do
+            echo "deb [arch=riscv64] https://ports.ubuntu.com/ubuntu-ports $suite main universe restricted multiverse"
+          done | sudo tee /etc/apt/sources.list.d/riscv64.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-riscv64-linux-gnu binutils-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross libc6-dev:riscv64 qemu-user pkg-config desktop-file-utils appstream \
+            libxkbcommon-dev:riscv64 libwayland-dev:riscv64 libx11-dev:riscv64 libxrandr-dev:riscv64 \
+            libxi-dev:riscv64 libgl1-mesa-dev:riscv64
+          packaging/linux/install-nfpm.sh amd64
+
+      - name: Rust
+        run: rustup update stable && rustup default stable && rustup target add riscv64gc-unknown-linux-gnu
+
+      # package.sh runs both binaries once under QEMU.
+      - name: Build and package
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+          PKG_CONFIG_SYSROOT_DIR: /
+          PKG_CONFIG_PATH: /usr/lib/riscv64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          CROSS_ARCH: riscv64
+          CROSS_TARGET: riscv64gc-unknown-linux-gnu
+          CROSS_COMPILE: riscv64-linux-gnu-
+          EMULATOR: qemu-riscv64
+          QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
+        run: packaging/linux/package.sh --formats "deb rpm tar"
+
+      - name: Check
+        run: |
+          dpkg-deb --info dist/release/*-linux-riscv64.deb
+          dpkg-deb --contents dist/release/*-linux-riscv64.deb | grep -E 'usr/bin/|metainfo|applications|mime'
+          rpm -qip dist/release/*-linux-riscv64.rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bimcraft-linux-riscv64
           path: dist/release/*
           if-no-files-found: error
 
@@ -155,7 +281,7 @@ jobs:
   release:
     name: Release
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [windows, linux, macos]
+    needs: [windows, linux, flatpak, arch, linux-riscv64, macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -164,7 +290,7 @@ jobs:
           merge-multiple: true
 
       - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS
+        run: cd dist && sha256sum -- * > SHA256SUMS
 
       - name: Release
         env:
