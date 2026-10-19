@@ -68,6 +68,8 @@ pub struct Canvas {
     crop_drag: Option<(Id, usize)>,
     /// A selected wall's end being dragged: the wall, and whether it's its start.
     grip: Option<(Id, bool)>,
+    /// Where the primary button last went down on a view, for a press that travels (`clicked_at`).
+    press: Option<Pos2>,
     /// What the last point a tool previewed snapped to this frame, if one did.
     pub(crate) found: Cell<Option<Found>>,
 }
@@ -85,6 +87,7 @@ impl Default for Canvas {
             cycle: 0,
             crop_drag: None,
             grip: None,
+            press: None,
             found: Cell::new(None),
         }
     }
@@ -522,6 +525,22 @@ pub(crate) fn click_modifiers(ui: &Ui) -> Modifiers {
 }
 
 impl BimApp {
+    /// Where `response` was clicked this frame: a press and release a few points apart, as egui has
+    /// it. A press that travels further before the button comes up is no click to egui (a drag if
+    /// the frames let it be, which Modify moves or boxes with); for every other tool it is a click
+    /// where it began, since fast drawing clicks on the move and no tool has a use for a drag.
+    pub(crate) fn clicked_at(&mut self, ui: &Ui, response: &Response) -> Option<Pos2> {
+        let (pressed, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released()));
+        if pressed && response.is_pointer_button_down_on() {
+            self.canvas.press = ui.input(|i| i.pointer.press_origin());
+        }
+        let began = if released { self.canvas.press.take() } else { None };
+        if response.clicked() {
+            return response.interact_pointer_pos();
+        }
+        if self.tool == Tool::Modify { None } else { began }
+    }
+
     /// Where a point picked at pixel `at` lands, with the points `from` already picked: on what
     /// the plan has there, a guide at an angle from the last of them, a wall's centre line, or the
     /// nearest 10 mm, as Manage > Snaps says. `square` keeps the step from the last horizontal or
@@ -709,9 +728,7 @@ impl BimApp {
             self.open_sheet(Sheet::Section(id));
             return;
         }
-        if response.clicked()
-            && let Some(at) = response.interact_pointer_pos()
-        {
+        if let Some(at) = self.clicked_at(ui, &response) {
             self.click(&model, level, &view, (at.x - rect.min.x, at.y - rect.min.y), hovered, click_modifiers(ui));
             // A snap override typed was for that point.
             self.snap_once = None;

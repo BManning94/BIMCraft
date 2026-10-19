@@ -351,6 +351,8 @@ pub struct BimApp {
     measured: Option<(P2, P2)>,
     /// Tab pressed over the plan, taken from egui's focus keys: cycle what's under the cursor.
     tab_cycle: bool,
+    /// What a window handed over that `pace` kept back for the frames after the one it came in.
+    held: Vec<Event>,
     show_properties: bool,
     show_browser: bool,
     /// The Keyboard Shortcuts dialog is open (KS); the Manage tab drops its Project Units menu open
@@ -600,6 +602,7 @@ impl BimApp {
             typed_length: String::new(),
             dim_edit: None,
             tab_cycle: false,
+            held: Vec::new(),
             show_properties: true,
             show_browser: true,
             show_shortcuts: false,
@@ -763,6 +766,10 @@ impl BimApp {
     /// The whole window.
     pub fn show(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // What `pace` held is for the next frame, which a window with nothing new to say won't run.
+        if !self.held.is_empty() {
+            ctx.request_repaint();
+        }
         if !self.styled {
             style::apply(&ctx);
             self.styled = true;
@@ -2746,6 +2753,23 @@ impl BimApp {
     }
 }
 
+impl BimApp {
+    /// Cut a window's `events` for one frame after the first button press or release, and hold the
+    /// rest, in order, for the frames after (true while any is held). egui takes where a click was,
+    /// and what lay under it, from the pointer's last position in the frame, and counts two clicks in
+    /// a frame as one: a hand that moves on between one frame and the next, as in fast drawing,
+    /// would click somewhere else, or once.
+    pub(crate) fn pace(&mut self, events: &mut Vec<Event>) -> bool {
+        let mut all = std::mem::take(&mut self.held);
+        all.append(events);
+        if let Some(cut) = all.iter().position(|e| matches!(e, Event::PointerButton { .. })) {
+            self.held = all.split_off(cut + 1);
+        }
+        *events = all;
+        !self.held.is_empty()
+    }
+}
+
 impl eframe::App for BimApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.show(ui);
@@ -2754,6 +2778,7 @@ impl eframe::App for BimApp {
     /// Tab over the plan cycles through what's under the cursor, as in Revit, rather than moving
     /// the keyboard between widgets.
     fn raw_input_hook(&mut self, ctx: &Context, raw: &mut egui::RawInput) {
+        self.pace(&mut raw.events);
         if self.canvas.hovering() && !ctx.egui_wants_keyboard_input() {
             self.tab_cycle |= raw.events.iter().any(|e| matches!(e, Event::Key { key: Key::Tab, pressed: true, .. }));
             raw.events.retain(|e| !matches!(e, Event::Key { key: Key::Tab, .. }));

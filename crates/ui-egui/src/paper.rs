@@ -125,9 +125,7 @@ impl BimApp {
             self.open_sheet(open);
             return;
         }
-        if response.clicked()
-            && let Some(q) = response.interact_pointer_pos()
-        {
+        if let Some(q) = self.clicked_at(ui, &response) {
             match pick(q) {
                 found if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
                 // Notes in paper mm, to the half millimetre.

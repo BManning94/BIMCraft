@@ -8,7 +8,7 @@ use bimcraft_core::geom::P2;
 use bimcraft_core::model::{Element, Id};
 use bimcraft_core::sample::SAMPLE;
 use egui::accesskit::Role;
-use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, vec2};
+use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhase, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
@@ -120,6 +120,24 @@ fn double_click(h: &mut Harness<BimApp>, p: P2) {
         h.event(Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
     }
     h.run();
+}
+
+/// The primary button going down or up at `pos`.
+fn button(pos: Pos2, pressed: bool) -> Event {
+    Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+}
+
+/// What a window hands the app for one frame, then the frames the app asks for to take what it held
+/// back (`BimApp::pace`, as `raw_input_hook` runs it): a hand moves on between one frame and the next.
+fn deliver(h: &mut Harness<BimApp>, mut events: Vec<Event>) {
+    loop {
+        let more = h.state_mut().pace(&mut events);
+        h.input_mut().events.append(&mut events);
+        h.step();
+        if !more {
+            break;
+        }
+    }
 }
 
 /// A drag with `button` between points on screen, in steps.
@@ -245,6 +263,125 @@ fn escape_drops_the_chain_and_clicking_its_start_closes_it() {
     assert_eq!(walls(&h).len(), 4, "back on its start, the chain closes");
     key(&mut h, Key::Escape);
     assert!(matches!(h.state().tool, Tool::Modify), "Escape with no chain leaves the tool");
+}
+
+#[test]
+fn pace_cuts_the_events_of_a_frame_after_each_button_and_holds_the_rest_in_order() {
+    let mut app = BimApp::new(Session::new());
+    let (a, b) = (pos2(1.0, 1.0), pos2(9.0, 9.0));
+    let mut events = vec![Event::PointerMoved(a), button(a, true), Event::PointerMoved(b), button(b, false), Event::PointerMoved(a)];
+    assert!(app.pace(&mut events), "the rest is held");
+    assert_eq!(events, [Event::PointerMoved(a), button(a, true)]);
+    // What arrives meanwhile waits behind what is held.
+    events = vec![Event::Text("w".into())];
+    assert!(app.pace(&mut events));
+    assert_eq!(events, [Event::PointerMoved(b), button(b, false)]);
+    events = Vec::new();
+    assert!(!app.pace(&mut events), "nothing left over");
+    assert_eq!(events, [Event::PointerMoved(a), Event::Text("w".into())]);
+}
+
+#[test]
+fn a_click_is_made_where_the_button_went_down_not_where_the_hand_had_got_to_by_the_frames_end() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    let (here, gone) = (h.state().screen(P2(1000.0, 1000.0)), h.state().screen(P2(5000.0, 3000.0)));
+    // The button goes down and up at one spot; the hand is far off when the window gets round to the frame.
+    deliver(&mut h, vec![Event::PointerMoved(here), button(here, true), button(here, false), Event::PointerMoved(gone)]);
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0)]));
+}
+
+#[test]
+fn a_press_belongs_to_what_lay_under_it_though_the_hand_has_left_it_by_the_frames_end() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    let (here, off) = (h.state().screen(P2(1000.0, 1000.0)), pos2(h.state().screen(P2(1000.0, 1000.0)).x, 2.0));
+    // The hand goes up onto the ribbon in the breath after the button went down on the plan.
+    deliver(&mut h, vec![Event::PointerMoved(here), button(here, true), Event::PointerMoved(off), button(off, false)]);
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0)]));
+}
+
+#[test]
+fn two_clicks_that_reach_the_app_in_one_frame_are_two_clicks() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    let (a, b) = (h.state().screen(P2(1000.0, 1000.0)), h.state().screen(P2(5000.0, 1000.0)));
+    let clicks = [Event::PointerMoved(a), button(a, true), button(a, false), Event::PointerMoved(b), button(b, true), button(b, false)];
+    deliver(&mut h, clicks.to_vec());
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0), P2(5000.0, 1000.0)]));
+}
+
+#[test]
+fn a_tool_takes_the_point_where_the_button_went_down_though_the_hand_travelled_before_it_came_up() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    // Fast drawing clicks on the move; egui calls a press and release more than six points apart a
+    // drag, which a drawing tool would drop.
+    drag(&mut h, P2(1000.0, 1000.0), P2(3000.0, 1000.0));
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0)]));
+    drag(&mut h, P2(5000.0, 1000.0), P2(5000.0, 3000.0));
+    assert_eq!(h.state().tool, Tool::Wall(vec![P2(1000.0, 1000.0), P2(5000.0, 1000.0)]));
+}
+
+#[test]
+fn a_tool_acts_where_the_button_went_down_in_sections_and_on_sheets_too() {
+    let mut h = app_at(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}\nsheet {{}}"), 0.05);
+    press(&mut h, "Annotate");
+    press(&mut h, "Text");
+    type_into(&mut h, "Text:", "Tiled floor");
+    browse(&mut h, "Section 1");
+    drag(&mut h, P2(3000.0, 2500.0), P2(5000.0, 2500.0));
+    h.get_by_label("A101 - Unnamed").click_accesskit();
+    h.run();
+    drag(&mut h, P2(50.0, 50.0), P2(120.0, 50.0));
+    let notes = ids(&h, "text");
+    assert_eq!(notes.len(), 2, "a note in the section and one on the sheet");
+    assert_eq!((field(&h, notes[0], "at"), field(&h, notes[1], "at")), (json!([3000.0, 2500.0]), json!([50.0, 50.0])));
+}
+
+#[test]
+fn a_click_selects_what_lay_under_the_button_though_the_hand_has_moved_on() {
+    let mut h = app(SAMPLE);
+    let door = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "1"));
+    let (on, off) = (h.state().screen(P2(2000.0, 0.0)), h.state().screen(P2(3000.0, 1000.0)));
+    deliver(&mut h, vec![Event::PointerMoved(on), button(on, true), button(on, false), Event::PointerMoved(off)]);
+    assert_eq!(h.state().selection, [door]);
+}
+
+#[test]
+fn a_drag_lets_go_where_the_button_came_up_not_where_the_hand_had_got_to_by_the_frames_end() {
+    let mut h = app(BOX);
+    click(&mut h, P2(2000.0, 0.0));
+    // The south wall's east end, dragged south, with the hand carrying on past where it let go.
+    let (grip, half, to, gone) = (
+        h.state().screen(P2(8000.0, 0.0)),
+        h.state().screen(P2(8000.0, -500.0)),
+        h.state().screen(P2(8000.0, -1000.0)),
+        h.state().screen(P2(8000.0, -3000.0)),
+    );
+    deliver(&mut h, vec![Event::PointerMoved(grip), button(grip, true)]);
+    deliver(&mut h, vec![Event::PointerMoved(half)]);
+    deliver(&mut h, vec![Event::PointerMoved(to), button(to, false), Event::PointerMoved(gone)]);
+    assert_eq!(walls(&h)[0], (P2(0.0, 0.0), P2(8000.0, -1000.0)));
+}
+
+#[test]
+fn a_press_on_the_ribbon_is_no_click_on_the_plan() {
+    let mut h = app("");
+    tool(&mut h, "Wall");
+    press(&mut h, "Annotate");
+    assert_eq!(h.state().tool, Tool::Wall(Vec::new()), "the tab took the press: no point went down under it");
+}
+
+#[test]
+fn the_app_asks_for_a_frame_while_it_holds_events_back() {
+    // Else a click's release would sit held until the next event came.
+    let mut h = app("");
+    h.step();
+    assert!(!h.ctx.has_requested_repaint(), "an idle frame asks for none");
+    h.state_mut().held.push(Event::WindowFocused(true));
+    h.step();
+    assert!(h.ctx.has_requested_repaint(), "the held event needs its frame");
 }
 
 #[test]
