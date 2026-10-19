@@ -6,7 +6,7 @@
 //! pixel shows, for picking. Sections and elevations use the same pictures, clipped at their
 //! line and in hidden line, and cut the same solids.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::geom::{self, P2};
 use crate::model::{Element, Id, Layer, Model};
@@ -57,12 +57,13 @@ pub(crate) fn unit(a: P3) -> P3 {
 }
 
 /// A triangle of an element's surface; on a curved one, which (its element's, and which of its
-/// curved surfaces: a wall's outside or inside, a component's form), so the facets read as one.
+/// curved surfaces: a wall's outside or inside, a component's by its first triangle's place in the
+/// scene), so the facets read as one.
 struct Tri {
     p: [P3; 3],
     owner: Id,
     color: Rgb,
-    curve: Option<(Id, u32)>,
+    curve: Option<(Id, usize)>,
 }
 
 /// A wall's plan frame: its start, along it, and square to it.
@@ -101,12 +102,13 @@ impl Frame {
 /// face, level or sloped, and what lies up to `rise` mm above it (a floor, a column, a roof's
 /// slope); a prism: a ring in plan from one plane up to another (a wall's part; of a curved wall,
 /// with its centre and its centre line's radius, its faces being one surface each); or triangles
-/// (a component's form, which sections show and don't cut), past `caps` one curved surface `round`.
+/// (a component's form, which sections show and don't cut): a round one's sides, past `caps`, are
+/// one curved surface; any other's facets that turn little where they meet are ([`facets`]).
 pub(crate) enum Solid {
     Box { owner: Id, color: Rgb, frame: Frame, a: (f64, f64), c: (f64, f64), z: (f64, f64) },
     Slab { owner: Id, color: Rgb, face: Vec<P3>, rise: f64 },
     Prism { owner: Id, color: Rgb, ring: Vec<P2>, bottom: Plane, top: Plane, curve: Option<(P2, f64)> },
-    Mesh { owner: Id, color: Rgb, tris: Vec<[P3; 3]>, caps: usize, round: Option<u32> },
+    Mesh { owner: Id, color: Rgb, tris: Vec<[P3; 3]>, caps: usize, round: bool },
 }
 
 /// A level slab: `ring` from `z.0` up to `z.1`.
@@ -250,19 +252,75 @@ impl Solid {
                     // Along a curved wall's face (not across it, where it's cut), which face.
                     let curve = curve
                         .filter(|(c, _)| (b - a).unit().cross((a - *c).unit()).abs() > 0.5)
-                        .map(|(c, r)| (owner, u32::from(((a + b) * 0.5).dist(c) > r)));
+                        .map(|(c, r)| (owner, usize::from(((a + b) * 0.5).dist(c) > r)));
                     out.push(Tri { p: [a0, b0, b1], owner, color, curve });
                     out.push(Tri { p: [a0, b1, a1], owner, color, curve });
                 }
             }
+            // Each surface keyed by its first triangle's place in `out`, which no other form's shares.
+            // ponytail: worked out again for each component of a family; keep it per form if many big meshes slow a scene.
             Solid::Mesh { owner, color, tris, caps, round } => {
-                for (i, p) in tris.iter().enumerate() {
-                    let curve = round.filter(|_| i >= *caps).map(|k| (*owner, k));
-                    out.push(Tri { p: *p, owner: *owner, color: *color, curve });
+                let first = out.len();
+                let surfaces = if *round { (0..tris.len()).map(|i| (i >= *caps).then_some(*caps)).collect() } else { facets(tris) };
+                for (p, s) in tris.iter().zip(surfaces) {
+                    out.push(Tri { p: *p, owner: *owner, color: *color, curve: s.map(|s| (*owner, first + s)) });
                 }
             }
         }
     }
+}
+
+/// How far, in degrees, two triangles may turn at the edge they share and still be one surface:
+/// the facets a curve is cut into turn less, a crease like a seat's rim more.
+const SMOOTH: f64 = 20.0;
+
+/// The curved surfaces a mesh's triangles make: those that share an edge and turn less than
+/// [`SMOOTH`] degrees there are one. Each triangle's surface is its first triangle's index; none
+/// for a flat face (`planes` finds those by their plane) or a triangle alone.
+fn facets(tris: &[[P3; 3]]) -> Vec<Option<usize>> {
+    /// The first triangle of `i`'s surface, as `up` links them, shortening the way as it goes.
+    fn first(up: &mut [usize], mut i: usize) -> usize {
+        while let Some(&p) = up.get(i)
+            && p != i
+        {
+            let grand = up.get(p).copied().unwrap_or(p);
+            if let Some(slot) = up.get_mut(i) {
+                *slot = grand;
+            }
+            i = grand;
+        }
+        i
+    }
+    let limit = SMOOTH.to_radians().cos();
+    let normals: Vec<P3> = tris.iter().map(|[a, b, c]| unit(cross(sub(*b, *a), sub(*c, *a)))).collect();
+    let normal = |i: usize| normals.get(i).copied().unwrap_or_default();
+    let mut up: Vec<usize> = (0..tris.len()).collect();
+    // The first triangle on each edge, which its corners name to a micron (as a file rounds them).
+    // ponytail: a corner on a rounding boundary may miss its twin, and a third triangle on an edge meets
+    // only the first; probe the neighbouring cells and pair them all if facet lines show.
+    let mut edges: HashMap<([i64; 3], [i64; 3]), usize> = HashMap::new();
+    let mut bent = Vec::new();
+    for (i, t) in tris.iter().enumerate() {
+        let corner = |k: usize| t.get(k % 3).map_or([0; 3], |p| p.map(|x| (x * 1e3).round() as i64));
+        for k in 0..3 {
+            let (a, b) = (corner(k), corner(k + 1));
+            let j = *edges.entry((a.min(b), a.max(b))).or_insert(i);
+            // A triangle with no area has no normal, so it turns 90° from every other.
+            let turn = dot(normal(i), normal(j));
+            if j != i && a != b && turn > limit {
+                let (ri, rj) = (first(&mut up, i), first(&mut up, j));
+                if let Some(slot) = up.get_mut(ri.max(rj)) {
+                    *slot = ri.min(rj);
+                }
+                // Triangles in one plane (as `planes` takes it) are a flat face, not a curve.
+                if turn < 1.0 - 1e-9 {
+                    bent.push(i);
+                }
+            }
+        }
+    }
+    let curved: HashSet<usize> = bent.into_iter().map(|i| first(&mut up, i)).collect();
+    (0..tris.len()).map(|i| Some(first(&mut up, i)).filter(|s| curved.contains(s))).collect()
 }
 
 /// The stretches of the line from `p` along unit `u` that lie over `ring`, as distances from `p`:
@@ -321,12 +379,11 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
             Element::Column(col) => {
                 out.push(slab(id, WALL, &m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height)))
             }
-            // Each form in its material's colour; a round one's sides one surface, as a curved wall's are.
+            // Each form in its material's colour; a curved one's facets one surface, as a curved wall's are.
             Element::Component(c) => {
-                for (k, piece) in (2..).zip(m.component_pieces(c)) {
+                for piece in m.component_pieces(c) {
                     let color = m.materials.get(&piece.material).map_or(COMPONENT, |x| Rgb(x.color[0], x.color[1], x.color[2]));
-                    let round = piece.round.then_some(k);
-                    out.push(Solid::Mesh { owner: id, color, tris: piece.tris, caps: piece.caps, round });
+                    out.push(Solid::Mesh { owner: id, color, tris: piece.tris, caps: piece.caps, round: piece.round });
                 }
             }
             // Each tread a block from the floor up to it, each landing a slab up to its top; the last
@@ -400,14 +457,14 @@ fn prism(out: &mut Vec<Tri>, owner: Id, color: Rgb, face: &[P3], rise: f64) {
 }
 
 /// Each triangle's plane, as an index the triangles lying in it (within half a millimetre) share;
-/// the facets of one face of a curved wall share one too.
+/// the facets of one curved surface (a curved wall's face, a mesh's curve) share one too.
 fn planes(tris: &[Tri]) -> Vec<usize> {
     // Planes by their normal, in cells wider than the tolerance, and a millimetre's slab of distance;
     // a match is looked for in the nearer neighbouring cell on each axis and the slabs either side,
     // so the tolerance holds across a cell's edge.
     let mut found: HashMap<[i64; 4], Vec<(P3, f64, usize)>> = HashMap::new();
     let mut count = 0;
-    let mut curves: BTreeMap<(Id, u32), usize> = BTreeMap::new();
+    let mut curves: BTreeMap<(Id, usize), usize> = BTreeMap::new();
     tris.iter()
         .map(|t| {
             if let Some(c) = t.curve {
@@ -822,6 +879,59 @@ mod tests {
         let degenerate: std::collections::BTreeSet<usize> = ids.iter().skip(200).copied().collect();
         assert_eq!(degenerate.len(), 20_000);
     }
+
+    /// A cylinder of `n` sides standing on the origin, turned out: its `n` top triangles, its `n`
+    /// bottom ones, then its `2n` sides. The last corner of a ring is a hair off the first, as a
+    /// file's rounding leaves it. Four sides make a box.
+    fn cylinder(n: usize, r: f64, h: f64) -> Vec<[P3; 3]> {
+        let ring = |z: f64, k: usize| {
+            let (s, c) = (k as f64 * std::f64::consts::TAU / n as f64).sin_cos();
+            [r * c, r * s, z]
+        };
+        let (mut top, mut bottom, mut sides) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..n {
+            let (a, b, c, d) = (ring(0.0, k), ring(0.0, k + 1), ring(h, k), ring(h, k + 1));
+            top.push([[0.0, 0.0, h], c, d]);
+            bottom.push([[0.0, 0.0, 0.0], b, a]);
+            sides.extend([[a, b, d], [a, d, c]]);
+        }
+        [top, bottom, sides].concat()
+    }
+
+    #[test]
+    fn a_meshs_facets_that_turn_little_read_as_one_surface_and_its_creases_keep_their_edges() {
+        let mesh = |owner, tris: Vec<[P3; 3]>| Solid::Mesh { owner, color: EDGE, caps: tris.len(), round: false, tris };
+        // Each cylinder's planes: its sides one surface where they turn 20° or less at their edges,
+        // else a plane to each side; and a plane to each cap, however many triangles make it.
+        for (n, planes_of) in [(4, 6), (8, 10), (16, 18), (20, 3), (24, 3), (64, 3)] {
+            let mut out = Vec::new();
+            mesh(1, cylinder(n, 200.0, 450.0)).tris(&mut out);
+            let ids = planes(&out);
+            let (top, bottom, sides) = (&ids[..n], &ids[n..2 * n], &ids[2 * n..]);
+            assert!(top.iter().all(|id| *id == top[0]) && bottom.iter().all(|id| *id == bottom[0]), "{n} sides: a cap is one plane");
+            assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), planes_of, "{n} sides: {ids:?}");
+            assert!(top[0] != bottom[0] && !sides.contains(&top[0]) && !sides.contains(&bottom[0]), "{n} sides: the caps keep their edges");
+        }
+        // Two forms of one element, one on the other, each its own surface where their facets touch.
+        let n = 24;
+        let mut out = Vec::new();
+        for _ in 0..2 {
+            mesh(1, cylinder(n, 200.0, 450.0)).tris(&mut out);
+        }
+        let ids = planes(&out);
+        assert_ne!(ids[2 * n], ids[6 * n], "{ids:?}");
+        // A mesh as big as a file may bring stays quick.
+        let started = std::time::Instant::now();
+        let mut out = Vec::new();
+        mesh(1, cylinder(25_000, 200.0, 450.0)).tris(&mut out);
+        let ids = planes(&out);
+        assert!(started.elapsed().as_secs_f64() < 1.0, "{:?}", started.elapsed());
+        assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 3);
+        // Corners that aren't numbers, and triangles with no area, join nothing, and don't crash it.
+        let odd = [[[f64::NAN; 3]; 3], [[f64::INFINITY; 3]; 3], [[1e300, 0.0, 0.0], [-1e300, 1e300, 0.0], [0.0; 3]], [[0.0; 3]; 3]];
+        assert_eq!(facets(&odd), vec![None; 4]);
+    }
+
     use crate::engine::Session;
 
     /// The 8 x 6 m box of 200 mm walls on Level 1 (walls 3 south, 4 east, 5 north, 6 west), a door
@@ -892,6 +1002,26 @@ mod tests {
         let (x, y) = at(&cam, [5000.0, -100.0, 3000.0]);
         let near: Vec<Rgb> = [-1.0, 0.0, 1.0].iter().flat_map(|dx| [-1.0, 0.0, 1.0].map(|dy| img.color(x + dx, y + dy))).collect();
         assert!(near.contains(&EDGE), "{near:?}");
+    }
+
+    #[test]
+    fn an_imported_curve_shows_no_facet_lines_and_keeps_the_edge_of_its_rim() {
+        let mut s = Session::new();
+        let post = serde_json::json!({"name": "Post", "types": {"A": {}}, "forms": [{"mesh": cylinder(24, 200.0, 1000.0)}]});
+        s.execute("family", &post).unwrap();
+        s.execute("component", &serde_json::json!({"family": "Post", "at": [0, 0]})).unwrap();
+        let scene = Scene::new(&s.model);
+        let cam = scene.fit(AZIMUTH, ELEVATION, 800, 600);
+        let img = scene.render(&cam, &[]);
+        // Across its side at mid-height, every pixel from one edge of it to the other.
+        let (x, y) = at(&cam, [0.0, 0.0, 500.0]);
+        let reach = (190.0 * cam.scale) as i32;
+        let across: Vec<Rgb> = (-reach..=reach).map(|dx| img.color(x.floor() + f64::from(dx) + 0.5, y)).collect();
+        assert!(!across.contains(&EDGE), "{across:?}");
+        // Where its top meets its side, nearest the camera, an edge.
+        let (x, y) = at(&cam, [141.0, -141.0, 1000.0]);
+        let rim: Vec<Rgb> = (-3..=3).map(|dy| img.color(x, y + f64::from(dy))).collect();
+        assert!(rim.contains(&EDGE), "{rim:?}");
     }
 
     #[test]

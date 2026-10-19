@@ -120,5 +120,7 @@ A family (`Model::families`, `family.rs`) is parameters, types that set them and
 component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
 `yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;
 `Model::component_pieces` are its forms where it stands. Plans draw them from above, a form's edges hidden under a higher
-form of the same component; sections show them beyond their line and never cut them (`Solid::Mesh` has no `across`); IFC
-writes each form as a closed face set, triangles turned out, and reads one family per family name the file gives.
+form of the same component; sections show them beyond their line and never cut them (`Solid::Mesh` has no `across`); the
+3D view takes a form's triangles that share an edge and turn under 20° there as one curved surface, so a curve draws no
+edge between its facets (`view3d::facets`); IFC writes each form as a closed face set, triangles turned out, and reads one
+family per family name the file gives.
