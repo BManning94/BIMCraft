@@ -5,7 +5,9 @@
 //! fills an opening element that voids its wall, so readers cut the hole, and a shaft voids each
 //! slab, ceiling and roof it passes through with one; compound walls carry their layers as a
 //! material layer set. A stair or a ramp is the sum of its parts: its flights, its landings and
-//! the railings along it; a railing carries its rail's top line as its axis.
+//! the railings along it; a railing carries its rail's top line as its axis. What an element holds
+//! of the project's parameters, and of its phase and design option, goes in property sets of its own;
+//! the project's phases and design option sets in one on the project.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
@@ -15,6 +17,7 @@ use crate::geom::{self, P2};
 use serde_json::Value;
 
 use crate::model::{DEFAULT_HEIGHT, Element, Function, Id, Layer, Model, ParameterKind, Railing, heading, mix};
+use crate::phasing;
 use crate::stairs;
 use crate::view3d::P3;
 use crate::walls::{self, Axis};
@@ -41,9 +44,17 @@ const SLAB_MATERIALS: u64 = 18;
 const COMPONENT_MATERIALS: u64 = 19;
 const PROPERTIES: u64 = 20;
 const DEFINES: u64 = 21;
+const PHASED: u64 = 22;
+const PHASED_DEFINES: u64 = 23;
 
 /// The property set an element's values of the project's parameters go in.
 pub const PARAMETERS: &str = "Project Parameters";
+
+/// The property set an element's phase and design option go in; on the project, its phases and design option sets.
+pub const PHASING: &str = "BIMCraft_Phasing";
+
+/// What a `Phase Created` says of itself when the element holds none: it was made in the first phase.
+pub const IMPLIED: &str = "Implied: no phase is set for it, so it was made in the first phase";
 
 /// Part `i` of element `id`, for its GlobalId.
 fn part(id: Id, i: usize) -> u64 {
@@ -149,6 +160,18 @@ impl Step {
 
     fn guid(&self, role: u64, id: u64) -> String {
         s(&guid(self.uid, role, id))
+    }
+
+    /// A text property, `note` describing it.
+    fn text_property(&mut self, name: &str, note: Option<&str>, value: &str) -> u64 {
+        let note = note.map_or_else(|| "$".to_string(), s);
+        self.add(format!("IFCPROPERTYSINGLEVALUE({},{note},IFCTEXT({}),$)", s(name), s(value)))
+    }
+
+    /// A property set `name` of `props` for `ent`; its GlobalIds from `(set, relation)` and `key`.
+    fn define(&mut self, ent: u64, name: &str, props: &[u64], (set, relation): (u64, u64), key: u64) {
+        let set = self.add(format!("IFCPROPERTYSET({},$,{},$,({}))", self.guid(set, key), s(name), refs(props)));
+        self.add(format!("IFCRELDEFINESBYPROPERTIES({},$,$,$,(#{ent}),#{set})", self.guid(relation, key)));
     }
 
     /// A material by name, written once; one the library has, with its colour, for viewers to
@@ -844,9 +867,56 @@ pub fn export(m: &Model) -> String {
             })
             .collect();
         if !props.is_empty() {
-            let set = w.add(format!("IFCPROPERTYSET({},$,'{PARAMETERS}',$,({}))", w.guid(PROPERTIES, id), refs(&props)));
-            w.add(format!("IFCRELDEFINESBYPROPERTIES({},$,$,$,(#{ent}),#{set})", w.guid(DEFINES, id)));
+            w.define(ent, PARAMETERS, &props, (PROPERTIES, DEFINES), id);
         }
+    }
+    // Each element's phase and design option, in a property set of its own. The first phase is no value in a
+    // model; here an element holding another value names it as its `Phase Created` (said to be implied), for
+    // another tool to read. A door or a window holds only what it says: one with no phase follows its wall.
+    for (&id, &ent) in &products {
+        let Some(e) = m.elements.get(&id) else { continue };
+        let Some(params) = e.params() else { continue };
+        let held = |key: &str| params.get(key).and_then(Value::as_str);
+        let [created, demolished, option] = [phasing::CREATED, phasing::DEMOLISHED, phasing::OPTION].map(held);
+        if created.is_none() && demolished.is_none() && option.is_none() {
+            continue;
+        }
+        let follows = matches!(e, Element::Door(_) | Element::Window(_));
+        let first = m.phases.first().map(String::as_str).filter(|_| !follows);
+        let props: Vec<u64> = [
+            (phasing::CREATED, created.or(first), created.is_none().then_some(IMPLIED)),
+            (phasing::DEMOLISHED, demolished, None),
+            (phasing::OPTION, option, None),
+        ]
+        .into_iter()
+        .filter_map(|(name, value, note)| Some(w.text_property(name, note, value?)))
+        .collect();
+        w.define(ent, PHASING, &props, (PHASED, PHASED_DEFINES), id);
+    }
+    // The project's phases, in order, when it uses any of it, with the phase filters, overrides and design option
+    // sets that differ from what a project read from IFC starts with, as the JSON a project file holds them in. The
+    // phases and filters a project in another language starts with are nothing it uses.
+    // ponytail: JSON inside an IfcText, which only BIMCraft reads; IfcComplexProperty records if another tool needs them.
+    let changed = [
+        ("Phase Filters", !phasing::is_default_filters(&m.phase_filters), serde_json::to_string(&m.phase_filters)),
+        ("Phase Overrides", !phasing::is_default_overrides(&m.phase_overrides), serde_json::to_string(&m.phase_overrides)),
+        ("Design Option Sets", !m.option_sets.is_empty(), serde_json::to_string(&m.option_sets)),
+    ];
+    let own = (phasing::phases(m.language), phasing::filters(m.language));
+    let used = phasing::any(m)
+        || m.phases != own.0
+        || m.phase_filters != own.1
+        || !phasing::is_default_overrides(&m.phase_overrides)
+        || !m.option_sets.is_empty();
+    if used {
+        let phases: Vec<String> = m.phases.iter().map(|p| format!("IFCTEXT({})", s(p))).collect();
+        let mut props = vec![w.add(format!("IFCPROPERTYLISTVALUE('Phases',$,({}),$)", phases.join(",")))];
+        for (name, _, json) in changed.into_iter().filter(|(_, changed, _)| *changed) {
+            if let Ok(json) = json {
+                props.push(w.text_property(name, None, &json));
+            }
+        }
+        w.define(project, PHASING, &props, (PHASED, PHASED_DEFINES), 0);
     }
 
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -864,6 +934,7 @@ pub fn export(m: &Model) -> String {
 mod tests {
     use super::*;
     use crate::engine::Session;
+    use serde_json::json;
     use std::collections::BTreeSet;
 
     #[test]
@@ -1004,5 +1075,174 @@ mod tests {
         }
         let dangling: Vec<_> = referenced.difference(&defined).collect();
         assert!(dangling.is_empty(), "dangling references: {dangling:?}");
+    }
+
+    /// The numbers of the entities of kind `kind` in `f`, in the order they're written.
+    fn of_kind(f: &str, kind: &str) -> Vec<u64> {
+        f.lines().filter(|l| l.contains(&format!("={kind}("))).filter_map(|l| l[1..].split('=').next()?.parse().ok()).collect()
+    }
+
+    /// The properties of the `BIMCraft_Phasing` set of entity `#ent`, as written, in the set's order; none when it has no such set.
+    fn phasing_of(f: &str, ent: u64) -> Vec<String> {
+        let body = |n: &str| -> String {
+            let line = f.lines().find(|l| l.starts_with(&format!("#{n}="))).unwrap_or_else(|| panic!("no #{n}"));
+            line.split_once('=').unwrap().1.trim_end_matches(';').to_string()
+        };
+        for rel in f.lines().filter(|l| l.contains("=IFCRELDEFINESBYPROPERTIES(")) {
+            // `#7=IFCRELDEFINESBYPROPERTIES('guid',$,$,$,(#12,#13),#40);`
+            let (related, set) = rel.split_once("$,$,$,(").unwrap().1.split_once("),#").unwrap();
+            if !related.split(',').any(|r| r == format!("#{ent}")) {
+                continue;
+            }
+            let set = body(set.trim_end_matches(");").trim_end_matches(';').trim_end_matches(')'));
+            if !set.contains(&format!("'{PHASING}'")) {
+                continue;
+            }
+            let props = set.rsplit_once(",(").unwrap().1.trim_end_matches(')');
+            return props.split(',').map(|p| body(p.trim_start_matches('#'))).collect();
+        }
+        Vec::new()
+    }
+
+    /// A text property as BIMCraft writes one: `note` is its description, `$` for none.
+    fn text_property(name: &str, note: &str, value: &str) -> String {
+        format!("IFCPROPERTYSINGLEVALUE('{name}',{note},IFCTEXT('{value}'),$)")
+    }
+
+    #[test]
+    fn phases_and_design_options_go_out_in_a_property_set_of_each_element_that_holds_one() {
+        use crate::graphics::testing::{house, run};
+        let implied = s(IMPLIED);
+        let mut s = Session::new();
+        let walls = house(&mut s);
+        let door = run(&mut s, "door", json!({"at": [2000, 0]}))["id"].as_u64().unwrap();
+        run(&mut s, "phase", json!({"name": "Demolition", "before": "New Construction"}));
+        run(&mut s, "option", json!({"set": "Facade", "options": ["Brick", "Glass"]}));
+        for (id, held) in [
+            (walls[1], json!({"Phase Created": "New Construction"})),
+            (walls[2], json!({"Phase Demolished": "Demolition", "Design Option": "Facade: Glass"})),
+            (walls[3], json!({"Phase Created": "Existing"})),
+            (door, json!({"Phase Demolished": "Demolition"})),
+        ] {
+            run(&mut s, "modify", json!({"id": id, "params": held}));
+        }
+        let f = export(&s.model);
+        let wall = of_kind(&f, "IFCWALL");
+        assert_eq!(phasing_of(&f, wall[0]), Vec::<String>::new(), "made in the first phase and in no option: nothing to say");
+        assert_eq!(phasing_of(&f, wall[1]), [text_property("Phase Created", "$", "New Construction")]);
+        assert_eq!(
+            phasing_of(&f, wall[2]),
+            [
+                text_property("Phase Created", &implied, "Existing"),
+                text_property("Phase Demolished", "$", "Demolition"),
+                text_property("Design Option", "$", "Facade: Glass"),
+            ],
+            "the first phase is named, and said to be implied"
+        );
+        assert_eq!(phasing_of(&f, wall[3]), [text_property("Phase Created", "$", "Existing")], "held, so not implied");
+        // A door says only what it holds: naming a phase it holds none of would stop it following its wall.
+        assert_eq!(phasing_of(&f, of_kind(&f, "IFCDOOR")[0]), [text_property("Phase Demolished", "$", "Demolition")]);
+        // The project's phases in order, for another tool to read the elements' by, and its sets.
+        let project = phasing_of(&f, of_kind(&f, "IFCPROJECT")[0]);
+        assert_eq!(
+            project,
+            [
+                "IFCPROPERTYLISTVALUE('Phases',$,(IFCTEXT('Existing'),IFCTEXT('Demolition'),IFCTEXT('New Construction')),$)".to_string(),
+                text_property("Design Option Sets", "$", r#"{"Facade":{"options":["Brick","Glass"],"primary":"Brick"}}"#),
+            ],
+            "its filters and overrides are the usual ones, left out"
+        );
+        assert_eq!(f.matches(&format!("'{PHASING}'")).count(), 3 + 1 + 1, "three walls and the door hold a value; and the project");
+        dangling(&f);
+    }
+
+    #[test]
+    fn a_projects_own_phase_filters_and_overrides_go_out_as_text_on_the_project() {
+        use crate::graphics::testing::run;
+        let filter = json!({"name": "Renovation", "new": "overridden", "existing": "by-category", "demolished": "not-displayed", "temporary": "not-displayed"});
+        let overrides = json!({"overrides": {"new": {"cut": {"color": [0, 0, 200]}}}});
+        // No element holds a value: the project's own filters, its own overrides, or both, are what it says.
+        for (filters, own, says) in [
+            (false, true, vec!["Phases", "Phase Overrides"]),
+            (true, false, vec!["Phases", "Phase Filters"]),
+            (true, true, vec!["Phases", "Phase Filters", "Phase Overrides"]),
+        ] {
+            let mut s = Session::new();
+            if filters {
+                run(&mut s, "phase_filter", filter.clone());
+            }
+            if own {
+                run(&mut s, "phase", overrides.clone());
+            }
+            let f = export(&s.model);
+            let project = phasing_of(&f, of_kind(&f, "IFCPROJECT")[0]);
+            let names: Vec<&str> = project.iter().map(|p| p.split('\'').nth(1).unwrap()).collect();
+            assert_eq!(names, says);
+            if let Some(p) = project.iter().find(|p| p.contains("'Phase Filters'")) {
+                assert!(p.contains(
+                    r#""Renovation":{"new":"overridden","existing":"by-category","demolished":"not-displayed","temporary":"not-displayed"}"#
+                ));
+                assert!(p.contains(r#""Show All":"#), "all of them, the usual ones too");
+            }
+            if let Some(p) = project.iter().find(|p| p.contains("'Phase Overrides'")) {
+                assert!(p.contains(r#""new":{"cut":{"color":[0,0,200]}}"#), "{p}");
+            }
+            dangling(&f);
+        }
+    }
+
+    #[test]
+    fn the_phases_are_listed_when_an_element_holds_one_or_the_project_has_phases_of_its_own() {
+        use crate::graphics::testing::{house, run};
+        let on_project = |s: &Session| {
+            let f = export(&s.model);
+            phasing_of(&f, of_kind(&f, "IFCPROJECT")[0])
+        };
+        // Only its phases: its filters, overrides and sets are the usual ones, or none.
+        let mut s = Session::new();
+        let walls = house(&mut s);
+        assert_eq!(on_project(&s), Vec::<String>::new());
+        run(&mut s, "modify", json!({"id": walls[1], "params": {"Phase Created": "New Construction"}}));
+        assert_eq!(on_project(&s), ["IFCPROPERTYLISTVALUE('Phases',$,(IFCTEXT('Existing'),IFCTEXT('New Construction')),$)"]);
+        // A phase of its own, with nothing in it yet.
+        let mut t = Session::new();
+        run(&mut t, "phase", json!({"name": "Demolition", "before": "New Construction"}));
+        assert_eq!(
+            on_project(&t),
+            ["IFCPROPERTYLISTVALUE('Phases',$,(IFCTEXT('Existing'),IFCTEXT('Demolition'),IFCTEXT('New Construction')),$)"]
+        );
+    }
+
+    #[test]
+    fn a_project_in_another_language_that_uses_no_phasing_says_nothing_of_it() {
+        use crate::graphics::testing::{house, run};
+        let mut s = Session::new();
+        run(&mut s, "new", json!({"language": "pt"}));
+        let walls = house(&mut s);
+        assert!(!export(&s.model).contains(PHASING), "its phases and filters are its language's, as a new project has them");
+        run(&mut s, "modify", json!({"id": walls[1], "params": {"Phase Created": "Nova construção"}}));
+        let f = export(&s.model);
+        let project = phasing_of(&f, of_kind(&f, "IFCPROJECT")[0]);
+        let names: Vec<&str> = project.iter().map(|p| p.split('\'').nth(1).unwrap()).collect();
+        // What a project read from IFC starts with is in English, so its filters go too, or they'd come back in English.
+        assert_eq!(names, ["Phases", "Phase Filters"]);
+        assert_eq!(
+            project[0],
+            r"IFCPROPERTYLISTVALUE('Phases',$,(IFCTEXT('Existente'),IFCTEXT('Nova constru\X2\00E7\X0\\X2\00E3\X0\o')),$)"
+        );
+    }
+
+    #[test]
+    fn a_project_that_uses_no_phasing_says_nothing_of_it() {
+        use crate::graphics::testing::{house, run};
+        assert!(!sample_ifc().contains(PHASING), "the sample doesn't use phases, so its file has no set for them");
+        // A phase named, which is no new value, or a view that shows one, doesn't count as using them.
+        let mut s = Session::new();
+        house(&mut s);
+        run(&mut s, "graphics", json!({"view": 1, "phase": "Existing", "phase_filter": "Show New"}));
+        assert!(!export(&s.model).contains(PHASING));
+        // An option set does.
+        run(&mut s, "option", json!({"set": "Facade", "options": ["Brick", "Glass"]}));
+        assert_eq!(export(&s.model).matches(&format!("'{PHASING}'")).count(), 1);
     }
 }

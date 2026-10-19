@@ -7,6 +7,7 @@
 //! element doesn't matter. A wall cut to a roof over it comes in attached to it; the openings
 //! through floors, ceilings and roofs, as shafts.
 //! What BIMCraft has no element for, or what breaks one of its rules, is left out and listed.
+//! Phases and design options come back from the property sets BIMCraft writes them in, `ifc::PHASING`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::f64::consts::PI;
@@ -20,6 +21,7 @@ use crate::model::{
     MAX_COORD, MAX_LAYERS, MAX_POINTS, MAX_PROJECT_PARAMETERS, MAX_TEXT, Model, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind,
     ProjectParameter, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
 };
+use crate::phasing;
 use crate::stairs;
 use crate::step::{self, Entity, File, V};
 use crate::view3d::{P3, add, cross, dot, mul, sub, unit};
@@ -1103,6 +1105,22 @@ fn fresh(taken: &mut BTreeSet<String>, base: &str) -> String {
     name
 }
 
+/// What a property of text holds, read as JSON of type `T`.
+fn read_json<T: serde::de::DeserializeOwned>(p: &Entity) -> Result<T, String> {
+    serde_json::from_str(text(p.args.get(2)).ok_or("it holds no text")?).map_err(|e| e.to_string())
+}
+
+/// Sets the part of the project's phasing that `field` is to `new`, if the project can have it; else it keeps what it had,
+/// and the rule `new` breaks is the error.
+fn adopt<T>(m: &mut Model, field: fn(&mut Model) -> &mut T, new: T) -> Result<(), String> {
+    let old = std::mem::replace(field(m), new);
+    let checked = phasing::check_project(m);
+    if checked.is_err() {
+        *field(m) = old;
+    }
+    checked
+}
+
 const WALLS: &[&str] = &["IFCWALL", "IFCWALLSTANDARDCASE", "IFCWALLELEMENTEDCASE"];
 const OPENINGS: &[&str] = &["IFCDOOR", "IFCDOORSTANDARDCASE", "IFCWINDOW", "IFCWINDOWSTANDARDCASE"];
 const SLABS: &[&str] = &["IFCSLAB", "IFCSLABSTANDARDCASE", "IFCSLABELEMENTEDCASE"];
@@ -2119,6 +2137,85 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         skipped.push(format!("{} project parameters: past the {MAX_PROJECT_PARAMETERS} a project holds", over.len()));
     }
 
+    // The project's phases, and what it changed of its phase filters, overrides and design option sets, from the
+    // property set on the project; then each element's phase and design option, from its own. What the project
+    // can't have is left out with the rule, and the element stays.
+    let phased: Vec<(Vec<u64>, BTreeMap<&str, &Entity>)> = named(&["IFCRELDEFINESBYPROPERTIES"])
+        .into_iter()
+        .filter_map(e)
+        .filter_map(|rel| {
+            let set = reference(rel.args.get(5))
+                .and_then(e)
+                .filter(|x| x.name == "IFCPROPERTYSET" && text(x.args.get(2)) == Some(crate::ifc::PHASING))?;
+            let props = refs(set.args.get(4)).into_iter().filter_map(e).filter_map(|p| Some((text(p.args.first())?, p))).collect();
+            Some((refs(rel.args.get(4)), props))
+        })
+        .collect();
+    let project_id = ids.iter().copied().find(|id| e(*id).is_some_and(|x| x.name == "IFCPROJECT"));
+    for (_, props) in phased.iter().filter(|(on, _)| project_id.is_some_and(|p| on.contains(&p))) {
+        let mut note = |what: &str, taken: Result<(), String>| {
+            if let Err(why) = taken {
+                skipped.push(format!("the project's {what}: {why}"));
+            }
+        };
+        if let Some(p) = props.get("Phases") {
+            let names = list(p.args.get(2)).iter().map(|v| text(Some(v)).map(String::from)).collect::<Option<Vec<_>>>();
+            note("phases", names.ok_or_else(|| "it isn't a list of names".to_string()).and_then(|n| adopt(&mut m, |m| &mut m.phases, n)));
+        }
+        if let Some(p) = props.get("Phase Filters") {
+            note("phase filters", read_json(p).and_then(|f| adopt(&mut m, |m| &mut m.phase_filters, f)));
+        }
+        if let Some(p) = props.get("Phase Overrides") {
+            note("phase overrides", read_json(p).and_then(|o| adopt(&mut m, |m| &mut m.phase_overrides, o)));
+        }
+        if let Some(p) = props.get("Design Option Sets") {
+            note("design option sets", read_json(p).and_then(|s| adopt(&mut m, |m| &mut m.option_sets, s)));
+        }
+    }
+    let (mut unknown, mut touched) = (0, Vec::new());
+    for (on, props) in &phased {
+        // An implied `Phase Created` is the first phase's name, said for another tool: the element holds none.
+        let value = |name: &str| {
+            let p = props.get(name).filter(|p| p.name == "IFCPROPERTYSINGLEVALUE")?;
+            let implied = name == phasing::CREATED && text(p.args.get(1)) == Some(crate::ifc::IMPLIED);
+            text(p.args.get(2)).filter(|_| !implied)
+        };
+        let values = [phasing::CREATED, phasing::DEMOLISHED, phasing::OPTION].map(|k| (k, value(k)));
+        for id in on.iter().filter_map(|x| elements_from.get(x)).flatten() {
+            for (key, v) in values.iter().filter_map(|(k, v)| Some((*k, (*v)?))) {
+                if m.elements.get(id).and_then(Element::params).is_none() {
+                    continue;
+                }
+                let known = if key == phasing::OPTION { phasing::option_exists(&m, v) } else { phasing::index(&m, v).is_some() };
+                match m.elements.get_mut(id).and_then(Element::params_mut) {
+                    Some(params) if known => {
+                        params.insert(key.into(), json!(v));
+                        touched.push(*id);
+                    }
+                    _ => unknown += 1,
+                }
+            }
+        }
+    }
+    // Once all are in, since a door's phase is its wall's unless it says: nothing is taken down before it was made.
+    touched.sort_unstable();
+    touched.dedup();
+    let mut early = 0;
+    for id in touched {
+        if m.elements.get(&id).is_some_and(|x| phasing::check_order(&m, "", x).is_err()) {
+            if let Some(params) = m.elements.get_mut(&id).and_then(Element::params_mut) {
+                params.remove(phasing::DEMOLISHED);
+            }
+            early += 1;
+        }
+    }
+    if unknown > 0 {
+        skipped.push(format!("{unknown} phase or design option values: not ones the project has"));
+    }
+    if early > 0 {
+        skipped.push(format!("{early} Phase Demolished values: before the phase the element is made in"));
+    }
+
     // The materials the layers are made of, in the library, shaded as the file shades them.
     m.adopt_materials();
     for (name, colour) in material_colours(&r, &ids) {
@@ -2878,5 +2975,345 @@ ENDSEC;END-ISO-10303-21;",
         let Some(Element::Wall(w)) = only(&i.model, "wall").first().copied() else { panic!("no wall") };
         assert_eq!((w.start, w.end), (P2(0.0, 0.0), P2(0.0, 5000.0)));
         assert_eq!(i.moved, Some(P2(-500_001_000.0, -5_000_002_000.0)));
+    }
+
+    /// Where element `e` of `m` stands, to tell it from the others of its category: a wall's middle, a door's and a window's the
+    /// middle of their wall, a component's point, a railing's the length of its host's category (none: 0); there is one of each
+    /// of the others in these projects.
+    fn spot(m: &Model, e: &Element) -> Option<(i64, i64)> {
+        let at = |p: P2| (p.0.round() as i64, p.1.round() as i64);
+        Some(match e {
+            Element::Wall(w) => at((w.start + w.end) * 0.5),
+            Element::Door(o) | Element::Window(o) => at(m.wall(o.host).map(|w| (w.start + w.end) * 0.5)?),
+            Element::Component(c) => at(c.at),
+            Element::Railing(r) => (r.host.and_then(|h| m.elements.get(&h)).map_or(0, |h| h.category().len() as i64), 0),
+            _ => (0, 0),
+        })
+    }
+
+    /// What each element of `m` holds in its parameters, by category and where it stands.
+    fn held(m: &Model) -> BTreeMap<(&'static str, (i64, i64)), serde_json::Value> {
+        m.elements.values().filter_map(|e| Some(((e.category(), spot(m, e)?), json!(e.params()?)))).collect()
+    }
+
+    /// What each element of `m` that can be phased is in phase `phase`, keyed as `held` keys them.
+    fn standing(m: &Model, phase: &str) -> BTreeMap<(&'static str, (i64, i64)), Option<crate::phasing::Status>> {
+        let at = crate::phasing::index(m, phase).unwrap_or(0);
+        m.elements
+            .values()
+            .filter(|e| e.params().is_some())
+            .filter_map(|e| Some(((e.category(), spot(m, e)?), crate::phasing::status(m, e, at))))
+            .collect()
+    }
+
+    /// A project's phasing, as a project file holds it.
+    fn phasing_of(m: &Model) -> serde_json::Value {
+        json!({"phases": m.phases, "filters": m.phase_filters, "overrides": m.phase_overrides, "sets": m.option_sets})
+    }
+
+    #[test]
+    fn phases_and_design_options_survive_save_as_ifc_and_open() {
+        use crate::graphics::testing::{house, run};
+        let mut s = crate::engine::Session::new();
+        let walls = house(&mut s);
+        let door = run(&mut s, "door", json!({"at": [2000, 0]}))["id"].as_u64().unwrap();
+        run(&mut s, "window", json!({"at": [8000, 3000]}));
+        let late = run(&mut s, "door", json!({"at": [8000, 1500]}))["id"].as_u64().unwrap();
+        let room = run(&mut s, "room", json!({"point": [4000, 3000]}))["id"].as_u64().unwrap();
+        let chair = run(&mut s, "component", json!({"family": "Chair", "at": [2000, 2000]}))["id"].as_u64().unwrap();
+        run(&mut s, "phase", json!({"name": "Demolition", "before": "New Construction"}));
+        run(&mut s, "phase", json!({"name": "Landscape"}));
+        let filter = json!({"name": "Renovation", "new": "overridden", "existing": "by-category", "demolished": "not-displayed", "temporary": "not-displayed"});
+        run(&mut s, "phase_filter", filter);
+        run(&mut s, "phase", json!({"overrides": {"new": {"cut": {"color": [0, 0, 200]}}}}));
+        run(&mut s, "option", json!({"set": "Facade", "options": ["Brick", "Glass"], "primary": "Glass"}));
+        run(&mut s, "option", json!({"set": "Roof", "options": ["Hip", "Gable", "Flat"]}));
+        for (id, values) in [
+            (walls[1], json!({"Phase Created": "New Construction"})),
+            (walls[2], json!({"Phase Demolished": "Demolition", "Design Option": "Facade: Brick"})),
+            (walls[3], json!({"Phase Created": "Demolition", "Phase Demolished": "New Construction"})),
+            // The first phase, said and not: a door that says it doesn't follow its wall, even one made later, and neither
+            // does a chair.
+            (door, json!({"Phase Created": "Existing"})),
+            (late, json!({"Phase Created": "Existing"})),
+            (room, json!({"Design Option": "Roof: Gable"})),
+            (chair, json!({"Phase Created": "Existing", "Design Option": "Facade: Glass"})),
+        ] {
+            run(&mut s, "modify", json!({"id": id, "params": values}));
+        }
+        let path = std::env::temp_dir().join(format!("bimcraft-phasing-{}.ifc", std::process::id()));
+        run(&mut s, "save", json!({"path": path.to_str().unwrap()}));
+        let mut t = crate::engine::Session::new();
+        let r = run(&mut t, "open", json!({"path": path.to_str().unwrap()}));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(r["skipped"], json!([]));
+        assert_eq!(phasing_of(&t.model), phasing_of(&s.model), "the phases in order, the filters, the overrides and the sets");
+        assert_eq!(t.model.phases, ["Existing", "Demolition", "New Construction", "Landscape"]);
+        let (before, after) = (held(&s.model), held(&t.model));
+        assert_eq!(after.len(), 9, "four walls, two doors, a window, a room and a chair");
+        assert_eq!(after, before, "every element holds what it held, and the others hold none");
+        // What it comes to, in every phase: the window follows its wall into the new phase, and the door made in the first
+        // is there before the wall it is in.
+        for phase in &s.model.phases {
+            assert_eq!(standing(&t.model, phase), standing(&s.model, phase), "in {phase}");
+        }
+        assert_eq!(standing(&s.model, "Existing")[&("door", (8000, 3000))], Some(crate::phasing::Status::New));
+        assert_eq!(standing(&s.model, "Existing")[&("wall", (8000, 3000))], None);
+    }
+
+    #[test]
+    fn every_kind_of_element_that_holds_parameters_keeps_its_phase_and_option() {
+        use crate::graphics::testing::run;
+        let mut s = crate::engine::Session::new();
+        s.script(
+            r#"wall {"points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "closed": true}
+               door {"at": [4000, 0]}
+               window {"at": [8000, 3000]}
+               room {"point": [4000, 3000]}
+               floor {}
+               ceiling {"point": [4000, 3000]}
+               roof {}
+               column {"at": [3000, 5500]}
+               component {"family": "Chair", "at": [2000, 2000]}
+               phase {"name": "Landscape"}
+               option {"set": "Facade", "options": ["Brick", "Glass"]}"#,
+        )
+        .unwrap();
+        let stair =
+            run(&mut s, "stair", json!({"start": [20000, 0], "angle": 90, "width": 1100, "landings": [{"at": 9, "turn": 180}]}))["id"]
+                .clone();
+        run(&mut s, "railing", json!({"host": stair}));
+        let ramp =
+            run(&mut s, "ramp", json!({"start": [30000, 0], "angle": 0, "height": 450, "landings": [{"at": 300, "turn": -90}]}))["id"]
+                .clone();
+        run(&mut s, "railing", json!({"host": ramp, "side": "left"}));
+        run(&mut s, "railing", json!({"path": [[0, -500], [3000, -500]]}));
+        // Each of them holds something of its own: the kinds that have more than one differ within the kind.
+        let values = [
+            json!({"Phase Created": "New Construction"}),
+            json!({"Phase Demolished": "New Construction"}),
+            json!({"Design Option": "Facade: Glass"}),
+            json!({"Phase Created": "Existing", "Design Option": "Facade: Brick"}),
+            json!({"Phase Created": "New Construction", "Phase Demolished": "Landscape", "Design Option": "Facade: Glass"}),
+        ];
+        let ids: Vec<Id> = s.model.elements.iter().filter(|(_, e)| e.params().is_some()).map(|(id, _)| *id).collect();
+        for (i, id) in ids.iter().enumerate() {
+            run(&mut s, "modify", json!({"id": id, "params": values[i % values.len()]}));
+        }
+        let path = std::env::temp_dir().join(format!("bimcraft-phasing-kinds-{}.ifc", std::process::id()));
+        run(&mut s, "save", json!({"path": path.to_str().unwrap()}));
+        let mut t = crate::engine::Session::new();
+        let r = run(&mut t, "open", json!({"path": path.to_str().unwrap()}));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(r["skipped"], json!([]));
+        let (before, after) = (held(&s.model), held(&t.model));
+        let kinds: BTreeSet<&str> = before.keys().map(|(cat, _)| *cat).collect();
+        assert_eq!(kinds.len(), 12, "all twelve kinds that hold parameters: {kinds:?}");
+        assert_eq!(after, before);
+        for phase in &s.model.phases {
+            assert_eq!(standing(&t.model, phase), standing(&s.model, phase), "in {phase}");
+        }
+    }
+
+    #[test]
+    fn names_in_other_scripts_and_with_quotes_come_back_whole() {
+        use crate::graphics::testing::{house, run};
+        let mut s = crate::engine::Session::new();
+        run(&mut s, "new", json!({"language": "pt"}));
+        let walls = house(&mut s);
+        // What a STEP string and the JSON inside one both have to escape, and what neither writes in ASCII.
+        let (phase, set, option) = (r#"O'Neil "Anexo" \ fase ç 😀"#, "Fachada", r#"Vidro "temperado""#);
+        run(&mut s, "phase", json!({"name": phase}));
+        run(&mut s, "option", json!({"set": set, "options": [option, "Tijolo"]}));
+        run(&mut s, "phase_filter", json!({"name": r#"Só o "novo""#, "new": "by-category", "existing": "not-displayed"}));
+        run(&mut s, "modify", json!({"id": walls[1], "params": {"Phase Created": phase, "Design Option": format!("{set}: {option}")}}));
+        run(&mut s, "modify", json!({"id": walls[2], "params": {"Phase Created": "Nova construção"}}));
+        let path = std::env::temp_dir().join(format!("bimcraft-phasing-names-{}.ifc", std::process::id()));
+        run(&mut s, "save", json!({"path": path.to_str().unwrap()}));
+        let mut t = crate::engine::Session::new();
+        let r = run(&mut t, "open", json!({"path": path.to_str().unwrap()}));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(r["skipped"], json!([]));
+        assert_eq!(phasing_of(&t.model), phasing_of(&s.model));
+        assert_eq!(t.model.phases, ["Existente", "Nova construção", phase]);
+        assert_eq!(held(&t.model), held(&s.model));
+    }
+
+    /// The file BIMCraft writes of a house with a wall made in a later phase, one made then and taken down in another, one in
+    /// an option, and the project's own filter and overrides.
+    fn phased_file() -> String {
+        use crate::graphics::testing::{house, run};
+        let mut s = crate::engine::Session::new();
+        let walls = house(&mut s);
+        run(&mut s, "phase", json!({"name": "Demolition", "before": "New Construction"}));
+        run(&mut s, "option", json!({"set": "Facade", "options": ["Brick", "Glass"]}));
+        run(&mut s, "phase_filter", json!({"name": "Renovation", "new": "overridden", "temporary": "not-displayed"}));
+        run(&mut s, "phase", json!({"overrides": {"new": {"cut": {"color": [0, 0, 200]}}}}));
+        for (id, values) in [
+            (walls[1], json!({"Phase Created": "New Construction"})),
+            (walls[2], json!({"Phase Created": "Demolition", "Phase Demolished": "New Construction"})),
+            (walls[3], json!({"Design Option": "Facade: Glass"})),
+        ] {
+            run(&mut s, "modify", json!({"id": id, "params": values}));
+        }
+        crate::ifc::export(&s.model)
+    }
+
+    #[test]
+    fn an_ifc_without_the_phasing_set_opens_as_a_new_project_does() {
+        let new = Model::new("x");
+        let usual = phasing_of(&new);
+        let mut s = crate::engine::Session::new();
+        s.script(crate::sample::SAMPLE).unwrap();
+        // A file from another tool, and one of BIMCraft's own that uses no phases.
+        for file in [meshes("0.,0.,0."), crate::ifc::export(&s.model)] {
+            let i = ifc(file.as_bytes(), "x").unwrap();
+            assert_eq!(phasing_of(&i.model), usual);
+            assert!(held(&i.model).values().all(|v| v == &json!({})), "no element holds a phase or an option");
+            // A set another tool calls its own, with a `Phase Created` in it, isn't BIMCraft's to read.
+            let walls: Vec<String> =
+                file.lines().filter(|l| l.contains("=IFCWALL(")).filter_map(|l| l.split('=').next().map(String::from)).collect();
+            let foreign = format!(
+                "#899990=IFCPROPERTYSINGLEVALUE('Phase Created',$,IFCLABEL('New Construction'),$);\n\
+                 #899991=IFCPROPERTYSET('0aaaaaaaaaaaaaaaaaaaaa',$,'Phasing',$,(#899990));\n\
+                 #899992=IFCRELDEFINESBYPROPERTIES('0bbbbbbbbbbbbbbbbbbbbb',$,$,$,({}),#899991);\n",
+                walls.join(",")
+            );
+            let end = file.rfind("ENDSEC;").unwrap();
+            let theirs = format!("{}{foreign}{}", &file[..end], &file[end..]);
+            assert!(theirs.contains("'Phasing'"));
+            let i = ifc(theirs.as_bytes(), "x").unwrap();
+            assert_eq!(phasing_of(&i.model), usual);
+            assert!(held(&i.model).values().all(|v| v == &json!({})), "{:?}", held(&i.model));
+        }
+    }
+
+    #[test]
+    fn a_phasing_set_that_breaks_a_rule_is_left_out_and_the_elements_stay() {
+        let file = phased_file();
+        let base = ifc(file.as_bytes(), "x").unwrap();
+        assert_eq!(base.skipped, Vec::<String>::new());
+        let good = held(&base.model);
+        let wall = |x, y| ("wall", (x, y));
+        // The walls: the south one holds nothing, the east a phase, the north a phase and a demolition, the west an option.
+        assert_eq!(good[&wall(8000, 3000)], json!({"Phase Created": "New Construction"}));
+        assert_eq!(good[&wall(4000, 6000)], json!({"Phase Created": "Demolition", "Phase Demolished": "New Construction"}));
+        assert_eq!(good[&wall(0, 3000)], json!({"Design Option": "Facade: Glass"}));
+        let text = |name: &str, value: &str| format!("IFCPROPERTYSINGLEVALUE('{name}',$,IFCTEXT('{value}'),$)");
+        // (what to change in the file, what is then left out of the model, and what the import says).
+        let cases = [
+            (
+                text("Phase Created", "New Construction"),
+                text("Phase Created", "Nowhere"),
+                vec![(wall(8000, 3000), json!({}))],
+                "phase or design option",
+            ),
+            (
+                text("Phase Demolished", "New Construction"),
+                text("Phase Demolished", "Existing"),
+                vec![(wall(4000, 6000), json!({"Phase Created": "Demolition"}))],
+                "before",
+            ),
+            (
+                text("Design Option", "Facade: Glass"),
+                text("Design Option", "Roof: Gable"),
+                vec![(wall(0, 3000), json!({}))],
+                "phase or design option",
+            ),
+            // A project that can't have these phases has none of the values that name a phase it doesn't.
+            (
+                "IFCTEXT('Existing'),IFCTEXT('Demolition')".into(),
+                "IFCTEXT('Existing'),IFCTEXT('Existing')".into(),
+                vec![
+                    (wall(4000, 6000), json!({"Phase Demolished": "New Construction"})),
+                    (wall(8000, 3000), json!({"Phase Created": "New Construction"})),
+                ],
+                "the project's phases",
+            ),
+            // A list with something in it that isn't a name.
+            (
+                "IFCTEXT('Existing'),IFCTEXT('Demolition')".into(),
+                "IFCTEXT('Existing'),IFCINTEGER(7)".into(),
+                vec![(wall(4000, 6000), json!({"Phase Demolished": "New Construction"}))],
+                "the project's phases: it isn't a list of names",
+            ),
+            (r#"{"Facade":"#.into(), r#"{"Facade"#.into(), vec![(wall(0, 3000), json!({}))], "the project's design option sets"),
+            (r#""primary":"Brick""#.into(), r#""primary":"Nope""#.into(), vec![(wall(0, 3000), json!({}))], "its primary"),
+            (r#""temporary":"not-displayed""#.into(), r#""temporary":"gone""#.into(), vec![], "the project's phase filters"),
+            ("[0,0,200]".into(), "[0,0,999]".into(), vec![], "the project's phase overrides"),
+        ];
+        for (from, to, left_out, says) in cases {
+            assert!(file.contains(&from), "{from}");
+            let i = ifc(file.replacen(&from, &to, 1).as_bytes(), "x").unwrap_or_else(|e| panic!("{to}: {e}"));
+            assert!(i.skipped.iter().any(|s| s.contains(says)), "{to}: {says}: {:?}", i.skipped);
+            let mut want = good.clone();
+            want.extend(left_out);
+            let (got, usual) = (held(&i.model), phasing_of(&Model::new("x")));
+            assert_eq!(got, want, "{to}");
+            // What can't be had is the project's own, not a mix: it has the usual one.
+            let kept = phasing_of(&i.model);
+            match says {
+                s if s.starts_with("the project's phases") => assert_eq!(kept["phases"], usual["phases"]),
+                "the project's phase filters" => assert_eq!(kept["filters"], usual["filters"]),
+                "the project's phase overrides" => assert_eq!(kept["overrides"], usual["overrides"]),
+                "the project's design option sets" | "its primary" => assert_eq!(kept["sets"], usual["sets"]),
+                _ => assert_eq!(kept, phasing_of(&base.model), "{to}"),
+            }
+        }
+    }
+
+    /// `file` with every property called `name` holding `value`, in STEP.
+    fn with_value(file: &str, name: &str, value: &str) -> String {
+        file.lines()
+            .map(|l| match l.split_once('=') {
+                Some((head, body)) if body.starts_with(&format!("IFCPROPERTYSINGLEVALUE('{name}',")) => {
+                    format!("{head}=IFCPROPERTYSINGLEVALUE('{name}',$,{value},$);")
+                }
+                Some((head, body)) if body.starts_with(&format!("IFCPROPERTYLISTVALUE('{name}',")) => {
+                    format!("{head}=IFCPROPERTYLISTVALUE('{name}',$,{value},$);")
+                }
+                _ => l.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn nothing_a_phasing_set_holds_stops_a_file_from_opening_or_takes_an_element_with_it() {
+        let file = phased_file();
+        let base = ifc(file.as_bytes(), "x").unwrap();
+        let deep = format!("{}{}", "[".repeat(5000), "]".repeat(5000));
+        let nasty = [
+            "$".to_string(),
+            "IFCTEXT('')".into(),
+            "IFCTEXT('x')".into(),
+            "IFCTEXT('{')".into(),
+            "IFCTEXT('null')".into(),
+            "IFCTEXT('[]')".into(),
+            "IFCTEXT('{}')".into(),
+            r#"IFCTEXT('{"a":1}')"#.into(),
+            r#"IFCTEXT('"x"')"#.into(),
+            r#"IFCTEXT('{"": {"options": [], "primary": ""}}')"#.into(),
+            r#"IFCTEXT('{"S": {"options": ["a"], "primary": "a"}, "T: U": {"options": ["a"], "primary": "a"}}')"#.into(),
+            format!("IFCTEXT('{deep}')"),
+            format!("IFCTEXT('{}')", "x".repeat(300)),
+            "IFCTEXT('\\X2\\D83D\\X0\\')".into(),
+            "IFCINTEGER(7)".into(),
+            "IFCREAL(1.5)".into(),
+            "IFCBOOLEAN(.T.)".into(),
+            "(IFCTEXT('a'),IFCTEXT('a'))".into(),
+            format!("({})", vec!["IFCTEXT('p')"; 200].join(",")),
+            "()".into(),
+            "#999".into(),
+        ];
+        for name in
+            ["Phases", "Phase Filters", "Phase Overrides", "Design Option Sets", "Phase Created", "Phase Demolished", "Design Option"]
+        {
+            for value in &nasty {
+                let i = ifc(with_value(&file, name, value).as_bytes(), "x").unwrap_or_else(|e| panic!("{name} = {value:.60}: {e}"));
+                assert_eq!(i.model.elements.len(), base.model.elements.len(), "{name} = {value:.60}");
+                assert!(i.model.check().is_ok(), "{name} = {value:.60}");
+            }
+        }
     }
 }

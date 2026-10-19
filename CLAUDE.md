@@ -52,7 +52,9 @@ cargo test --workspace
   with `ifcopenshell.geom.create_shape` and compare wall and roof volumes with a hand calculation.
 - IFC import: after touching `import.rs` or `step.rs`, open the sample's IFC (`run house.ifc --cmd 'elements {}'`) and
   compare it with the sample, then the same file with its bodies turned into triangle meshes by IfcOpenShell, and a
-  building written with IfcOpenShell's API. Render what came in and look at it.
+  building written with IfcOpenShell's API. Render what came in and look at it. After touching how phases and design options
+  cross (`ifc::PHASING`), do it with a phased sample too: `run --sample --script phased.txt --save p.ifc`, `convert p.ifc
+  p.bimcraft`, and compare `phases`, `phase_filters`, `phase_overrides`, `option_sets` and each element's `params` with the project's.
 
 ## Conventions
 
@@ -156,3 +158,13 @@ view too). What was made in the first phase holds no value, so a phase put in be
 (`phasing::pin_first`; a door or window follows its wall, which is named). Deleting or combining a phase moves what was in it to
 `into` (`phasing::move_phase`), and renaming a phase, an option or a set takes the elements, the views and the rules of filters
 and schedules along; accepting a set keeps the primary's elements and deletes the rest.
+IFC carries them in property sets named `ifc::PHASING`, `BIMCraft_Phasing`. An element that holds a phase or an option gets one:
+`Phase Created` (always: the first phase is named too, with `ifc::IMPLIED` as its description where the element holds none, but a
+door or window holds only what it says, or one with no phase would stop following its wall), `Phase Demolished` and `Design
+Option`, as text. The project gets one when an element holds a phase or an option, or it changed its phases, filters or overrides,
+or has an option set: `Phases`, a list of the names in order, and, where it changed them, `Phase Filters`, `Phase Overrides` and
+`Design Option Sets` as the JSON a project file holds them in; a project that uses none of it writes none, and the file is as it
+was. `import.rs` reads them beside the project parameters: what the project can't have (a phase or an option it hasn't, a
+demolition before the creation, a list or a JSON that breaks `phasing::check_project`) is left out and listed, and the element
+stays (it is the property, not the element, that breaks the rule); an implied `Phase Created` is no value; no other set is read, so
+one another tool writes for phases, `Phasing` say, changes nothing.
