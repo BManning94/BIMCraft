@@ -46,8 +46,7 @@ impl BimApp {
         let pick = |cut: &Cut, (x, y): (f32, f32)| {
             d.pick((x, y), PICK).or_else(|| cut.image.as_ref()?.pick(f64::from(x) * ppp, f64::from(y) * ppp))
         };
-        let modify = self.tool == Tool::Modify;
-        let hovered = local.filter(|_| modify).and_then(|q| pick(&self.cut, q));
+        let hovered = local.filter(|_| matches!(self.tool, Tool::Modify | Tool::Demolish)).and_then(|q| pick(&self.cut, q));
         let tints: Vec<(Id, Rgb)> = self
             .selection
             .iter()
@@ -89,6 +88,11 @@ impl BimApp {
             (Some(q), Tool::Modify) => {
                 let found = pick(&self.cut, q);
                 self.pick_up(found.into_iter().collect(), click_modifiers(ui));
+            }
+            (Some(q), Tool::Demolish) => {
+                if let Some(id) = pick(&self.cut, q) {
+                    self.demolish(id);
+                }
             }
             (Some(q), Tool::Text) => self.write_note(id, at(q)),
             (Some(q), Tool::Spot) => {

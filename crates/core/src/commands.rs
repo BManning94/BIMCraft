@@ -433,7 +433,8 @@ pub static ALL: &[Command] = &[
          fields as a family's formulas are (lengths in mm, areas in m²; `Area * 120`); `total` sums it in a totals row. \
          `filters`: [{field, op: equals|not-equals|greater|greater-or-equal|less|less-or-equal|contains|not-contains|\
          begins-with|not-begins-with|ends-with|not-ends-with|has-value|has-no-value, value}, …], the elements all of them \
-         keep (text in any case, numbers as the schedule shows them, an unset yes or no as no). `sort`: [field or {field, descending?}, …], in turn (its first column unless it says); \
+         keep (text in any case, numbers as the schedule shows them, an unset yes or no as no). `sort`: [field or {field, descending?}, …], in turn (its first column unless it says; Phase Created \
+         and Phase Demolished in the project's order of phases, a phase never demolished after the last); \
          `grouped`, a row for each set of the sort fields' values: Count and totals summed, and a field whose values differ \
          left empty. Each one given replaces the last; `fields: []` goes back to its category's",
         schedule,

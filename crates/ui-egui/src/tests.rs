@@ -12,6 +12,7 @@ use egui::{Event, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, TouchPhas
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::{BimApp, Sheet, Tool};
 
@@ -369,6 +370,8 @@ fn typed_shortcuts_pick_tools_like_revit() {
     assert!(matches!(h.state().tool, Tool::Tag));
     shortcut(&mut h, "CR");
     assert!(matches!(h.state().tool, Tool::Section(None)));
+    shortcut(&mut h, "DW");
+    assert!(matches!(h.state().tool, Tool::Demolish));
     key(&mut h, Key::Escape);
     assert!(matches!(h.state().tool, Tool::Modify));
 }
@@ -471,7 +474,7 @@ fn sa_selects_every_element_of_the_selected_ones_type_the_view_shows() {
 fn ks_lists_every_shortcut_and_every_one_it_lists_works() {
     let mut h = app(BOX);
     shortcut(&mut h, "KS");
-    for label in ["Create Similar", "CS", "Select All Instances", "SA", "CR", "WA", "KS", "ZF, ZE, ZA"] {
+    for label in ["Create Similar", "CS", "Select All Instances", "SA", "CR", "WA", "KS", "ZF, ZE, ZA", "Demolish", "DW"] {
         assert!(h.query_by_label(label).is_some(), "{label}");
     }
     shortcut(&mut h, "WA");
@@ -1489,6 +1492,9 @@ option {"set": "Massing", "options": ["Tall", "Low"]}"#;
             press(&mut h, tr(tab));
             missed.extend(english(&h, l));
         }
+        // The Demolish tool on the Modify tab, with its prompt.
+        press(&mut h, tr("Demolish"));
+        missed.extend(english(&h, l));
         // A wall's Properties and its contextual tab; a door's; a roof's; the tools' Options Bars.
         let tools = ["Wall", "Roof", "Roof by Extrusion", "Floor", "Ceiling", "Shaft", "Dormer", "Stair", "Ramp", "Railing", "Component"]
             .map(|t| (P2(0.0, 0.0), Some(t)));
@@ -3082,4 +3088,137 @@ fn a_view_that_does_not_show_the_active_option_says_so_and_picking_it_again_show
     press(&mut h, "Massing: Low");
     assert_eq!(plan_graphics(&h, 2).options["Massing"], "Low");
     assert!(!h.state().active_option_unseen());
+}
+
+/// The value of `Phase Demolished` that element `id` holds of its own.
+fn demolished(h: &Harness<BimApp>, id: Id) -> Option<Value> {
+    param(h, id, "Phase Demolished")
+}
+
+#[test]
+fn demolish_takes_what_is_clicked_down_in_the_views_phase_and_a_second_click_takes_it_back() {
+    use bimcraft_core::phasing::{self, Status};
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nphase {{\"name\": \"Demolition\", \"before\": \"New Construction\"}}"));
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    let east = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(8000.0, 0.0)));
+    let door = find(&h, |e| matches!(e, Element::Door(_)));
+    let steps = |h: &Harness<BimApp>| h.state().session.history().len();
+    // The Modify tab has the tool, in a panel of its own.
+    topmost(&mut h, "Modify");
+    press(&mut h, "Demolish");
+    assert_eq!(h.state().tool, Tool::Demolish);
+    // A view with no phase of its own shows the project's last: the wall comes down in it, as one undo step.
+    let before = steps(&h);
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!(demolished(&h, wall), Some(json!("New Construction")));
+    assert_eq!((steps(&h), h.state().session.history().last()), (before + 1, Some(&"Modify")));
+    // The door in it is left alone: with no phase of its own, it follows its wall.
+    assert_eq!(demolished(&h, door), None);
+    let m = Arc::clone(&h.state().session.model);
+    let last = phasing::index(&m, "New Construction").unwrap();
+    assert_eq!(phasing::status(&m, &m.elements[&door], last), Some(Status::Demolished));
+    // Clicking the door says why nothing happens: it goes back up with its wall.
+    click(&mut h, P2(2000.0, 0.0));
+    assert_eq!((demolished(&h, door), steps(&h)), (None, before + 1));
+    let note = h.state().status.clone();
+    assert!(!note.error && note.text.contains("Door follows its wall") && note.text.contains("New Construction"), "{note:?}");
+    // A second click on the wall takes it back, and a step back puts it down again.
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!((demolished(&h, wall), steps(&h)), (None, before + 2));
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(demolished(&h, wall), Some(json!("New Construction")));
+    // A view with a phase of its own takes things down in that one, and what comes down in another phase, in this one.
+    open_combo(&mut h, "Phase");
+    press(&mut h, "Demolition");
+    click(&mut h, P2(8000.0, 3000.0));
+    assert_eq!(demolished(&h, east), Some(json!("Demolition")));
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!(demolished(&h, wall), Some(json!("Demolition")));
+    click(&mut h, P2(8000.0, 3000.0));
+    assert_eq!(demolished(&h, east), None);
+    // The tool stays on until Esc.
+    assert_eq!(h.state().tool, Tool::Demolish);
+    key(&mut h, Key::Escape);
+    assert_eq!(h.state().tool, Tool::Modify);
+}
+
+#[test]
+fn demolish_works_in_a_section_and_in_the_3d_view_as_in_a_plan() {
+    let mut h = app_at(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}\nsheet {{}}"), 0.05);
+    let west = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 6000.0)));
+    let south = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    let section = ids(&h, "section")[0];
+    topmost(&mut h, "Modify");
+    press(&mut h, "Demolish");
+    // In the section, points run along its line from its start, and up: the west wall is cut at 1000.
+    browse(&mut h, "Section 1");
+    assert_eq!((h.state().sheet, &h.state().tool), (Sheet::Section(section), &Tool::Demolish));
+    assert!(h.query_by_label("Click an element to take it down in the view's phase; click it again to take it back.").is_some());
+    click(&mut h, P2(1060.0, 1500.0));
+    assert_eq!(demolished(&h, west), Some(json!("New Construction")));
+    // And in the default 3D view, on the south wall's face.
+    press(&mut h, "Default 3D View");
+    assert_eq!((h.state().sheet, &h.state().tool), (Sheet::View3D, &Tool::Demolish));
+    let at = h.state().screen3([5000.0, -100.0, 1500.0]);
+    click_at(&mut h, at);
+    assert_eq!(demolished(&h, south), Some(json!("New Construction")));
+    // Where it can't work, on a sheet, it gives way to Modify.
+    browse(&mut h, "A101 - Unnamed");
+    assert_eq!(h.state().tool, Tool::Modify);
+}
+
+#[test]
+fn demolish_says_so_when_what_is_clicked_holds_no_parameters_and_changes_nothing() {
+    let mut h = app(&format!("{BOX}\ndimension {{\"refs\": [[0, 3000], [8000, 3000]], \"at\": [4000, -1000]}}"));
+    let dimension = ids(&h, "dimension")[0];
+    topmost(&mut h, "Modify");
+    press(&mut h, "Demolish");
+    let (model, steps) = (Arc::clone(&h.state().session.model), h.state().session.history().len());
+    click(&mut h, P2(4000.0, -1000.0));
+    let status = h.state().status.clone();
+    assert!(status.error && status.text == "Dimension holds no parameters, so it has no phase to demolish", "{status:?}");
+    assert!(Arc::ptr_eq(&model, &h.state().session.model), "the model is the one it was");
+    assert_eq!(h.state().session.history().len(), steps);
+    assert_eq!(ids(&h, "dimension"), [dimension]);
+    // Nothing under the cursor is nothing to say.
+    click(&mut h, P2(4000.0, 3000.0));
+    assert!(Arc::ptr_eq(&model, &h.state().session.model));
+}
+
+#[test]
+fn demolish_speaks_portuguese_and_spanish() {
+    use bimcraft_core::language::Language;
+    let mut h =
+        app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\ndimension {{\"refs\": [[0, 3000], [8000, 3000]], \"at\": [4000, -1000]}}"));
+    // The wall comes down, so that the door only follows it.
+    topmost(&mut h, "Modify");
+    press(&mut h, "Demolish");
+    click(&mut h, P2(5000.0, 0.0));
+    let cases = [
+        (
+            Language::Portuguese,
+            "Demolir",
+            "Clique num elemento para demoli-lo na fase da vista; clique de novo para desfazer.",
+            "Porta acompanha a parede, que é demolida em New Construction: desfaça a demolição da parede",
+            "Cota não tem parâmetros, então não tem fase a demolir",
+        ),
+        (
+            Language::Spanish,
+            "Demoler",
+            "Haga clic en un elemento para demolerlo en la fase de la vista; haga clic otra vez para deshacerlo.",
+            "Puerta acompaña al muro, que se demuele en New Construction: deshaga la demolición del muro",
+            "Cota no tiene parámetros, así que no tiene fase que demoler",
+        ),
+    ];
+    for (language, button, prompt, follows, none) in cases {
+        h.state_mut().lang = language;
+        h.run();
+        press(&mut h, button);
+        assert!(h.query_by_label(prompt).is_some(), "{language:?}: the prompt");
+        click(&mut h, P2(2000.0, 0.0));
+        assert_eq!(h.state().status.text, follows, "{language:?}: a door that follows its wall");
+        click(&mut h, P2(4000.0, -1000.0));
+        assert_eq!(h.state().status.text, none, "{language:?}: a dimension");
+    }
 }

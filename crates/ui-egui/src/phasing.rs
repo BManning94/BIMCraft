@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 
 use crate::BimApp;
 use crate::graphics::{controls, editor, merge_patch};
-use crate::lang::{t, tf};
+use crate::lang::{category, t, tf};
 use crate::properties::{combo, group_header};
 use crate::style::pal;
 
@@ -77,6 +77,29 @@ impl BimApp {
         let phase = (g.phase.is_some() || g.phase_filter.is_some()).then(|| g.phase.clone().or_else(|| m.phases.last().cloned())).flatten();
         let option = self.active_option.clone().filter(|o| phasing::option_exists(m, o));
         (self.session.phase, self.session.option) = (phase, option);
+    }
+
+    /// Demolish (DW): element `id` comes down in the phase of the view on screen, the project's last unless the view has
+    /// its own, or, when it comes down in that phase already, goes back up: one `modify`, one undo step. A door or window
+    /// with no phase of its own follows its wall, so only a note says so.
+    pub(crate) fn demolish(&mut self, id: Id) {
+        let m = Arc::clone(&self.session.model);
+        let Some(e) = m.elements.get(&id) else { return };
+        let what = category(e.category(), false);
+        let Some(held) = e.params() else {
+            let text = tf("{} holds no parameters, so it has no phase to demolish", &[&what]);
+            self.status = crate::Status { text, error: true };
+            return;
+        };
+        let Some(phase) = self.graphics_now().resolved(&m).phase.clone().or_else(|| m.phases.last().cloned()) else { return };
+        let own = held.get(phasing::DEMOLISHED).and_then(Value::as_str);
+        if own.is_none() && phasing::value(&m, e, phasing::DEMOLISHED) == Some(phase.as_str()) {
+            let text = tf("{} follows its wall, which comes down in {}: take the wall back instead", &[&what, &phase]);
+            self.status = crate::Status { text, error: false };
+            return;
+        }
+        let down = if own == Some(phase.as_str()) { Value::Null } else { json!(phase) };
+        self.run("modify", json!({"id": id, "params": {phasing::DEMOLISHED: down}}));
     }
 
     /// Whether the active design option is one the view on screen doesn't show (it shows another option of its set):

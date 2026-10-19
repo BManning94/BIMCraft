@@ -2,7 +2,8 @@
 //! columns: its category's own, the project parameters for it and, for components, their families'
 //! parameters; or calculated, worked out from the others by a formula, as a family's are. Its
 //! filters keep the elements every one of them holds for; its rows sort by its sort fields in turn
-//! and, grouped, come together into one row for each set of their values.
+//! (a phase by its place in the project's order, not its name) and, grouped, come together into one
+//! row for each set of their values.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,7 @@ use crate::commands::{category, element_json};
 use crate::family::{self, MAX_FORMULA};
 use crate::language::Language;
 use crate::model::{Element, Id, MAX_COORD, MAX_TEXT, Model, ParameterKind, Schedule};
+use crate::phasing;
 use crate::units::Units;
 
 /// What a field holds, and so how a schedule shows it and a formula reads it: text, a number, a
@@ -625,9 +627,9 @@ impl Row<'_> {
                 From::Count => serde_json::json!(1.0),
                 // Its parameter of that name, or its wall's for a door or window with none; a phase it holds none of
                 // is the project's first.
-                From::Param => match crate::phasing::value(m, self.e, name) {
+                From::Param => match phasing::value(m, self.e, name) {
                     Some(v) if !v.is_empty() => Value::String(v.to_string()),
-                    _ if name == crate::phasing::CREATED => m.phases.first().map_or(Value::Null, |p| Value::String(p.clone())),
+                    _ if name == phasing::CREATED => m.phases.first().map_or(Value::Null, |p| Value::String(p.clone())),
                     _ => Value::Null,
                 },
             };
@@ -662,8 +664,8 @@ fn fine(x: f64) -> f64 {
 }
 
 /// Schedule `sc`'s table: a column for each of its fields, a row for each element its filters keep,
-/// sorted by its sort fields (by its first column unless it says) or, grouped, a row for each set
-/// of their values; its totals under them.
+/// sorted by its sort fields (by its first column unless it says; a phase field in the project's
+/// order of phases) or, grouped, a row for each set of their values; its totals under them.
 pub fn table(m: &Model, sc: &Schedule) -> Result<Table, String> {
     let cat = category(&sc.of);
     if own(&cat).1.is_empty() {
@@ -694,7 +696,7 @@ pub fn table(m: &Model, sc: &Schedule) -> Result<Table, String> {
         let mut row = Row { m, e, json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
         if sc.filters.iter().all(|f| keeps(f, &row.get(&f.field), kind_of(&f.field), m.units)) {
             let cells = fields.iter().map(|f| row.get(&f.name)).collect();
-            rows.push((cells, sort.iter().map(|(n, _)| row.get(n)).collect()));
+            rows.push((cells, sort.iter().map(|(n, _)| sorts_as(m, &cat, n, row.get(n))).collect()));
         }
     }
     rows.sort_by(|(_, a), (_, b)| {
@@ -743,6 +745,15 @@ pub fn table(m: &Model, sc: &Schedule) -> Result<Table, String> {
         rows.into_iter().map(|(cells, _)| cells).collect()
     };
     Ok(Table { columns, rows, totals })
+}
+
+/// What field `name` of category `cat` sorts and groups by, where a row's value for it is `v`: a phase, its place
+/// in the project's order (a phase never taken down comes after every phase), not its name; the rest, itself.
+fn sorts_as(m: &Model, cat: &str, name: &str, v: Value) -> Value {
+    if !matches!(name, phasing::CREATED | phasing::DEMOLISHED) || !own_field(cat, name) {
+        return v;
+    }
+    serde_json::json!(v.as_str().and_then(|p| phasing::index(m, p)).unwrap_or(m.phases.len()))
 }
 
 /// The numbers among `values`, summed.

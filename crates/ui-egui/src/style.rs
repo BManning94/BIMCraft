@@ -211,6 +211,7 @@ pub enum Icon {
     Template,
     Phasing,
     Options,
+    Demolish,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -558,6 +559,13 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
         Icon::Phasing => vec![
             line(&[(2.0, 20.0), (8.0, 20.0), (8.0, 14.0), (14.0, 14.0), (14.0, 8.0), (20.0, 8.0), (20.0, 3.0)]),
             line(&[(2.0, 22.0), (22.0, 22.0)]),
+        ],
+        // A hammer, its head across the end of its handle, and the rubble it leaves.
+        Icon::Demolish => vec![
+            ring(&[(11.2, 2.5), (22.0, 11.3), (18.8, 15.1), (8.0, 6.3)]),
+            line(&[(5.0, 21.0), (13.4, 10.7)]),
+            line(&[(15.5, 20.0), (19.0, 20.0)]),
+            line(&[(18.0, 17.5), (21.5, 17.5)]),
         ],
         // A fork: one design branching into its options.
         Icon::Options => vec![

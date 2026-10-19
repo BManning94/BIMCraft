@@ -97,6 +97,8 @@ pub enum Tool {
     Split,
     /// Copy (or move) the wall picked to the cursor's side, by the Options Bar's distance.
     Offset,
+    /// Take the element picked down in the phase of the view on screen, or, if it comes down in it already, back up.
+    Demolish,
     /// An aligned dimension: the references picked so far. A click away from any places it.
     Dimension(Vec<Reference>),
     /// An angular dimension: the lines picked so far, two that meet; then a click where its arc goes.
@@ -195,12 +197,13 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 31] = [
+const SHORTCUTS: [(&str, &str); 32] = [
     ("MD", "Modify"),
     ("MM", "Mirror Pick Axis"),
     ("DM", "Mirror Draw Axis"),
     ("AL", "Align"),
     ("OF", "Offset"),
+    ("DW", "Demolish"),
     ("ZF", "Zoom to Fit"),
     ("ZE", "Zoom to Fit"),
     ("ZA", "Zoom to Fit"),
@@ -675,6 +678,7 @@ impl BimApp {
             | Tool::Trim(_)
             | Tool::Split
             | Tool::Offset
+            | Tool::Demolish
             | Tool::Attach
             | Tool::GableEdge
             | Tool::SlopeArrow(_) => None,
@@ -976,6 +980,7 @@ impl BimApp {
             "DM" => Tool::Mirror { draw: true, start: None },
             "AL" => Tool::Align(None),
             "OF" => Tool::Offset,
+            "DW" => Tool::Demolish,
             "ZF" | "ZE" | "ZA" => {
                 self.fit();
                 return true;
@@ -1198,9 +1203,9 @@ impl BimApp {
     }
 
     fn set_tool(&mut self, mut tool: Tool) {
-        // Move, Copy, Rotate and Mirror take the selection; Align, Trim, Split and Offset pick walls.
+        // Move, Copy, Rotate and Mirror take the selection; Align, Trim, Split and Offset pick walls, Demolish anything.
         let edits = matches!(tool, Tool::Move(_) | Tool::Copy(_) | Tool::Rotate { .. } | Tool::Mirror { .. });
-        let picks = matches!(tool, Tool::Align(_) | Tool::Trim(_) | Tool::Split | Tool::Offset);
+        let picks = matches!(tool, Tool::Align(_) | Tool::Trim(_) | Tool::Split | Tool::Offset | Tool::Demolish);
         if edits && self.selection.is_empty() {
             self.status = Status { text: t("select what to move, copy, rotate or mirror first").into(), error: true };
             return;
@@ -1398,10 +1403,11 @@ impl BimApp {
         // A ruler belongs to the view it was laid in.
         self.measured = None;
         // The tools that pick points work in plans (Text in sections and on sheets too, Spot
-        // Elevation in sections); any other view takes clicks to select.
+        // Elevation in sections, Demolish in sections and 3D); any other view takes clicks to select.
         let works = match sheet {
             Sheet::Plan(_) | Sheet::Ceiling(_) => true,
-            Sheet::Section(_) => matches!(self.tool, Tool::Text | Tool::Spot),
+            Sheet::Section(_) => matches!(self.tool, Tool::Text | Tool::Spot | Tool::Demolish),
+            Sheet::View3D => self.tool == Tool::Demolish,
             Sheet::Paper(_) => self.tool == Tool::Text,
             _ => false,
         };
@@ -2174,6 +2180,13 @@ impl BimApp {
                 }
             });
         });
+        panel(ui, "Phasing", |ui| {
+            let tip = "Demolish (DW): click an element to take it down in the view's phase; click it again to take it back";
+            let on = self.graphic_view().is_some();
+            if ui.add_enabled_ui(on, |ui| big_button(ui, Icon::Demolish, "Demolish", self.tool == Tool::Demolish, tip)).inner.clicked() {
+                self.set_tool(Tool::Demolish);
+            }
+        });
     }
 
     /// The Options Bar: the contextual tab's name, then the tool's options.
@@ -2363,6 +2376,8 @@ impl BimApp {
             }
             (Sheet::Section(_) | Sheet::Paper(_), Tool::Text) => return "Type the note in the Options Bar, then click where it goes.",
             (Sheet::Section(_), Tool::Spot) => return "Click a point to mark its height.",
+            // Demolish picks in these views as it does in a plan.
+            (Sheet::View3D | Sheet::Section(_), Tool::Demolish) => {}
             (Sheet::View3D | Sheet::Section(_) | Sheet::Paper(_), _) => {
                 return "This tool works in plan views: open one from the Project Browser.";
             }
@@ -2397,6 +2412,7 @@ impl BimApp {
             Tool::Trim(Some(_)) => "Pick the second wall, on the part to keep.",
             Tool::Split => "Click a wall where to split it.",
             Tool::Offset => "Point to a wall: the offset goes to the cursor's side. Click to place it.",
+            Tool::Demolish => "Click an element to take it down in the view's phase; click it again to take it back.",
             Tool::Dimension(refs) if refs.is_empty() => "Pick a wall face, centre line or end, a door, a window or a grid to measure from.",
             Tool::Dimension(refs) if refs.len() == 1 => "Pick the next reference, parallel to the first.",
             Tool::Dimension(_) => "Pick more references, or click away from them where the dimension line goes. Esc cancels.",

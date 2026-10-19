@@ -168,3 +168,9 @@ was. `import.rs` reads them beside the project parameters: what the project can'
 demolition before the creation, a list or a JSON that breaks `phasing::check_project`) is left out and listed, and the element
 stays (it is the property, not the element, that breaks the rule); an implied `Phase Created` is no value; no other set is read, so
 one another tool writes for phases, `Phasing` say, changes nothing.
+A schedule sorts and groups `Phase Created` and `Phase Demolished` by the phase's place in `Model::phases`, not by its name, no
+`Phase Demolished` coming after every phase (`schedule::sorts_as`); its filters still compare the names. The desktop's Demolish
+tool (DW, `BimApp::demolish`, in the Modify tab's Phasing panel) runs `modify {params: {Phase Demolished}}` on the element clicked in a
+plan, a section or the 3D view: the phase of the view on screen (the project's last unless it has one), or null when the element
+already comes down in it, one undo step a click. A door or window that only follows its wall gets a note instead, and an element that
+holds no `params` (annotation, levels, grids, shafts) says so and changes nothing.
