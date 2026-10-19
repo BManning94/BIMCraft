@@ -212,6 +212,10 @@ pub enum Icon {
     Phasing,
     Options,
     Demolish,
+    Paint,
+    Unpaint,
+    Favorite,
+    FamilyEditor,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -566,6 +570,38 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(5.0, 21.0), (13.4, 10.7)]),
             line(&[(15.5, 20.0), (19.0, 20.0)]),
             line(&[(18.0, 17.5), (21.5, 17.5)]),
+        ],
+        // A bucket tipped over, with what it pours; the same with a cross through it.
+        Icon::Paint | Icon::Unpaint => {
+            let mut bucket = vec![
+                ring(&[(4.0, 9.0), (13.0, 4.0), (18.0, 12.0), (9.0, 17.0)]),
+                line(&[(8.0, 6.5), (6.0, 3.0), (11.0, 1.5)]),
+                line(&[(18.0, 12.0), (20.5, 17.0)]),
+                Shape::circle_stroke(at(20.5, 19.5), 1.5 * k, s),
+            ];
+            if matches!(icon, Icon::Unpaint) {
+                bucket.extend([line(&[(2.0, 22.0), (10.0, 14.0)]), line(&[(2.0, 14.0), (10.0, 22.0)])]);
+            }
+            bucket
+        }
+        // A star.
+        Icon::Favorite => vec![ring(&[
+            (12.0, 3.0),
+            (14.2, 8.9),
+            (20.6, 9.2),
+            (15.6, 13.2),
+            (17.3, 19.3),
+            (12.0, 15.8),
+            (6.7, 19.3),
+            (8.4, 13.2),
+            (3.4, 9.2),
+            (9.8, 8.9),
+        ])],
+        // A box seen corner on: a family is a thing of three dimensions.
+        Icon::FamilyEditor => vec![
+            ring(&[(12.0, 2.0), (21.0, 7.0), (21.0, 17.0), (12.0, 22.0), (3.0, 17.0), (3.0, 7.0)]),
+            line(&[(3.0, 7.0), (12.0, 12.0), (21.0, 7.0)]),
+            line(&[(12.0, 12.0), (12.0, 22.0)]),
         ],
         // A fork: one design branching into its options.
         Icon::Options => vec![

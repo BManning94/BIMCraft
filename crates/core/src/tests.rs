@@ -953,12 +953,21 @@ fn a_new_project_comes_with_a_library_of_families() {
         let m = Model::new_in("x", language);
         assert_eq!(m.check(), Ok(()), "{language:?}");
         let names: Vec<&str> = m.families.keys().map(String::as_str).collect();
-        assert_eq!(names.len(), 10, "{names:?}");
-        // Every type of every family places and builds.
+        assert_eq!(names.len(), 10 + 4, "{names:?}: furniture, fittings, and a door's and a window's of two kinds each");
+        // Every type of every family places and builds: a component's as one, a door's or a window's in a wall's opening.
         let mut s = Session::new();
         s.reset(m.clone(), None);
+        run(&mut s, "wall", json!({"points": [[-20000, 5000], [20000, 5000]]}));
+        let mut along = -15000.0;
         for (family, f) in &m.families {
-            for t in f.types.keys() {
+            for t in f.types.keys().filter(|_| f.category.hosted()) {
+                let kind = if f.category == crate::family::Category::Door { "door" } else { "window" };
+                along += 2500.0;
+                let id = run(&mut s, kind, json!({"at": [along, 5000], "family": family, "type": t}))["id"].as_u64().unwrap();
+                let (pieces, strokes) = s.model.opening_local(&s.model.elements[&id]).unwrap_or_else(|| panic!("{family}: {t}"));
+                assert!(!pieces.is_empty() && (f.category != crate::family::Category::Door || !strokes.is_empty()), "{family}: {t}");
+            }
+            for t in f.types.keys().filter(|_| !f.category.hosted()) {
                 let id = run(&mut s, "component", json!({"family": family, "type": t, "at": [0, 0]}))["id"].as_u64().unwrap();
                 let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("no component") };
                 assert!(!s.model.component_pieces(c).is_empty(), "{family}: {t}");
@@ -1218,6 +1227,12 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"name": "F", "types": {"A": {}}, "parameters": [{"name": "W", "formula": "W + 1"}], "forms": [{"circle": {"centre": [0, 0], "radius": "W"}, "to": 1}]}),
         json!({"name": "F", "types": {"A": {"Nope": 1}}, "forms": [{"profile": "x"}]}),
         json!({"name": "F", "types": {"A": {}}, "forms": [{"mesh": [[[0, 0, 0], [1e300, 0, 0], [0, 1, 0]]]}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"plane": "xz", "profile": [[1, 0], [2, 0], [2, 1]], "axis": [[0, 0], [1e300, 1e300]], "to": 1e300}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"profile": [[1, 0], [2, 0], [2, 1]], "axis": [[0, 0], [0, 0]], "to": 360}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"profile": [[1, 0], [2, 0], [2, 1]], "axis": "x", "to": 360}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"profile": [[1, 0], [2, 0], [2, 1]], "axis": [[0, 0], [0, 1]], "to": f64::MAX, "void": "x"}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"profile": [[0, 0], [1e9, 0], [1e9, 1e9]], "to": 1e9}, {"circle": {"centre": [0, 0], "radius": 1e9}, "from": -1e9, "to": 1e9, "void": true}]}),
+        json!({"name": "F", "types": {"A": {}}, "forms": [{"circle": {"centre": [0, 0], "radius": 5}, "to": 1}, {"plane": "yz", "circle": {"centre": [0, 0], "radius": 1e-9}, "to": 1, "void": true}]}),
         json!({"name": "F", "types": {}, "parameters": [{"name": " ", "kind": "material", "value": 5}]}),
         json!({"name": "", "delete": true, "rename": ""}),
         json!({"path": "/nonexistent/family.json"}),
@@ -3012,4 +3027,422 @@ fn a_project_from_before_the_library_brings_its_layers_materials_into_it() {
     let lib = run(&mut t, "inspect", json!({}))["materials"].clone();
     assert!(lib["Rock wool"]["color"].is_array() && lib["Brick"]["color"].is_array(), "{lib}");
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn a_new_project_has_doors_and_windows_of_its_own_that_build_in_every_language() {
+    for l in crate::language::Language::ALL {
+        let m = Model::new_in("x", l);
+        let hosted: Vec<(&str, crate::family::Category)> =
+            m.families.iter().filter(|(_, f)| f.category.hosted()).map(|(n, f)| (n.as_str(), f.category)).collect();
+        let named = |english: &str| l.word(english).to_string();
+        for (english, kind) in [
+            ("Single Door", crate::family::Category::Door),
+            ("Double Door", crate::family::Category::Door),
+            ("Fixed Window", crate::family::Category::Window),
+            ("Casement Window", crate::family::Category::Window),
+        ] {
+            assert!(hosted.contains(&(named(english).as_str(), kind)), "{l:?}: {english} in {hosted:?}");
+        }
+        // Each family builds, every type of it, with every material it names in the library.
+        assert_eq!(m.check(), Ok(()), "{l:?}");
+    }
+}
+
+/// An 8 x 6 m box of walls, a single door in its south wall and a fixed window in its east one, both of the project's families.
+fn family_house() -> Session {
+    let mut s = Session::new();
+    s.script(
+        r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}
+           door {"at": [2000, 0], "family": "Single Door", "type": "800 x 2100"}
+           window {"at": [8000, 3000], "family": "Fixed Window", "type": "600 x 900"}"#,
+    )
+    .unwrap();
+    s
+}
+
+#[test]
+fn a_doors_family_sizes_its_opening_and_a_windows_gives_it_its_sill() {
+    let s = family_house();
+    // Elements 3 to 6 are the walls, 7 the door and 8 the window.
+    let door = crate::element_json(&s.model, 7);
+    assert_eq!(
+        (&door["family"], &door["type"], &door["width"], &door["height"], &door["sill"]),
+        (&json!("Single Door"), &json!("800 x 2100"), &json!(800.0), &json!(2100.0), &json!(0.0))
+    );
+    assert_eq!((&door["values"]["Wall Thickness"], &door["values"]["Frame Width"]), (&json!(200.0), &json!(50.0)));
+    let window = crate::element_json(&s.model, 8);
+    assert_eq!((&window["width"], &window["height"], &window["sill"]), (&json!(600.0), &json!(900.0), &json!(1100.0)), "its type's sill");
+    // The wall's opening is the family's size: a 1000 wide type, as the family says, in place of the 800.
+    let mut s = s;
+    run(&mut s, "modify", json!({"id": 7, "type": "1000 x 2100"}));
+    assert_eq!(crate::element_json(&s.model, 7)["width"], json!(1000.0));
+    // A door of a family that isn't a door's, or of none, is refused; so is a type the family hasn't.
+    for (p, says) in [
+        (json!({"at": [4000, 0], "family": "Fixed Window"}), "no door family"),
+        (json!({"at": [4000, 0], "family": "Nowhere"}), "no door family"),
+        (json!({"at": [4000, 0], "family": "Single Door", "type": "9 x 9"}), "9 x 9"),
+    ] {
+        let e = s.execute("door", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    // A door's family can't be placed as furniture, and while openings are of it, it can't go.
+    let e = s.execute("component", &json!({"family": "Single Door", "at": [1000, 1000]})).unwrap_err();
+    assert!(e.contains("door"), "{e}");
+    let e = s.execute("family", &json!({"name": "Single Door", "delete": true})).unwrap_err();
+    assert!(e.contains('7'), "{e}");
+}
+
+#[test]
+fn a_door_familys_instance_parameters_are_its_own_and_its_type_parameters_its_types() {
+    let mut s = family_house();
+    run(
+        &mut s,
+        "family",
+        json!({"name": "Hatch", "category": "door", "parameters": [{"name": "Width", "instance": true, "value": 600}, {"name": "Height", "value": 700}],
+               "types": {"A": {}}, "forms": [{"profile": [["-Width / 2", "-Wall Thickness / 2"], ["Width / 2", "-Wall Thickness / 2"], ["Width / 2", "Wall Thickness / 2"]], "to": "Height"}]}),
+    );
+    let id = run(&mut s, "door", json!({"at": [4000, 0], "family": "Hatch"}))["id"].as_u64().unwrap();
+    assert_eq!(crate::element_json(&s.model, id)["width"], json!(600.0));
+    run(&mut s, "modify", json!({"id": id, "params": {"Width": 900}}));
+    assert_eq!(crate::element_json(&s.model, id)["width"], json!(900.0), "its own width, as a component's own parameter");
+    // A type parameter isn't the opening's to set, and a family that isn't sound is refused, saying why.
+    let e = s.execute("modify", &json!({"id": id, "params": {"Height": 5}})).unwrap_err();
+    assert!(e.contains("type parameter"), "{e}");
+    for (p, says) in [
+        (json!({"name": "Bad", "category": "door", "types": {"A": {}}, "parameters": [{"name": "Width", "value": 1}]}), "Height"),
+        (
+            json!({"name": "Bad", "category": "window", "types": {"A": {}}, "parameters": [{"name": "Width", "value": 1}, {"name": "Height", "value": 1}, {"name": "Wall Thickness", "value": 1}]}),
+            "Wall Thickness",
+        ),
+        (json!({"name": "Bad", "category": "furniture", "types": {"A": {}}, "symbols": [{"line": [[0, 0], [1, 1]]}]}), "symbols"),
+        (
+            json!({"name": "Bad", "category": "door", "types": {"A": {}}, "parameters": [{"name": "Width", "value": 1}, {"name": "Height", "value": 1}], "symbols": [{"arc": {"centre": [0, 0], "radius": 0, "to": 90}}]}),
+            "radius",
+        ),
+    ] {
+        let e = s.execute("family", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+}
+
+#[test]
+fn a_door_familys_swing_is_drawn_in_plan_and_flips_with_the_door() {
+    let mut s = family_house();
+    let level = 1;
+    // The polylines the door draws that aren't closed: its leaf's swing, as lines of points in the plan's own millimetres.
+    let swing = |s: &Session| -> Vec<Vec<P2>> {
+        let d = crate::render::plan(&s.model, level, 1600, 1000);
+        d.prims
+            .iter()
+            .zip(&d.owners)
+            .filter(|(_, o)| **o == Some(7))
+            .filter_map(|(p, _)| match p {
+                crate::render::Prim::Line { pts, closed: false, .. } if pts.len() > 10 => Some(pts.iter().map(|q| d.view.mm(*q)).collect()),
+                _ => None,
+            })
+            .collect()
+    };
+    let arc = |s: &Session, hinge: P2, sign: P2| {
+        let lines = swing(s);
+        assert_eq!(lines.len(), 1, "one arc");
+        for p in &lines[0] {
+            // 700 from the hinge (the 800 opening less two 50 frames), on the side of the wall it swings to.
+            assert!((p.dist(hinge) - 700.0).abs() < 1.5, "{p:?} from {hinge:?}");
+            assert!((p.0 - hinge.0) * sign.0 >= -1.5 && (p.1 - hinge.1) * sign.1 >= -1.5, "{p:?} on the side {sign:?} of {hinge:?}");
+        }
+    };
+    // Hinged on the jamb toward the wall's start, 50 in from its edge, at the wall's face (100 from its middle) toward +y.
+    arc(&s, P2(1650.0, 100.0), P2(1.0, 1.0));
+    run(&mut s, "modify", json!({"id": 7, "flip_hand": true}));
+    arc(&s, P2(2350.0, 100.0), P2(-1.0, 1.0));
+    run(&mut s, "modify", json!({"id": 7, "flip_facing": true}));
+    arc(&s, P2(2350.0, -100.0), P2(-1.0, -1.0));
+    run(&mut s, "modify", json!({"id": 7, "flip_hand": false}));
+    arc(&s, P2(1650.0, -100.0), P2(1.0, -1.0));
+    // A door of the project's own types swings as it always did: 24 chords, drawn all the same.
+    run(&mut s, "modify", json!({"id": 7, "family": null, "type": "Single 800 x 2100"}));
+    assert_eq!(swing(&s).len(), 1);
+}
+
+#[test]
+fn a_family_door_flipped_either_way_keeps_its_forms_turned_out_and_the_same_size() {
+    let mut s = family_house();
+    // What each form encloses, from its triangles, in the opening's own axes: positive while they face out.
+    let volumes = |s: &Session| -> Vec<f64> {
+        let (pieces, _) = s.model.opening_local(&s.model.elements[&7]).unwrap();
+        let sixth = |p: &crate::family::Piece| {
+            p.tris.iter().map(|[a, b, c]| crate::view3d::dot(*a, crate::view3d::cross(*b, *c))).sum::<f64>() / 6.0
+        };
+        pieces.iter().map(sixth).collect()
+    };
+    let straight = volumes(&s);
+    assert!(straight.len() > 3 && straight.iter().all(|v| *v > 0.0), "{straight:?}");
+    for (facing, hand) in [(true, false), (false, true), (true, true)] {
+        run(&mut s, "modify", json!({"id": 7, "flip_facing": facing, "flip_hand": hand}));
+        for (a, b) in straight.iter().zip(volumes(&s)) {
+            assert!((a - b).abs() < 1e-6 * a, "facing {facing}, hand {hand}: {a} against {b}");
+        }
+    }
+}
+
+#[test]
+fn a_family_door_and_window_show_in_a_schedule_by_their_family() {
+    let mut s = family_house();
+    let r = run(&mut s, "schedule", json!({"name": "D", "category": "doors", "fields": ["Mark", "Family", "Type", "Width"]}));
+    assert_eq!(r["rows"], json!([["1", "Single Door", "800 x 2100", 800.0]]));
+    let r = run(&mut s, "schedule", json!({"name": "W", "category": "windows", "fields": ["Family", "Type", "Sill"]}));
+    assert_eq!(r["rows"], json!([["Fixed Window", "600 x 900", 1100.0]]));
+    // The Family field is there to pick, and not shown unless it is.
+    assert_eq!(
+        run(&mut s, "schedule", json!({"category": "doors"}))["columns"],
+        json!(["Mark", "Type", "Width", "Height", "Level", "Wall"])
+    );
+}
+
+/// A PNG file of `w` by `h` px in the scratch folder, every pixel `color`; its path.
+fn picture_file(name: &str, w: u32, h: u32, color: [u8; 4]) -> std::path::PathBuf {
+    let rgba: Vec<u8> = (0..w * h).flat_map(|_| color).collect();
+    let png = tiny_skia::Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(w, h).unwrap()).unwrap().encode_png().unwrap();
+    let path = std::env::temp_dir().join(format!("bimcraft-{name}-{}.png", std::process::id()));
+    std::fs::write(&path, png).unwrap();
+    path
+}
+
+#[test]
+fn a_materials_texture_is_set_changed_and_taken_away_and_a_picture_comes_into_the_project_once() {
+    let mut s = Session::new();
+    // A new project's library has textures: bricks, boards.
+    let lib = run(&mut s, "inspect", json!({}))["materials"].clone();
+    assert_eq!((&lib["Brick"]["texture"]["kind"], &lib["Brick"]["texture"]["size"]), (&json!("brick"), &json!([900.0, 600.0])));
+    assert!(lib["Membrane"]["texture"].is_null() && lib["Timber"]["texture"]["kind"] == "boards");
+    // A pattern of another kind, at its natural size; then over it a size, a turn and a move, which keep its kind.
+    let t = |s: &Session| serde_json::to_value(&s.model.materials["Oak"].texture).unwrap();
+    run(&mut s, "material", json!({"name": "Oak", "color": "#a0703c", "texture": {"kind": "boards"}}));
+    assert_eq!(t(&s), json!({"kind": "boards", "size": [1200.0, 1120.0]}));
+    run(&mut s, "material", json!({"name": "Oak", "texture": {"size": [600, 300], "angle": 90, "offset": [10, 20]}}));
+    assert_eq!(t(&s), json!({"kind": "boards", "size": [600.0, 300.0], "angle": 90.0, "offset": [10.0, 20.0]}));
+    run(&mut s, "material", json!({"name": "Oak", "texture": {"size": 250}}));
+    assert_eq!(t(&s)["size"], json!([250.0, 250.0]), "one number is both");
+    // Another kind starts again; null takes it away; the material's other fields stay as they were.
+    run(&mut s, "material", json!({"name": "Oak", "texture": {"kind": "tile"}}));
+    assert_eq!(t(&s), json!({"kind": "tile", "size": [1200.0, 1200.0]}));
+    run(&mut s, "material", json!({"name": "Oak", "texture": null}));
+    assert_eq!((t(&s), s.model.materials["Oak"].color), (json!(null), [160, 112, 60]));
+    // A picture: its file, taken into the project (a tile a metre across, as tall as its proportions make it); the same file again, the same picture.
+    let (wide, tall) = (picture_file("wide", 8, 4, [200, 100, 50, 255]), picture_file("tall", 4, 8, [20, 100, 250, 255]));
+    run(&mut s, "material", json!({"name": "Oak", "texture": {"kind": "image", "path": wide}}));
+    run(&mut s, "material", json!({"name": "Maple", "texture": {"kind": "image", "path": wide}}));
+    assert_eq!((s.model.images.len(), t(&s)["size"].clone()), (1, json!([1000.0, 500.0])));
+    let inspected = run(&mut s, "inspect", json!({}))["images"].clone();
+    let id = s.model.images.keys().next().unwrap().clone();
+    assert_eq!(
+        (&inspected[&id]["size"], inspected[&id]["name"].as_str().map(|n| n.starts_with("bimcraft-wide"))),
+        (&json!([8, 4]), Some(true))
+    );
+    // A picture is the project's while a material's texture is made of it: out of one, still there for the other; out of both, gone.
+    run(&mut s, "material", json!({"name": "Oak", "texture": {"kind": "image", "path": tall}}));
+    assert_eq!(s.model.images.len(), 2);
+    run(&mut s, "material", json!({"name": "Oak", "texture": null}));
+    assert_eq!(s.model.images.len(), 1);
+    run(&mut s, "material", json!({"name": "Maple", "delete": true}));
+    assert!(s.model.images.is_empty());
+    // A project that holds one saves it with it, and opens with it.
+    run(&mut s, "material", json!({"name": "Oak", "texture": {"kind": "image", "path": tall, "angle": 45}}));
+    let project = temp("textured.bimcraft");
+    run(&mut s, "save", json!({"path": project}));
+    let mut t2 = Session::new();
+    run(&mut t2, "open", json!({"path": project}));
+    assert_eq!((t2.model.images.len(), &t2.model.materials["Oak"]), (1, &s.model.materials["Oak"]));
+    assert_eq!(t2.model.images, s.model.images);
+    // As a hand might spoil it: a picture's data cut short comes back with its name, and the project isn't opened.
+    let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&project).unwrap()).unwrap();
+    let key = v["images"].as_object().unwrap().keys().next().unwrap().clone();
+    v["images"][&key]["png"] = json!("iVBORw0KGgo=");
+    std::fs::write(&project, v.to_string()).unwrap();
+    let e = Session::new().execute("open", &json!({"path": project})).unwrap_err();
+    assert!(e.contains("not a BIMCraft project") && e.contains("cut short"), "{e}");
+    for f in [wide, tall, project] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+#[test]
+fn a_texture_that_isnt_sound_is_refused_and_says_why_and_the_project_is_as_it_was() {
+    let mut s = Session::new();
+    let before = s.model.clone();
+    let wide = picture_file("refused", 8, 4, [1, 2, 3, 255]);
+    let notes = temp("notes.txt");
+    std::fs::write(&notes, "not a picture").unwrap();
+    for (texture, says) in [
+        (json!("brick"), "or null"),
+        (json!({"kind": "marble"}), "isn't one of"),
+        (json!({"size": [10, 10]}), "needs a `kind`"),
+        (json!({"kind": "brick", "colour": 1}), "isn't one of kind"),
+        (json!({"kind": "brick", "size": [0, 10]}), "each side"),
+        (json!({"kind": "brick", "size": "big"}), "[a, b] numbers"),
+        (json!({"kind": "brick", "angle": "up"}), "degrees"),
+        (json!({"kind": "brick", "path": wide}), "only a texture of kind `image`"),
+        (json!({"kind": "image"}), "needs its file"),
+        (json!({"kind": "image", "image": "img-nothere"}), "doesn't hold"),
+        (json!({"kind": "image", "path": "/nonexistent/wood.jpg"}), "wood.jpg"),
+        (json!({"kind": "image", "path": notes}), "neither a PNG nor a JPEG"),
+    ] {
+        let e = s.execute("material", &json!({"name": "Bad", "texture": texture})).unwrap_err();
+        assert!(e.contains(says), "{texture}: {e}");
+        assert_eq!(*s.model, *before);
+    }
+    // At most 24 pictures; the 25th isn't taken in.
+    for k in 0..crate::texture::MAX_IMAGES as u8 {
+        let file = picture_file(&format!("many{k}"), 2, 2, [k, 7, 9, 255]);
+        run(&mut s, "material", json!({"name": format!("M{k}"), "texture": {"kind": "image", "path": file.clone()}}));
+        std::fs::remove_file(file).unwrap();
+    }
+    let extra = picture_file("extra", 2, 2, [250, 7, 9, 255]);
+    let e = s.execute("material", &json!({"name": "M25", "texture": {"kind": "image", "path": extra}})).unwrap_err();
+    assert!(e.contains("pictures already"), "{e}");
+    for f in [wide, notes, extra] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+#[test]
+fn paint_gives_a_face_a_material_and_takes_it_off_and_a_material_painted_on_stays() {
+    let mut s = Session::new();
+    house(&mut s);
+    let floor = run(&mut s, "floor", json!({}))["id"].as_u64().unwrap();
+    let paint = |s: &Session, id: u64| crate::element_json(&s.model, id)["params"]["Paint"].clone();
+    // A wall's faces are its exterior and its interior; paint a face, or all of them.
+    run(&mut s, "paint", json!({"id": 3, "face": "exterior", "material": "Brick"}));
+    assert_eq!(paint(&s, 3), json!({"exterior": "Brick"}));
+    run(&mut s, "PT", json!({"ids": [3, 4], "material": "Plaster"}));
+    assert_eq!(
+        (paint(&s, 3), paint(&s, 4)),
+        (json!({"exterior": "Plaster", "interior": "Plaster"}), json!({"exterior": "Plaster", "interior": "Plaster"}))
+    );
+    // A floor's: its top and its bottom.
+    run(&mut s, "paint", json!({"id": floor, "face": "top", "material": "Ceramic tile"}));
+    assert_eq!(paint(&s, floor), json!({"top": "Ceramic tile"}));
+    // Taken off one face; off the last, the paint's gone.
+    run(&mut s, "paint", json!({"id": 3, "face": "interior", "material": null}));
+    assert_eq!(paint(&s, 3), json!({"exterior": "Plaster"}));
+    run(&mut s, "paint", json!({"id": 3, "material": null}));
+    assert!(paint(&s, 3).is_null() && crate::element_json(&s.model, 3)["params"].is_null());
+    // A material in use by paint can't go, and a rename follows it.
+    let e = s.execute("material", &json!({"name": "Ceramic tile", "delete": true})).unwrap_err();
+    assert!(e.contains("paint of floor"), "{e}");
+    run(&mut s, "material", json!({"name": "Ceramic tile", "rename": "Glazed"}));
+    assert_eq!(paint(&s, floor), json!({"top": "Glazed"}));
+    // What can't be painted, or painted so, is refused; so is a hand-written value that isn't a paint.
+    for (p, says) in [
+        (json!({"id": 3, "face": "top", "material": "Brick"}), "no face `top`"),
+        (json!({"id": 3, "material": "Nope"}), "no `Nope`"),
+        (json!({"id": 3}), "`material` is required"),
+        (json!({"id": 3, "material": 5}), "a material's name"),
+        (json!({"id": 1, "material": "Brick"}), "no face to paint"),
+        (json!({"id": 999, "material": "Brick"}), "999"),
+    ] {
+        let e = s.execute("paint", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    for (value, says) in
+        [(json!("Brick"), "{face: material}"), (json!({"sky": "Brick"}), "no face"), (json!({"exterior": "Nope"}), "painted a material")]
+    {
+        let e = s.execute("modify", &json!({"id": 3, "params": {"Paint": value}})).unwrap_err();
+        assert!(e.contains(says), "{value}: {e}");
+    }
+    // A project parameter can't be called Paint, nor a family's parameter.
+    let e = s.execute("parameter", &json!({"name": "Paint", "categories": ["wall"]})).unwrap_err();
+    assert!(e.contains("paint"), "{e}");
+    let e =
+        s.execute("family", &json!({"name": "F", "types": {"A": {}}, "parameters": [{"name": "Paint", "kind": "number"}]})).unwrap_err();
+    assert!(e.contains("paint"), "{e}");
+    // A copy is painted as its original is.
+    let copy = run(&mut s, "copy", json!({"ids": [floor], "by": [0, 0]}));
+    let _ = copy;
+}
+
+#[test]
+fn favorites_keep_materials_and_families_for_every_project() {
+    let file = temp("favorites.json");
+    let _ = std::fs::remove_file(&file);
+    let picture = picture_file("fav", 8, 8, [10, 200, 30, 255]);
+    let mut a = Session::new();
+    run(
+        &mut a,
+        "material",
+        json!({"name": "My Lawn", "color": "#33aa33", "texture": {"kind": "image", "path": picture, "size": [500, 500]}}),
+    );
+    run(&mut a, "material", json!({"name": "My Oak", "color": "#a0703c", "texture": {"kind": "boards", "angle": 30}}));
+    // None to begin with; then two, a material with its picture and a family with the materials it's made of.
+    assert_eq!(run(&mut a, "favorite", json!({"path": file}))["materials"], json!([]));
+    run(&mut a, "favorite", json!({"action": "save", "name": "My Lawn", "path": file}));
+    run(&mut a, "favorite", json!({"action": "save", "name": "My Oak", "as": "Oak, aged", "path": file}));
+    run(
+        &mut a,
+        "family",
+        json!({"name": "Bench", "parameters": [{"name": "Seat", "kind": "material", "value": "My Oak"}], "types": {"A": {}},
+        "forms": [{"profile": [[0, 0], [1500, 0], [1500, 400], [0, 400]], "to": 450, "material": "Seat"}]}),
+    );
+    run(&mut a, "favorite", json!({"action": "save", "kind": "family", "name": "Bench", "path": file}));
+    let listed = run(&mut a, "favorite", json!({"path": file}));
+    assert_eq!(
+        (listed["materials"].clone(), listed["families"].clone()),
+        (
+            json!([{"name": "My Lawn", "color": [51, 170, 51], "texture": "image"}, {"name": "Oak, aged", "color": [160, 112, 60], "texture": "boards"}]),
+            json!([{"name": "Bench", "category": "furniture", "types": ["A"]}])
+        )
+    );
+    // In another project, from the file alone: the lawn comes with its picture, the family with the oak it's made of.
+    let mut b = Session::new();
+    run(&mut b, "favorite", json!({"action": "load", "name": "My Lawn", "as": "Lawn", "path": file}));
+    assert_eq!((b.model.images.len(), &b.model.materials["Lawn"].texture), (1, &a.model.materials["My Lawn"].texture));
+    run(&mut b, "favorite", json!({"action": "load", "kind": "family", "name": "Bench", "path": file}));
+    assert_eq!(b.model.materials["My Oak"].color, [160, 112, 60]);
+    let bench = run(&mut b, "component", json!({"family": "Bench", "at": [0, 0]}))["id"].as_u64().unwrap();
+    assert!(b.model.elements.contains_key(&bench));
+    // A name the project has is its own, unless the favorite is to replace it; the project's material of a family's keeps its own.
+    let e = b.execute("favorite", &json!({"action": "load", "name": "My Lawn", "as": "Lawn", "path": file})).unwrap_err();
+    assert!(e.contains("replace"), "{e}");
+    run(&mut b, "material", json!({"name": "Lawn", "color": "#000000"}));
+    run(&mut b, "favorite", json!({"action": "load", "name": "My Lawn", "as": "Lawn", "replace": true, "path": file}));
+    assert_eq!(b.model.materials["Lawn"].color, [51, 170, 51]);
+    run(&mut b, "material", json!({"name": "My Oak", "color": "#ffffff"}));
+    run(&mut b, "favorite", json!({"action": "load", "kind": "family", "name": "Bench", "as": "Bench 2", "path": file}));
+    assert_eq!(b.model.materials["My Oak"].color, [255, 255, 255]);
+    // Loading is an undo step; saving and listing aren't, and nothing is left half done when it's refused.
+    let steps = b.history().len();
+    run(&mut b, "undo", json!({}));
+    assert_eq!(b.history().len(), steps - 1);
+    let before = b.model.clone();
+    for (p, says) in [
+        (json!({"action": "load", "name": "Nothing", "path": file}), "no favorite material"),
+        (json!({"action": "load", "kind": "family", "name": "Nothing", "path": file}), "no favorite family"),
+        (json!({"action": "save", "name": "Nothing", "path": file}), "no `Nothing`"),
+        (json!({"action": "save", "path": file}), "`name` is required"),
+        (json!({"action": "delete", "name": "Nothing", "path": file}), "no favorite"),
+        (json!({"action": "keep", "path": file}), "list, save, load or delete"),
+        (json!({"kind": "texture", "path": file}), "material or family"),
+    ] {
+        let e = b.execute("favorite", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    assert_eq!(*b.model, *before);
+    // Deleted, a favorite's gone; a file that isn't one is refused, not written over.
+    run(&mut a, "favorite", json!({"action": "delete", "name": "My Lawn", "path": file}));
+    assert_eq!(run(&mut a, "favorite", json!({"path": file}))["materials"].as_array().map(Vec::len), Some(1));
+    std::fs::write(&file, "not favorites").unwrap();
+    let e = a.execute("favorite", &json!({"action": "save", "name": "My Oak", "path": file})).unwrap_err();
+    assert!(e.contains("isn't a favorites file"), "{e}");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "not favorites");
+    // A family goes to a file of its own, and comes back from it.
+    let bench_file = temp("bench.json");
+    run(&mut a, "family", json!({"name": "Bench", "save": bench_file}));
+    let mut c = Session::new();
+    run(&mut c, "material", json!({"name": "My Oak"}));
+    run(&mut c, "family", json!({"path": bench_file}));
+    assert_eq!(c.model.families["Bench"], a.model.families["Bench"]);
+    for f in [file, picture, bench_file] {
+        let _ = std::fs::remove_file(f);
+    }
 }

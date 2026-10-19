@@ -68,6 +68,13 @@ fn topmost(h: &mut Harness<BimApp>, name: &str) {
     h.run();
 }
 
+/// A button named `name` beside the widget `beside`, when another window has one by that name too: the nearest.
+fn press_near(h: &mut Harness<BimApp>, name: &str, beside: &str) {
+    let from = h.get_by_label(beside).rect().center();
+    let pos = h.get_all_by_label(name).map(|n| n.rect().center()).min_by(|a, b| a.distance(from).total_cmp(&b.distance(from)));
+    click_at(h, pos.unwrap());
+}
+
 /// A view in the Project Browser, opened as screen readers do: it may lie below the browser's fold.
 fn browse(h: &mut Harness<BimApp>, label: &str) {
     h.get_by_label(label).click_accesskit();
@@ -3488,4 +3495,140 @@ fn demolish_speaks_portuguese_and_spanish() {
         click(&mut h, P2(4000.0, -1000.0));
         assert_eq!(h.state().status.text, none, "{language:?}: a dimension");
     }
+}
+
+#[test]
+fn paint_lays_a_material_on_the_face_clicked_in_3d_and_remove_paint_takes_it_off() {
+    let mut h = app(BOX);
+    press(&mut h, "Default 3D View");
+    topmost(&mut h, "Modify");
+    h.state_mut().paint_material = "Timber".into();
+    press(&mut h, "Paint");
+    assert_eq!(h.state().tool, Tool::Paint);
+    assert!(h.query_by_label("Modify | Paint").is_some(), "its contextual tab");
+    // The south wall's outer face: a wall's exterior is to the left of its start to its end, so for these walls, drawn the
+    // way round they are, it's their interior.
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    let at = h.state().screen3([5000.0, -100.0, 1500.0]);
+    click_at(&mut h, at);
+    assert_eq!(field(&h, wall, "params"), json!({"Paint": {"interior": "Timber"}}));
+    // Another material for the next click, over the same face; one undo step each.
+    h.state_mut().paint_material = "Plaster".into();
+    click_at(&mut h, at);
+    assert_eq!(field(&h, wall, "params"), json!({"Paint": {"interior": "Plaster"}}));
+    press(&mut h, "Remove Paint");
+    assert_eq!(h.state().tool, Tool::Unpaint);
+    click_at(&mut h, at);
+    assert!(field(&h, wall, "params").is_null());
+    // The sky has no face to paint, and says so.
+    let corner = h.state().orbit.rect.min + vec2(4.0, 4.0);
+    click_at(&mut h, corner);
+    assert!(h.state().session.history().iter().filter(|l| **l == "Paint").count() == 3);
+}
+
+#[test]
+fn pt_picks_the_paint_tool_in_3d_from_any_view_and_ks_lists_it() {
+    let mut h = app(BOX);
+    assert!(matches!(h.state().sheet, Sheet::Plan(_)));
+    shortcut(&mut h, "PT");
+    assert_eq!(h.state().tool, Tool::Paint);
+    assert_eq!(h.state().sheet, Sheet::View3D, "Paint works in the 3D view: it opens it");
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "KS");
+    assert!(h.query_by_label("PT").is_some() && h.query_by_label("Paint").is_some());
+}
+
+#[test]
+fn the_materials_window_gives_a_material_a_texture_and_keeps_it_in_the_favorites_for_other_projects() {
+    let file = std::env::temp_dir().join(format!("bimcraft-ui-favorites-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut h = app(BOX);
+    h.state_mut().favorites_path = Some(file.clone());
+    press(&mut h, "Manage");
+    press(&mut h, "Materials");
+    // Brick comes first, with its pattern; give it a tile's, of its own size and turned.
+    let texture = |h: &Harness<BimApp>| h.state().session.model.materials["Brick"].texture.clone();
+    assert_eq!(texture(&h).map(|t| t.kind.name()), Some("brick"));
+    pick(&mut h, Role::ComboBox, "Texture");
+    press(&mut h, "Tile");
+    assert_eq!(texture(&h).map(|t| t.kind.name()), Some("tile"));
+    type_into(&mut h, "Tile Width", "450");
+    key(&mut h, Key::Enter);
+    type_into(&mut h, "Texture Angle", "45");
+    key(&mut h, Key::Enter);
+    let t = texture(&h).unwrap();
+    assert_eq!((t.size[0], t.angle), (450.0, 45.0));
+    // Typed nonsense is said, and the texture is as it was.
+    type_into(&mut h, "Tile Width", "wide");
+    key(&mut h, Key::Enter);
+    assert!(h.state().status.error && texture(&h) == Some(t));
+    // Kept in the Favorites, once, whatever it is now.
+    press(&mut h, "Save to Favorites");
+    let kept = bimcraft_core::favorites::Favorites::read(&file).unwrap();
+    assert_eq!(kept.materials["Brick"].material.texture.as_ref().map(|t| t.angle), Some(45.0));
+    // And, from the Favorites window, into the project again, under another name, since it has that one.
+    press(&mut h, "Close");
+    press(&mut h, "Favorites");
+    press(&mut h, "Add to Project");
+    assert_eq!(h.state().session.model.materials["Brick 2"].texture.as_ref().map(|t| t.angle), Some(45.0));
+    press(&mut h, "Remove");
+    assert!(bimcraft_core::favorites::Favorites::read(&file).unwrap().materials.is_empty());
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn the_family_editor_edits_a_family_says_what_wont_build_and_starts_a_new_one_of_a_category() {
+    let mut h = app(&format!("{BOX}\ncomponent {{\"family\": \"Table\", \"type\": \"1600 x 900\", \"at\": [3000, 3000]}}"));
+    let table = find(&h, |e| matches!(e, Element::Component(_)));
+    // Its top is drawn as an outline: click on its east edge.
+    click(&mut h, P2(3800.0, 3000.0));
+    assert_eq!(h.state().selection, [table]);
+    press(&mut h, "Manage");
+    press(&mut h, "Edit Family");
+    assert!(h.state().family_editor.is_some(), "the window is open on the table's family");
+    // The table's parameters, a row each: its fourth is its top's thickness, 40 mm.
+    type_into(&mut h, "Parameter Value 4", "55");
+    press_near(&mut h, "Apply", "Cancel");
+    let thickness = |h: &Harness<BimApp>| h.state().session.model.families["Table"].parameters[3].value.clone();
+    assert_eq!(thickness(&h), json!(55.0));
+    // A formula naming what isn't there is said, in the window; the project's family is as it was.
+    type_into(&mut h, "Parameter Formula 4", "Nope + 1");
+    press_near(&mut h, "Apply", "Cancel");
+    assert!(h.state().status.text.is_empty(), "the window says it itself: a box over the view's corner would lie on its buttons");
+    assert_eq!(h.query_all_by_label_contains("Nope").count(), 1, "the window says what's wrong, once");
+    assert_eq!(h.state().session.model.families["Table"].parameters[3].formula, None);
+    press(&mut h, "Cancel");
+    assert!(h.state().family_editor.is_none(), "Cancel closes it");
+    // A new family of a category: its name, then OK; a door's has the opening's Width and Height.
+    key(&mut h, Key::Escape);
+    press(&mut h, "New Family");
+    press(&mut h, "Door");
+    type_into(&mut h, "Family name", "Cupboard Door");
+    press(&mut h, "OK");
+    let f = &h.state().session.model.families["Cupboard Door"];
+    assert_eq!(f.category, bimcraft_core::family::Category::Door);
+    assert!(f.parameters.iter().any(|p| p.name == "Width") && !f.forms.is_empty());
+}
+
+#[test]
+fn the_door_tool_places_the_projects_single_door_of_a_family_and_the_type_selector_offers_both_kinds() {
+    let mut h = app(BOX);
+    tool(&mut h, "Door");
+    click(&mut h, P2(2000.0, 0.0));
+    let door = ids(&h, "door")[0];
+    assert_eq!((field(&h, door, "family"), field(&h, door, "type")), (json!("Single Door"), json!("900 x 2100")));
+    // Selected, its Type Selector lists the project's own types, then the families' as `Family: Type`.
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(2000.0, 0.0));
+    press(&mut h, "Type Selector");
+    assert!(h.query_by_label("Double Door: 1500 x 2100").is_some() && h.query_by_label("Single 800 x 2100").is_some());
+    // One of the project's own takes it off the family; another family's gives it that.
+    press(&mut h, "Single 800 x 2100");
+    assert_eq!((field(&h, door, "family"), field(&h, door, "type")), (Value::Null, json!("Single 800 x 2100")));
+    press(&mut h, "Type Selector");
+    press(&mut h, "Double Door: 1500 x 2100");
+    assert_eq!((field(&h, door, "family"), field(&h, door, "type")), (json!("Double Door"), json!("1500 x 2100")));
+    // Its Edit Type is its family type's, with a family's own parameters.
+    press(&mut h, "Edit Type");
+    assert!(h.query_by_label("Family:").is_some());
 }

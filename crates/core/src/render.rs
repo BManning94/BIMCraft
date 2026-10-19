@@ -1339,6 +1339,18 @@ fn opening(d: &mut Drawing, m: &Model, e: &Element, o: &Opening, w: &Wall, cut: 
     if !shown {
         return;
     }
+    // Of a family: the forms the cut plane passes through, outlined, and the lines of its symbols (a door's swing).
+    if o.family.is_some() {
+        for piece in m.opening_pieces(e).iter().filter(|p| p.bottom <= cut && cut < p.top) {
+            d.line(&piece.outline, 1.5, INK, true);
+        }
+        d.part(Part::Projection);
+        for stroke in m.opening_strokes(e) {
+            d.line(&stroke, 1.0, INK, false);
+        }
+        d.part(Part::Cut);
+        return;
+    }
     if matches!(e, Element::Door(_)) {
         // Swinging to the wall's left (its exterior side), or flipped, its right; hung on the jamb
         // toward its start, or flipped, its end.

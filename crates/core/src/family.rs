@@ -9,11 +9,13 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::csg;
 use crate::geom::P2;
 use crate::model::{MAX_COORD, MAX_TEXT};
-use crate::view3d::P3;
+use crate::view3d::{P3, add, cross, mul};
 
-/// What a family is: how IFC names its components.
+/// What a family is: how IFC names its components; a door or a window is hosted in a wall, which
+/// its `Width` and `Height` open.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Category {
@@ -23,7 +25,26 @@ pub enum Category {
     Plumbing,
     Lighting,
     Generic,
+    Door,
+    Window,
 }
+
+impl Category {
+    /// Whether a family of it stands in a wall: a door's or a window's, drawn in the opening's own axes (x along
+    /// the wall from the opening's middle, y across it toward the wall's left, z up from its sill).
+    pub fn hosted(self) -> bool {
+        matches!(self, Category::Door | Category::Window)
+    }
+}
+
+/// What a hosted family reads of its wall: the thickness, mm, in formulas.
+pub const WALL: &str = "Wall Thickness";
+/// A wall as thick as this is assumed where a hosted family is built without one: 200 mm.
+pub const DEFAULT_WALL: f64 = 200.0;
+/// The parameters that open a hosted family's wall: its width and its height, and the height of its sill.
+pub const WIDTH: &str = "Width";
+pub const HEIGHT: &str = "Height";
+pub const SILL: &str = "Sill Height";
 
 /// What a parameter holds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,10 +108,36 @@ pub struct Circle {
     pub radius: Expr,
 }
 
+/// A round line: its middle, its radius, and the angles it runs between, degrees counter-clockwise from +x.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Curve {
+    pub centre: [Expr; 2],
+    pub radius: Expr,
+    #[serde(default)]
+    pub from: Expr,
+    pub to: Expr,
+}
+
+/// A line a door's or a window's plan draws, in its own axes (a swing, a sill), and no view shows
+/// otherwise: a `line` through points, or an `arc`; `visible` (a yes/no parameter, or a formula) whether it's there.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Symbol {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub line: Vec<[Expr; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arc: Option<Curve>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<Expr>,
+}
+
 /// A solid of a family, in its own axes (x along the component's angle, y to its left, z up from
-/// its base): a profile drawn in `plane` and swept across it from `from` to `to`; or triangles, as
-/// a file brings them. A material's name, or a material parameter's, says what it's made of;
-/// `visible` (a yes/no parameter, or a formula) whether it's there.
+/// its base): a profile drawn in `plane` and swept across it from `from` to `to`; or, with an
+/// `axis`, turned about it from `from` to `to` degrees; or triangles, as a file brings them. A
+/// material's name, or a material parameter's, says what it's made of; `visible` (a yes/no
+/// parameter, or a formula) whether it's there. A `void` is no solid: it cuts the solid forms listed
+/// before it that it passes through, and is never seen itself.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Form {
@@ -104,6 +151,12 @@ pub struct Form {
     pub from: Expr,
     #[serde(default)]
     pub to: Expr,
+    /// A revolve: the line in the sketch plane its profile turns about, right-handed from the axis'
+    /// first point toward its second; its `from` and `to` are angles, a full turn at most.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<[[Expr; 2]; 2]>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub void: bool,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub material: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +183,9 @@ pub struct Family {
     pub types: BTreeMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
     pub forms: Vec<Form>,
+    /// What a door's or a window's plan draws besides its forms: lines of its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub symbols: Vec<Symbol>,
 }
 
 /// A parameter's value, worked out: a number (yes/no, 1 or 0), or a material's name.
@@ -156,6 +212,8 @@ pub struct Piece {
 const MAX_DEPTH: usize = 64;
 /// Sides a circle's profile is drawn with.
 const SEGMENTS: usize = 32;
+/// Degrees a symbol's arc turns between the corners it is drawn with.
+const ARC_STEP: f64 = 3.75;
 /// Corners one profile may have.
 pub const MAX_PROFILE: usize = 64;
 /// Formulas one may take from in a row: `A` from `B` from `C`…
@@ -165,9 +223,10 @@ pub const MAX_BUILT: usize = 400_000;
 /// Triangles one form, as a file brings it, may have.
 pub const MAX_TRIANGLES: usize = 100_000;
 
-/// Parameters, forms and types one family may have.
+/// Parameters, forms, symbols and types one family may have.
 pub const MAX_PARAMETERS: usize = 64;
 pub const MAX_FORMS: usize = 256;
+pub const MAX_SYMBOLS: usize = 64;
 pub const MAX_TYPES: usize = 1000;
 /// The longest formula, in characters.
 pub const MAX_FORMULA: usize = 1024;
@@ -555,13 +614,21 @@ impl Family {
     }
 
     /// Its parameters' values for type `type_name`, a component's `instance` values over them, and
-    /// its formulas worked out.
+    /// its formulas worked out; a hosted family's in a wall of the usual thickness.
     pub fn values(&self, type_name: &str, instance: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Val>, String> {
+        self.values_in(type_name, instance, DEFAULT_WALL)
+    }
+
+    /// [`Family::values`], with a hosted family's wall `wall` mm thick: what its formulas read as `Wall Thickness`.
+    pub fn values_in(&self, type_name: &str, instance: &BTreeMap<String, Value>, wall: f64) -> Result<BTreeMap<String, Val>, String> {
         let set = self.types.get(type_name).ok_or_else(|| {
             let names: Vec<&str> = self.types.keys().map(String::as_str).collect();
             format!("type `{type_name}` doesn't exist (there are: {})", names.join(", "))
         })?;
         let mut done = BTreeMap::new();
+        if self.category.hosted() {
+            done.insert(WALL.to_string(), Val::Number(wall));
+        }
         for p in &self.parameters {
             self.resolve(&p.name, set, instance, &mut done, &mut Vec::new())?;
         }
@@ -611,6 +678,7 @@ impl Family {
         for (what, n, most) in [
             ("parameters", self.parameters.len(), MAX_PARAMETERS),
             ("forms", self.forms.len(), MAX_FORMS),
+            ("symbols", self.symbols.len(), MAX_SYMBOLS),
             ("types", self.types.len(), MAX_TYPES),
         ] {
             if n > most {
@@ -619,6 +687,18 @@ impl Family {
         }
         if self.types.is_empty() {
             return Err("it needs a type: add one to `types`".into());
+        }
+        if self.category.hosted() {
+            for name in [WIDTH, HEIGHT] {
+                if !self.parameters.iter().any(|p| p.name == name && p.kind == Kind::Length) {
+                    return Err(format!("a door or window family needs a length parameter `{name}`: the size of the opening it makes"));
+                }
+            }
+            if self.parameters.iter().any(|p| p.name == WALL) {
+                return Err(format!("`{WALL}` is the wall's, which a door or a window reads; name the parameter otherwise"));
+            }
+        } else if !self.symbols.is_empty() {
+            return Err("symbols are the lines a door's or a window's plan draws; this family isn't one".into());
         }
         let material_ok = |who: &str, m: &str| {
             if m.is_empty() || has_material(m) {
@@ -670,20 +750,41 @@ impl Family {
             if ways != 1 {
                 return Err(format!("{who}: it takes a `profile`, a `circle` or a `mesh`, one of them"));
             }
+            if form.axis.is_some() && !form.mesh.is_empty() {
+                return Err(format!("{who}: a `mesh` is as it is; an `axis` turns a `profile` or a `circle`"));
+            }
             if !self.parameters.iter().any(|p| p.name == form.material && p.kind == Kind::Material) {
                 material_ok(&who, &form.material)?;
             }
             let circle = form.circle.iter().flat_map(|c| c.centre.iter().chain([&c.radius]));
-            let mut exprs = form.profile.iter().flatten().chain([&form.from, &form.to]).chain(&form.visible).chain(circle);
+            let mut exprs = form
+                .profile
+                .iter()
+                .flatten()
+                .chain([&form.from, &form.to])
+                .chain(&form.visible)
+                .chain(circle)
+                .chain(form.axis.iter().flatten().flatten());
             if exprs.any(|e| matches!(e, Expr::Formula(f) if long(f))) {
                 return Err(format!("{who}: a formula of it is longer than {MAX_FORMULA} characters"));
             }
         }
+        let symbol_exprs = self.symbols.iter().flat_map(|y| {
+            y.line.iter().flatten().chain(&y.visible).chain(y.arc.iter().flat_map(|c| c.centre.iter().chain([&c.radius, &c.from, &c.to])))
+        });
+        if symbol_exprs.into_iter().any(|e| matches!(e, Expr::Formula(f) if long(f))) {
+            return Err(format!("a formula of a symbol is longer than {MAX_FORMULA} characters"));
+        }
         // Each formula read once across the types; past what a family may build, refused.
-        let (mut read, mut built) = (HashMap::new(), 0);
+        let (mut read, mut built, mut cuts) = (HashMap::new(), 0, csg::Meter::default());
         for t in self.types.keys() {
-            let pieces =
-                self.values(t, &BTreeMap::new()).and_then(|v| self.build(&v, &mut read)).map_err(|e| format!("type `{t}`: {e}"))?;
+            let pieces = self
+                .values(t, &BTreeMap::new())
+                .and_then(|v| {
+                    self.strokes(&v)?;
+                    self.build(&v, &mut read, &mut cuts)
+                })
+                .map_err(|e| format!("type `{t}`: {e}"))?;
             built += pieces.iter().map(|p| p.tris.len()).sum::<usize>();
             if built > MAX_BUILT {
                 return Err(format!("its types build more than {MAX_BUILT} triangles together"));
@@ -692,32 +793,59 @@ impl Family {
         Ok(())
     }
 
-    /// Its visible forms' solids, sized by `values`.
+    /// Its visible forms' solids, sized by `values`, less what its voids cut.
     pub fn pieces(&self, values: &BTreeMap<String, Val>) -> Result<Vec<Piece>, String> {
-        self.build(values, &mut HashMap::new())
+        self.build(values, &mut HashMap::new(), &mut csg::Meter::default())
     }
 
-    /// Its visible forms' solids, sized by `values`; `read`, its formulas as read already.
+    /// The lines of its visible symbols, sized by `values`, in its own axes: an arc as a polyline of short chords.
+    pub fn strokes<'a>(&'a self, values: &BTreeMap<String, Val>) -> Result<Vec<Vec<P2>>, String> {
+        let mut read = HashMap::new();
+        let mut out = Vec::new();
+        for (i, sym) in self.symbols.iter().enumerate() {
+            let said = |e: String| format!("symbol {}: {e}", i + 1);
+            if let Some(v) = &sym.visible
+                && number(v, values, &mut read).map_err(said)? == 0.0
+            {
+                continue;
+            }
+            let ways = usize::from(!sym.line.is_empty()) + usize::from(sym.arc.is_some());
+            if ways != 1 || sym.line.len() > MAX_PROFILE {
+                return Err(said(format!("it takes a `line` of up to {MAX_PROFILE} points, or an `arc`, one of them")));
+            }
+            let mut pts = Vec::new();
+            for [a, b] in &sym.line {
+                pts.push(P2(number(a, values, &mut read).map_err(said)?, number(b, values, &mut read).map_err(said)?));
+            }
+            if let Some(c) = &sym.arc {
+                let mut n = |e: &'a Expr| number(e, values, &mut read).map_err(said);
+                let (centre, r, from, to) = (P2(n(&c.centre[0])?, n(&c.centre[1])?), n(&c.radius)?, n(&c.from)?, n(&c.to)?);
+                if r <= 0.0 || (to - from).abs() > 360.0 || to == from {
+                    return Err(said(format!(
+                        "its arc has radius {r} and runs from {from} to {to} degrees; it needs a radius above zero and up to a full turn"
+                    )));
+                }
+                let steps = ((to - from).abs() / ARC_STEP).ceil().max(1.0) as usize;
+                pts.extend((0..=steps).map(|k| {
+                    let (s, c) = (from + (to - from) * k as f64 / steps as f64).to_radians().sin_cos();
+                    P2(centre.0 + r * c, centre.1 + r * s)
+                }));
+            }
+            out.push(pts);
+        }
+        Ok(out)
+    }
+
+    /// Its visible forms' solids, sized by `values`, less what its voids cut; `read`, its formulas as
+    /// read already, and `cuts`, what the cutting may still cost.
     fn build<'a>(
         &'a self,
         values: &BTreeMap<String, Val>,
         read: &mut HashMap<&'a str, Result<Node, String>>,
+        cuts: &mut csg::Meter,
     ) -> Result<Vec<Piece>, String> {
-        let mut num = |e: &'a Expr| -> Result<f64, String> {
-            let x = match e {
-                Expr::Number(x) => *x,
-                Expr::Formula(f) => match read.entry(f.as_str()).or_insert_with(|| parse(f)) {
-                    Ok(node) => worked(f, node, &mut |n: &str| match values.get(n) {
-                        Some(Val::Number(x)) => Ok(*x),
-                        Some(Val::Text(_)) => Err(format!("`{n}` is a material, not a number")),
-                        None => Err(format!("`{n}` isn't one of its parameters")),
-                    })?,
-                    Err(e) => return Err(e.clone()),
-                },
-            };
-            if x.is_finite() && x.abs() <= MAX_COORD { Ok(x) } else { Err(format!("{x} is not a usable number")) }
-        };
-        let mut out = Vec::new();
+        let mut num = |e: &'a Expr| number(e, values, read);
+        let (mut out, mut voids) = (Vec::new(), Vec::new());
         for (i, form) in self.forms.iter().enumerate() {
             let what = format!("form {}", i + 1);
             let said = |e: String| format!("{what}: {e}");
@@ -730,62 +858,125 @@ impl Family {
                 Some(Val::Text(m)) => m.clone(),
                 _ => form.material.clone(),
             };
-            if !form.mesh.is_empty() {
-                out.push(mesh(&form.mesh, material).map_err(said)?);
-                continue;
-            }
-            let ring: Vec<P2> = match &form.circle {
-                Some(c) => {
-                    let (x, y, r) = (num(&c.centre[0]).map_err(said)?, num(&c.centre[1]).map_err(said)?, num(&c.radius).map_err(said)?);
-                    if r <= 0.0 {
-                        return Err(said(format!("its circle's radius is {r}; it needs one above zero")));
+            let piece = if !form.mesh.is_empty() {
+                mesh(&form.mesh, material).map_err(said)?
+            } else {
+                let ring: Vec<P2> = match &form.circle {
+                    Some(c) => {
+                        let (x, y, r) = (num(&c.centre[0]).map_err(said)?, num(&c.centre[1]).map_err(said)?, num(&c.radius).map_err(said)?);
+                        if r <= 0.0 {
+                            return Err(said(format!("its circle's radius is {r}; it needs one above zero")));
+                        }
+                        (0..SEGMENTS)
+                            .map(|k| (k as f64 * std::f64::consts::TAU / SEGMENTS as f64).sin_cos())
+                            .map(|(s, c)| P2(x + r * c, y + r * s))
+                            .collect()
                     }
-                    (0..SEGMENTS)
-                        .map(|k| (k as f64 * std::f64::consts::TAU / SEGMENTS as f64).sin_cos())
-                        .map(|(s, c)| P2(x + r * c, y + r * s))
-                        .collect()
+                    None if form.profile.len() > MAX_PROFILE => {
+                        return Err(said(format!("its profile has more than {MAX_PROFILE} corners")));
+                    }
+                    None => form.profile.iter().map(|[a, b]| Ok(P2(num(a)?, num(b)?))).collect::<Result<_, String>>().map_err(said)?,
+                };
+                let (from, to) = (num(&form.from).map_err(said)?, num(&form.to).map_err(said)?);
+                if ring.len() < 3 || crate::geom::area(&ring).abs() < 1.0 {
+                    return Err(said("its profile has no area: it needs three corners or more, or a circle".into()));
                 }
-                None if form.profile.len() > MAX_PROFILE => {
-                    return Err(said(format!("its profile has more than {MAX_PROFILE} corners")));
+                if to <= from {
+                    let unit = if form.axis.is_some() { " degrees" } else { "" };
+                    return Err(format!("{what} sweeps nothing: from {from} to {to}{unit}"));
                 }
-                None => form.profile.iter().map(|[a, b]| Ok(P2(num(a)?, num(b)?))).collect::<Result<_, String>>().map_err(said)?,
+                let ring = if crate::geom::area(&ring) < 0.0 { ring.into_iter().rev().collect() } else { ring };
+                match &form.axis {
+                    Some([p, q]) => {
+                        if to - from > 360.0 {
+                            return Err(format!("{what} turns more than all the way round: from {from} to {to} degrees, 360 at most"));
+                        }
+                        let mut corner = |c: &'a [Expr; 2]| Ok(P2(num(&c[0])?, num(&c[1])?));
+                        let axis = [corner(p).map_err(said)?, corner(q).map_err(said)?];
+                        let (tris, outline) = revolve(&ring, axis, (from, to), form.plane).map_err(said)?;
+                        let (bottom, top) = heights(&tris);
+                        Piece { caps: tris.len(), tris, outline, bottom, top, material, round: false }
+                    }
+                    None => {
+                        let (tris, caps) = sweep(&ring, from, to, form.plane).map_err(said)?;
+                        let span = |k: usize| {
+                            ring.iter()
+                                .map(|p| if k == 0 { p.0 } else { p.1 })
+                                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)))
+                        };
+                        let ((a0, a1), (b0, b1)) = (span(0), span(1));
+                        let (outline, bottom, top) = match form.plane {
+                            Plane::Xy => (ring.clone(), from, to),
+                            Plane::Xz => (vec![P2(a0, from), P2(a1, from), P2(a1, to), P2(a0, to)], b0, b1),
+                            Plane::Yz => (vec![P2(from, a0), P2(to, a0), P2(to, a1), P2(from, a1)], b0, b1),
+                        };
+                        Piece { tris, caps, outline, bottom, top, material, round: form.circle.is_some() }
+                    }
+                }
             };
-            let (from, to) = (num(&form.from).map_err(said)?, num(&form.to).map_err(said)?);
-            if ring.len() < 3 || crate::geom::area(&ring).abs() < 1.0 {
-                return Err(said("its profile has no area: it needs three corners or more, or a circle".into()));
+            if form.void {
+                voids.push((i, out.len(), piece.tris));
+            } else {
+                out.push(piece);
             }
-            if to <= from {
-                return Err(format!("{what} sweeps nothing: from {from} to {to}"));
-            }
-            let ring = if crate::geom::area(&ring) < 0.0 { ring.into_iter().rev().collect() } else { ring };
-            let (tris, caps) = sweep(&ring, from, to, form.plane).map_err(said)?;
-            let span = |k: usize| {
-                ring.iter()
-                    .map(|p| if k == 0 { p.0 } else { p.1 })
-                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)))
-            };
-            let ((a0, a1), (b0, b1)) = (span(0), span(1));
-            let (outline, bottom, top) = match form.plane {
-                Plane::Xy => (ring.clone(), from, to),
-                Plane::Xz => (vec![P2(a0, from), P2(a1, from), P2(a1, to), P2(a0, to)], b0, b1),
-                Plane::Yz => (vec![P2(from, a0), P2(to, a0), P2(to, a1), P2(from, a1)], b0, b1),
-            };
-            out.push(Piece { tris, caps, outline, bottom, top, material, round: form.circle.is_some() });
         }
+        // Each void cut from the solids listed before it that it reaches. A cut solid is no longer one round surface,
+        // and its outline seen from above is as it was. ponytail: a notch or a hole doesn't show in plan; trace it if it must.
+        for (i, before, void) in &voids {
+            for piece in out.iter_mut().take(*before) {
+                let tris = csg::subtract(&piece.tris, void, cuts).map_err(|e| format!("form {}: {e}", i + 1))?;
+                if tris != piece.tris {
+                    let (bottom, top) = heights(&tris);
+                    *piece = Piece {
+                        caps: tris.len(),
+                        tris,
+                        bottom,
+                        top,
+                        round: false,
+                        outline: std::mem::take(&mut piece.outline),
+                        material: std::mem::take(&mut piece.material),
+                    };
+                }
+            }
+        }
+        out.retain(|p| !p.tris.is_empty());
         Ok(out)
     }
 }
 
-/// `ring`, counter-clockwise in `plane`, swept across it from `from` to `to`: its caps, then its
-/// sides, every triangle turned out; and how many the caps take.
-fn sweep(ring: &[P2], from: f64, to: f64, plane: Plane) -> Result<(Vec<[P3; 3]>, usize), String> {
-    let at = |p: P2, t: f64| -> P3 {
-        match plane {
-            Plane::Xy => [p.0, p.1, t],
-            Plane::Xz => [p.0, t, p.1],
-            Plane::Yz => [t, p.0, p.1],
-        }
+/// `e` as a number: itself, or its formula worked out over `values`; `read`, the formulas as read already.
+fn number<'a>(e: &'a Expr, values: &BTreeMap<String, Val>, read: &mut HashMap<&'a str, Result<Node, String>>) -> Result<f64, String> {
+    let x = match e {
+        Expr::Number(x) => *x,
+        Expr::Formula(f) => match read.entry(f.as_str()).or_insert_with(|| parse(f)) {
+            Ok(node) => worked(f, node, &mut |n: &str| match values.get(n) {
+                Some(Val::Number(x)) => Ok(*x),
+                Some(Val::Text(_)) => Err(format!("`{n}` is a material, not a number")),
+                None => Err(format!("`{n}` isn't one of its parameters")),
+            })?,
+            Err(e) => return Err(e.clone()),
+        },
     };
+    if x.is_finite() && x.abs() <= MAX_COORD { Ok(x) } else { Err(format!("{x} is not a usable number")) }
+}
+
+/// How low and how high `tris` reach.
+fn heights(tris: &[[P3; 3]]) -> (f64, f64) {
+    tris.iter().flatten().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p[2]), hi.max(p[2])))
+}
+
+/// The point of a plane's sketch at `p`, `t` along the way it's swept; with `t` zero, the direction
+/// `p` is in the family's axes.
+fn embed(plane: Plane, p: P2, t: f64) -> P3 {
+    match plane {
+        Plane::Xy => [p.0, p.1, t],
+        Plane::Xz => [p.0, t, p.1],
+        Plane::Yz => [t, p.0, p.1],
+    }
+}
+
+/// The triangles that cap a profile `ring`, counter-clockwise; or why it can't be capped: it crosses itself.
+fn cap(ring: &[P2]) -> Result<Vec<[usize; 3]>, String> {
     let pt = |i: usize| ring.get(i).copied().unwrap_or_default();
     let caps = crate::geom::triangulate(ring);
     let covered: f64 = caps.iter().map(|[a, b, c]| (pt(*b) - pt(*a)).cross(pt(*c) - pt(*a)) / 2.0).sum();
@@ -793,6 +984,15 @@ fn sweep(ring: &[P2], from: f64, to: f64, plane: Plane) -> Result<(Vec<[P3; 3]>,
     if (covered - area).abs() > 1e-6 * area + 1e-3 {
         return Err("its profile crosses itself".into());
     }
+    Ok(caps)
+}
+
+/// `ring`, counter-clockwise in `plane`, swept across it from `from` to `to`: its caps, then its
+/// sides, every triangle turned out; and how many the caps take.
+fn sweep(ring: &[P2], from: f64, to: f64, plane: Plane) -> Result<(Vec<[P3; 3]>, usize), String> {
+    let at = |p: P2, t: f64| embed(plane, p, t);
+    let pt = |i: usize| ring.get(i).copied().unwrap_or_default();
+    let caps = cap(ring)?;
     let mut tris = Vec::with_capacity(caps.len() * 2 + ring.len() * 2);
     for &[a, b, c] in &caps {
         tris.push([at(pt(a), to), at(pt(b), to), at(pt(c), to)]);
@@ -809,6 +1009,85 @@ fn sweep(ring: &[P2], from: f64, to: f64, plane: Plane) -> Result<(Vec<[P3; 3]>,
         tris.iter_mut().for_each(|t| t.swap(1, 2));
     }
     Ok((tris, caps.len() * 2))
+}
+
+/// `ring`, counter-clockwise in `plane`, turned about the line through `axis` (in `plane`) from `from` to
+/// `to` degrees, right-handed from the axis' first point toward its second: its triangles, every one turned
+/// out, a full turn's sides only and a part-turn's with its two ends capped; and its outline seen from above.
+fn revolve(ring: &[P2], [p0, p1]: [P2; 2], (from, to): (f64, f64), plane: Plane) -> Result<(Vec<[P3; 3]>, Vec<P2>), String> {
+    if p0.dist(p1) < 1e-6 {
+        return Err("its axis starts and ends at one point: it needs a direction".into());
+    }
+    let caps = cap(ring)?;
+    // Each corner's distance along the axis, and out from it to its left (none, on it).
+    let (along, left) = ((p1 - p0).unit(), (p1 - p0).unit().perp());
+    let reach: Vec<(f64, f64)> =
+        ring.iter().map(|c| ((*c - p0).dot(along), (*c - p0).dot(left))).map(|(t, r)| (t, if r.abs() < 1e-6 { 0.0 } else { r })).collect();
+    let (least, most) = reach.iter().fold((0.0_f64, 0.0_f64), |(lo, hi), (_, r)| (lo.min(*r), hi.max(*r)));
+    if least < 0.0 && most > 0.0 {
+        return Err("its profile crosses its axis: draw it to one side of it".into());
+    }
+    if least == 0.0 && most == 0.0 {
+        return Err("its profile lies along its axis: it needs some width off it".into());
+    }
+    // In 3D: along the axis (`u`), out from it (`n`), and the way a corner out to its left turns (`w`). One out to
+    // the right turns the other way, which turns its triangles inside out.
+    let (o, u, n) = (embed(plane, p0, 0.0), embed(plane, along, 0.0), embed(plane, left, 0.0));
+    let w = cross(u, n);
+    let turn = to - from;
+    let full = turn > 360.0 - 1e-9;
+    let steps = (turn / 360.0 * SEGMENTS as f64 - 1e-9).ceil().max(1.0) as usize;
+    let angle = |k: usize| (from + turn * (if full { k % steps } else { k }) as f64 / steps as f64).to_radians().sin_cos();
+    let at = |i: usize, k: usize| -> P3 {
+        let (t, r) = reach.get(i).copied().unwrap_or_default();
+        let (s, c) = angle(k);
+        add(add(o, mul(u, t)), mul(add(mul(n, c), mul(w, s)), r)).map(|x| (x * 1e9).round() / 1e9 + 0.0)
+    };
+    let mut tris = Vec::new();
+    let mut push = |t: [P3; 3]| {
+        // A corner on the axis stays put as it turns, which leaves a side with no area.
+        if t[0] != t[1] && t[1] != t[2] && t[0] != t[2] {
+            tris.push(if least < 0.0 { [t[0], t[2], t[1]] } else { t });
+        }
+    };
+    if !full {
+        for &[a, b, c] in &caps {
+            push([at(a, steps), at(b, steps), at(c, steps)]);
+            push([at(a, 0), at(c, 0), at(b, 0)]);
+        }
+    }
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        for k in 0..steps {
+            let (a0, b0, a1, b1) = (at(i, k), at(j, k), at(i, k + 1), at(j, k + 1));
+            push([a0, b0, b1]);
+            push([a0, b1, a1]);
+        }
+    }
+    // Seen from above, a part-turn about an upright axis is a slice of a ring from the profile's widest to its
+    // narrowest; any other, the hull of what it comes to. ponytail: the hull stands for the outline of the rest.
+    let outline = if u[0].abs() < 1e-9 && u[1].abs() < 1e-9 && !full {
+        let inner = reach.iter().map(|(_, r)| r.abs()).fold(f64::INFINITY, f64::min);
+        // A profile to the axis' right is out along minus `n`.
+        let side = if least < 0.0 { -1.0 } else { 1.0 };
+        let arc = |r: f64, k: usize| {
+            let (s, c) = angle(k);
+            P2(o[0] + side * r * (n[0] * c + w[0] * s), o[1] + side * r * (n[1] * c + w[1] * s))
+        };
+        let mut pts: Vec<P2> = (0..=steps).map(|k| arc(most.max(-least), k)).collect();
+        if inner > 0.0 {
+            pts.extend((0..=steps).rev().map(|k| arc(inner, k)));
+        } else {
+            pts.push(P2(o[0], o[1]));
+        }
+        if crate::geom::area(&pts) < 0.0 {
+            pts.reverse();
+        }
+        pts
+    } else {
+        crate::geom::hull(tris.iter().flatten().map(|p| P2(p[0], p[1])).collect())
+    };
+    Ok((tris, outline))
 }
 
 /// A form a file brought as triangles: its outline seen from above, the hull round them.
@@ -1025,7 +1304,148 @@ pub fn library(language: crate::language::Language) -> BTreeMap<String, Family> 
             ]
         }),
     ));
+    families.extend(hosted_library(language));
     families.into_iter().filter_map(|(name, v)| serde_json::from_value(v).ok().map(|f| (name, f))).collect()
+}
+
+/// The doors and windows a new project starts with, in `language`: a single door, a double door, a fixed window and
+/// a casement window, each with several sizes. Their forms stand in the opening's axes (x along the wall from the
+/// middle of the opening, y across it, 0 in the middle of the wall and + toward its exterior, z up from the sill),
+/// and they take the thickness of the wall they're in, `Wall Thickness`, as theirs.
+fn hosted_library(language: crate::language::Language) -> Vec<(String, Value)> {
+    use serde_json::json;
+    let w = |s: &str| language.word(s).to_string();
+    let (frame, depth, leaf) = (w("Frame Width"), w("Frame Depth"), w("Leaf Thickness"));
+    let (frame_mat, leaf_mat, glass, metal, timber) = (w("Frame Material"), w("Leaf Material"), w("Glass"), w("Metal"), w("Timber"));
+    let (width, height, wall, sill) = (WIDTH, HEIGHT, WALL, SILL);
+    let size = |name: &str, value: f64| json!({"name": name, "value": value});
+    let material = |name: &str, value: &str| json!({"name": name, "kind": "material", "value": value});
+    // A box from `x.0` to `x.1` along, `y.0` to `y.1` across and `z.0` up to `z.1`, each a formula, made of `m`.
+    let block = |x: [&str; 2], y: [&str; 2], z: [&str; 2], m: &str| json!({"profile": [[x[0], y[0]], [x[1], y[0]], [x[1], y[1]], [x[0], y[1]]], "from": z[0], "to": z[1], "material": m});
+    // What draws a box, as `block` does.
+    type Block<'a> = &'a dyn Fn([&str; 2], [&str; 2], [&str; 2], &str) -> Value;
+    // The frame of a door: two jambs and a head across the wall's thickness, in the opening's width and height.
+    let (left, right) = (format!("-{width} / 2 + {frame}"), format!("{width} / 2 - {frame}"));
+    let (half_w, minus_half_w) = (format!("{width} / 2"), format!("-{width} / 2"));
+    let (half_t, minus_half_t) = (format!("{wall} / 2"), format!("-{wall} / 2"));
+    let under_head = format!("{height} - {frame}");
+    let door_frame = |bx: Block<'_>| {
+        vec![
+            bx([&minus_half_w, &left], [&minus_half_t, &half_t], ["0", &under_head], &frame_mat),
+            bx([&right, &half_w], [&minus_half_t, &half_t], ["0", &under_head], &frame_mat),
+            bx([&minus_half_w, &half_w], [&minus_half_t, &half_t], [&under_head, height], &frame_mat),
+        ]
+    };
+    let leaf_y = [format!("-{leaf} / 2"), format!("{leaf} / 2")];
+    let (face_in, face_out) = (format!("-{leaf} / 2 - 55"), format!("{leaf} / 2 + 55"));
+    let handle = |x: [&str; 2], bx: Block<'_>| {
+        vec![bx(x, [&leaf_y[1], &face_out], ["1000", "1030"], &metal), bx(x, [&face_in, &leaf_y[0]], ["1000", "1030"], &metal)]
+    };
+    let sizes = |names: &[(&str, f64, f64)]| -> Value {
+        names.iter().map(|(n, wd, h)| (n.to_string(), json!({width: wd, height: h}))).collect::<serde_json::Map<String, Value>>().into()
+    };
+    let mut out = Vec::new();
+
+    // A single door, hinged on the jamb toward the wall's start and swinging to its exterior.
+    let run = format!("{width} - 2 * {frame}");
+    let mut forms = door_frame(&block);
+    forms.push(block([&left, &right], [&leaf_y[0], &leaf_y[1]], ["0", &under_head], &leaf_mat));
+    forms.extend(handle([&format!("{width} / 2 - {frame} - 120"), &format!("{width} / 2 - {frame} - 40")], &block));
+    out.push((
+        w("Single Door"),
+        json!({
+            "category": "door",
+            "parameters": [size(width, 900.0), size(height, 2100.0), size(&frame, 50.0), size(&leaf, 40.0), material(&frame_mat, &timber), material(&leaf_mat, &timber)],
+            "types": sizes(&[("900 x 2100", 900.0, 2100.0), ("800 x 2100", 800.0, 2100.0), ("1000 x 2100", 1000.0, 2100.0)]),
+            "forms": forms,
+            "symbols": [
+                {"line": [[&left, &half_t], [&left, &format!("{wall} / 2 + {run}")]]},
+                {"arc": {"centre": [&left, &half_t], "radius": &run, "from": 0, "to": 90}}
+            ]
+        }),
+    ));
+
+    // A double door: two leaves, each hinged on its jamb, meeting in the middle.
+    let each = format!("({width} - 2 * {frame}) / 2");
+    let mut forms = door_frame(&block);
+    forms.push(block([&left, "-1"], [&leaf_y[0], &leaf_y[1]], ["0", &under_head], &leaf_mat));
+    forms.push(block(["1", &right], [&leaf_y[0], &leaf_y[1]], ["0", &under_head], &leaf_mat));
+    forms.extend(handle(["-120", "-40"], &block));
+    forms.extend(handle(["40", "120"], &block));
+    out.push((
+        w("Double Door"),
+        json!({
+            "category": "door",
+            "parameters": [size(width, 1500.0), size(height, 2100.0), size(&frame, 50.0), size(&leaf, 40.0), material(&frame_mat, &timber), material(&leaf_mat, &timber)],
+            "types": sizes(&[("1500 x 2100", 1500.0, 2100.0), ("1200 x 2100", 1200.0, 2100.0), ("1800 x 2100", 1800.0, 2100.0)]),
+            "forms": forms,
+            "symbols": [
+                {"line": [[&left, &half_t], [&left, &format!("{wall} / 2 + {each}")]]},
+                {"arc": {"centre": [&left, &half_t], "radius": &each, "from": 0, "to": 90}},
+                {"line": [[&right, &half_t], [&right, &format!("{wall} / 2 + {each}")]]},
+                {"arc": {"centre": [&right, &half_t], "radius": &each, "from": 90, "to": 180}}
+            ]
+        }),
+    ));
+
+    // The frame of a window: its jambs, its head and its sill, as deep as it says or as the wall is, if that's less.
+    let deep = format!("min({depth}, {wall})");
+    let (half_d, minus_half_d) = (format!("{deep} / 2"), format!("-{deep} / 2"));
+    let (inner_l, inner_r, inner_b, inner_t) = (left.clone(), right.clone(), frame.clone(), under_head.clone());
+    let window_frame = |bx: Block<'_>| {
+        vec![
+            bx([&minus_half_w, &inner_l], [&minus_half_d, &half_d], ["0", height], &frame_mat),
+            bx([&inner_r, &half_w], [&minus_half_d, &half_d], ["0", height], &frame_mat),
+            bx([&inner_l, &inner_r], [&minus_half_d, &half_d], [&inner_t, height], &frame_mat),
+            bx([&inner_l, &inner_r], [&minus_half_d, &half_d], ["0", &inner_b], &frame_mat),
+        ]
+    };
+    let window_sizes = sizes(&[("1200 x 1500", 1200.0, 1500.0), ("600 x 900", 600.0, 900.0), ("1800 x 1200", 1800.0, 1200.0)]);
+    let mut types = window_sizes.clone();
+    if let Some(t) = types.as_object_mut() {
+        for (name, at) in [("600 x 900", 1100.0), ("1800 x 1200", 1000.0)] {
+            if let Some(Value::Object(set)) = t.get_mut(name) {
+                set.insert(sill.into(), json!(at));
+            }
+        }
+    }
+    let pane = |x: [&str; 2], z: [&str; 2]| block(x, ["-3", "3"], z, &glass);
+
+    // A fixed window: its frame round one pane.
+    let mut forms = window_frame(&block);
+    forms.push(pane([&inner_l, &inner_r], [&inner_b, &inner_t]));
+    out.push((
+        w("Fixed Window"),
+        json!({
+            "category": "window",
+            "parameters": [size(width, 1200.0), size(height, 1500.0), size(sill, 900.0), size(&frame, 50.0), size(&depth, 90.0), material(&frame_mat, &timber)],
+            "types": types.clone(),
+            "forms": forms
+        }),
+    ));
+
+    // A casement window: two sashes meeting in the middle, each a box with a void through it, its bars 40 wide
+    // (20 where the sashes meet), and its pane after the void, so the void leaves it whole.
+    let mut forms = window_frame(&block);
+    let sash = |outer: [&str; 2], bars: [i32; 2]| -> Vec<Value> {
+        let inside = [format!("({}) + {}", outer[0], bars[0]), format!("({}) - {}", outer[1], bars[1])];
+        let (low, high) = (format!("{inner_b} + 40"), format!("{inner_t} - 40"));
+        let mut hole = block([&inside[0], &inside[1]], ["-30", "30"], [&low, &high], "");
+        hole["void"] = json!(true);
+        vec![block(outer, ["-20", "20"], [&inner_b, &inner_t], &frame_mat), hole, pane([&inside[0], &inside[1]], [&low, &high])]
+    };
+    forms.extend(sash([&inner_l, "-1"], [40, 20]));
+    forms.extend(sash(["1", &inner_r], [20, 40]));
+    out.push((
+        w("Casement Window"),
+        json!({
+            "category": "window",
+            "parameters": [size(width, 1200.0), size(height, 1500.0), size(sill, 900.0), size(&frame, 50.0), size(&depth, 90.0), material(&frame_mat, &timber)],
+            "types": types,
+            "forms": forms
+        }),
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -1210,5 +1630,163 @@ mod tests {
         let mut flat = table();
         flat.forms[0].to = Expr::Formula("Top".into());
         assert!(flat.pieces(&flat.values("Small", &BTreeMap::new()).unwrap()).unwrap_err().contains("form 1"));
+    }
+
+    /// The pieces of a family of `forms`, its one type built.
+    fn built(forms: Value) -> Result<Vec<Piece>, String> {
+        let f: Family = serde_json::from_value(json!({"types": {"A": {}}, "parameters": [{"name": "R", "value": 300}], "forms": forms}))
+            .map_err(|e| e.to_string())?;
+        f.check(&|_| true)?;
+        f.pieces(&f.values("A", &BTreeMap::new())?)
+    }
+
+    #[test]
+    fn a_revolve_turns_its_profile_about_its_axis() {
+        // A tube: a rectangle across x and z, 100 to `R` out from the z axis, turned all the way round it.
+        let ring = json!([[100, 0], ["R", 0], ["R", 500], [100, 500]]);
+        let tube = built(json!([{"plane": "xz", "profile": ring, "axis": [[0, 0], [0, 1]], "to": 360}])).unwrap();
+        let [p] = tube.as_slice() else { panic!("{tube:?}") };
+        // Its sides are polygons of 32 sides: their area is a hair under the circle's.
+        let k = 16.0 * (std::f64::consts::TAU / 32.0).sin() / std::f64::consts::PI;
+        let want = std::f64::consts::PI * (300.0 * 300.0 - 100.0 * 100.0) * 500.0 * k;
+        assert!((volume(&p.tris) / want - 1.0).abs() < 1e-6, "{} not {want}", volume(&p.tris));
+        assert_eq!((p.bottom, p.top), (0.0, 500.0));
+        assert!(
+            (crate::geom::area(&p.outline) / (std::f64::consts::PI * 300.0 * 300.0 * k) - 1.0).abs() < 1e-6,
+            "seen from above, its rim"
+        );
+        // A quarter of it, closed at both ends; its axis given the other way round, or across x and y.
+        let quarter = built(json!([{"plane": "xz", "profile": ring, "axis": [[0, 1], [0, 0]], "from": 0, "to": 90}])).unwrap();
+        assert!((volume(&quarter[0].tris) / (want / 4.0) - 1.0).abs() < 1e-6, "{}", volume(&quarter[0].tris));
+        let half = built(json!([{"profile": [[100, 0], [300, 0], [300, 50], [100, 50]], "axis": [[0, 0], [0, 1]], "to": 180}])).unwrap();
+        let ring_of = std::f64::consts::PI * (300.0 * 300.0 - 100.0 * 100.0) * 50.0 * k;
+        assert!((volume(&half[0].tris) / (ring_of / 2.0) - 1.0).abs() < 1e-6, "{}", volume(&half[0].tris));
+        assert!((half[0].top - half[0].bottom - 300.0).abs() < 1e-6, "turned out of its plane, 300 to one side");
+        // A profile across its axis, an axis of one point, a turn of nothing or more than all the way: said.
+        for (form, says) in [
+            (json!({"plane": "xz", "profile": [[-100, 0], [300, 0], [300, 500]], "axis": [[0, 0], [0, 1]], "to": 360}), "crosses its axis"),
+            (json!({"plane": "xz", "profile": ring, "axis": [[0, 0], [0, 0]], "to": 360}), "axis"),
+            (json!({"plane": "xz", "profile": ring, "axis": [[0, 0], [0, 1]], "from": 90, "to": 90}), "nothing"),
+            (json!({"plane": "xz", "profile": ring, "axis": [[0, 0], [0, 1]], "to": 400}), "360"),
+        ] {
+            let e = built(json!([form])).unwrap_err();
+            assert!(e.contains(says) && e.contains("form 1"), "{e}");
+        }
+    }
+
+    #[test]
+    fn a_revolve_faces_out_whatever_plane_side_and_direction_it_turns() {
+        // The same tube, 100 to 300 out and 500 along: drawn across each plane, to either side of its axis, the axis given
+        // either way round, from any angle: one volume, turned out.
+        let k = 16.0 * (std::f64::consts::TAU / 32.0).sin();
+        let want = k * (300.0 * 300.0 - 100.0 * 100.0) * 500.0;
+        let across = |a0: f64, a1: f64| json!([[a0, 0], [a1, 0], [a1, 500], [a0, 500]]);
+        for (plane, profile, axis) in [
+            ("xz", across(100.0, 300.0), json!([[0, 0], [0, 1]])),
+            ("xz", across(100.0, 300.0), json!([[0, 1], [0, 0]])),
+            ("xz", across(-300.0, -100.0), json!([[0, 0], [0, 1]])),
+            ("xz", across(-300.0, -100.0), json!([[0, 1], [0, 0]])),
+            ("yz", across(100.0, 300.0), json!([[0, 0], [0, 1]])),
+            ("yz", across(-300.0, -100.0), json!([[0, 1], [0, 0]])),
+            ("xy", json!([[0, 100], [500, 100], [500, 300], [0, 300]]), json!([[0, 0], [1, 0]])),
+            ("xy", json!([[0, -300], [500, -300], [500, -100], [0, -100]]), json!([[1, 0], [0, 0]])),
+            ("xy", json!([[0, 100], [500, 100], [500, 300], [0, 300]]), json!([[0, 0], [1, 0]])),
+        ] {
+            for (from, to) in [(0, 360), (-90, 270), (30, 390)] {
+                let tube = built(json!([{"plane": plane, "profile": profile, "axis": axis, "from": from, "to": to}]));
+                let tube = tube.unwrap_or_else(|e| panic!("{plane} {profile} {axis}: {e}"));
+                let v = volume(&tube[0].tris);
+                assert!((v / want - 1.0).abs() < 1e-6, "{plane} {profile} {axis} {from} to {to}: {v} not {want}");
+            }
+        }
+        // A part turn is closed by two caps, turned out. About an axis beside the origin, with neither cap in a plane through it
+        // (a cap in one adds nothing to the volume, however it faces), the volume is the sector's only if both are.
+        let sector = k / 4.0 * (300.0 * 300.0 - 100.0 * 100.0) * 500.0;
+        for (from, to) in [(30, 120), (-120, -30)] {
+            for axis in [json!([[1000, 0], [1000, 1]]), json!([[1000, 1], [1000, 0]])] {
+                let part =
+                    built(json!([{"plane": "xz", "profile": across(1100.0, 1300.0), "axis": axis, "from": from, "to": to}])).unwrap();
+                let v = volume(&part[0].tris);
+                assert!((v / sector - 1.0).abs() < 1e-6, "{axis} {from} to {to}: {v} not {sector}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_part_turn_about_an_upright_axis_shows_a_slice_in_plan_and_a_circle_makes_a_torus() {
+        let k = 16.0 * (std::f64::consts::TAU / 32.0).sin();
+        let ring = json!([[100, 0], [300, 0], [300, 500], [100, 500]]);
+        let quarter = built(json!([{"plane": "xz", "profile": ring, "axis": [[0, 0], [0, 1]], "to": 90}])).unwrap();
+        let outline = &quarter[0].outline;
+        // 4 sin δ (R² − r²) where δ is a step's angle: a quarter of the ring, as the polygon makes it, counter-clockwise, from +x.
+        assert!((crate::geom::area(outline) / (k / 4.0 * (300.0 * 300.0 - 100.0 * 100.0)) - 1.0).abs() < 1e-6, "{outline:?}");
+        assert!(outline.iter().all(|p| p.0 > -1e-6 && p.1 > -1e-6), "in the first quarter: {outline:?}");
+        // The same turned the other way round the axis, the other way round the plan.
+        let down = built(json!([{"plane": "xz", "profile": ring, "axis": [[0, 1], [0, 0]], "to": 90}])).unwrap();
+        assert!(down[0].outline.iter().all(|p| p.0 > -1e-6 && p.1 < 1e-6), "{:?}", down[0].outline);
+        // A profile on the axis: a slice of a disc, its centre one of its corners.
+        let wedge =
+            built(json!([{"plane": "xz", "profile": [[0, 0], [300, 0], [300, 500], [0, 500]], "axis": [[0, 0], [0, 1]], "to": 90}]));
+        assert!((crate::geom::area(&wedge.unwrap()[0].outline) / (k / 4.0 * 300.0 * 300.0) - 1.0).abs() < 1e-6);
+        // A circle turned about an axis beside it: a torus. Its volume is its circle's area times the way its centre goes.
+        let donut = built(json!([{"plane": "xz", "circle": {"centre": [500, 100], "radius": 100}, "axis": [[0, 0], [0, 1]], "to": 360}]));
+        let donut = donut.unwrap();
+        let (v, exact) = (volume(&donut[0].tris), 2.0 * std::f64::consts::PI.powi(2) * 500.0 * 100.0 * 100.0);
+        assert!((v / exact - 1.0).abs() < 0.03, "{v} not about {exact}");
+        assert_eq!((donut[0].bottom, donut[0].top), (0.0, 200.0), "its circle's lowest and highest");
+        // A mesh has no axis to turn about, and a form of more than one kind is still refused.
+        let f: Family = serde_json::from_value(
+            json!({"types": {"A": {}}, "forms": [{"mesh": [[[0, 0, 0], [1, 0, 0], [0, 1, 0]]], "axis": [[0, 0], [0, 1]]}]}),
+        )
+        .unwrap();
+        assert!(f.check(&|_| true).unwrap_err().contains("axis"));
+    }
+
+    #[test]
+    fn a_void_cuts_the_forms_it_passes_through_and_shows_nothing_itself() {
+        let slab = json!({"profile": [[0, 0], [1000, 0], [1000, 1000], [0, 1000]], "from": 0, "to": 100});
+        let hole = |shown: Value| json!({"profile": [[400, 400], [600, 400], [600, 600], [400, 600]], "from": -10, "to": 110, "void": true, "visible": shown});
+        let cut = built(json!([slab, hole(json!(1))])).unwrap();
+        let [p] = cut.as_slice() else { panic!("{cut:?}") };
+        assert!((volume(&p.tris) - (1000.0 * 1000.0 - 200.0 * 200.0) * 100.0).abs() < 1e-3, "{}", volume(&p.tris));
+        // Hidden, it cuts nothing; away from the slab, nothing is cut.
+        assert!((volume(&built(json!([slab, hole(json!(0))])).unwrap()[0].tris) - 1e8).abs() < 1e-3);
+        let away = json!({"profile": [[2000, 0], [2100, 0], [2100, 100], [2000, 100]], "to": 100, "void": true});
+        assert!((volume(&built(json!([slab, away])).unwrap()[0].tris) - 1e8).abs() < 1e-3);
+        // A void cuts what's listed before it: a form after it is whole, as a pane in the hole of a sash.
+        let pane = json!({"profile": [[450, 450], [550, 450], [550, 550], [450, 550]], "from": 0, "to": 100});
+        let both = built(json!([slab, hole(json!(1)), pane])).unwrap();
+        assert_eq!(both.len(), 2);
+        assert!((volume(&both[0].tris) - 9.6e7).abs() < 1e-3 && (volume(&both[1].tris) - 100.0 * 100.0 * 100.0).abs() < 1e-3);
+        // A round bowl out of a block, as a basin's: what's left is the block less the bowl.
+        let block = json!({"profile": [[-300, -300], [300, -300], [300, 300], [-300, 300]], "from": 0, "to": 200});
+        let bowl = json!({"plane": "xz", "profile": [[0, 50], [200, 50], [200, 250], [0, 250]], "axis": [[0, 0], [0, 1]], "to": 360, "void": true});
+        let basin = built(json!([block, bowl])).unwrap();
+        let k = 16.0 * (std::f64::consts::TAU / 32.0).sin();
+        assert!((volume(&basin[0].tris) - (600.0 * 600.0 * 200.0 - k * 200.0 * 200.0 * 150.0)).abs() < 1.0, "{}", volume(&basin[0].tris));
+    }
+
+    #[test]
+    fn voids_of_many_triangles_never_exhaust_the_stack() {
+        // Two revolves of 64 corners each, the one cutting the other, on a small stack: done, and quickly.
+        let ring: Vec<Value> = (0..MAX_PROFILE)
+            .map(|k| (k as f64 * std::f64::consts::TAU / MAX_PROFILE as f64).sin_cos())
+            .map(|(s, c)| json!([400.0 + 100.0 * c, 300.0 + 100.0 * s]))
+            .collect();
+        let worked = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || {
+                let started = std::time::Instant::now();
+                let solid = json!({"plane": "xz", "profile": ring, "axis": [[0, 0], [0, 1]], "to": 360});
+                let void =
+                    json!({"profile": [[-1000, -1000], [1000, -1000], [1000, 0], [-1000, 0]], "from": -10, "to": 1000, "void": true});
+                (built(json!([solid, void])), started.elapsed())
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+        let (pieces, took) = worked;
+        let pieces = pieces.unwrap();
+        assert!(volume(&pieces[0].tris) > 0.0 && took.as_secs_f64() < 5.0, "{took:?}");
     }
 }

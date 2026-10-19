@@ -13,13 +13,14 @@ wall {"points": [[0, 0], [0, 7000], [10000, 7000], [10000, 0]], "closed": true, 
 wall {"points": [[6000, 0], [6000, 7000]], "type": "Interior - 100mm"}
 wall {"points": [[0, 4000], [6000, 4000]], "type": "Interior - 100mm"}
 wall {"points": [[6000, 3500], [10000, 3500]], "type": "Interior - 100mm"}
-door {"at": [2000, 0], "flip_facing": true}
+# Doors and windows of the project's families (forms, plan swing, glass), and three of its own plain types.
+door {"at": [2000, 0], "family": "Single Door", "type": "900 x 2100", "flip_facing": true}
 door {"at": [4500, 4000], "type": "Single 800 x 2100"}
-door {"at": [6000, 1750], "type": "Single 800 x 2100", "flip_hand": true}
+door {"at": [6000, 1750], "family": "Single Door", "type": "800 x 2100", "flip_hand": true}
 door {"at": [6000, 5250], "type": "Single 800 x 2100", "flip_facing": true}
-window {"at": [4300, 0]}
-window {"at": [3000, 7000]}
-window {"at": [8000, 7000]}
+window {"at": [4300, 0], "family": "Casement Window", "type": "1200 x 1500"}
+window {"at": [3000, 7000], "family": "Casement Window", "type": "1200 x 1500"}
+window {"at": [8000, 7000], "family": "Fixed Window", "type": "1200 x 1500"}
 window {"at": [10000, 5250], "type": "Fixed 600 x 900"}
 window {"at": [8000, 0]}
 floor {}

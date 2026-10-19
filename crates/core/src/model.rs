@@ -15,6 +15,7 @@ use crate::geom::{self, P2, Region};
 use crate::graphics::{self, Graphics, ViewFilter, ViewTemplate};
 use crate::language::Language;
 use crate::phasing::{self, OptionSet, PhaseFilter, Status};
+use crate::texture::{Kind, MAX_IMAGES, Picture, Texture};
 use crate::units::Units;
 use crate::walls;
 
@@ -253,11 +254,14 @@ pub struct Material {
     pub cut: Pattern,
     #[serde(default)]
     pub surface: Pattern,
+    /// What its surfaces look like in the 3D view, over its colour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub texture: Option<Texture>,
 }
 
 impl Default for Material {
     fn default() -> Material {
-        Material { color: [200, 200, 200], cut: Pattern::None, surface: Pattern::None }
+        Material { color: [200, 200, 200], cut: Pattern::None, surface: Pattern::None, texture: None }
     }
 }
 
@@ -349,12 +353,16 @@ pub struct Shaft {
     pub base_offset: f64,
 }
 
-/// A door or window in a host wall, centred `offset` mm along it from the wall's start.
+/// A door or window in a host wall, centred `offset` mm along it from the wall's start. Of a `family`
+/// (a door's or a window's own, its `type` one of that family's) or, with none, of one of the project's
+/// door or window types.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Opening {
     #[serde(rename = "type")]
     pub type_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
     pub host: Id,
     pub offset: f64,
     /// Height of its bottom above the wall's base (0 for doors).
@@ -914,6 +922,33 @@ impl Element {
         }
     }
 
+    /// The family a component or a family's door or window is of, and its type.
+    pub fn family(&self) -> Option<(&str, &str)> {
+        match self {
+            Element::Component(c) => Some((&c.family, &c.type_name)),
+            Element::Door(o) | Element::Window(o) => o.family.as_deref().map(|f| (f, o.type_name.as_str())),
+            _ => None,
+        }
+    }
+
+    /// The kind of family a door or a window is of.
+    pub fn hosted_category(&self) -> Option<crate::family::Category> {
+        match self {
+            Element::Door(_) => Some(crate::family::Category::Door),
+            Element::Window(_) => Some(crate::family::Category::Window),
+            _ => None,
+        }
+    }
+
+    /// The name of its family, to change.
+    pub fn family_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Element::Component(c) => Some(&mut c.family),
+            Element::Door(o) | Element::Window(o) => o.family.as_mut(),
+            _ => None,
+        }
+    }
+
     pub fn category(&self) -> &'static str {
         match self {
             Element::Text(_) => "text",
@@ -1007,7 +1042,7 @@ pub struct RoofType {
 }
 
 /// A door or window type. `sill` is a window's default sill height.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OpeningType {
     pub width: f64,
@@ -1089,6 +1124,9 @@ pub struct Model {
     /// What layers are made of, by name.
     #[serde(default)]
     pub materials: BTreeMap<String, Material>,
+    /// The pictures its materials' textures are made of, by id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub images: BTreeMap<String, Picture>,
     /// Its families, by name: what components place.
     #[serde(default)]
     pub families: BTreeMap<String, Family>,
@@ -1133,6 +1171,7 @@ impl Model {
             next_id: 1,
             types: Types::default(),
             materials: BTreeMap::new(),
+            images: BTreeMap::new(),
             families: BTreeMap::new(),
             parameters: BTreeMap::new(),
             view_filters: BTreeMap::new(),
@@ -1143,23 +1182,26 @@ impl Model {
             option_sets: BTreeMap::new(),
             elements: BTreeMap::new(),
         };
-        // A library to start from: each material its colour, its cut's pattern and its surface's.
-        for (name, color, cut, surface) in [
-            ("Brick", [178, 92, 70], Pattern::Brick, Pattern::Brick),
-            ("Insulation", [232, 214, 140], Pattern::Insulation, Pattern::None),
-            ("Concrete block", [176, 176, 170], Pattern::Crosshatch, Pattern::None),
-            ("Plaster", [238, 234, 224], Pattern::None, Pattern::None),
-            ("Concrete", [188, 188, 182], Pattern::Concrete, Pattern::None),
-            ("Screed", [206, 200, 188], Pattern::Concrete, Pattern::None),
-            ("Timber", [196, 154, 102], Pattern::Diagonal, Pattern::Horizontal),
-            ("Gypsum board", [242, 242, 238], Pattern::None, Pattern::None),
-            ("Ceramic tile", [222, 220, 210], Pattern::Solid, Pattern::Grid),
-            ("Roof tiles", [170, 86, 64], Pattern::Solid, Pattern::Horizontal),
-            ("Membrane", [70, 70, 74], Pattern::Solid, Pattern::None),
-            ("Fabric", [176, 160, 136], Pattern::None, Pattern::None),
-            ("Porcelain", [244, 244, 240], Pattern::None, Pattern::None),
+        // A library to start from: each material its colour, its cut's pattern and its surface's, and the texture it has.
+        for (name, color, cut, surface, texture) in [
+            ("Brick", [178, 92, 70], Pattern::Brick, Pattern::Brick, Some(Kind::Brick)),
+            ("Insulation", [232, 214, 140], Pattern::Insulation, Pattern::None, Some(Kind::Insulation)),
+            ("Concrete block", [176, 176, 170], Pattern::Crosshatch, Pattern::None, Some(Kind::Block)),
+            ("Plaster", [238, 234, 224], Pattern::None, Pattern::None, Some(Kind::Plaster)),
+            ("Concrete", [188, 188, 182], Pattern::Concrete, Pattern::None, Some(Kind::Concrete)),
+            ("Screed", [206, 200, 188], Pattern::Concrete, Pattern::None, Some(Kind::Concrete)),
+            ("Timber", [196, 154, 102], Pattern::Diagonal, Pattern::Horizontal, Some(Kind::Boards)),
+            ("Gypsum board", [242, 242, 238], Pattern::None, Pattern::None, None),
+            ("Ceramic tile", [222, 220, 210], Pattern::Solid, Pattern::Grid, Some(Kind::Tile)),
+            ("Roof tiles", [170, 86, 64], Pattern::Solid, Pattern::Horizontal, Some(Kind::Roof)),
+            ("Membrane", [70, 70, 74], Pattern::Solid, Pattern::None, None),
+            ("Fabric", [176, 160, 136], Pattern::None, Pattern::None, Some(Kind::Fabric)),
+            ("Porcelain", [244, 244, 240], Pattern::None, Pattern::None, None),
+            ("Glass", [166, 200, 228], Pattern::None, Pattern::None, None),
+            ("Metal", [150, 152, 158], Pattern::Solid, Pattern::None, Some(Kind::Metal)),
         ] {
-            m.materials.insert(language.word(name).into(), Material { color, cut, surface });
+            let texture = texture.map(Texture::new);
+            m.materials.insert(language.word(name).into(), Material { color, cut, surface, texture });
         }
         m.families = crate::family::library(language);
         for (n, t) in [("Generic - 200mm", 200.0), ("Interior - 100mm", 100.0)] {
@@ -1231,9 +1273,9 @@ impl Model {
 
     /// The materials component `e` names itself, in its material parameters.
     fn component_materials<'a>(&self, e: &'a Element) -> Vec<&'a str> {
-        let Element::Component(c) = e else { return Vec::new() };
-        let Some(f) = self.families.get(&c.family) else { return Vec::new() };
-        c.params.iter().filter(|(k, _)| f.material_parameter(k)).filter_map(|(_, v)| v.as_str()).collect()
+        let (Some((family, _)), Some(params)) = (e.family(), e.params()) else { return Vec::new() };
+        let Some(f) = self.families.get(family) else { return Vec::new() };
+        params.iter().filter(|(k, _)| f.material_parameter(k)).filter_map(|(_, v)| v.as_str()).collect()
     }
 
     /// What names material `name` besides the types' layers: a family, or a component of one.
@@ -1241,7 +1283,34 @@ impl Model {
         if let Some((n, _)) = self.families.iter().find(|(_, f)| f.materials().contains(&name)) {
             return Some(format!("family `{n}`"));
         }
+        let painted = |e: &Element| {
+            e.params().and_then(|p| p.get(crate::paint::KEY)?.as_object()).is_some_and(|o| o.values().any(|v| v.as_str() == Some(name)))
+        };
+        if let Some((id, e)) = self.elements.iter().find(|(_, e)| painted(e)) {
+            return Some(format!("the paint of {} {id}", e.category()));
+        }
         self.elements.iter().find(|(_, e)| self.component_materials(e).contains(&name)).map(|(id, _)| format!("component {id}"))
+    }
+
+    /// Whether the values `params` give an element of family `name` are its instance parameters' own: what the
+    /// element sets of the family are instance parameters, none worked out by a formula, materials in the library.
+    fn family_values_ok(&self, who: &str, name: &str, f: &Family, params: &BTreeMap<String, serde_json::Value>) -> Result<(), String> {
+        for (k, v) in params {
+            let Some(p) = f.parameters.iter().find(|p| p.name == *k) else { continue };
+            if !p.instance {
+                return Err(format!("{who}: `{k}` is a type parameter of `{name}`; change it in its type, with `family`"));
+            }
+            if p.formula.is_some() {
+                return Err(format!("{who}: `{k}` is worked out by its formula"));
+            }
+            if let crate::family::Val::Text(m) = crate::family::read(p, v).map_err(|e| format!("{who}: {e}"))?
+                && !m.is_empty()
+                && !self.materials.contains_key(&m)
+            {
+                return Err(format!("{who}: material `{m}` isn't in the library; add it with `material`"));
+            }
+        }
+        Ok(())
     }
 
     /// Material `from`, renamed `to` in the families and their components.
@@ -1251,10 +1320,16 @@ impl Model {
         }
         let Model { families, elements, .. } = self;
         for e in elements.values_mut() {
-            if let Element::Component(c) = e
-                && let Some(f) = families.get(&c.family)
+            // Paint of it, on any face.
+            if let Some(serde_json::Value::Object(paint)) = e.params_mut().and_then(|p| p.get_mut(crate::paint::KEY)) {
+                for v in paint.values_mut().filter(|v| v.as_str() == Some(from)) {
+                    *v = serde_json::Value::String(to.into());
+                }
+            }
+            if let Some(f) = e.family().and_then(|(f, _)| families.get(f))
+                && let Some(params) = e.params_mut()
             {
-                for (k, v) in c.params.iter_mut() {
+                for (k, v) in params.iter_mut() {
                     if f.material_parameter(k) && v.as_str() == Some(from) {
                         *v = serde_json::Value::String(to.into());
                     }
@@ -1448,13 +1523,121 @@ impl Model {
         names.iter().find(|n| **n == preferred).or(names.first()).copied()
     }
 
-    /// The type of a door or window.
-    pub fn opening_type(&self, e: &Element) -> Option<&OpeningType> {
-        match e {
-            Element::Door(o) => self.types.door.get(&o.type_name),
-            Element::Window(o) => self.types.window.get(&o.type_name),
-            _ => None,
+    /// The family and type a new door or window gets in an interface that places families: the project's single door or fixed window
+    /// at their usual size, else its first family of the category and that family's first type.
+    pub fn default_family(&self, category: &str) -> Option<(&str, &str)> {
+        let (kind, usual, size) = match crate::commands::category(category).as_str() {
+            "door" => (crate::family::Category::Door, "Single Door", "900 x 2100"),
+            "window" => (crate::family::Category::Window, "Fixed Window", "1200 x 1500"),
+            _ => return None,
+        };
+        let usual = self.language.word(usual);
+        let (name, family) = self
+            .families
+            .get_key_value(usual)
+            .filter(|(_, f)| f.category == kind)
+            .or_else(|| self.families.iter().find(|(_, f)| f.category == kind))?;
+        let ty = family.types.get_key_value(size).or_else(|| family.types.iter().next())?.0;
+        Some((name.as_str(), ty.as_str()))
+    }
+
+    /// The size of a door or window and its default sill: its type's, or its family's `Width`, `Height` and
+    /// `Sill Height` for the type it is, in its wall, with the values it holds of its own; or why it has none.
+    pub fn opening_dims(&self, e: &Element) -> Result<OpeningType, String> {
+        let (Element::Door(o) | Element::Window(o)) = e else { return Err(format!("{} isn't a door or a window", e.category())) };
+        let is_door = matches!(e, Element::Door(_));
+        let Some(name) = &o.family else {
+            let types = if is_door { &self.types.door } else { &self.types.window };
+            return types.get(&o.type_name).copied().ok_or_else(|| {
+                let names: Vec<&str> = types.keys().map(String::as_str).collect();
+                format!("type `{}` doesn't exist (there are: {})", o.type_name, names.join(", "))
+            });
+        };
+        let f = self.families.get(name).ok_or_else(|| {
+            let names: Vec<&str> =
+                self.families.iter().filter(|(_, f)| Some(f.category) == e.hosted_category()).map(|(n, _)| n.as_str()).collect();
+            format!("family `{name}` doesn't exist (there are: {})", names.join(", "))
+        })?;
+        if Some(f.category) != e.hosted_category() {
+            return Err(format!("family `{name}` isn't a {} family", e.category()));
         }
+        let wall = self.wall(o.host).map_or(crate::family::DEFAULT_WALL, |w| self.thickness(w));
+        let values = f.values_in(&o.type_name, &o.params, wall)?;
+        let number = |key: &str| match values.get(key) {
+            Some(crate::family::Val::Number(x)) => Some(*x),
+            _ => None,
+        };
+        let need = |key: &str| number(key).ok_or_else(|| format!("family `{name}` has no length `{key}`"));
+        Ok(OpeningType {
+            width: need(crate::family::WIDTH)?,
+            height: need(crate::family::HEIGHT)?,
+            sill: number(crate::family::SILL).unwrap_or(if is_door { 0.0 } else { 900.0 }),
+        })
+    }
+
+    /// The type of a door or window.
+    pub fn opening_type(&self, e: &Element) -> Option<OpeningType> {
+        self.opening_dims(e).ok()
+    }
+
+    /// Where a door's or window's family's axes lie: the point in plan at the middle of the opening in the middle
+    /// of its wall, the way the wall runs there, and the height of its sill.
+    pub fn opening_frame(&self, o: &Opening) -> Option<(P2, P2, f64)> {
+        let w = self.wall(o.host)?;
+        let axis = walls::Axis::of(w);
+        Some((axis.at(o.offset, walls::centre(self, w)), axis.tangent(o.offset), self.own_base(w) + o.sill))
+    }
+
+    /// A door's or window's family's solids and the lines its plan draws, in the family's own axes, turned out with
+    /// the opening's flips as mirror images (its hinge on the other jamb, its swing to the wall's other side);
+    /// none for one that isn't of a family, or doesn't build.
+    pub fn opening_local(&self, e: &Element) -> Option<(Vec<Piece>, Vec<Vec<P2>>)> {
+        let (Element::Door(o) | Element::Window(o)) = e else { return None };
+        let f = self.families.get(o.family.as_ref()?)?;
+        let values = f.values_in(&o.type_name, &o.params, self.thickness(self.wall(o.host)?)).ok()?;
+        let (pieces, strokes) = (f.pieces(&values).ok()?, f.strokes(&values).ok()?);
+        let (fx, fy) = (if o.flip_hand { -1.0 } else { 1.0 }, if o.flip_facing { -1.0 } else { 1.0 });
+        let mirrored = fx * fy < 0.0;
+        let flip = |p: [f64; 3]| [fx * p[0] + 0.0, fy * p[1] + 0.0, p[2]];
+        let pieces = pieces
+            .into_iter()
+            .map(|pc| {
+                let tris =
+                    pc.tris.iter().map(|[a, b, c]| if mirrored { [flip(*a), flip(*c), flip(*b)] } else { [flip(*a), flip(*b), flip(*c)] });
+                let outline: Vec<P2> = pc.outline.iter().map(|q| P2(fx * q.0 + 0.0, fy * q.1 + 0.0)).collect();
+                Piece { tris: tris.collect(), outline: if mirrored { outline.into_iter().rev().collect() } else { outline }, ..pc }
+            })
+            .collect();
+        let strokes = strokes.into_iter().map(|l| l.into_iter().map(|q| P2(fx * q.0 + 0.0, fy * q.1 + 0.0)).collect()).collect();
+        Some((pieces, strokes))
+    }
+
+    /// A door's or window's family's solids where it stands, in the model's own axes: each form's triangles, its
+    /// outline seen from above, and what it reaches from and to, over the level.
+    pub fn opening_pieces(&self, e: &Element) -> Vec<Piece> {
+        let (Element::Door(o) | Element::Window(o)) = e else { return Vec::new() };
+        let (Some((pieces, _)), Some((at, u, z))) = (self.opening_local(e), self.opening_frame(o)) else { return Vec::new() };
+        let place = |p: [f64; 3]| {
+            let q = at + u * p[0] + u.perp() * p[1];
+            [q.0, q.1, z + p[2]]
+        };
+        pieces
+            .into_iter()
+            .map(|pc| Piece {
+                tris: pc.tris.iter().map(|t| t.map(place)).collect(),
+                outline: pc.outline.iter().map(|q| place([q.0, q.1, 0.0])).map(|p| P2(p[0], p[1])).collect(),
+                bottom: z + pc.bottom,
+                top: z + pc.top,
+                ..pc
+            })
+            .collect()
+    }
+
+    /// The lines a door's or window's family draws in plan, where it stands.
+    pub fn opening_strokes(&self, e: &Element) -> Vec<Vec<P2>> {
+        let (Element::Door(o) | Element::Window(o)) = e else { return Vec::new() };
+        let (Some((_, strokes)), Some((at, u, _))) = (self.opening_local(e), self.opening_frame(o)) else { return Vec::new() };
+        strokes.into_iter().map(|l| l.into_iter().map(|q| at + u * q.0 + u.perp() * q.1).collect()).collect()
     }
 
     /// The level an element stands on: a door's or window's is its wall's, a tag's its door's or
@@ -2094,10 +2277,19 @@ impl Model {
                 coord(&format!("{cat} type `{n}` sill"), t.sill)?;
             }
         }
-        for n in self.materials.keys() {
+        if self.images.len() > MAX_IMAGES {
+            return Err(format!("the project has {} pictures; it holds up to {MAX_IMAGES}", self.images.len()));
+        }
+        for id in self.images.keys() {
+            text(&format!("picture `{id}`"), "id", id)?;
+        }
+        for (n, x) in &self.materials {
             text(&format!("material `{n}`"), "name", n)?;
             if n.trim().is_empty() {
                 return Err("a material needs a name".into());
+            }
+            if let Some(t) = &x.texture {
+                t.check(&self.images).map_err(|e| format!("material `{n}`: texture: {e}"))?;
             }
         }
         for (n, f) in &self.families {
@@ -2114,6 +2306,11 @@ impl Model {
             let who = format!("parameter `{n}`");
             if !crate::family::nameable(n) {
                 return Err(format!("{who}: a name starts with a letter and holds letters, digits, `_` and spaces, up to {MAX_TEXT}"));
+            }
+            if crate::paint::reserved(n) || phasing::reserved(n) {
+                return Err(format!(
+                    "{who}: elements hold their phase, their design option and their paint under that name; name it otherwise"
+                ));
             }
             if p.categories.is_empty() {
                 return Err(format!("{who}: it needs a category: one of {}", PARAMETER_CATEGORIES.join(", ")));
@@ -2202,9 +2399,11 @@ impl Model {
                     checked?;
                     continue;
                 }
-                if let Element::Component(c) = e
-                    && self.families.get(&c.family).is_some_and(|f| f.parameters.iter().any(|p| p.name == *k))
-                {
+                if let Some(checked) = crate::paint::check_value(self, &who, k, v, e) {
+                    checked?;
+                    continue;
+                }
+                if e.family().and_then(|(f, _)| self.families.get(f)).is_some_and(|f| f.parameters.iter().any(|p| p.name == *k)) {
                     continue;
                 }
                 let p = self
@@ -2309,9 +2508,15 @@ impl Model {
                     }
                 }
                 Element::Door(o) | Element::Window(o) => {
-                    let types = if matches!(e, Element::Door(_)) { &self.types.door } else { &self.types.window };
-                    let t = known(&who, &o.type_name, types)?;
                     let w = self.wall(o.host).ok_or(format!("{who}: host wall {} doesn't exist", o.host))?;
+                    let t = self.opening_dims(e).map_err(|e| format!("{who}: {e}"))?;
+                    if let Some(f) = o.family.as_ref().and_then(|n| self.families.get(n)) {
+                        self.family_values_ok(&who, o.family.as_deref().unwrap_or_default(), f, &o.params)?;
+                        let values = f.values_in(&o.type_name, &o.params, self.thickness(w)).map_err(|e| format!("{who}: {e}"))?;
+                        f.pieces(&values).and_then(|_| f.strokes(&values)).map_err(|e| format!("{who}: {e}"))?;
+                        size(&format!("{who} width"), t.width)?;
+                        size(&format!("{who} height"), t.height)?;
+                    }
                     coord(&format!("{who} offset"), o.offset)?;
                     coord(&format!("{who} sill"), o.sill)?;
                     text(&who, "mark", &o.mark)?;
@@ -2456,28 +2661,17 @@ impl Model {
                         let names: Vec<&str> = self.families.keys().map(String::as_str).collect();
                         format!("{who}: family `{}` doesn't exist (there are: {})", c.family, names.join(", "))
                     })?;
+                    if f.category.hosted() {
+                        return Err(format!(
+                            "{who}: family `{}` is a door's or a window's: it stands in a wall, placed with `door` or `window`",
+                            c.family
+                        ));
+                    }
                     level_ok(c.level)?;
                     point(&who, c.at)?;
                     coord(&format!("{who} angle"), c.angle)?;
                     coord(&format!("{who} offset"), c.offset)?;
-                    for (k, v) in &c.params {
-                        let Some(p) = f.parameters.iter().find(|p| p.name == *k) else { continue };
-                        if !p.instance {
-                            return Err(format!(
-                                "{who}: `{k}` is a type parameter of `{}`; change it in its type, with `family`",
-                                c.family
-                            ));
-                        }
-                        if p.formula.is_some() {
-                            return Err(format!("{who}: `{k}` is worked out by its formula"));
-                        }
-                        if let crate::family::Val::Text(m) = crate::family::read(p, v).map_err(|e| format!("{who}: {e}"))?
-                            && !m.is_empty()
-                            && !self.materials.contains_key(&m)
-                        {
-                            return Err(format!("{who}: material `{m}` isn't in the library; add it with `material`"));
-                        }
-                    }
+                    self.family_values_ok(&who, &c.family, f, &c.params)?;
                     f.values(&c.type_name, &c.params).and_then(|v| f.pieces(&v)).map_err(|e| format!("{who}: {e}"))?;
                 }
                 Element::Column(col) => {
@@ -2890,6 +3084,7 @@ mod tests {
     fn door(host: Id, offset: f64) -> Element {
         Element::Door(Opening {
             params: Default::default(),
+            family: None,
             type_name: "Single 900 x 2100".into(),
             host,
             offset,

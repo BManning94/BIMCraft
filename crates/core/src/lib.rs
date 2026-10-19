@@ -3,8 +3,10 @@
 //! and IFC4 export. Nothing here knows about a UI.
 
 mod commands;
+mod csg;
 pub mod engine;
 pub mod family;
+pub mod favorites;
 mod font;
 pub mod geom;
 pub mod graphics;
@@ -12,6 +14,7 @@ pub mod ifc;
 pub mod import;
 pub mod language;
 pub mod model;
+pub mod paint;
 pub mod pdf;
 pub mod phasing;
 pub mod render;
@@ -22,6 +25,7 @@ pub mod skeleton;
 pub mod snap;
 pub mod stairs;
 pub mod step;
+pub mod texture;
 pub mod units;
 pub mod view3d;
 pub mod walls;

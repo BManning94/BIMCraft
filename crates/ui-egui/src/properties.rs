@@ -12,10 +12,11 @@ use bimcraft_core::family::{Kind as Holds, Val};
 use bimcraft_core::model::{Element, Function, Id, Layer, Location, Model, PARAMETER_CATEGORIES, ParameterKind, Pattern};
 use bimcraft_core::schedule::{self, Field, Filter, Op, Sort};
 use bimcraft_core::snap::Kind as Snap;
+use bimcraft_core::texture::{Kind as TextureKind, Texture};
 use bimcraft_core::units::Units;
 use egui::{
     Align, Align2, Button, Checkbox, ComboBox, Context, FontId, Frame, Grid, Id as UiId, Key, Layout, Margin, Modal, Popup, Rect, RichText,
-    ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType, pos2, vec2,
+    ScrollArea, Sense, Shape, Stroke, StrokeKind, TextEdit, TextureHandle, Ui, WidgetInfo, WidgetType, pos2, vec2,
 };
 use serde_json::{Value, json};
 
@@ -424,6 +425,24 @@ const PATTERNS: [(Pattern, &str); 10] = [
     (Pattern::Insulation, "Insulation"),
 ];
 
+/// A kind of texture, as the Materials window names it.
+pub(crate) fn texture_name(k: bimcraft_core::texture::Kind) -> &'static str {
+    use bimcraft_core::texture::Kind::*;
+    match k {
+        Brick => "Brick",
+        Block => "Block",
+        Boards => "Boards",
+        Concrete => "Concrete",
+        Plaster => "Plaster",
+        Tile => "Tile",
+        Roof => "Roof Tiles",
+        Fabric => "Fabric",
+        Metal => "Metal",
+        Insulation => "Insulation",
+        Image => "Picture",
+    }
+}
+
 fn pattern_name(p: Pattern) -> &'static str {
     PATTERNS.iter().find(|(q, _)| *q == p).map_or("None", |(_, n)| n)
 }
@@ -434,12 +453,17 @@ pub(crate) struct MaterialsDialog {
     picked: String,
     name: String,
     color: Option<[u8; 3]>,
+    /// The texture's fields as typed (a tile's width and height, the angle, the offset across and up), for the material and
+    /// texture they were made from.
+    texture: Option<(String, Texture, [String; 5])>,
+    /// The swatch drawn of the texture, and what it was drawn of.
+    swatch: Option<(String, TextureHandle)>,
 }
 
 impl MaterialsDialog {
     pub(crate) fn new(m: &Model) -> MaterialsDialog {
         let picked = m.materials.keys().next().cloned().unwrap_or_default();
-        MaterialsDialog { name: picked.clone(), picked, color: None }
+        MaterialsDialog { name: picked.clone(), picked, color: None, texture: None, swatch: None }
     }
 }
 
@@ -599,6 +623,10 @@ impl BimApp {
         if category == "component" {
             return self.component_type().map(|(_, ty)| (category, ty, self.selection.clone()));
         }
+        // A door or window of a family: that family's type.
+        if let Some((_, ty)) = self.opening_pair(m, self.subject(), category) {
+            return Some((category, ty, self.selection.clone()));
+        }
         let name = match self.selection.is_empty() {
             false => self.shared_type(m),
             true => self.types.get(category).cloned().or_else(|| m.default_type(category).map(String::from)),
@@ -606,9 +634,51 @@ impl BimApp {
         Some((category, name?, self.selection.clone()))
     }
 
+    /// The family and type a door or window is of: the selected ones', while they share them; with none selected, what the tool places.
+    /// None for one of the project's own types.
+    fn opening_pair(&self, m: &Model, subject: Subject, category: &str) -> Option<(String, String)> {
+        let of = |id: &Id| {
+            m.elements.get(id).filter(|e| e.category() == category).and_then(|e| e.family().map(|(f, t)| (f.to_string(), t.to_string())))
+        };
+        match subject {
+            Subject::Element(id) => of(&id),
+            Subject::Elements(_) => {
+                let pairs: BTreeSet<Option<(String, String)>> = self.selection.iter().map(of).collect();
+                if pairs.len() == 1 { pairs.into_iter().next().flatten() } else { None }
+            }
+            Subject::New(c) if c == category => {
+                let (family, ty) = self.opening_pick(category);
+                family.zip(ty)
+            }
+            _ => None,
+        }
+    }
+
+    /// The family and type the Door or Window tool places: the ones picked, while the project still has them, else the project's usual
+    /// door or window of a family, else its own default type.
+    pub(crate) fn opening_pick(&self, category: &str) -> (Option<String>, Option<String>) {
+        let m = &self.session.model;
+        if let Some(ty) = self.types.get(category) {
+            match self.opening_families.get(category) {
+                Some(f) if m.families.get(f).is_some_and(|x| x.types.contains_key(ty)) => return (Some(f.clone()), Some(ty.clone())),
+                None if m.type_names(category).contains(&ty.as_str()) => return (None, Some(ty.clone())),
+                _ => {}
+            }
+        }
+        match m.default_family(category) {
+            Some((f, ty)) => (Some(f.to_string()), Some(ty.to_string())),
+            None => (None, m.default_type(category).map(String::from)),
+        }
+    }
+
     pub(crate) fn edit_type(&mut self) {
         if let Some((category, name, elements)) = self.type_subject() {
-            match self.component_type().filter(|_| category == "component") {
+            let pair = if category == "component" {
+                self.component_type()
+            } else {
+                self.opening_pair(&self.session.model, self.subject(), category)
+            };
+            match pair {
                 Some((family, ty)) => self.family_dialog = Some(FamilyDialog::new(&self.session.model, family, ty, elements)),
                 None => self.type_dialog = Some(TypeDialog::new(&self.session.model, category, name, elements)),
             }
@@ -689,14 +759,22 @@ impl BimApp {
             Subject::View3D => ("3d view", None),
             Subject::Schedule => ("schedule", None),
         };
-        // A component's: its family over its type; every family's types to pick from.
-        let pairs: Vec<(String, String)> = if category == "component" {
-            model.families.iter().flat_map(|(f, x)| x.types.keys().map(move |t| (f.clone(), t.clone()))).collect()
-        } else {
-            Vec::new()
+        // A component's: its family over its type; every family's types to pick from. A door's or a window's: the project's own
+        // types, then those of its families, each as `Family: Type`.
+        let hosted = match category {
+            "door" => Some(bimcraft_core::family::Category::Door),
+            "window" => Some(bimcraft_core::family::Category::Window),
+            _ => None,
         };
+        let pairs: Vec<(String, String)> = model
+            .families
+            .iter()
+            .filter(|(_, x)| if category == "component" { !x.category.hosted() } else { hosted == Some(x.category) })
+            .flat_map(|(f, x)| x.types.keys().map(move |t| (f.clone(), t.clone())))
+            .collect();
         let label = |(f, t): &(String, String)| format!("{f}: {t}");
-        let picked_pair = (category == "component").then(|| self.component_type()).flatten();
+        let picked_pair =
+            if category == "component" { self.component_type() } else { hosted.and_then(|_| self.opening_pair(model, subject, category)) };
         let current = match &picked_pair {
             Some(pair) => Some(label(pair)),
             None if category == "component" => None,
@@ -705,7 +783,7 @@ impl BimApp {
         let names: Vec<String> = if category == "component" {
             pairs.iter().map(label).collect()
         } else {
-            model.type_names(category).into_iter().map(String::from).collect()
+            model.type_names(category).into_iter().map(String::from).chain(pairs.iter().map(label)).collect()
         };
         let enabled = !names.is_empty();
         let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 50.0), if enabled { Sense::click() } else { Sense::hover() });
@@ -761,10 +839,22 @@ impl BimApp {
                 }
             }
             (Some(_), Subject::New("component")) => self.component = pair,
+            (Some(_), Subject::New(category @ ("door" | "window"))) if pair.is_some() => {
+                if let Some((f, t)) = pair {
+                    self.opening_families.insert(category, f);
+                    self.types.insert(category, t);
+                }
+            }
             (Some(n), Subject::Element(_) | Subject::Elements(_)) if current.as_ref() != Some(&n) => {
-                self.run("modify", json!({"ids": self.selection, "type": n}));
+                // One of the project's own types takes a door or window off the family it was of.
+                let mut p = json!({"ids": self.selection, "type": n});
+                if hosted.is_some() {
+                    p["family"] = Value::Null;
+                }
+                self.run("modify", p);
             }
             (Some(n), Subject::New(category)) => {
+                self.opening_families.remove(category);
                 self.types.insert(category, n);
             }
             _ => {}
@@ -950,17 +1040,10 @@ impl BimApp {
     /// parameters name them, lengths and numbers under Dimensions, materials under Materials and
     /// Finishes, yes or no under Other; what a formula works out, shown. An edit changes them all.
     fn component_parameters(&mut self, ui: &mut Ui, model: &Model, ids: &[Id]) {
-        let families: BTreeSet<&str> = ids
-            .iter()
-            .filter_map(|id| match model.elements.get(id) {
-                Some(Element::Component(c)) => Some(c.family.as_str()),
-                _ => None,
-            })
-            .collect();
+        let families: BTreeSet<&str> = ids.iter().filter_map(|id| model.elements.get(id)?.family().map(|(f, _)| f)).collect();
         let families: Vec<&str> = families.into_iter().collect();
         let (Some(&id), [name]) = (ids.first(), families.as_slice()) else { return };
-        let Some(f) =
-            model.families.get(*name).filter(|_| ids.iter().all(|i| model.elements.get(i).is_some_and(|e| e.category() == "component")))
+        let Some(f) = model.families.get(*name).filter(|_| ids.iter().all(|i| model.elements.get(i).is_some_and(|e| e.family().is_some())))
         else {
             return;
         };
@@ -1282,6 +1365,9 @@ impl BimApp {
         let Some(mut d) = self.materials_dialog.take() else { return };
         let model = Arc::clone(&self.session.model);
         let (mut close, mut run, mut picked): (bool, Option<Value>, Option<String>) = (false, None, None);
+        // Save the material to the Favorites (true), or open them (false), once the window is done.
+        let mut favorite: Option<bool> = None;
+        let mut typed_wrong: Option<String> = None;
         let released = ctx.input(|i| !i.pointer.any_down());
         let r = Modal::new(UiId::new("materials")).show(ctx, |ui| {
             ui.set_width(440.0);
@@ -1343,11 +1429,105 @@ impl BimApp {
                         c.response.labelled_by(l.id);
                         ui.end_row();
                     }
+                    // Its texture: a pattern drawn in code or a picture, over its colour in the 3D view; a tile of it this
+                    // big, turned and moved.
+                    let l = ui.label(t("Texture"));
+                    let now = m.texture.as_ref().map(|x| x.kind);
+                    let shown = now.map_or(t("None"), |k| t(texture_name(k)));
+                    let c = ComboBox::from_id_salt("material-texture").selected_text(shown).width(160.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(now.is_none(), t("None")).clicked() {
+                            run = Some(json!({"name": d.picked, "texture": null}));
+                        }
+                        for k in TextureKind::ALL.into_iter().filter(|k| *k != TextureKind::Image) {
+                            if ui.selectable_label(now == Some(k), t(texture_name(k))).clicked() {
+                                run = Some(json!({"name": d.picked, "texture": {"kind": k}}));
+                            }
+                        }
+                        let clicked = ui.selectable_label(now == Some(TextureKind::Image), t("Picture…")).clicked();
+                        if let Some(path) =
+                            clicked.then(|| rfd::FileDialog::new().add_filter(t("Pictures"), &["png", "jpg", "jpeg"]).pick_file()).flatten()
+                        {
+                            run = Some(json!({"name": d.picked, "texture": {"kind": "image", "path": path.to_string_lossy()}}));
+                        }
+                    });
+                    c.response.labelled_by(l.id);
+                    ui.end_row();
+                    if let Some(x) = &m.texture {
+                        let units = model.units;
+                        if !d.texture.as_ref().is_some_and(|(n, old, _)| *n == d.picked && old == x) {
+                            let typed = [
+                                units.length(x.size[0]),
+                                units.length(x.size[1]),
+                                format!("{}", x.angle),
+                                units.length(x.offset[0]),
+                                units.length(x.offset[1]),
+                            ];
+                            d.texture = Some((d.picked.clone(), x.clone(), typed));
+                        }
+                        if let Some((_, _, typed)) = &mut d.texture {
+                            let rows = [
+                                ("Tile Width", 0),
+                                ("Tile Height", 1),
+                                ("Texture Angle", 2),
+                                ("Texture Offset Across", 3),
+                                ("Texture Offset Up", 4),
+                            ];
+                            for (label, k) in rows {
+                                let l = ui.label(t(label));
+                                let hint = if k == 2 { "°" } else { units.name() };
+                                let r = ui.add(TextEdit::singleline(&mut typed[k]).desired_width(120.0).hint_text(hint)).labelled_by(l.id);
+                                if r.lost_focus() {
+                                    let length = |i: usize| units.parse(&typed[i]);
+                                    match (length(0), length(1), number(&typed[2]), length(3), length(4)) {
+                                        (Some(w), Some(h), Some(a), Some(ox), Some(oy)) => {
+                                            if [w, h, a, ox, oy] != [x.size[0], x.size[1], x.angle, x.offset[0], x.offset[1]] {
+                                                run = Some(
+                                                    json!({"name": d.picked, "texture": {"size": [w, h], "angle": a, "offset": [ox, oy]}}),
+                                                );
+                                            }
+                                        }
+                                        _ => typed_wrong = Some(tf("`{}` is not a size, an angle or an offset", &[&typed[k]])),
+                                    }
+                                }
+                                ui.end_row();
+                            }
+                        }
+                    }
+                });
+                // A tile of its texture, or its colour; and the Favorites it can be kept in.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let key = format!("{:?}", (m.color, &m.texture));
+                    if d.swatch.as_ref().map(|(k, _)| k) != Some(&key) {
+                        d.swatch = crate::favorites::swatch(ui.ctx(), "material-swatch", m, &model.images, 64).map(|h| (key, h));
+                    }
+                    crate::favorites::paint_swatch(ui, 64.0, m.color, d.swatch.as_ref().map(|(_, h)| h));
+                    ui.vertical(|ui| {
+                        if ui.button(t("Save to Favorites")).clicked() {
+                            favorite = Some(true);
+                        }
+                        if ui.button(t("Favorites…")).clicked() {
+                            favorite = Some(false);
+                        }
+                    });
                 });
             }
             ui.add_space(8.0);
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
         });
+        if let Some(text) = typed_wrong {
+            self.status = Status { text, error: true };
+        }
+        match favorite {
+            Some(true) => {
+                let p = self.favorite_params("save", "material", &d.picked);
+                if self.run("favorite", p).is_some() {
+                    self.status = Status { text: tf("Saved {} to your Favorites", &[&d.picked]), error: false };
+                }
+            }
+            Some(false) => self.open_favorites(),
+            None => {}
+        }
         if let Some(p) = run {
             self.run("material", p);
         }

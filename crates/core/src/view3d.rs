@@ -7,12 +7,15 @@
 //! line and in hidden line, and cut the same solids.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::geom::{self, P2};
 use crate::graphics::Look;
 use crate::model::{Element, Id, Layer, Model};
+use crate::paint;
 use crate::render::{PAPER, Rgb};
 use crate::stairs;
+use crate::texture::Sampler;
 use crate::walls::{self, Axis, Plane};
 
 /// A model point in mm: x east, y north, z up.
@@ -64,6 +67,8 @@ struct Tri {
     p: [P3; 3],
     owner: Id,
     color: Rgb,
+    /// The texture over its colour: one more than where its material is in the library; 0, none.
+    tex: u32,
     curve: Option<(Id, usize)>,
 }
 
@@ -77,7 +82,7 @@ pub(crate) struct Frame {
 
 impl Frame {
     /// A box from `a.0` to `a.1` along, `c.0` to `c.1` across and `z.0` to `z.1` up.
-    fn cuboid(&self, out: &mut Vec<Tri>, owner: Id, color: Rgb, a: (f64, f64), c: (f64, f64), z: (f64, f64)) {
+    fn cuboid(&self, out: &mut Vec<Tri>, owner: Id, (color, tex): (Rgb, u32), a: (f64, f64), c: (f64, f64), z: (f64, f64)) {
         let at = |a: f64, c: f64, z: f64| {
             let p = self.o + self.u * a + self.n * c;
             [p.0, p.1, z]
@@ -93,8 +98,8 @@ impl Frame {
             at(a.0, c.1, z.1),
         ];
         for [i, j, k, l] in [[0, 1, 2, 3], [4, 5, 6, 7], [0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]] {
-            out.push(Tri { p: [v[i], v[j], v[k]], owner, color, curve: None });
-            out.push(Tri { p: [v[i], v[k], v[l]], owner, color, curve: None });
+            out.push(Tri { p: [v[i], v[j], v[k]], owner, color, tex, curve: None });
+            out.push(Tri { p: [v[i], v[k], v[l]], owner, color, tex, curve: None });
         }
     }
 }
@@ -106,15 +111,15 @@ impl Frame {
 /// (a component's form, which sections show and don't cut): a round one's sides, past `caps`, are
 /// one curved surface; any other's facets that turn little where they meet are ([`facets`]).
 pub(crate) enum Solid {
-    Box { owner: Id, color: Rgb, frame: Frame, a: (f64, f64), c: (f64, f64), z: (f64, f64) },
-    Slab { owner: Id, color: Rgb, face: Vec<P3>, rise: f64 },
-    Prism { owner: Id, color: Rgb, ring: Vec<P2>, bottom: Plane, top: Plane, curve: Option<(P2, f64)> },
-    Mesh { owner: Id, color: Rgb, tris: Vec<[P3; 3]>, caps: usize, round: bool },
+    Box { owner: Id, color: Rgb, tex: u32, frame: Frame, a: (f64, f64), c: (f64, f64), z: (f64, f64) },
+    Slab { owner: Id, color: Rgb, tex: u32, face: Vec<P3>, rise: f64 },
+    Prism { owner: Id, color: Rgb, tex: u32, ring: Vec<P2>, bottom: Plane, top: Plane, curve: Option<(P2, f64)> },
+    Mesh { owner: Id, color: Rgb, tex: u32, tris: Vec<[P3; 3]>, caps: usize, round: bool },
 }
 
 /// A level slab: `ring` from `z.0` up to `z.1`.
 fn slab(owner: Id, color: Rgb, ring: &[P2], z: (f64, f64)) -> Solid {
-    Solid::Slab { owner, color, face: ring.iter().map(|p| [p.0, p.1, z.0]).collect(), rise: z.1 - z.0 }
+    Solid::Slab { owner, color, tex: 0, face: ring.iter().map(|p| [p.0, p.1, z.0]).collect(), rise: z.1 - z.0 }
 }
 
 fn plan(face: &[P3]) -> Vec<P2> {
@@ -238,15 +243,23 @@ impl Solid {
 
     fn tris(&self, out: &mut Vec<Tri>) {
         match self {
-            Solid::Box { owner, color, frame, a, c, z } => frame.cuboid(out, *owner, *color, *a, *c, *z),
-            Solid::Slab { owner, color, face, rise } => prism(out, *owner, *color, face, *rise),
-            Solid::Prism { owner, color, ring, bottom, top, curve } => {
-                let (owner, color) = (*owner, *color);
+            Solid::Box { owner, color, tex, frame, a, c, z } => frame.cuboid(out, *owner, (*color, *tex), *a, *c, *z),
+            Solid::Slab { owner, color, tex, face, rise } => prism(out, *owner, (*color, *tex), face, *rise),
+            Solid::Prism { owner, color, tex, ring, bottom, top, curve } => {
+                let (owner, color, tex) = (*owner, *color, *tex);
+                // Counter-clockwise, so every face is turned out: a wall's ring runs the other way round.
+                let turned: Vec<P2>;
+                let ring = if geom::area(ring) < 0.0 {
+                    turned = ring.iter().rev().copied().collect();
+                    &turned
+                } else {
+                    ring
+                };
                 let at = |q: P2, p: &Plane| [q.0, q.1, p.at(q)];
                 for [a, b, c] in geom::triangulate(ring) {
                     let pt = |i: usize| ring.get(i).copied().unwrap_or_default();
-                    out.push(Tri { p: [at(pt(a), top), at(pt(b), top), at(pt(c), top)], owner, color, curve: None });
-                    out.push(Tri { p: [at(pt(a), bottom), at(pt(c), bottom), at(pt(b), bottom)], owner, color, curve: None });
+                    out.push(Tri { p: [at(pt(a), top), at(pt(b), top), at(pt(c), top)], owner, color, tex, curve: None });
+                    out.push(Tri { p: [at(pt(a), bottom), at(pt(c), bottom), at(pt(b), bottom)], owner, color, tex, curve: None });
                 }
                 for (a, b) in geom::ring_edges(ring) {
                     let (a0, b0, a1, b1) = (at(a, bottom), at(b, bottom), at(a, top), at(b, top));
@@ -254,17 +267,17 @@ impl Solid {
                     let curve = curve
                         .filter(|(c, _)| (b - a).unit().cross((a - *c).unit()).abs() > 0.5)
                         .map(|(c, r)| (owner, usize::from(((a + b) * 0.5).dist(c) > r)));
-                    out.push(Tri { p: [a0, b0, b1], owner, color, curve });
-                    out.push(Tri { p: [a0, b1, a1], owner, color, curve });
+                    out.push(Tri { p: [a0, b0, b1], owner, color, tex, curve });
+                    out.push(Tri { p: [a0, b1, a1], owner, color, tex, curve });
                 }
             }
             // Each surface keyed by its first triangle's place in `out`, which no other form's shares.
             // ponytail: worked out again for each component of a family; keep it per form if many big meshes slow a scene.
-            Solid::Mesh { owner, color, tris, caps, round } => {
+            Solid::Mesh { owner, color, tex, tris, caps, round } => {
                 let first = out.len();
                 let surfaces = if *round { (0..tris.len()).map(|i| (i >= *caps).then_some(*caps)).collect() } else { facets(tris) };
                 for (p, s) in tris.iter().zip(surfaces) {
-                    out.push(Tri { p: *p, owner: *owner, color: *color, curve: s.map(|s| (*owner, first + s)) });
+                    out.push(Tri { p: *p, owner: *owner, color: *color, tex: *tex, curve: s.map(|s| (*owner, first + s)) });
                 }
             }
         }
@@ -380,10 +393,11 @@ fn slabs(out: &mut Vec<Solid>, m: &Model, owner: Id, color: Rgb, face: Vec<P3>, 
         (false, Some(plane)) => out.extend(pieces.into_iter().map(|ring| Solid::Slab {
             owner,
             color,
+            tex: 0,
             face: ring.iter().map(|q| [q.0, q.1, plane.at(*q)]).collect(),
             rise,
         })),
-        _ => out.push(Solid::Slab { owner, color, face, rise }),
+        _ => out.push(Solid::Slab { owner, color, tex: 0, face, rise }),
     }
 }
 
@@ -396,6 +410,7 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
             Element::Wall(_) => out.extend(walls::prisms(m, id, true).into_iter().map(|p| Solid::Prism {
                 owner: id,
                 color: WALL,
+                tex: 0,
                 ring: p.ring,
                 bottom: p.bottom,
                 top: p.top,
@@ -418,7 +433,14 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
             Element::Component(c) => {
                 for piece in m.component_pieces(c) {
                     let color = m.materials.get(&piece.material).map_or(COMPONENT, |x| Rgb(x.color[0], x.color[1], x.color[2]));
-                    out.push(Solid::Mesh { owner: id, color, tris: piece.tris, caps: piece.caps, round: piece.round });
+                    out.push(Solid::Mesh {
+                        owner: id,
+                        color,
+                        tex: skin(m, &piece.material),
+                        tris: piece.tris,
+                        caps: piece.caps,
+                        round: piece.round,
+                    });
                 }
             }
             // Each tread a block from the floor up to it, each landing a slab up to its top; the last
@@ -431,7 +453,7 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                     for k in 1..run.risers {
                         let k = f64::from(k);
                         let (a, c) = (((k - 1.0) * st.tread, k * st.tread), (-st.width / 2.0, st.width / 2.0));
-                        out.push(Solid::Box { owner: id, color: SLAB, frame, a, c, z: (base, run.z.0 + k * each) });
+                        out.push(Solid::Box { owner: id, color: SLAB, tex: 0, frame, a, c, z: (base, run.z.0 + k * each) });
                     }
                 }
                 out.extend(l.pads.iter().map(|p| slab(id, SLAB, &p.ring, (base, p.z))));
@@ -442,13 +464,22 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 for run in &l.runs {
                     let g = run.u * ((run.z.1 - run.z.0) / run.length.max(1e-9));
                     let top = Plane { z: run.z.0 - g.dot(run.start), g };
-                    out.push(Solid::Prism { owner: id, color: SLAB, ring: run.ring(r.width), bottom: Plane::flat(base), top, curve: None });
+                    out.push(Solid::Prism {
+                        owner: id,
+                        color: SLAB,
+                        tex: 0,
+                        ring: run.ring(r.width),
+                        bottom: Plane::flat(base),
+                        top,
+                        curve: None,
+                    });
                 }
                 out.extend(l.pads.iter().map(|p| slab(id, SLAB, &p.ring, (base, p.z))));
             }
             Element::Railing(rl) => out.extend(stairs::railing_parts(m, rl).into_iter().map(|(ring, bottom, top)| Solid::Prism {
                 owner: id,
                 color: RAIL,
+                tex: 0,
                 ring,
                 bottom,
                 top,
@@ -459,16 +490,30 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                     slabs(&mut out, m, id, ROOF, face, rise);
                 }
             }
-            // A door's leaf or a window's glass: a 50 mm panel in the middle of the wall, square to it.
+            // Of a family: each form in its material's colour, shown beyond a section's line and never cut, as a
+            // component's are. Else a door's leaf or a window's glass: a 50 mm panel in the middle of the wall, square to it.
             Element::Door(o) | Element::Window(o) => {
-                if let (Some(t), Some(w)) = (m.opening_type(e), m.wall(o.host)) {
+                if o.family.is_some() {
+                    let fallback = if matches!(e, Element::Door(_)) { DOOR } else { GLASS };
+                    for piece in m.opening_pieces(e) {
+                        let color = m.materials.get(&piece.material).map_or(fallback, |x| Rgb(x.color[0], x.color[1], x.color[2]));
+                        out.push(Solid::Mesh {
+                            owner: id,
+                            color,
+                            tex: skin(m, &piece.material),
+                            tris: piece.tris,
+                            caps: piece.caps,
+                            round: piece.round,
+                        });
+                    }
+                } else if let (Some(t), Some(w)) = (m.opening_type(e), m.wall(o.host)) {
                     let color = if matches!(e, Element::Door(_)) { DOOR } else { GLASS };
                     let z = m.own_base(w) + o.sill;
                     let axis = Axis::of(w);
                     let u = axis.tangent(o.offset);
                     let frame = Frame { o: axis.at(o.offset, walls::centre(m, w)), u, n: u.perp() };
                     let a = (-t.width / 2.0, t.width / 2.0);
-                    out.push(Solid::Box { owner: id, color, frame, a, c: (-25.0, 25.0), z: (z, z + t.height) });
+                    out.push(Solid::Box { owner: id, color, tex: 0, frame, a, c: (-25.0, 25.0), z: (z, z + t.height) });
                 }
             }
             _ => {}
@@ -478,16 +523,24 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
 }
 
 /// A slab: `face`, its copy `rise` above, and the sides between them.
-fn prism(out: &mut Vec<Tri>, owner: Id, color: Rgb, face: &[P3], rise: f64) {
+fn prism(out: &mut Vec<Tri>, owner: Id, (color, tex): (Rgb, u32), face: &[P3], rise: f64) {
+    // Counter-clockwise seen from above, so every face is turned out.
+    let turned: Vec<P3>;
+    let face = if geom::area(&plan(face)) < 0.0 {
+        turned = face.iter().rev().copied().collect();
+        &turned
+    } else {
+        face
+    };
     let up = |p: P3| [p[0], p[1], p[2] + rise];
     let pt = |i: usize| face.get(i).copied().unwrap_or_default();
     for [a, b, c] in geom::triangulate(&plan(face)) {
-        out.push(Tri { p: [up(pt(a)), up(pt(b)), up(pt(c))], owner, color, curve: None });
-        out.push(Tri { p: [pt(a), pt(c), pt(b)], owner, color, curve: None });
+        out.push(Tri { p: [up(pt(a)), up(pt(b)), up(pt(c))], owner, color, tex, curve: None });
+        out.push(Tri { p: [pt(a), pt(c), pt(b)], owner, color, tex, curve: None });
     }
     for (a, b) in face.iter().zip(face.iter().cycle().skip(1)) {
-        out.push(Tri { p: [*a, *b, up(*b)], owner, color, curve: None });
-        out.push(Tri { p: [*a, up(*b), up(*a)], owner, color, curve: None });
+        out.push(Tri { p: [*a, *b, up(*b)], owner, color, tex, curve: None });
+        out.push(Tri { p: [*a, up(*b), up(*a)], owner, color, tex, curve: None });
     }
 }
 
@@ -540,6 +593,12 @@ fn planes(tris: &[Tri]) -> Vec<usize> {
         .collect()
 }
 
+/// The texture id a library material gives what is made of it: one more than where it is in the library's order, 0
+/// for one with no texture, or none in the library.
+fn skin(m: &Model, name: &str) -> u32 {
+    m.materials.iter().position(|(k, x)| k == name && x.texture.is_some()).map_or(0, |i| i as u32 + 1)
+}
+
 /// The model's solids as its pictures show them: an element of a compound type split into its
 /// layers, each in its material's colour; a slab's from the top down, a wall's from its exterior in.
 pub(crate) fn shaded(m: &Model) -> Vec<Solid> {
@@ -560,7 +619,7 @@ fn layered(m: &Model, s: Solid) -> Vec<Solid> {
     }
     let colour = |l: &Layer, or: Rgb| m.materials.get(&l.material).map_or(or, |x| Rgb(x.color[0], x.color[1], x.color[2]));
     match s {
-        Solid::Slab { owner, color, face, rise } => {
+        Solid::Slab { owner, color, tex, face, rise } => {
             let mut out = Vec::new();
             let mut above = 0.0;
             for l in layers {
@@ -568,7 +627,7 @@ fn layered(m: &Model, s: Solid) -> Vec<Solid> {
                 if r > 1e-9 {
                     let lift = rise - above - r;
                     let face = face.iter().map(|p| [p[0], p[1], p[2] + lift]).collect();
-                    out.push(Solid::Slab { owner, color: colour(l, color), face, rise: r });
+                    out.push(Solid::Slab { owner, color: colour(l, color), tex: skin(m, &l.material).max(tex), face, rise: r });
                 }
                 above += r;
             }
@@ -576,8 +635,8 @@ fn layered(m: &Model, s: Solid) -> Vec<Solid> {
         }
         // Across the wall from its exterior face in, each layer between two of its boundaries; the
         // outermost and innermost reach whatever lies past them.
-        Solid::Prism { owner, color, ring, bottom, top, curve } => {
-            let Some(w) = m.wall(owner) else { return vec![Solid::Prism { owner, color, ring, bottom, top, curve }] };
+        Solid::Prism { owner, color, tex, ring, bottom, top, curve } => {
+            let Some(w) = m.wall(owner) else { return vec![Solid::Prism { owner, color, tex, ring, bottom, top, curve }] };
             let (axis, b) = (Axis::of(w), walls::boundaries(m, w));
             let off = |q: P2| axis.project(q).1;
             let n = layers.len();
@@ -596,6 +655,7 @@ fn layered(m: &Model, s: Solid) -> Vec<Solid> {
                     (part.len() >= 3 && geom::area(&part).abs() > 1e-6).then(|| Solid::Prism {
                         owner,
                         color: colour(l, color),
+                        tex: skin(m, &l.material).max(tex),
                         ring: part,
                         bottom,
                         top,
@@ -608,12 +668,74 @@ fn layered(m: &Model, s: Solid) -> Vec<Solid> {
     }
 }
 
+/// Paint laid on the faces of elements: each triangle on a painted face takes the material it's painted, its colour and its
+/// texture, in place of what its type is made of.
+fn painted(m: &Model, tris: &mut [Tri], faces: &[&'static str]) {
+    let paints: HashMap<Id, &serde_json::Map<String, serde_json::Value>> =
+        m.elements.iter().filter_map(|(id, e)| Some((*id, e.params()?.get(paint::KEY)?.as_object()?))).collect();
+    if paints.is_empty() {
+        return;
+    }
+    for (t, face) in tris.iter_mut().zip(faces) {
+        let Some(name) = paints.get(&t.owner).and_then(|p| p.get(*face)).and_then(|v| v.as_str()) else { continue };
+        if let Some(x) = m.materials.get(name) {
+            (t.color, t.tex) = (Rgb(x.color[0], x.color[1], x.color[2]), skin(m, name));
+        }
+    }
+}
+
 /// The model as triangles, each with its plane, and its corner normals where it's a curve's: what
 /// every picture of it is drawn from.
 pub struct Scene {
     tris: Vec<Tri>,
     planes: Vec<usize>,
     smooth: Vec<Option<Box<[P3; 3]>>>,
+    /// Each triangle's face, as paint names them: `exterior`, `interior`, `top`, `bottom`, `all`, or none.
+    faces: Arc<Vec<&'static str>>,
+    /// Each texture the scene uses, by id; and each textured triangle's way across and up its plane.
+    skins: Vec<Option<Sampler>>,
+    bases: Vec<Option<[P3; 2]>>,
+}
+
+/// How an element's triangles name their faces.
+enum Rule {
+    /// A wall's: its exterior is to the left of its start to its end.
+    Wall(Axis),
+    /// A floor's, a roof's or a ceiling's: facing up or down.
+    Slab,
+    /// Any other: all of it is one face.
+    Whole,
+}
+
+impl Rule {
+    /// The face a triangle is on, or none where it's on no face that can be painted (a wall's top or end).
+    fn face(&self, p: &[P3; 3]) -> &'static str {
+        let n = unit(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+        match self {
+            Rule::Wall(axis) => {
+                let c = P2((p[0][0] + p[1][0] + p[2][0]) / 3.0, (p[0][1] + p[1][1] + p[2][1]) / 3.0);
+                let left = axis.tangent(axis.project(c).0).perp();
+                match n[0] * left.0 + n[1] * left.1 {
+                    d if d > 0.5 => "exterior",
+                    d if d < -0.5 => "interior",
+                    _ => "",
+                }
+            }
+            Rule::Slab if n[2] > 0.5 => "top",
+            Rule::Slab if n[2] < -0.5 => "bottom",
+            Rule::Slab => "",
+            Rule::Whole => "all",
+        }
+    }
+}
+
+/// Two unit vectors across a triangle's plane, the way a texture's across and up lie on it: across is level (to the
+/// right of someone looking at the face from outside, east where it lies flat), up goes up it (north where it lies flat).
+fn basis(t: &Tri) -> [P3; 2] {
+    let n = unit(cross(sub(t.p[1], t.p[0]), sub(t.p[2], t.p[0])));
+    let level = cross([0.0, 0.0, 1.0], n);
+    let across = if dot(level, level) < 1e-4 { [1.0, 0.0, 0.0] } else { unit(level) };
+    [across, unit(cross(n, across))]
 }
 
 impl Scene {
@@ -622,8 +744,31 @@ impl Scene {
         for solid in shaded(m) {
             solid.tris(&mut tris);
         }
+        // Each paintable element's rule for naming the faces of its triangles; paint gives those it's laid on their material.
+        let rules: HashMap<Id, Rule> = m
+            .elements
+            .iter()
+            .filter_map(|(id, e)| match e {
+                Element::Wall(w) => Some((*id, Rule::Wall(Axis::of(w)))),
+                e if matches!(e.category(), "floor" | "roof" | "ceiling") => Some((*id, Rule::Slab)),
+                e if paint::faces(e.category()).contains(&"all") => Some((*id, Rule::Whole)),
+                _ => None,
+            })
+            .collect();
+        let faces: Vec<&'static str> = tris.iter().map(|t| rules.get(&t.owner).map_or("", |r| r.face(&t.p))).collect();
+        painted(m, &mut tris, &faces);
+        // The textures the scene uses, ready to look up, and what each textured triangle lies across.
+        let used: BTreeSet<u32> = tris.iter().map(|t| t.tex).filter(|t| *t > 0).collect();
+        let mut skins: Vec<Option<Sampler>> = vec![None; m.materials.len() + 1];
+        for id in used {
+            let found = m.materials.values().nth(id as usize - 1);
+            if let (Some(x), Some(slot)) = (found, skins.get_mut(id as usize)) {
+                *slot = x.texture.as_ref().and_then(|t| Sampler::new(t, x.color, &m.images));
+            }
+        }
+        let bases = tris.iter().map(|t| skins.get(t.tex as usize).is_some_and(Option::is_some).then(|| basis(t))).collect();
         let (planes, smooth) = (planes(&tris), corner_normals(&tris));
-        Scene { tris, planes, smooth }
+        Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases }
     }
 
     /// A view of the whole model from `azimuth` and `elevation` (degrees), fitted into the picture.
@@ -761,29 +906,53 @@ impl Scene {
         self.raster((cam, clip), (w, h), opaque, None, &corner_light, (&mut depth, &mut hit, &mut curve_lit));
         // Only a picture with something in it to see through needs the second pass, and its buffers.
         let through_any = !plain && self.tris.iter().any(|t| shown(t) && see_through(t));
-        let (mut seen, mut seen_lit) = (Vec::new(), Vec::new());
+        let (mut seen, mut seen_lit, mut near) = (Vec::new(), Vec::new(), Vec::new());
         if through_any {
-            let mut near = vec![f32::NEG_INFINITY; w * h];
+            near = vec![f32::NEG_INFINITY; w * h];
             (seen, seen_lit) = (vec![u32::MAX; w * h], vec![0.0; w * h]);
             let clear = |t: &Tri| shown(t) && see_through(t);
             self.raster((cam, clip), (w, h), clear, Some(&depth), &corner_light, (&mut near, &mut seen, &mut seen_lit));
         }
-        let shade: Vec<Rgb> = self
+        // How lit each triangle is, as its face turns to the light; and its flat colour, which a section's is the paper's.
+        let light: Vec<f64> = self
             .tris
             .iter()
             .map(|t| {
                 let n = unit(cross(sub(t.p[1], t.p[0]), sub(t.p[2], t.p[0])));
-                let n = if dot(n, back) < 0.0 { mul(n, -1.0) } else { n };
-                if clip.is_some() { PAPER } else { paint(colour(t), lit(n)) }
+                lit(if dot(n, back) < 0.0 { mul(n, -1.0) } else { n })
             })
             .collect();
-        // What triangle `t` shows at pixel `k`: a curve's, the blend of its corners' lighting; a flat face's, its own shade.
-        let shaded = |t: usize, k: usize, curve: &[f32]| {
+        let shade: Vec<Rgb> =
+            self.tris.iter().zip(&light).map(|(t, l)| if clip.is_some() { PAPER } else { paint(colour(t), *l) }).collect();
+        // A textured triangle's colour at pixel `k`, where its surface lies `z` toward the camera: the texture at that point of
+        // its plane, for a pixel's width of it. None for any other, or where the view colours it its own way, or in a section.
+        let texturing = clip.is_none() && self.skins.iter().any(Option::is_some);
+        let foot = 1.0 / cam.scale;
+        let textured = |t: usize, k: usize, z: f32| -> Option<Rgb> {
+            if !texturing {
+                return None;
+            }
             let tri = self.tris.get(t)?;
-            let flat = *shade.get(t)?;
-            Some(match curve.get(k) {
-                Some(l) if smooth.get(t).is_some_and(Option::is_some) => paint(colour(tri), f64::from(*l)),
-                _ => flat,
+            let sampler = self.skins.get(tri.tex as usize)?.as_ref()?;
+            if !plain && colour(tri) != tri.color {
+                return None;
+            }
+            let [across, up] = (*self.bases.get(t)?).as_ref()?;
+            let (x, y) = ((k % w) as f64 + 0.5, (k / w) as f64 + 0.5);
+            let at = add(cam.unproject((x, y)), mul(back, f64::from(z)));
+            Some(sampler.at(dot(at, *across), dot(at, *up), foot))
+        };
+        // What triangle `t` shows at pixel `k`, whose surface is `depths` there: a curve's, the blend of its corners' lighting; a
+        // flat face's, its own shade; a texture's colour lit as the face is.
+        let shaded = |t: usize, k: usize, curve: &[f32], depths: &[f32]| {
+            let tri = self.tris.get(t)?;
+            let corners = curve.get(k).filter(|_| smooth.get(t).is_some_and(Option::is_some));
+            let skin = textured(t, k, depths.get(k).copied().unwrap_or_default());
+            Some(match (skin, corners) {
+                (Some(c), Some(l)) => paint(c, f64::from(*l)),
+                (Some(c), None) => paint(c, *light.get(t)?),
+                (None, Some(l)) => paint(colour(tri), f64::from(*l)),
+                (None, None) => *shade.get(t)?,
             })
         };
         let tints: BTreeMap<Id, Rgb> = tints.iter().copied().collect();
@@ -800,14 +969,14 @@ impl Scene {
                 let tint = owner_at(k).and_then(|o| tints.get(&o));
                 // An edge is drawn in the colour the view gives the edges of what it bounds.
                 let edge_of = || [k, k + 1, k + w].into_iter().find_map(owner_at).map_or(EDGE, |o| look.edge(o, EDGE));
-                let c = match (edge, tri(k).and_then(|t| shaded(t, k, &curve_lit))) {
+                let c = match (edge, tri(k).and_then(|t| shaded(t, k, &curve_lit, &depth))) {
                     (true, _) => tint.copied().unwrap_or_else(edge_of),
                     (false, Some(s)) => tint.map_or(s, |c| mix(s, *c)),
                     (false, None) => PAPER,
                 };
                 // Over it, the nearest surface seen through, as much of it as the view lets show (and a
                 // tinted one always a little, or selecting it would show nothing).
-                let c = match through(k).and_then(|t| Some((shaded(t, k, &seen_lit)?, self.tris.get(t)?.owner))) {
+                let c = match through(k).and_then(|t| Some((shaded(t, k, &seen_lit, &near)?, self.tris.get(t)?.owner))) {
                     Some((s, owner)) => {
                         let tint = tints.get(&owner);
                         let weight = 1.0 - f64::from(look.transparency(owner)) / 100.0;
@@ -822,7 +991,14 @@ impl Scene {
         if through_any {
             hit = hit.iter().zip(&seen).map(|(h, s)| if *s == u32::MAX { *h } else { *s }).collect();
         }
-        Image { width: w as u32, height: h as u32, rgba, hit, owners: self.tris.iter().map(|t| t.owner).collect() }
+        Image {
+            width: w as u32,
+            height: h as u32,
+            rgba,
+            hit,
+            owners: self.tris.iter().map(|t| t.owner).collect(),
+            faces: Arc::clone(&self.faces),
+        }
     }
 }
 
@@ -967,6 +1143,7 @@ pub struct Image {
     /// Each pixel's triangle (`u32::MAX` for none), and each triangle's element.
     hit: Vec<u32>,
     owners: Vec<Id>,
+    faces: Arc<Vec<&'static str>>,
 }
 
 impl Image {
@@ -979,6 +1156,13 @@ impl Image {
     pub fn pick(&self, x: f64, y: f64) -> Option<Id> {
         let t = *self.hit.get(self.index(x, y)?)?;
         self.owners.get(t as usize).copied()
+    }
+
+    /// The face of the element the pixel at `(x, y)` shows, as paint names it: `exterior` or `interior` for a wall's, `top` or
+    /// `bottom` for a floor's, a roof's or a ceiling's, `all` for another's; none where it's on no face that can be painted.
+    pub fn face(&self, x: f64, y: f64) -> Option<&'static str> {
+        let t = *self.hit.get(self.index(x, y)?)?;
+        self.faces.get(t as usize).copied().filter(|f| !f.is_empty())
     }
 
     /// Every element the picture shows.
@@ -1007,7 +1191,7 @@ mod tests {
 
     #[test]
     fn coplanar_triangles_share_a_plane_and_degenerate_ones_each_their_own() {
-        let tri = |p: [P3; 3]| Tri { p, owner: 1, color: EDGE, curve: None };
+        let tri = |p: [P3; 3]| Tri { p, owner: 1, color: EDGE, tex: 0, curve: None };
         // A face's triangles a micron off its plane, as a file rounds them, are one plane;
         // triangles with no area are each their own, and many of them stay quick.
         let mut tris: Vec<Tri> = (0..200)
@@ -1045,7 +1229,7 @@ mod tests {
 
     #[test]
     fn a_meshs_facets_that_turn_little_read_as_one_surface_and_its_creases_keep_their_edges() {
-        let mesh = |owner, tris: Vec<[P3; 3]>| Solid::Mesh { owner, color: EDGE, caps: tris.len(), round: false, tris };
+        let mesh = |owner, tris: Vec<[P3; 3]>| Solid::Mesh { owner, color: EDGE, tex: 0, caps: tris.len(), round: false, tris };
         // Each cylinder's planes: its sides one surface where they turn 20° or less at their edges,
         // else a plane to each side; and a plane to each cap, however many triangles make it.
         for (n, planes_of) in [(4, 6), (8, 10), (16, 18), (20, 3), (24, 3), (64, 3)] {
@@ -1168,7 +1352,7 @@ mod tests {
     fn a_curves_corners_take_the_normals_of_the_surface_they_are_on() {
         let n = 24;
         let mut out = Vec::new();
-        Solid::Mesh { owner: 1, color: EDGE, caps: 0, round: false, tris: cylinder(n, 200.0, 450.0) }.tris(&mut out);
+        Solid::Mesh { owner: 1, color: EDGE, tex: 0, caps: 0, round: false, tris: cylinder(n, 200.0, 450.0) }.tris(&mut out);
         let normals = corner_normals(&out);
         // Its caps are flat faces: none. Each corner of its sides points straight out from the axis, the top
         // ones as the bottom ones (two triangles meet at some corners, one at others).
@@ -1187,13 +1371,13 @@ mod tests {
         let mut roofed = cylinder(n, 200.0, 450.0);
         roofed.extend((0..n).map(|k| [ring(k), ring(k + 1), [0.0, 0.0, 850.0]]));
         let mut out = Vec::new();
-        Solid::Mesh { owner: 1, color: EDGE, caps: 0, round: false, tris: roofed }.tris(&mut out);
+        Solid::Mesh { owner: 1, color: EDGE, tex: 0, caps: 0, round: false, tris: roofed }.tris(&mut out);
         let normals = corner_normals(&out);
         let normal = |i: usize| normals[i].as_deref().unwrap();
         assert!((2 * n..4 * n).all(|i| normal(i).iter().all(|v| v[2].abs() < 1e-9)));
         assert!((4 * n..5 * n).all(|i| normal(i)[0][2] > 0.4 && normal(i)[1][2] > 0.4 && normal(i)[2][2] > 1.0 - 1e-9));
         // Triangles with corners that aren't numbers, or no area, have none, and don't crash it.
-        let odd = |p: [P3; 3]| Tri { p, owner: 1, color: EDGE, curve: Some((1, 0)) };
+        let odd = |p: [P3; 3]| Tri { p, owner: 1, color: EDGE, tex: 0, curve: Some((1, 0)) };
         let odd = [
             odd([[f64::NAN; 3]; 3]),
             odd([[f64::INFINITY; 3]; 3]),
@@ -1272,6 +1456,235 @@ mod tests {
         let (x, y) = at(&cam, [141.0, -141.0, 1000.0]);
         let rim: Vec<Rgb> = (-3..=3).map(|dy| img.color(x, y + f64::from(dy))).collect();
         assert!(rim.contains(&EDGE), "{rim:?}");
+    }
+
+    #[test]
+    fn a_family_door_and_window_show_their_forms_in_the_wall_and_mirror_with_their_flips() {
+        let mut s = house();
+        s.script(
+            r#"delete {"ids": [7, 8]}
+               door {"at": [2000, 0], "family": "Single Door", "type": "800 x 2100"}
+               window {"at": [8000, 3000], "family": "Fixed Window", "type": "600 x 900"}"#,
+        )
+        .unwrap();
+        // The door and the window are 10 and 11 now (9 is the floor).
+        let (door, window) = (10, 11);
+        let scene = Scene::new(&s.model);
+        let cam = scene.fit(AZIMUTH, ELEVATION, 1600, 1200);
+        let pick_at = |cam: &Camera, img: &Image, p: P3| {
+            let (x, y) = at(cam, p);
+            img.pick(x, y)
+        };
+        let near = |p: P3| {
+            let close = cam.zoom(6.0, at(&cam, p));
+            let img = scene.render(&close, &[]);
+            pick_at(&close, &img, p)
+        };
+        // Seen through the opening: the leaf's face (40 thick, in the middle of the wall), a jamb of the frame, a handle.
+        assert_eq!(near([2000.0, -20.0, 1000.0]), Some(door), "the leaf");
+        assert_eq!(near([1625.0, -100.0, 1000.0]), Some(door), "the jamb");
+        assert_eq!(near([2250.0, -75.0, 1015.0]), Some(door), "the handle, 55 proud of the leaf");
+        // The window's glass is 6 thick, in the middle of its wall, and not what a classic window's 50 mm panel is.
+        assert_eq!(near([8003.0, 3000.0, 1550.0]), Some(window), "the glass");
+        assert_eq!(near([5000.0, -100.0, 1500.0]), Some(3), "the wall beside them");
+        // Its hinge side's jamb is still there, on the other jamb's side, once flipped.
+        run_flip(&mut s);
+        let scene = Scene::new(&s.model);
+        let close = cam.zoom(6.0, at(&cam, [2000.0, -20.0, 1000.0]));
+        let img = scene.render(&close, &[]);
+        // The handle moved to the other side of the leaf: where it was is only the leaf's face now.
+        assert_eq!(pick_at(&close, &img, [1750.0, -75.0, 1015.0]), Some(door), "the handle on the other side");
+    }
+
+    fn run_flip(s: &mut Session) {
+        s.execute("modify", &serde_json::json!({"id": 10, "flip_hand": true})).unwrap();
+    }
+
+    /// The house with its walls of two layers: brick on the left of each, and a block to its right.
+    fn brick_house() -> Session {
+        let mut s = house();
+        s.script(
+            r#"type {"category": "wall", "name": "Brick wall", "layers": [{"function": "finish", "material": "Brick", "thickness": 100}, {"function": "structure", "material": "Concrete block", "thickness": 100}]}
+               modify {"ids": [3, 4, 5, 6], "type": "Brick wall"}"#,
+        )
+        .unwrap();
+        s
+    }
+
+    /// A height in the middle of a brick course (each 75 mm), up a wall.
+    const COURSE: f64 = 1537.5;
+
+    /// The view of `s` from the default angle, a picture 1600 by 1200 centred on `target`, `scale` px to the mm.
+    fn closeup(s: &Session, target: P3, scale: f64) -> (Scene, Camera) {
+        let scene = Scene::new(&s.model);
+        let cam = Camera { target, scale, ..scene.fit(AZIMUTH, ELEVATION, 1600, 1200) };
+        (scene, cam)
+    }
+
+    /// The colours along the north wall's face toward the house (its brick), from `x0` to `x1` mm at 1537.5 up (the middle of a course: 1500 is
+    /// a joint), seen close up.
+    fn along_the_brick(s: &Session, x0: f64, x1: f64, n: i32) -> Vec<Rgb> {
+        let (scene, close) = closeup(s, [4000.0, 5900.0, COURSE], 0.8);
+        let img = scene.render(&close, &[]);
+        (0..n)
+            .map(|i| {
+                let (x, y) = at(&close, [x0 + (x1 - x0) * f64::from(i) / f64::from(n - 1), 5900.0, COURSE]);
+                img.color(x, y)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_textured_material_varies_over_its_faces_at_its_real_size_and_none_is_one_shade() {
+        let mut s = brick_house();
+        let row = along_the_brick(&s, 3200.0, 4800.0, 120);
+        let distinct: BTreeSet<(u8, u8, u8)> = row.iter().map(|c| (c.0, c.1, c.2)).collect();
+        assert!(distinct.len() > 8, "bricks and joints: {} colours", distinct.len());
+        assert!(row.iter().all(|c| c.0 > c.2), "brick red and the mortar's cream, never blue: {:?}", &row[..4]);
+        // Its tile is 900 mm across: what's at one point is at the next, a tile along, within a level or two.
+        let (a, b) = (along_the_brick(&s, 3300.0, 3300.0 + 1e-9, 2), along_the_brick(&s, 4200.0, 4200.0 + 1e-9, 2));
+        let near = |p: Rgb, q: Rgb| p.0.abs_diff(q.0) <= 4 && p.1.abs_diff(q.1) <= 4 && p.2.abs_diff(q.2) <= 4;
+        assert!(near(a[0], b[0]), "{:?} {:?}", a[0], b[0]);
+        // A size of half that, and the pattern repeats twice as often: now a half tile along is the same.
+        s.execute("material", &serde_json::json!({"name": "Brick", "texture": {"size": [450, 300]}})).unwrap();
+        let (c, d) = (along_the_brick(&s, 3300.0, 3300.0 + 1e-9, 2), along_the_brick(&s, 3750.0, 3750.0 + 1e-9, 2));
+        assert!(near(c[0], d[0]), "{:?} {:?}", c[0], d[0]);
+        // Without its texture, one shade along the whole face, as before.
+        s.execute("material", &serde_json::json!({"name": "Brick", "texture": null})).unwrap();
+        let plain = along_the_brick(&s, 3200.0, 4800.0, 120);
+        assert!(plain.iter().all(|c| *c == plain[0]), "{:?}", &plain[..4]);
+        // The same wall in a section is paper and line, as it was: a texture is for the shaded view.
+        s.execute("material", &serde_json::json!({"name": "Brick", "texture": {"kind": "brick"}})).unwrap();
+        let scene = Scene::new(&s.model);
+        let cam = scene.fit(AZIMUTH, ELEVATION, 400, 300);
+        let clip = Clip { near: f64::MAX, far: None, x: (0.0, 400.0), y: (0.0, 300.0) };
+        let cut = scene.cut(&cam, &clip, &[]);
+        assert!(cut.rgba.as_chunks::<4>().0.iter().all(|p| p[0] == p[1] && p[1] == p[2]), "grey, never a colour");
+    }
+
+    /// A PNG file whose left half is red and whose right half is blue, in the scratch folder.
+    fn halves(name: &str) -> String {
+        let (w, h) = (64u32, 8u32);
+        let rgba: Vec<u8> = (0..w * h).flat_map(|k| if k % w < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] }).collect();
+        let png = tiny_skia::Pixmap::from_vec(rgba, tiny_skia::IntSize::from_wh(w, h).unwrap()).unwrap().encode_png().unwrap();
+        let path = std::env::temp_dir().join(format!("bimcraft-{name}-{}.png", std::process::id()));
+        std::fs::write(&path, png).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_picture_made_a_texture_lies_on_the_floor_as_laid_and_paint_gives_a_face_its_own_material() {
+        let mut s = house();
+        let path = halves("floor");
+        // A floor of a material textured with the picture: a tile of 1000 by 1000 mm, red where x is under 500 from a metre's mark.
+        s.script(&format!(
+            r##"material {{"name": "Stripes", "color": "#808080", "texture": {{"kind": "image", "path": {path:?}, "size": [1000, 1000]}}}}
+               type {{"category": "floor", "name": "Striped", "layers": [{{"material": "Stripes", "thickness": 200}}]}}
+               delete {{"ids": [9]}}
+               floor {{"type": "Striped"}}"##
+        ))
+        .unwrap();
+        // Seen from over the house's south-east, a floor point is hidden by the south wall unless it's over 3.7 m north of it, and by
+        // the east wall unless it's over 3.7 m west of it: these, 4500 north and 1250 to 3750 east, aren't.
+        let (scene, close) = closeup(&s, [2500.0, 4500.0, 0.0], 0.4);
+        let img = scene.render(&close, &[]);
+        let at_floor = |x: f64| {
+            let (px, py) = at(&close, [x, 4500.0, 0.0]);
+            img.color(px, py)
+        };
+        let (red, blue) = (|c: Rgb| i32::from(c.0) - i32::from(c.2), |c: Rgb| i32::from(c.2) - i32::from(c.0));
+        for x in [1250.0, 2250.0, 3250.0] {
+            let c = at_floor(x);
+            assert!(red(c) > 80, "{x}: red, {c:?}");
+        }
+        for x in [1750.0, 2750.0, 3750.0] {
+            let c = at_floor(x);
+            assert!(blue(c) > 80, "{x}: blue, {c:?}");
+        }
+        // Moved by 500 mm, the halves swap; the picture itself is the project's, once.
+        s.execute("material", &serde_json::json!({"name": "Stripes", "texture": {"offset": [500, 0]}})).unwrap();
+        let (scene, close) = closeup(&s, [2500.0, 4500.0, 0.0], 0.4);
+        let img = scene.render(&close, &[]);
+        let (px, py) = at(&close, [3250.0, 4500.0, 0.0]);
+        let c = img.color(px, py);
+        assert!(blue(c) > 80, "blue now: {c:?}");
+        assert_eq!(s.model.images.len(), 1);
+        std::fs::remove_file(path).unwrap();
+        // Paint: the face of a wall toward the house (the exterior of these walls, drawn the way round they are) in a material
+        // of its own; the face away from it, the other.
+        let mut s = brick_house();
+        s.execute("paint", &serde_json::json!({"ids": [5], "face": "exterior", "material": "Timber"})).unwrap();
+        let (scene, close) = closeup(&s, [4000.0, 5900.0, COURSE], 0.8);
+        let img = scene.render(&close, &[]);
+        let (x, y) = at(&close, [4000.0, 5900.0, COURSE]);
+        assert_eq!((img.pick(x, y), img.face(x, y)), (Some(5), Some("exterior")));
+        let row: Vec<Rgb> = (0..60).map(|i| img.color(at(&close, [3200.0 + 25.0 * f64::from(i), 5900.0, COURSE]).0, y)).collect();
+        // Timber's tan, in boards (a gap between two, a joint along one, darker): where brick was red.
+        let tan = row.iter().filter(|c| i32::from(c.0) - i32::from(c.2) > 30 && u32::from(c.1) * 100 > u32::from(c.0) * 70).count();
+        assert!(tan >= 50 && row.iter().all(|c| c.0 >= c.2), "{tan} of 60 tan: {:?}", &row[..3]);
+        // The outer face of the south wall is on its interior (a wall's exterior is to the left of its start to its end), and the
+        // floor and the sky have faces of their own or none.
+        let far = scene.fit(AZIMUTH, ELEVATION, 1600, 1200);
+        let seen = scene.render(&far, &[]);
+        let (fx, fy) = at(&far, [4000.0, -100.0, 1500.0]);
+        assert_eq!((seen.pick(fx, fy), seen.face(fx, fy)), (Some(3), Some("interior")));
+        assert_eq!(seen.face(1.0, 1.0), None, "the sky");
+        let top = at(&far, [4000.0, 4500.0, 0.0]);
+        assert_eq!((seen.pick(top.0, top.1), seen.face(top.0, top.1)), (Some(9), Some("top")), "the floor's");
+    }
+
+    #[test]
+    fn paint_changes_only_the_face_it_names() {
+        let mut s = brick_house();
+        let before = Scene::new(&s.model);
+        s.execute("paint", &serde_json::json!({"ids": [5], "face": "exterior", "material": "Timber"})).unwrap();
+        let after = Scene::new(&s.model);
+        let timber = s.model.materials["Timber"].color;
+        assert_eq!(before.tris.len(), after.tris.len());
+        let (mut painted, mut kept) = (0, 0);
+        for (i, (a, b)) in before.tris.iter().zip(&after.tris).enumerate() {
+            if a.owner == 5 && after.faces[i] == "exterior" {
+                assert_eq!(b.color, Rgb(timber[0], timber[1], timber[2]), "triangle {i}");
+                painted += 1;
+            } else {
+                assert_eq!(
+                    (a.color, a.tex),
+                    (b.color, b.tex),
+                    "triangle {i}: the {:?} face of {} keeps what it was",
+                    after.faces[i],
+                    a.owner
+                );
+                kept += usize::from(a.owner == 5);
+            }
+        }
+        assert!(painted > 0 && kept > 0, "{painted} painted, {kept} left of the wall's others");
+    }
+
+    #[test]
+    fn a_texture_on_a_wall_runs_across_to_the_right_of_someone_looking_at_its_face_from_outside() {
+        let mut s = house();
+        let path = halves("wall");
+        // Red where x is under 500 from a metre's mark, laid on the south wall's outer face: its face looks south, so across is east.
+        s.script(&format!(
+            r##"material {{"name": "Stripes", "color": "#808080", "texture": {{"kind": "image", "path": {path:?}, "size": [1000, 1000]}}}}
+               paint {{"ids": [3], "face": "interior", "material": "Stripes"}}"##
+        ))
+        .unwrap();
+        let scene = Scene::new(&s.model);
+        let far = scene.fit(AZIMUTH, ELEVATION, 1600, 1200);
+        let img = scene.render(&far, &[]);
+        let colour = |x: f64| {
+            let (px, py) = at(&far, [x, -100.0, 1500.0]);
+            let c = img.color(px, py);
+            i32::from(c.0) - i32::from(c.2)
+        };
+        for x in [4250.0, 5250.0, 6250.0] {
+            assert!(colour(x) > 80, "{x}: red");
+        }
+        for x in [4750.0, 5750.0, 6750.0] {
+            assert!(colour(x) < -80, "{x}: blue");
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

@@ -169,6 +169,7 @@ type Own = (&'static str, Kind, From);
 
 const ID: Own = ("Id", Kind::Number, From::Key("id"));
 const TYPE: Own = ("Type", Kind::Text, From::Key("type"));
+const FAMILY: Own = ("Family", Kind::Text, From::Key("family"));
 const LEVEL: Own = ("Level", Kind::Text, From::Level);
 const AREA: Own = ("Area", Kind::Area, From::Key("area_m2"));
 const WIDTH: Own = ("Width", Kind::Length, From::Key("width"));
@@ -202,7 +203,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
             DESIGN_OPTION,
         ],
     ),
-    ("door", 6, &[MARK, TYPE, WIDTH, HEIGHT, LEVEL, HOST, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("door", 6, &[MARK, TYPE, WIDTH, HEIGHT, LEVEL, HOST, FAMILY, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "window",
         7,
@@ -214,6 +215,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
             ("Sill", Kind::Length, From::Key("sill")),
             LEVEL,
             HOST,
+            FAMILY,
             COUNT,
             PHASE_CREATED,
             PHASE_DEMOLISHED,
@@ -255,7 +257,7 @@ const OWN: &[(&str, usize, &[Own])] = &[
             DESIGN_OPTION,
         ],
     ),
-    ("component", 4, &[("Family", Kind::Text, From::Key("family")), TYPE, LEVEL, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("component", 4, &[FAMILY, TYPE, LEVEL, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "stair",
         7,
@@ -643,8 +645,8 @@ impl Row<'_> {
                 None => Value::Null,
             };
         }
-        if let Element::Component(c) = self.e
-            && let Some(p) = m.families.get(&c.family).and_then(|f| f.parameters.iter().find(|p| p.name == name))
+        if let Some((family, _)) = self.e.family()
+            && let Some(p) = m.families.get(family).and_then(|f| f.parameters.iter().find(|p| p.name == name))
         {
             let v = j.get("values").and_then(|v| v.get(name)).cloned().unwrap_or(Value::Null);
             return match (p.kind, v.as_f64()) {

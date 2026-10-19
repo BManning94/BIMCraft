@@ -14,6 +14,7 @@ use egui::{
     Align, Color32, ColorImage, Layout, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder,
     pos2, vec2,
 };
+use serde_json::json;
 
 use crate::canvas::{click_modifiers, color};
 use crate::style::{Icon, pal};
@@ -82,6 +83,20 @@ impl BimApp {
         }
     }
 
+    /// Paint (PT): the face clicked of element `id` takes the material in the Options Bar, or with `remove` loses its paint.
+    pub(crate) fn paint_face(&mut self, id: bimcraft_core::model::Id, face: Option<&'static str>, remove: bool) {
+        let Some(face) = face else {
+            self.status = Status { text: crate::lang::t("there's no face to paint there").into(), error: true };
+            return;
+        };
+        let material = match (remove, self.painting()) {
+            (true, _) => serde_json::Value::Null,
+            (false, Some(n)) => json!(n),
+            (false, None) => return,
+        };
+        self.run("paint", json!({"id": id, "face": face, "material": material}));
+    }
+
     /// The 3D view, filling `ui`.
     pub(crate) fn view3d(&mut self, ui: &mut Ui) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
@@ -96,6 +111,7 @@ impl BimApp {
         });
         let model = Arc::clone(&self.session.model);
         let (modify, demolish, selection) = (self.tool == Tool::Modify, self.tool == Tool::Demolish, self.selection.clone());
+        let (paint, unpaint) = (self.tool == Tool::Paint, self.tool == Tool::Unpaint);
         let o = &mut self.orbit;
         (o.rect, o.ppp) = (rect, ppp);
         let scene = scene_of(&mut o.scene, &model);
@@ -137,7 +153,7 @@ impl BimApp {
             let (x, y) = px(at);
             image.as_ref().and_then(|i| i.pick(x, y))
         };
-        let hovered = hover.filter(|_| (modify || demolish) && o.drag.is_none()).and_then(|at| pick(&o.image, at));
+        let hovered = hover.filter(|_| (modify || demolish || paint || unpaint) && o.drag.is_none()).and_then(|at| pick(&o.image, at));
         let tints: Vec<(Id, Rgb)> = selection
             .iter()
             .map(|id| (*id, rgb(pal().accent)))
@@ -165,17 +181,19 @@ impl BimApp {
         if let Some(t) = &o.texture {
             p.image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        let clicked = response
-            .clicked()
-            .then(|| response.interact_pointer_pos())
-            .flatten()
-            .or(self.canvas.quick_press())
-            .map(|at| pick(&o.image, at));
+        let click = response.clicked().then(|| response.interact_pointer_pos()).flatten().or(self.canvas.quick_press());
+        let clicked = click.map(|at| pick(&o.image, at));
+        // The face of what's clicked, as paint names the faces of an element.
+        let face = click.and_then(|at| {
+            let (x, y) = px(at);
+            o.image.as_ref().and_then(|i| i.face(x, y))
+        });
         match clicked {
             Some(found) if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
             Some(Some(id)) if demolish => self.demolish(id),
-            // Nothing under the cursor: nothing to take down.
-            Some(None) if demolish => {}
+            Some(Some(id)) if paint || unpaint => self.paint_face(id, face, unpaint),
+            // Nothing under the cursor: nothing to take down, or to paint.
+            Some(None) if demolish || paint || unpaint => {}
             Some(_) => {
                 self.status =
                     Status { text: crate::lang::t("this tool works in plan views: open one from the Project Browser").into(), error: true }

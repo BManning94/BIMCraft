@@ -9,6 +9,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value, json};
 
 use crate::engine::{Command, Run, Session};
+use crate::favorites::{self, FamilyEntry, Favorites, MaterialEntry};
 use crate::geom::{self, P2};
 use crate::graphics::{self, Graphics, Group, Look, Override, ViewTemplate};
 use crate::language::Language;
@@ -19,8 +20,10 @@ use crate::model::{
     Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL,
     TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
+use crate::paint;
 use crate::phasing;
 use crate::render::Drawing;
+use crate::texture::{self, Kind, Picture, Texture};
 use crate::units::Units;
 use crate::walls::{self, Axis, stacked};
 use crate::{pdf, render, schedule, sheet, snap, stairs, view3d};
@@ -73,15 +76,17 @@ pub static ALL: &[Command] = &[
         "door",
         "Door",
         &["DR"],
-        "{at: [x,y] | wall: id, offset?, type?, level?, mark?, flip_facing?, flip_hand?} in the wall under `at`, \
-         or in `wall` centred `offset` mm from its start",
+        "{at: [x,y] | wall: id, offset?, type?, family?, level?, mark?, flip_facing?, flip_hand?} in the wall under `at`, \
+         or in `wall` centred `offset` mm from its start; with `family`, a door family's `type` (its first by default), \
+         which sizes the opening and draws the door",
         door,
     ),
     edit(
         "window",
         "Window",
         &["WN"],
-        "{at: [x,y] | wall: id, offset?, sill?, type?, level?, mark?, flip_facing?} like door; `sill` defaults to the type's",
+        "{at: [x,y] | wall: id, offset?, sill?, type?, family?, level?, mark?, flip_facing?} like door; `sill` defaults to the \
+         type's (a family's `Sill Height`)",
         window,
     ),
     edit(
@@ -282,13 +287,39 @@ pub static ALL: &[Command] = &[
         "material",
         "Materials",
         &[],
-        "{name, color?: \"#rrggbb\" | [r, g, b], cut?, surface?, rename?, delete?: true} a material of the project's library, \
-         created or changed: its colour in shaded 3D views, the pattern its cut shows in plans and sections (where a layer is \
-         wide enough to hold it), and the one its surfaces show at its size in the building (a floor's top in plan, a \
-         ceiling's underside in its ceiling plan). Patterns: none, solid, diagonal, crosshatch, horizontal, vertical, grid, brick, concrete, insulation. \
-         `rename` renames it, the layers using it following; `delete` takes it away, while no layer uses it. `inspect` lists \
-         the library",
+        "{name, color?: \"#rrggbb\" | [r, g, b], cut?, surface?, texture?: {kind?, size?: [w, h], angle?, offset?: [x, y], path?, \
+         image?} | null, rename?, delete?: true} a material of the project's library, created or changed: its colour in shaded 3D \
+         views, the pattern its cut shows in plans and sections (where a layer is wide enough to hold it), and the one its \
+         surfaces show at its size in the building (a floor's top in plan, a ceiling's underside in its ceiling plan). Patterns: \
+         none, solid, diagonal, crosshatch, horizontal, vertical, grid, brick, concrete, insulation. Its `texture` is what its \
+         surfaces look like in the 3D view, over its colour, a tile of it `size` mm across and up, turned `angle` degrees and \
+         moved `offset` mm: a pattern drawn in code, `kind` brick, block, boards, concrete, plaster, tile, roof, fabric, metal \
+         or insulation (at its natural size unless `size` says); or `image`, a picture: the PNG or JPEG file at `path`, taken \
+         into the project (up to 1024 px a side, 24 pictures), or one the project holds (`image`, its id from `inspect`); null \
+         takes the texture away. `rename` renames it, the layers using it following; `delete` takes it away, while no layer \
+         uses it. `inspect` lists the library and the pictures",
         material,
+    ),
+    edit(
+        "favorite",
+        "Favorites",
+        &[],
+        "{action?: list|save|load|delete, kind?: material|family, name?, as?, replace?, path?} the user's favorites, kept in a file \
+         of their own (`path`; by default in their configuration folder) for every project to use: `save` the project's \
+         material or family `name` (a material with the picture its texture is made of, a family with the materials it is \
+         made of), under another name with `as`; `load` a favorite into the project, under another name with `as`, or over \
+         one it has already with `replace`; `delete` one from the favorites; `list` them (the default)",
+        favorite,
+    ),
+    edit(
+        "paint",
+        "Paint",
+        &["PT"],
+        "{id | ids, face?, material} paints a face of the elements with a material of the library, as Revit's Paint does: its \
+         colour and texture show in the 3D view over what their types are made of. `face`: a wall's `exterior` or `interior`, a \
+         floor's, roof's or ceiling's `top` or `bottom`, and `all` for a column, a component, a door, a window, a stair, a ramp or \
+         a railing; without it, every face the elements have. `material` null takes the paint off",
+        paint,
     ),
     edit(
         "parameter",
@@ -305,12 +336,23 @@ pub static ALL: &[Command] = &[
         "family",
         "Load Family",
         &[],
-        "{name, category?: furniture|casework|plumbing|lighting|generic, parameters?: [{name, kind?: length|number|angle|yesno|\
-         material, instance?, value?, formula?}], types?: {type: {parameter: value}}, forms?: [{plane?: xy|xz|yz, profile?: [[a, \
-         b], …], circle?: {centre: [a, b], radius}, from?, to, material?, visible?}], rename?, delete?: true, path?} a family of \
+        "{name, category?: furniture|casework|plumbing|lighting|generic|door|window, parameters?: [{name, kind?: length|number|\
+         angle|yesno|material, instance?, value?, formula?}], types?: {type: {parameter: value}}, forms?: [{plane?: xy|xz|yz, \
+         profile?: [[a, b], …], circle?: {centre: [a, b], radius}, axis?: [[a, b], [a, b]], from?, to, material?, visible?, \
+         void?}], symbols?: [{line?: [[x, y], …] | arc?: {centre: [x, y], radius, from?, to}, visible?}], rename?, delete?: \
+         true, path?, save?} a family of \
          the project's, BIMCraft's own parametric component: created, changed, or loaded from the .json file at `path` (a family \
          as `inspect` shows it, with its `name`). Its forms are profiles drawn in its own axes (x along a component's angle, y \
-         to its left, z up from its base) and swept: `xy` up from `from` to `to`, `xz` along y, `yz` along x. Sizes are mm, or \
+         to its left, z up from its base) and swept: `xy` up from `from` to `to`, `xz` along y, `yz` along x. With an `axis`, a \
+         line in that plane, the profile is turned about it instead, `from` to `to` degrees (up to 360, right-handed from the \
+         axis' first point toward its second; it can't cross the axis): a pipe, a bowl, a lamp shade. A `void` is no solid: it \
+         cuts the solid forms listed before it that it passes through, a hole, a notch, a sink's bowl, and is never seen \
+         itself (forms listed after it are whole). A `door` or `window` family stands in a wall, placed with `door` or `window` \
+         and a `family`: its forms are drawn in the opening's axes (x along the wall from the middle of the opening, y across \
+         it, 0 in the middle of the wall and + toward its exterior, z up from the sill), it must have length parameters \
+         `Width` and `Height` (the opening it makes; `Sill Height` is a window's default sill), and its formulas read \
+         `Wall Thickness`, the wall's. Its `symbols` are the lines its plan draws (a door's swing: a `line`, an `arc` in \
+         degrees from +x counter-clockwise). Sizes are mm, or \
          formulas over its parameters as Revit's are: `Width / 2`, `if(Depth > 600, 4, 2)`, with + - * / ^, < > = <= >=, if, \
          and, or, not, min, max, abs, sqrt, round, roundup, rounddown, sin, cos, tan (degrees). A parameter is each type's, or \
          with `instance` each component's. `types` merges into its types (a null takes one away); `parameters` and `forms` \
@@ -837,6 +879,15 @@ pub fn element_json(m: &Model, id: Id) -> Value {
                 extra.insert("height".into(), json!(t.height));
                 extra.insert("level".into(), json!(w.level));
                 extra.insert("at".into(), json!(m.anchor(id)));
+                // Of a family: every parameter's value, worked out.
+                if let Some(v) = o
+                    .family
+                    .as_ref()
+                    .and_then(|n| m.families.get(n))
+                    .and_then(|f| f.values_in(&o.type_name, &o.params, m.thickness(w)).ok())
+                {
+                    extra.insert("values".into(), values_json(v));
+                }
             }
         }
         Element::Dimension(d) => {
@@ -845,14 +896,7 @@ pub fn element_json(m: &Model, id: Id) -> Value {
         // Every parameter's value, worked out, and how high it reaches over its base.
         Element::Component(cp) => {
             if let Some(v) = m.families.get(&cp.family).and_then(|f| f.values(&cp.type_name, &cp.params).ok()) {
-                let values: Map<String, Value> = v
-                    .into_iter()
-                    .map(|(k, v)| match v {
-                        crate::family::Val::Number(x) => (k, json!(x)),
-                        crate::family::Val::Text(t) => (k, json!(t)),
-                    })
-                    .collect();
-                extra.insert("values".into(), Value::Object(values));
+                extra.insert("values".into(), values_json(v));
             }
             let base = m.elevation(cp.level) + cp.offset;
             let top = m.component_pieces(cp).iter().map(|p| p.top).fold(base, f64::max);
@@ -1030,10 +1074,10 @@ fn open(s: &mut Session, p: &Value) -> R {
     m.adopt_materials();
     // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
     let mut renamed = BTreeMap::new();
-    if m.parameters.keys().any(|n| phasing::reserved(n)) {
+    if m.parameters.keys().any(|n| phasing::reserved(n) || paint::reserved(n)) {
         let mut t = Session::new();
         t.model = Arc::new(m);
-        let olds: Vec<String> = t.model.parameters.keys().filter(|n| phasing::reserved(n)).cloned().collect();
+        let olds: Vec<String> = t.model.parameters.keys().filter(|n| phasing::reserved(n) || paint::reserved(n)).cloned().collect();
         for old in olds {
             let new = (1..)
                 .map(|i| if i == 1 { format!("{old} Parameter") } else { format!("{old} Parameter {i}") })
@@ -2226,7 +2270,28 @@ fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
     let c = if is_door { "door" } else { "window" };
     let m = &s.model;
     let types = if is_door { &m.types.door } else { &m.types.window };
-    let type_name = type_param(c, p, m, c)?;
+    // Of a family's type, or one of the project's own.
+    let family = string(c, p, "family")?;
+    let (type_name, family_sill) = match &family {
+        Some(name) => {
+            let kind = if is_door { crate::family::Category::Door } else { crate::family::Category::Window };
+            let f = m.families.get(name).filter(|f| f.category == kind).ok_or_else(|| {
+                let names: Vec<&str> = m.families.iter().filter(|(_, f)| f.category == kind).map(|(n, _)| n.as_str()).collect();
+                bad(c, format!("there's no {c} family `{name}` (there are: {})", names.join(", ")))
+            })?;
+            let type_name = match string(c, p, "type")? {
+                Some(t) => t,
+                None => f.types.keys().next().cloned().ok_or_else(|| bad(c, format!("family `{name}` has no type")))?,
+            };
+            let values = f.values(&type_name, &BTreeMap::new()).map_err(|e| bad(c, e))?;
+            let sill = match values.get(crate::family::SILL) {
+                Some(crate::family::Val::Number(x)) => Some(*x),
+                _ => None,
+            };
+            (type_name, sill)
+        }
+        None => (type_param(c, p, m, c)?, None),
+    };
     let at = point_opt(c, p, "at")?;
     let (host, along_at) = match id_opt(c, p, "wall")? {
         Some(h) => {
@@ -2240,7 +2305,12 @@ fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
         }
     };
     let offset = num(c, p, "offset")?.unwrap_or(along_at);
-    let sill = if is_door { 0.0 } else { num(c, p, "sill")?.unwrap_or_else(|| types.get(&type_name).map_or(0.0, |t| t.sill)) };
+    let default_sill = family_sill.unwrap_or_else(|| match &family {
+        Some(_) if is_door => 0.0,
+        Some(_) => 900.0,
+        None => types.get(&type_name).map_or(0.0, |t| t.sill),
+    });
+    let sill = if is_door { 0.0 } else { num(c, p, "sill")?.unwrap_or(default_sill) };
     let mark = match string(c, p, "mark")? {
         Some(mk) => mk,
         None => next_number(m.elements.values().filter_map(|e| match e {
@@ -2251,6 +2321,7 @@ fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
     };
     let o = Opening {
         params: Default::default(),
+        family,
         type_name,
         host,
         offset,
@@ -3099,9 +3170,16 @@ fn material(s: &mut Session, p: &Value) -> R {
             return Err(bad(c, format!("`{name}` is in {user}; take it out of it first")));
         }
         m.materials.remove(&name);
+        prune_images(m);
         return Ok(json!({"deleted": name}));
     }
     let mut mat = m.materials.get(&name).cloned().unwrap_or_default();
+    match p.get("texture") {
+        None => {}
+        Some(Value::Null) => mat.texture = None,
+        Some(Value::Object(o)) => mat.texture = Some(texture_param(c, m, o, mat.texture.take())?),
+        Some(v) => return Err(bad(c, format!("`texture` is {{kind, size?, angle?, offset?, path?}} or null, not {v}"))),
+    }
     if let Some(v) = p.get("color").filter(|v| !v.is_null()) {
         mat.color = colour(v).ok_or_else(|| bad(c, format!("`color` is \"#rrggbb\" or [r, g, b], each 0 to 255, not {v}")))?;
     }
@@ -3130,7 +3208,126 @@ fn material(s: &mut Session, p: &Value) -> R {
         None => name,
     };
     m.materials.insert(name.clone(), mat.clone());
+    prune_images(m);
     Ok(json!({"name": name, "material": mat}))
+}
+
+/// The pictures no material's texture is made of, taken out of the project.
+fn prune_images(m: &mut Model) {
+    let used: BTreeSet<String> =
+        m.materials.values().filter_map(|x| x.texture.as_ref()).filter(|t| t.kind == Kind::Image).map(|t| t.image.clone()).collect();
+    m.images.retain(|id, _| used.contains(id));
+}
+
+/// Two numbers, `[a, b]`, or one for both.
+fn pair(c: &str, key: &str, v: &Value) -> Result<[f64; 2], String> {
+    let n = |x: &Value| {
+        x.as_f64().filter(|x| x.is_finite()).ok_or_else(|| bad(c, format!("texture `{key}` is [a, b] numbers, or one, not {v}")))
+    };
+    match v {
+        Value::Array(a) if a.len() == 2 => Ok([n(&a[0])?, n(&a[1])?]),
+        v => n(v).map(|x| [x, x]),
+    }
+}
+
+/// A material's texture as the JSON `p` says over its `old` one: kind, size, angle, offset, and for a picture the file to take
+/// into the project (`path`) or the project's own picture (`image`).
+fn texture_param(c: &str, m: &mut Model, p: &Map<String, Value>, old: Option<Texture>) -> Result<Texture, String> {
+    if let Some(k) = p.keys().find(|k| !["kind", "size", "angle", "offset", "path", "image"].contains(&k.as_str())) {
+        return Err(bad(c, format!("texture: `{k}` isn't one of kind, size, angle, offset, path, image")));
+    }
+    let kinds: Vec<&str> = Kind::ALL.iter().map(|k| k.name()).collect();
+    let kind = match p.get("kind").filter(|v| !v.is_null()) {
+        Some(v) => serde_json::from_value::<Kind>(v.clone())
+            .map_err(|_| bad(c, format!("texture `kind`: {v} isn't one of {}", kinds.join(", "))))?,
+        None => old.as_ref().map(|t| t.kind).ok_or_else(|| bad(c, format!("a texture needs a `kind`: one of {}", kinds.join(", "))))?,
+    };
+    // Over the old one while it's of this kind; else a new one at its natural size.
+    let mut t = old.filter(|t| t.kind == kind).unwrap_or_else(|| Texture::new(kind));
+    if let Some(v) = p.get("size").filter(|v| !v.is_null()) {
+        t.size = pair(c, "size", v)?;
+    }
+    if let Some(v) = p.get("offset").filter(|v| !v.is_null()) {
+        t.offset = pair(c, "offset", v)?;
+    }
+    if let Some(v) = p.get("angle").filter(|v| !v.is_null()) {
+        t.angle = v.as_f64().ok_or_else(|| bad(c, format!("texture `angle` is a number of degrees, not {v}")))?;
+    }
+    match (kind, p.get("path").filter(|v| !v.is_null()), p.get("image").filter(|v| !v.is_null())) {
+        (Kind::Image, Some(path), _) => {
+            let path = PathBuf::from(path.as_str().ok_or_else(|| bad(c, format!("texture `path` is a file's path, not {path}")))?);
+            let len = std::fs::metadata(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
+            if len > texture::MAX_BYTES as u64 {
+                return Err(bad(c, format!("{} is too large ({len} bytes)", path.display())));
+            }
+            let bytes = std::fs::read(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+            let stem = path.file_stem().map_or_else(|| "picture".into(), |s| s.to_string_lossy().into_owned());
+            let picture = Picture::import(&stem, &bytes).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+            let (id, (w, h)) = (picture.id(), picture.size());
+            if !m.images.contains_key(&id) && m.images.len() >= texture::MAX_IMAGES {
+                return Err(bad(c, format!("the project holds {} pictures already; take a texture of one away first", m.images.len())));
+            }
+            m.images.insert(id.clone(), picture);
+            t.image = id;
+            // A new picture covers a tile a metre across, as tall as its proportions make it.
+            if p.get("size").is_none_or(Value::is_null) {
+                t.size = [1000.0, 1000.0 * h as f64 / w.max(1) as f64];
+            }
+        }
+        (Kind::Image, None, Some(image)) => {
+            t.image = image.as_str().ok_or_else(|| bad(c, format!("texture `image` is a picture's id, not {image}")))?.to_string();
+        }
+        (Kind::Image, None, None) if t.image.is_empty() => {
+            return Err(bad(c, "a texture of a picture needs its file, `path`, or one of the project's, `image`"));
+        }
+        (Kind::Image, None, None) => {}
+        (_, None, None) => t.image.clear(),
+        _ => return Err(bad(c, "only a texture of kind `image` takes a `path` or an `image`")),
+    }
+    t.check(&m.images).map_err(|e| bad(c, format!("texture: {e}")))?;
+    Ok(t)
+}
+
+fn paint(s: &mut Session, p: &Value) -> R {
+    let c = "paint";
+    let m = &s.model;
+    let ids = ids_param(c, m, p)?;
+    let face = string(c, p, "face")?;
+    let material = match p.get("material") {
+        None => return Err(bad(c, "`material` is required: a material's name, or null to take the paint off")),
+        Some(Value::Null) => None,
+        Some(Value::String(n)) => Some(n.trim().to_string()),
+        Some(v) => return Err(bad(c, format!("`material` is a material's name, or null, not {v}"))),
+    };
+    if let Some(n) = material.as_ref().filter(|n| !m.materials.contains_key(*n)) {
+        return Err(bad(c, format!("the library has no `{n}`; add it with `material`")));
+    }
+    let m = s.model_mut();
+    for &id in &ids {
+        let e = m.elements.get_mut(&id).ok_or_else(|| bad(c, format!("no element {id}")))?;
+        let (category, faces) = (e.category(), paint::faces(e.category()));
+        let Some(params) = e.params_mut().filter(|_| !faces.is_empty()) else {
+            return Err(bad(c, format!("{category} {id} has no face to paint")));
+        };
+        let touched: Vec<&str> = match face.as_deref() {
+            Some(f) if faces.contains(&f) => vec![f],
+            Some(f) => return Err(bad(c, format!("a {category} has no face `{f}`; its faces are {}", faces.join(", ")))),
+            None => faces.to_vec(),
+        };
+        let mut now = params.get(paint::KEY).and_then(Value::as_object).cloned().unwrap_or_default();
+        for f in touched {
+            match &material {
+                Some(n) => now.insert(f.to_string(), json!(n)),
+                None => now.remove(f),
+            };
+        }
+        if now.is_empty() {
+            params.remove(paint::KEY);
+        } else {
+            params.insert(paint::KEY.into(), Value::Object(now));
+        }
+    }
+    Ok(json!({"painted": ids}))
 }
 
 fn parameter(s: &mut Session, p: &Value) -> R {
@@ -3151,7 +3348,7 @@ fn parameter(s: &mut Session, p: &Value) -> R {
                 }
                 continue;
             }
-            let (cat, family) = (e.category(), if let Element::Component(cp) = &*e { families.get(&cp.family) } else { None });
+            let (cat, family) = (e.category(), e.family().and_then(|(f, _)| families.get(f)));
             if !gone.iter().any(|g| g == cat) || family.is_some_and(|f| f.parameters.iter().any(|q| q.name == name)) {
                 continue;
             }
@@ -3186,7 +3383,7 @@ fn parameter(s: &mut Session, p: &Value) -> R {
         // that name aren't).
         let Model { families, elements, .. } = &*m;
         let valued = elements.values().any(|e| {
-            let theirs = matches!(e, Element::Component(cp) if families.get(&cp.family).is_some_and(|f| f.parameters.iter().any(|q| q.name == name)));
+            let theirs = e.family().and_then(|(f, _)| families.get(f)).is_some_and(|f| f.parameters.iter().any(|q| q.name == name));
             param.categories.iter().any(|k| k == e.category()) && !theirs && e.params().is_some_and(|ps| ps.contains_key(&name))
         });
         if kind != param.kind && valued {
@@ -3271,16 +3468,27 @@ fn family(s: &mut Session, p: &Value) -> R {
         let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let name = p.get("name").filter(|v| !v.is_null()).cloned().or_else(|| fields.remove("name")).unwrap_or(json!(stem));
         // Only the family it holds: what a file says to rename or delete isn't for it to say.
-        let mut family: Map<String, Value> =
-            ["category", "parameters", "types", "forms"].into_iter().filter_map(|k| fields.remove(k).map(|v| (k.to_string(), v))).collect();
+        let mut family: Map<String, Value> = ["category", "parameters", "types", "forms", "symbols"]
+            .into_iter()
+            .filter_map(|k| fields.remove(k).map(|v| (k.to_string(), v)))
+            .collect();
         family.insert("name".into(), name);
         p = Value::Object(family);
     }
     let name =
         string(c, &p, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or_else(|| bad(c, "`name` is required"))?;
+    // Saved to a file a family of the project's is: the file `path` loads it back from.
+    if let Some(file) = string(c, &p, "save")? {
+        let f = s.model.families.get(&name).ok_or_else(|| bad(c, format!("there's no family `{name}` to save")))?;
+        let mut v = serde_json::to_value(f).map_err(|e| bad(c, e))?;
+        v["name"] = json!(name);
+        let text = serde_json::to_string_pretty(&v).map_err(|e| bad(c, e))?;
+        std::fs::write(&file, text).map_err(|e| bad(c, format!("{file}: {e}")))?;
+        return Ok(json!({"saved": name, "path": file}));
+    }
     let m = s.model_mut();
     let users = |m: &Model, name: &str| -> Vec<Id> {
-        m.elements.iter().filter(|(_, e)| matches!(e, Element::Component(cp) if cp.family == name)).map(|(id, _)| *id).collect()
+        m.elements.iter().filter(|(_, e)| e.family().is_some_and(|(f, _)| f == name)).map(|(id, _)| *id).collect()
     };
     if flag(c, &p, "delete")? {
         if !m.families.contains_key(&name) {
@@ -3289,7 +3497,7 @@ fn family(s: &mut Session, p: &Value) -> R {
         let used = users(m, &name);
         if !used.is_empty() {
             let ids: Vec<String> = used.iter().map(Id::to_string).collect();
-            return Err(bad(c, format!("components {} are of `{name}`; delete them first", ids.join(", "))));
+            return Err(bad(c, format!("elements {} are of `{name}`; delete them first", ids.join(", "))));
         }
         m.families.remove(&name);
         return Ok(json!({"deleted": name}));
@@ -3301,6 +3509,9 @@ fn family(s: &mut Session, p: &Value) -> R {
     }
     if let Some(v) = p.get("parameters").filter(|v| !v.is_null()) {
         f.parameters = serde_json::from_value(v.clone()).map_err(|e| field("parameters", e))?;
+        if let Some(q) = f.parameters.iter().find(|q| paint::reserved(&q.name)) {
+            return Err(bad(c, format!("parameter `{}`: an element holds its paint under that name; name it otherwise", q.name)));
+        }
         if let Some(q) = f.parameters.iter().find(|q| phasing::reserved(&q.name)) {
             return Err(bad(
                 c,
@@ -3310,6 +3521,9 @@ fn family(s: &mut Session, p: &Value) -> R {
     }
     if let Some(v) = p.get("forms").filter(|v| !v.is_null()) {
         f.forms = serde_json::from_value(v.clone()).map_err(|e| field("forms", e))?;
+    }
+    if let Some(v) = p.get("symbols").filter(|v| !v.is_null()) {
+        f.symbols = serde_json::from_value(v.clone()).map_err(|e| field("symbols", e))?;
     }
     if let Some(v) = p.get("types").filter(|v| !v.is_null()) {
         let mut types = serde_json::to_value(&f.types).map_err(|e| bad(c, e))?;
@@ -3327,10 +3541,10 @@ fn family(s: &mut Session, p: &Value) -> R {
             }
             m.families.remove(&name);
             for e in m.elements.values_mut() {
-                if let Element::Component(cp) = e
-                    && cp.family == name
+                if let Some(f) = e.family_mut()
+                    && *f == name
                 {
-                    cp.family.clone_from(&to);
+                    f.clone_from(&to);
                 }
             }
             to
@@ -3372,6 +3586,96 @@ fn component(s: &mut Session, p: &Value) -> R {
     Ok(json!({"id": id}))
 }
 
+/// The project's pictures, each its name and its size in pixels.
+fn images(m: &Model) -> Value {
+    Value::Object(m.images.iter().map(|(id, p)| (id.clone(), json!({"name": p.name(), "size": [p.size().0, p.size().1]}))).collect())
+}
+
+fn favorite(s: &mut Session, p: &Value) -> R {
+    let c = "favorite";
+    let action = string(c, p, "action")?.unwrap_or_else(|| "list".into());
+    let kind = string(c, p, "kind")?.unwrap_or_else(|| "material".into());
+    if !matches!(kind.as_str(), "material" | "family") {
+        return Err(bad(c, format!("`kind` is material or family, not `{kind}`")));
+    }
+    let path = match string(c, p, "path")? {
+        Some(path) => PathBuf::from(path),
+        None => favorites::default_path().ok_or_else(|| bad(c, "there's no folder to keep favorites in here: give `path`"))?,
+    };
+    let mut kept = Favorites::read(&path).map_err(|e| bad(c, e))?;
+    let clean = |n: String| Some(n.trim().to_string()).filter(|n| !n.is_empty());
+    let name = string(c, p, "name")?.and_then(clean);
+    let rename = string(c, p, "as")?.and_then(clean);
+    let need = || name.clone().ok_or_else(|| bad(c, format!("`name` is required: the {kind}'s")));
+    match action.as_str() {
+        "list" => {
+            let materials: Vec<Value> = kept
+                .materials
+                .iter()
+                .map(|(n, e)| json!({"name": n, "color": e.material.color, "texture": e.material.texture.as_ref().map(|t| t.kind.name())}))
+                .collect();
+            let families: Vec<Value> = kept
+                .families
+                .iter()
+                .map(|(n, e)| json!({"name": n, "category": e.family.category, "types": e.family.types.keys().collect::<Vec<_>>()}))
+                .collect();
+            Ok(json!({"path": path, "materials": materials, "families": families}))
+        }
+        "save" => {
+            let name = need()?;
+            let kept_as = rename.unwrap_or_else(|| name.clone());
+            if kind == "material" {
+                let entry = MaterialEntry::of(&s.model, &name).ok_or_else(|| bad(c, format!("the library has no `{name}`")))?;
+                kept.materials.insert(kept_as.clone(), entry);
+            } else {
+                let entry = FamilyEntry::of(&s.model, &name).ok_or_else(|| bad(c, format!("the project has no family `{name}`")))?;
+                kept.families.insert(kept_as.clone(), entry);
+            }
+            kept.version = 1;
+            kept.check().and_then(|()| kept.write(&path)).map_err(|e| bad(c, e))?;
+            Ok(json!({"saved": kept_as, "kind": kind, "path": path}))
+        }
+        "delete" => {
+            let name = need()?;
+            let gone = if kind == "material" { kept.materials.remove(&name).is_some() } else { kept.families.remove(&name).is_some() };
+            if !gone {
+                return Err(bad(c, format!("there's no favorite {kind} `{name}`")));
+            }
+            kept.write(&path).map_err(|e| bad(c, e))?;
+            Ok(json!({"deleted": name, "kind": kind}))
+        }
+        "load" => {
+            let name = need()?;
+            let as_name = rename.unwrap_or_else(|| name.clone());
+            let replace = flag(c, p, "replace")?;
+            let m = s.model_mut();
+            if kind == "material" {
+                let entry = kept.materials.get(&name).ok_or_else(|| bad(c, format!("there's no favorite material `{name}`")))?;
+                if m.materials.contains_key(&as_name) && !replace {
+                    return Err(bad(c, format!("the library has `{as_name}` already: load it `as` another name, or `replace` it")));
+                }
+                entry.bring_into(m, &as_name).map_err(|e| bad(c, e))?;
+                prune_images(m);
+            } else {
+                let entry = kept.families.get(&name).ok_or_else(|| bad(c, format!("there's no favorite family `{name}`")))?;
+                if m.families.contains_key(&as_name) && !replace {
+                    return Err(bad(c, format!("the project has family `{as_name}` already: load it `as` another name, or `replace` it")));
+                }
+                // The materials it's made of that the project hasn't come with it; the project's own of the same name stay.
+                for (n, material) in &entry.materials {
+                    if !m.materials.contains_key(n) {
+                        material.bring_into(m, n).map_err(|e| bad(c, e))?;
+                    }
+                }
+                m.families.insert(as_name.clone(), entry.family.clone());
+                m.adopt_materials();
+            }
+            Ok(json!({"loaded": as_name, "kind": kind}))
+        }
+        other => Err(bad(c, format!("`action` is list, save, load or delete, not `{other}`"))),
+    }
+}
+
 /// The families, each its category, its types and its parameters' names.
 fn families(m: &Model) -> Value {
     let all: Map<String, Value> = m
@@ -3383,6 +3687,18 @@ fn families(m: &Model) -> Value {
         })
         .collect();
     Value::Object(all)
+}
+
+/// A family's parameters' values, worked out, as JSON.
+fn values_json(v: BTreeMap<String, crate::family::Val>) -> Value {
+    Value::Object(
+        v.into_iter()
+            .map(|(k, v)| match v {
+                crate::family::Val::Number(x) => (k, json!(x)),
+                crate::family::Val::Text(t) => (k, json!(t)),
+            })
+            .collect::<Map<String, Value>>(),
+    )
 }
 
 /// `"#rrggbb"`, or `[r, g, b]`, each 0 to 255.
@@ -3433,7 +3749,7 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
                 height: height.or(old.as_ref().map(|t| t.height)).ok_or_else(|| need("height"))?,
                 sill: sill.or(old.as_ref().map(|t| t.sill)).unwrap_or(if cat == "window" { 900.0 } else { 0.0 }),
             };
-            map.insert(name.clone(), t.clone());
+            map.insert(name.clone(), t);
             json!(t)
         }
         "column" => {
@@ -4233,7 +4549,7 @@ fn inspect(s: &mut Session, _: &Value) -> R {
     Ok(json!({
         "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
         "counts": counts,
-        "types": m.types, "materials": m.materials, "families": families(m), "parameters": m.parameters,
+        "types": m.types, "materials": m.materials, "images": images(m), "families": families(m), "parameters": m.parameters,
         "view_filters": m.view_filters, "view_templates": m.view_templates, "phases": m.phases, "phase_filters": m.phase_filters,
         "phase_overrides": m.phase_overrides, "option_sets": m.option_sets, "warnings": warnings,
         "history": s.history(),

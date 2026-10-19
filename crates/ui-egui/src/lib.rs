@@ -6,6 +6,8 @@
 //! (plans, the 3D view, schedules), and the tool's prompt in the status bar.
 
 mod canvas;
+mod editor;
+mod favorites;
 mod graphics;
 pub mod lang;
 mod orbit;
@@ -99,6 +101,10 @@ pub enum Tool {
     Offset,
     /// Take the element picked down in the phase of the view on screen, or, if it comes down in it already, back up.
     Demolish,
+    /// Lay the material in the Options Bar over the face clicked in the 3D view, as Revit's Paint does.
+    Paint,
+    /// Take the paint off the face clicked in the 3D view.
+    Unpaint,
     /// An aligned dimension: the references picked so far. A click away from any places it.
     Dimension(Vec<Reference>),
     /// An angular dimension: the lines picked so far, two that meet; then a click where its arc goes.
@@ -281,6 +287,8 @@ pub struct BimApp {
     back: Tab,
     /// The type each placing tool uses, by category; the core's default when missing.
     types: BTreeMap<&'static str, String>,
+    /// The family a door or window type picked belongs to (none: one of the project's own); by category.
+    opening_families: BTreeMap<&'static str, String>,
     /// The Wall tool's top: `None` as the core does it (up to the next level up), `Some(None)`
     /// unconnected at `wall_height`, `Some(Some(level))` up to that level.
     wall_top: Option<Option<Id>>,
@@ -375,6 +383,11 @@ pub struct BimApp {
     type_dialog: Option<properties::TypeDialog>,
     materials_dialog: Option<properties::MaterialsDialog>,
     family_dialog: Option<properties::FamilyDialog>,
+    /// The Favorites window, while it's open; where the favorites file is, when the app was told (else the usual place).
+    favorites_dialog: Option<favorites::FavoritesDialog>,
+    /// The Family Editor, while it's open.
+    family_editor: Option<editor::FamilyEditor>,
+    favorites_path: Option<std::path::PathBuf>,
     parameters_dialog: Option<properties::ParametersDialog>,
     schedule_dialog: Option<properties::ScheduleDialog>,
     /// Visibility/Graphics, Filters and View Templates, while they're open.
@@ -387,6 +400,8 @@ pub struct BimApp {
     options_dialog: Option<phasing::OptionsDialog>,
     active_option: Option<String>,
     new_schedule: Option<properties::NewSchedule>,
+    /// The material the Paint tool lays; the first of the library's while it isn't one it has.
+    paint_material: String,
     /// The family and type the Component tool places, as picked, and how far it's turned, degrees.
     component: Option<(String, String)>,
     component_angle: f64,
@@ -562,6 +577,7 @@ impl BimApp {
             tab: Tab::Architecture,
             back: Tab::Architecture,
             types: BTreeMap::new(),
+            opening_families: BTreeMap::new(),
             wall_top: None,
             wall_height: units.length(3000.0),
             column_top: None,
@@ -623,6 +639,10 @@ impl BimApp {
             type_dialog: None,
             materials_dialog: None,
             family_dialog: None,
+            favorites_dialog: None,
+            family_editor: None,
+            favorites_path: None,
+            paint_material: String::new(),
             parameters_dialog: None,
             schedule_dialog: None,
             vg_dialog: None,
@@ -686,6 +706,8 @@ impl BimApp {
             | Tool::GableEdge
             | Tool::SlopeArrow(_) => None,
             Tool::Wall(_) => Some("Place Wall"),
+            Tool::Paint => Some("Paint"),
+            Tool::Unpaint => Some("Remove Paint"),
             Tool::Door => Some("Place Door"),
             Tool::Window => Some("Place Window"),
             Tool::Room => Some("Place Room"),
@@ -885,6 +907,8 @@ impl BimApp {
         if self.type_dialog.is_some()
             || self.materials_dialog.is_some()
             || self.family_dialog.is_some()
+            || self.favorites_dialog.is_some()
+            || self.family_editor.is_some()
             || self.parameters_dialog.is_some()
             || self.schedule_dialog.is_some()
             || self.vg_dialog.is_some()
@@ -1078,6 +1102,7 @@ impl BimApp {
                 Some("component") => Tool::Component,
                 Some("section") => Tool::Section(None),
                 Some("measure") => Tool::Measure(None),
+                Some("paint") => Tool::Paint,
                 Some("delete") => {
                     self.delete();
                     return true;
@@ -1209,7 +1234,17 @@ impl BimApp {
         }
     }
 
+    /// The material the Paint tool lays: the one picked while the library has it, else the library's first.
+    pub(crate) fn painting(&self) -> Option<String> {
+        let m = &self.session.model;
+        Some(self.paint_material.clone()).filter(|n| m.materials.contains_key(n)).or_else(|| m.materials.keys().next().cloned())
+    }
+
     fn set_tool(&mut self, mut tool: Tool) {
+        // Paint works in the 3D view: open it, as the tool asks.
+        if matches!(tool, Tool::Paint | Tool::Unpaint) && self.sheet != Sheet::View3D {
+            self.open_sheet(Sheet::View3D);
+        }
         // Move, Copy, Rotate and Mirror take the selection; Align, Trim, Split and Offset pick walls, Demolish anything.
         let edits = matches!(tool, Tool::Move(_) | Tool::Copy(_) | Tool::Rotate { .. } | Tool::Mirror { .. });
         let picks = matches!(tool, Tool::Align(_) | Tool::Trim(_) | Tool::Split | Tool::Offset | Tool::Demolish);
@@ -1414,7 +1449,7 @@ impl BimApp {
         let works = match sheet {
             Sheet::Plan(_) | Sheet::Ceiling(_) => true,
             Sheet::Section(_) => matches!(self.tool, Tool::Text | Tool::Spot | Tool::Demolish),
-            Sheet::View3D => self.tool == Tool::Demolish,
+            Sheet::View3D => matches!(self.tool, Tool::Demolish | Tool::Paint | Tool::Unpaint),
             Sheet::Paper(_) => self.tool == Tool::Text,
             _ => false,
         };
@@ -1980,6 +2015,10 @@ impl BimApp {
             if big_button(ui, Icon::Materials, "Materials", self.materials_dialog.is_some(), tip).clicked() {
                 self.materials_dialog = Some(properties::MaterialsDialog::new(&self.session.model));
             }
+            let tip = "Favorites: the materials and families you keep for every project; add one to this project with a click";
+            if big_button(ui, Icon::Favorite, "Favorites", self.favorites_dialog.is_some(), tip).clicked() {
+                self.open_favorites();
+            }
             let tip = "Project Parameters: values of your own each element of their categories holds, for schedules and IFC";
             if big_button(ui, Icon::Parameters, "Project Parameters", self.parameters_dialog.is_some(), tip).clicked() {
                 self.parameters_dialog = Some(properties::ParametersDialog::new(&self.session.model));
@@ -2012,6 +2051,24 @@ impl BimApp {
                     }
                 }
             });
+        });
+        panel(ui, "Family Editor", |ui| {
+            let tip = "New Family: start a family of your own, of a category, to edit its parameters, types and forms";
+            let r = big_button(ui, Icon::FamilyEditor, "New Family", false, tip);
+            Popup::menu(&r).show(|ui| {
+                for c in editor::CATEGORIES {
+                    if ui.button(editor::category_label(c)).clicked() {
+                        self.new_family(c);
+                    }
+                }
+            });
+            let tip = "Edit Family: the family of what is selected, or of the component being placed";
+            let family = self.family_in_hand();
+            if ui.add_enabled_ui(family.is_some(), |ui| big_button(ui, Icon::FamilyEditor, "Edit Family", false, tip)).inner.clicked()
+                && let Some(f) = family
+            {
+                self.edit_family(&f);
+            }
         });
         panel(ui, "Phasing", |ui| {
             let tip = "Phasing (PH): the project's phases in order, the phase filters that show them, and how a filter draws each";
@@ -2194,6 +2251,16 @@ impl BimApp {
                 self.set_tool(Tool::Demolish);
             }
         });
+        panel(ui, "Geometry", |ui| {
+            let tip = "Paint (PT): lay a material, and its texture, over the face you click in the 3D view";
+            if big_button(ui, Icon::Paint, "Paint", self.tool == Tool::Paint, tip).clicked() {
+                self.set_tool(Tool::Paint);
+            }
+            let tip = "Remove Paint: take the paint off the face you click in the 3D view";
+            if big_button(ui, Icon::Unpaint, "Remove Paint", self.tool == Tool::Unpaint, tip).clicked() {
+                self.set_tool(Tool::Unpaint);
+            }
+        });
     }
 
     /// The Options Bar: the contextual tab's name, then the tool's options.
@@ -2210,6 +2277,14 @@ impl BimApp {
             }
             match self.tool {
                 Tool::Wall(_) => self.wall_options(ui),
+                Tool::Paint => {
+                    let label = ui.label(t("Material:"));
+                    let names: Vec<String> = self.session.model.materials.keys().cloned().collect();
+                    let now = self.painting().unwrap_or_default();
+                    if let Some(n) = properties::combo(ui, (0, "paint-material"), label.id, &now, &names) {
+                        self.paint_material = n;
+                    }
+                }
                 Tool::Column => {
                     if let Some(level) = self.plan_level() {
                         height_options(ui, &self.session.model, level, &mut self.column_top, &mut self.column_height, "column-top");
@@ -2383,8 +2458,8 @@ impl BimApp {
             }
             (Sheet::Section(_) | Sheet::Paper(_), Tool::Text) => return "Type the note in the Options Bar, then click where it goes.",
             (Sheet::Section(_), Tool::Spot) => return "Click a point to mark its height.",
-            // Demolish picks in these views as it does in a plan.
-            (Sheet::View3D | Sheet::Section(_), Tool::Demolish) => {}
+            // Demolish picks in these views as it does in a plan; Paint in the 3D view alone.
+            (Sheet::View3D | Sheet::Section(_), Tool::Demolish) | (Sheet::View3D, Tool::Paint | Tool::Unpaint) => {}
             (Sheet::View3D | Sheet::Section(_) | Sheet::Paper(_), _) => {
                 return "This tool works in plan views: open one from the Project Browser.";
             }
@@ -2420,6 +2495,8 @@ impl BimApp {
             Tool::Split => "Click a wall where to split it.",
             Tool::Offset => "Point to a wall: the offset goes to the cursor's side. Click to place it.",
             Tool::Demolish => "Click an element to take it down in the view's phase; click it again to take it back.",
+            Tool::Paint => "Click a face to paint it with the material in the Options Bar; the 3D view orbits as ever.",
+            Tool::Unpaint => "Click a painted face to take its paint off.",
             Tool::Dimension(refs) if refs.is_empty() => "Pick a wall face, centre line or end, a door, a window or a grid to measure from.",
             Tool::Dimension(refs) if refs.len() == 1 => "Pick the next reference, parallel to the first.",
             Tool::Dimension(_) => "Pick more references, or click away from them where the dimension line goes. Esc cancels.",
@@ -2711,6 +2788,8 @@ impl BimApp {
         self.type_properties(ctx);
         self.family_type_properties(ctx);
         self.materials_window(ctx);
+        self.favorites_window(ctx);
+        self.family_editor_window(ctx);
         self.snaps_window(ctx);
         self.parameters_window(ctx);
         self.new_schedule_window(ctx);

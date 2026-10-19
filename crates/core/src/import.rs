@@ -1994,6 +1994,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let flip_hand = enumeration(o.args.get(11)).is_some_and(|op| op.contains("RIGHT"));
         let op = Opening {
             params: Default::default(),
+            family: None,
             type_name,
             host,
             offset: micron(P2((s0 + s1) / 2.0, 0.0)).0,

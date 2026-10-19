@@ -937,8 +937,17 @@ impl BimApp {
     }
 
     fn click(&mut self, m: &Model, level: Id, v: &View, at: (f32, f32), hovered: Option<Id>, mods: Modifiers) {
-        let typed = |app: &BimApp, cat: &str, mut p: Value| {
-            if let Some(t) = app.types.get(cat) {
+        let typed = |app: &BimApp, cat: &'static str, mut p: Value| {
+            if matches!(cat, "door" | "window") {
+                // Of a family, by default the project's usual door or window of one; else one of the project's own types.
+                let (family, ty) = app.opening_pick(cat);
+                if let Some(f) = family {
+                    p["family"] = json!(f);
+                }
+                if let Some(t) = ty {
+                    p["type"] = json!(t);
+                }
+            } else if let Some(t) = app.types.get(cat) {
                 p["type"] = json!(t);
             }
             p
@@ -1032,6 +1041,8 @@ impl BimApp {
                     self.demolish(id);
                 }
             }
+            // Paint works in the 3D view, which it opens; a plan's tool goes back to Modify.
+            Tool::Paint | Tool::Unpaint => {}
             // A reference under the cursor joins the dimension; a click away from them places it.
             Tool::Dimension(refs) => {
                 let mut refs = refs.clone();

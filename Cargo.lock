@@ -443,6 +443,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tiny-skia",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -585,7 +585,8 @@ pub fn export(m: &Model) -> String {
                     Category::Furniture | Category::Casework => "IFCFURNITURE",
                     Category::Plumbing => "IFCSANITARYTERMINAL",
                     Category::Lighting => "IFCLIGHTFIXTURE",
-                    Category::Generic => "IFCBUILDINGELEMENTPROXY",
+                    // A door's or a window's family is placed in a wall, never as a component.
+                    Category::Generic | Category::Door | Category::Window => "IFCBUILDINGELEMENTPROXY",
                 };
                 let name = s(&format!("{}:{}", cp.family, cp.type_name));
                 let ent = w.add(format!("{entity}({},$,{name},$,{name},#{at},#{shape},'{id}',.NOTDEFINED.)", w.guid(ELEMENT, id)));
@@ -743,30 +744,63 @@ pub fn export(m: &Model) -> String {
         let shape = w.body(profile, 0.0, t.height, &[]);
         let opening = w.add(format!("IFCOPENINGELEMENT({},$,'Opening',$,$,#{at},#{shape},$,.OPENING.)", w.guid(OPENING, id)));
         w.add(format!("IFCRELVOIDSELEMENT({},$,$,$,#{wall},#{opening})", w.guid(VOIDS, id)));
-        // The door or window itself: a 50 mm panel centred in the wall.
-        let fill_at = w.place(Some(at), (0.0, 0.0, 0.0), None);
-        let profile = w.rectangle(P2(t.width / 2.0, 0.0), P2(t.width, 50.0));
-        let shape = w.body(profile, 0.0, t.height, &[]);
+        // The door or window itself: a 50 mm panel centred in the wall; of a family, its forms as a component's are,
+        // closed face sets in their materials' colours, standing at the middle of the opening.
+        let mut made_of: Vec<u64> = Vec::new();
+        let (fill_at, shape) = match m.opening_local(e).filter(|_| o.family.is_some()) {
+            Some((pieces, _)) => {
+                let mut items = Vec::new();
+                for piece in &pieces {
+                    let set = w.faceset(&piece.tris);
+                    if !piece.material.trim().is_empty() {
+                        let (material, style) = w.material_style(m, piece.material.trim());
+                        if let Some(style) = style {
+                            w.add(format!("IFCSTYLEDITEM(#{set},(#{style}),$)"));
+                        }
+                        if !made_of.contains(&material) {
+                            made_of.push(material);
+                        }
+                    }
+                    items.push(set);
+                }
+                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
+                (w.place(Some(at), (t.width / 2.0, 0.0, 0.0), None), w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))")))
+            }
+            None => {
+                let profile = w.rectangle(P2(t.width / 2.0, 0.0), P2(t.width, 50.0));
+                (w.place(Some(at), (0.0, 0.0, 0.0), None), w.body(profile, 0.0, t.height, &[]))
+            }
+        };
         let (h, wd) = (real(t.height), real(t.width));
+        // Named `Family:Type` as Revit names them; a project's own type, by its name.
+        let name = s(&o.family.as_ref().map_or_else(|| o.type_name.clone(), |f| format!("{f}:{}", o.type_name)));
         let ent = if matches!(e, Element::Door(_)) {
             let swing = if o.flip_hand { ".SINGLE_SWING_RIGHT." } else { ".SINGLE_SWING_LEFT." };
             w.add(format!(
-                "IFCDOOR({},$,{},$,{},#{fill_at},#{shape},{},{h},{wd},.DOOR.,{swing},$)",
+                "IFCDOOR({},$,{name},$,{name},#{fill_at},#{shape},{},{h},{wd},.DOOR.,{swing},$)",
                 w.guid(ELEMENT, id),
-                s(&o.type_name),
-                s(&o.type_name),
                 s(&o.mark)
             ))
         } else {
             w.add(format!(
-                "IFCWINDOW({},$,{},$,{},#{fill_at},#{shape},{},{h},{wd},.WINDOW.,.SINGLE_PANEL.,$)",
+                "IFCWINDOW({},$,{name},$,{name},#{fill_at},#{shape},{},{h},{wd},.WINDOW.,.SINGLE_PANEL.,$)",
                 w.guid(ELEMENT, id),
-                s(&o.type_name),
-                s(&o.type_name),
                 s(&o.mark)
             ))
         };
         w.add(format!("IFCRELFILLSELEMENT({},$,$,$,#{opening},#{ent})", w.guid(FILLS, id)));
+        // What a family's door or window is made of: its material, or the set of them.
+        let relating = match made_of.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => {
+                let parts: Vec<u64> = many.iter().map(|x| w.add(format!("IFCMATERIALCONSTITUENT($,$,#{x},$,$)"))).collect();
+                Some(w.add(format!("IFCMATERIALCONSTITUENTSET({},$,({}))", s(&o.type_name), refs(&parts))))
+            }
+        };
+        if let Some(r) = relating {
+            w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{r})", w.guid(COMPONENT_MATERIALS, id)));
+        }
         contained.entry(wl.level).or_default().push(ent);
         products.insert(id, ent);
     }
@@ -1012,6 +1046,32 @@ mod tests {
             f.lines().any(|l| l.contains("IFCRELCONTAINEDINSPATIALSTRUCTURE(") && l.contains(&format!("{table},"))
                 || l.contains(&format!("{table})")))
         );
+    }
+
+    #[test]
+    fn family_doors_and_windows_export_their_forms_as_face_sets_in_their_materials() {
+        let mut s = Session::new();
+        s.script(
+            r#"wall {"points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "closed": true}
+               door {"at": [2000, 0], "family": "Single Door", "type": "800 x 2100"}
+               window {"at": [8000, 3000], "family": "Casement Window"}
+               door {"at": [5000, 0]}"#,
+        )
+        .unwrap();
+        let f = export(&s.model);
+        dangling(&f);
+        let n = |e: &str| f.matches(&format!("={e}(")).count();
+        assert_eq!([n("IFCDOOR"), n("IFCWINDOW"), n("IFCOPENINGELEMENT")], [2, 1, 3]);
+        assert!(f.contains("'Single Door:800 x 2100'") && f.contains("'Casement Window:1200 x 1500'"), "named by family and type");
+        assert!(f.contains("'Single 900 x 2100'"), "a project's own type, by its name");
+        // The door's forms: its jambs, head, leaf and two handles; the window's: its frame's four, and two sashes (cut
+        // round their panes) with a pane each.
+        assert_eq!(n("IFCTRIANGULATEDFACESET"), 6 + 4 + 4);
+        // Each material they're made of written once, with the families' door and window sharing Timber; each of the two made of its set.
+        for material in ["Timber", "Metal", "Glass"] {
+            assert!(f.contains(&format!("IFCMATERIAL('{material}'")), "{material}");
+        }
+        assert_eq!(n("IFCRELASSOCIATESMATERIAL"), 2, "the family door and the family window; the plain door has none");
     }
 
     #[test]
