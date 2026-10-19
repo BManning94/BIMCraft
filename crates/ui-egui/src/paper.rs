@@ -73,10 +73,7 @@ impl BimApp {
             && let Some(vp) = pick(o).filter(|v| matches!(model.elements.get(v), Some(Element::Viewport(_) | Element::Text(_))))
         {
             papers.drag = Some(view.mm((o.x - rect.min.x, o.y - rect.min.y)));
-            if !self.selection.contains(&vp) {
-                self.selection = vec![vp];
-                self.raise_context();
-            }
+            self.grab(vp);
         }
         let now = ui.input(|i| i.pointer.latest_pos()).map(|q| view.mm((q.x - rect.min.x, q.y - rect.min.y)));
         let papers = &mut self.paper;
@@ -101,6 +98,7 @@ impl BimApp {
         }
         if response.drag_stopped()
             && let Some(by) = std::mem::take(&mut self.paper.drag).and(by)
+            && self.finish_drag()
             && (by.0 != 0.0 || by.1 != 0.0)
         {
             self.run("move", serde_json::json!({"ids": self.selection, "by": [by.0, by.1]}));
@@ -125,7 +123,7 @@ impl BimApp {
             self.open_sheet(open);
             return;
         }
-        if let Some(q) = self.clicked_at(ui, &response) {
+        if let Some(q) = self.clicked_at(&response) {
             match pick(q) {
                 found if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
                 // Notes in paper mm, to the half millimetre.

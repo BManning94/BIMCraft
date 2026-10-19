@@ -140,6 +140,15 @@ fn deliver(h: &mut Harness<BimApp>, mut events: Vec<Event>) {
     }
 }
 
+/// A press at `a`, a move halfway and a release at `b`, in three frames: a click made on the move
+/// (a quick one in a harness with short frames, [`app_at`]).
+fn flick(h: &mut Harness<BimApp>, a: Pos2, b: Pos2, modifiers: Modifiers) {
+    let at = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers };
+    deliver(h, vec![Event::PointerMoved(a), at(a, true)]);
+    deliver(h, vec![Event::PointerMoved(a + (b - a) * 0.5)]);
+    deliver(h, vec![Event::PointerMoved(b), at(b, false)]);
+}
+
 /// A drag with `button` between points on screen, in steps.
 fn drag_screen(h: &mut Harness<BimApp>, a: Pos2, b: Pos2, button: PointerButton) {
     h.hover_at(a);
@@ -382,6 +391,115 @@ fn the_app_asks_for_a_frame_while_it_holds_events_back() {
     h.state_mut().held.push(Event::WindowFocused(true));
     h.step();
     assert!(h.ctx.has_requested_repaint(), "the held event needs its frame");
+}
+
+const COLUMNS: &str = "column {\"at\": [2000, 3000]}\ncolumn {\"at\": [6000, 3000]}";
+
+#[test]
+fn a_click_made_on_the_move_selects_in_modify_and_moves_nothing() {
+    let mut h = app_at(COLUMNS, 0.05);
+    let a = ids(&h, "column")[0];
+    let before = Arc::clone(&h.state().session.model);
+    let on = h.state().screen(P2(2000.0, 3000.0));
+    flick(&mut h, on, on + vec2(90.0, 50.0), Modifiers::NONE);
+    assert_eq!(h.state().selection, [a]);
+    assert!(Arc::ptr_eq(&before, &h.state().session.model), "no command ran: nothing moved");
+}
+
+#[test]
+fn a_slower_drag_in_modify_still_moves_what_it_began_on() {
+    let mut h = app_at(COLUMNS, 0.05);
+    let a = ids(&h, "column")[0];
+    let (from, to) = (h.state().screen(P2(2000.0, 3000.0)), h.state().screen(P2(3000.0, 3000.0)));
+    // Ten frames of 50 ms from the press to the release: the hand means to move it.
+    deliver(&mut h, vec![Event::PointerMoved(from), button(from, true)]);
+    for k in 1..=8 {
+        deliver(&mut h, vec![Event::PointerMoved(from + (to - from) * (k as f32 / 8.0))]);
+    }
+    deliver(&mut h, vec![button(to, false)]);
+    assert_eq!(field(&h, a, "at"), json!([3000.0, 3000.0]));
+    assert_eq!(h.state().session.history().last(), Some(&"Move"));
+}
+
+#[test]
+fn ctrl_and_a_click_made_on_the_move_adds_to_the_selection_it_found() {
+    let mut h = app_at(COLUMNS, 0.05);
+    let cols = ids(&h, "column");
+    click(&mut h, P2(2000.0, 3000.0));
+    assert_eq!(h.state().selection, [cols[0]]);
+    let before = Arc::clone(&h.state().session.model);
+    let on = h.state().screen(P2(6000.0, 3000.0));
+    flick(&mut h, on, on + vec2(90.0, 50.0), Modifiers::COMMAND);
+    assert_eq!(h.state().selection, [cols[0], cols[1]], "the first stays selected, the second joins it");
+    assert!(Arc::ptr_eq(&before, &h.state().session.model), "nothing moved");
+}
+
+#[test]
+fn a_quick_flick_from_empty_floor_is_a_click_there_not_a_selection_box() {
+    // Two walls give the plan room for the box, which lies between them.
+    let mut h = app_at(&format!("{COLUMNS}\nwall {{\"points\": [[0,0],[8000,0]]}}\nwall {{\"points\": [[0,6000],[8000,6000]]}}"), 0.05);
+    let cols = ids(&h, "column");
+    click(&mut h, P2(2000.0, 3000.0));
+    assert_eq!(h.state().selection, [cols[0]]);
+    // A window across both columns, if the hand meant one; a click on empty floor if it did not.
+    let (from, to) = (h.state().screen(P2(1000.0, 4500.0)), h.state().screen(P2(7000.0, 1500.0)));
+    flick(&mut h, from, to, Modifiers::NONE);
+    assert!(h.state().selection.is_empty(), "{:?}", h.state().selection);
+}
+
+#[test]
+fn a_flick_from_a_walls_end_grip_leaves_the_wall_as_it_was() {
+    let mut h = app_at(r#"wall {"points": [[0,0],[8000,0]]}"#, 0.05);
+    let wall = ids(&h, "wall")[0];
+    click(&mut h, P2(4000.0, 0.0));
+    let before = Arc::clone(&h.state().session.model);
+    let (grip, off) = (h.state().screen(P2(8000.0, 0.0)), h.state().screen(P2(8000.0, -1500.0)));
+    flick(&mut h, grip, off, Modifiers::NONE);
+    assert!(Arc::ptr_eq(&before, &h.state().session.model), "the end did not move");
+    assert_eq!(h.state().selection, [wall]);
+}
+
+#[test]
+fn a_flick_from_a_crop_regions_grip_leaves_the_crop_as_it_was() {
+    let mut h = app_at(BOX, 0.05);
+    press(&mut h, "View");
+    h.get_by_role_and_label(Role::Button, "Crop View").click();
+    h.run();
+    let crop = field(&h, 1, "crop");
+    let (lo, hi) = (&crop[0], &crop[1]);
+    let east = P2(hi[0].as_f64().unwrap(), (lo[1].as_f64().unwrap() + hi[1].as_f64().unwrap()) / 2.0);
+    let grip = h.state().screen(east);
+    flick(&mut h, grip, grip - vec2(120.0, 0.0), Modifiers::NONE);
+    assert_eq!(field(&h, 1, "crop"), crop);
+}
+
+#[test]
+fn a_flick_on_a_sheets_view_selects_it_and_does_not_move_it() {
+    let mut h = app_at(BOX, 0.05);
+    press(&mut h, "View");
+    press(&mut h, "Sheet");
+    press(&mut h, "View");
+    press(&mut h, "Place View");
+    press(&mut h, "Floor Plan: Level 1");
+    let vp = ids(&h, "viewport")[0];
+    let at = field(&h, vp, "at");
+    let (x, y) = (at[0].as_f64().unwrap(), at[1].as_f64().unwrap());
+    key(&mut h, Key::Escape);
+    let on = h.state().screen(P2(x, y));
+    flick(&mut h, on, on + vec2(60.0, 0.0), Modifiers::NONE);
+    assert_eq!(field(&h, vp, "at"), json!([x, y]));
+    assert_eq!(h.state().selection, [vp]);
+}
+
+#[test]
+fn a_tool_acts_on_what_lay_under_the_press_not_under_where_the_hand_let_go() {
+    let mut h = app_at(BOX, 0.05);
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    shortcut(&mut h, "DW");
+    assert_eq!(h.state().tool, Tool::Demolish);
+    // Down on the south wall, up on empty floor inside the box.
+    drag(&mut h, P2(4000.0, 0.0), P2(4000.0, 3000.0));
+    assert_eq!(demolished(&h, wall), Some(json!("New Construction")));
 }
 
 #[test]

@@ -77,7 +77,7 @@ impl BimApp {
         }
         paint(&p, Place::at(rect.min), &d, &self.selection, hovered, self.thin, &[]);
         p.extend(crop);
-        let clicked = self.clicked_at(ui, &response).map(|at| (at.x - rect.min.x, at.y - rect.min.y));
+        let clicked = self.clicked_at(&response).map(|at| (at.x - rect.min.x, at.y - rect.min.y));
         // Along the line and up, to the nearest 10 mm.
         let at = |q: (f32, f32)| {
             let p = view.mm(q);

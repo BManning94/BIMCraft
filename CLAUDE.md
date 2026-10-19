@@ -123,8 +123,12 @@ pointer's last position in the frame, and counts two clicks in a frame as one, s
 (fast drawing) would click elsewhere, or once: `BimApp::pace` (run by `raw_input_hook`, with `show` asking for the frame that takes
 the rest) cuts a window's events after each button press or release, and tests hand events over through `deliver`. egui also takes a
 press and release more than six points apart for no click (a drag, if a frame falls between), which a hand clicking on the move
-makes, so for every tool but Modify (whose drag is its move and its box) that is a click where the button went down
-(`BimApp::clicked_at`, where the plan, sections and sheets take their clicks). The 3D view clicks as egui has it.
+makes, so for every tool but Modify that is a click where the button went down (`BimApp::clicked_at`, where the plan, sections and
+sheets take their clicks), and what lay under it is read there (`under_at`), not where the hand has got to. In Modify a drag is its
+move and its box, so only a press let go within `QUICK` (0.2 s) is a click wherever the hand went: the drag it began is not
+finished (`Canvas::quick`, `BimApp::finish_drag`: grips, crop regions, a sheet's views, the plan's move and box) and the selection
+that drag's start replaced comes back (`BimApp::grab`) for the click to pick from. A slower press is the drag it is. The 3D view
+clicks as egui has it.
 A family (`Model::families`, `family.rs`) is parameters, types that set them and forms in its own axes: x along a
 component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
 `yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;

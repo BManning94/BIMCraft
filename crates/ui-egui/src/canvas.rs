@@ -32,6 +32,10 @@ pub(crate) const PICK: f32 = 6.0;
 const SNAP: f64 = 10.0;
 /// Zoom limits, px per mm: from 1000 km to 2 cm across 1000 px.
 const SCALE: (f64, f64) = (1e-6, 50.0);
+/// How long a press may last and still be a click, wherever the hand went meanwhile, in seconds: a
+/// click is over in a tenth of a second or so, and a drag that means to move something takes longer.
+// ponytail: one number for every hand; make it a setting if it needs tuning.
+const QUICK: f64 = 0.2;
 
 /// A level's view: px per mm and the model point at the canvas centre.
 #[derive(Clone, Copy, Debug)]
@@ -68,8 +72,13 @@ pub struct Canvas {
     crop_drag: Option<(Id, usize)>,
     /// A selected wall's end being dragged: the wall, and whether it's its start.
     grip: Option<(Id, bool)>,
-    /// Where the primary button last went down on a view, for a press that travels (`clicked_at`).
-    press: Option<Pos2>,
+    /// Where the primary button last went down on a view, and when.
+    press: Option<(Pos2, f64)>,
+    /// The primary button's release this frame: where it went down, and whether it came up within
+    /// [`QUICK`] of that, so it was a click whatever the hand did between.
+    lifted: Option<(Pos2, bool)>,
+    /// The selection a drag from an element replaced, for a drag that turns out a click.
+    prior: Option<Vec<Id>>,
     /// What the last point a tool previewed snapped to this frame, if one did.
     pub(crate) found: Cell<Option<Found>>,
 }
@@ -88,6 +97,8 @@ impl Default for Canvas {
             crop_drag: None,
             grip: None,
             press: None,
+            lifted: None,
+            prior: None,
             found: Cell::new(None),
         }
     }
@@ -118,6 +129,12 @@ impl Canvas {
         self.cursor.is_some()
     }
 
+    /// Whether the primary button came up this frame within [`QUICK`] of going down: a click,
+    /// whatever the hand did between, and no drag it began is to be finished.
+    pub(crate) fn quick(&self) -> bool {
+        self.lifted.is_some_and(|(_, quick)| quick)
+    }
+
     /// Show all of `level` again, the next time it's drawn.
     pub fn fit(&mut self, level: Id) {
         self.cams.remove(&level);
@@ -134,6 +151,11 @@ impl Canvas {
         id: Id,
         fit: impl FnOnce(u32, u32) -> View,
     ) -> Option<(View, Option<(f32, f32)>)> {
+        let (pressed, released, now) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.time));
+        if pressed && response.is_pointer_button_down_on() {
+            self.press = ui.input(|i| i.pointer.press_origin()).map(|at| (at, now));
+        }
+        self.lifted = if released { self.press.take().map(|(at, began)| (at, now - began <= QUICK)) } else { None };
         self.rect = rect;
         self.level = Some(id);
         self.cams.entry(id).or_insert_with(|| {
@@ -527,18 +549,36 @@ pub(crate) fn click_modifiers(ui: &Ui) -> Modifiers {
 impl BimApp {
     /// Where `response` was clicked this frame: a press and release a few points apart, as egui has
     /// it. A press that travels further before the button comes up is no click to egui (a drag if
-    /// the frames let it be, which Modify moves or boxes with); for every other tool it is a click
-    /// where it began, since fast drawing clicks on the move and no tool has a use for a drag.
-    pub(crate) fn clicked_at(&mut self, ui: &Ui, response: &Response) -> Option<Pos2> {
-        let (pressed, released) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released()));
-        if pressed && response.is_pointer_button_down_on() {
-            self.canvas.press = ui.input(|i| i.pointer.press_origin());
-        }
-        let began = if released { self.canvas.press.take() } else { None };
+    /// the frames let it be, which Modify moves or boxes with); it is a click where it began for
+    /// every other tool, since fast drawing clicks on the move and no tool has a use for a drag,
+    /// and for Modify when the button came up quickly ([`QUICK`]).
+    pub(crate) fn clicked_at(&self, response: &Response) -> Option<Pos2> {
         if response.clicked() {
             return response.interact_pointer_pos();
         }
-        if self.tool == Tool::Modify { None } else { began }
+        self.canvas.lifted.filter(|(_, quick)| *quick || self.tool != Tool::Modify).map(|(at, _)| at)
+    }
+
+    /// A drag has begun on `id`: it is selected, and the selection it replaces is kept for
+    /// [`BimApp::finish_drag`].
+    pub(crate) fn grab(&mut self, id: Id) {
+        self.canvas.prior = None;
+        if !self.selection.contains(&id) {
+            self.canvas.prior = Some(std::mem::replace(&mut self.selection, vec![id]));
+            self.raise_context();
+        }
+    }
+
+    /// A drag has stopped: whether it is to be finished (moved, boxed). It isn't if the hand was
+    /// clicking on the move, and then the selection the drag's start replaced comes back, for the
+    /// click to pick from.
+    pub(crate) fn finish_drag(&mut self) -> bool {
+        let prior = self.canvas.prior.take();
+        let quick = self.canvas.quick();
+        if let (true, Some(prior)) = (quick, prior) {
+            self.selection = prior;
+        }
+        !quick
     }
 
     /// Where a point picked at pixel `at` lands, with the points `from` already picked: on what
@@ -647,41 +687,46 @@ impl BimApp {
         }
         // How near the cursor a dimension's reference line must be, mm.
         let near = 2.0 * f64::from(PICK) / view.scale;
-        let hovered = match (&self.tool, local) {
-            (Tool::Modify, Some(_)) => c.under.get(c.cycle).copied(),
-            (Tool::Door | Tool::Window | Tool::Trim(_) | Tool::Split | Tool::Offset, Some(q)) => {
+        // What the tool in hand would take at pixel `q`: under the cursor for the highlight, under
+        // the press for a click, which the hand may have left by the time the button came up.
+        // (Modify, here, is what is drawn nearest; Tab cycles through what is under the cursor.)
+        let tool = self.tool.clone();
+        let under_at = |q: (f32, f32)| match &tool {
+            Tool::Modify => d.pick(q, PICK),
+            Tool::Door | Tool::Window | Tool::Trim(_) | Tool::Split | Tool::Offset => {
                 d.pick(q, PICK).filter(|id| model.wall(*id).is_some())
             }
-            (Tool::Demolish, Some(q)) => d.pick(q, PICK),
-            (Tool::Align(_) | Tool::Mirror { draw: false, .. }, Some(q)) => {
-                d.pick(q, PICK).filter(|id| !model.reference_lines(*id).is_empty())
-            }
+            Tool::Demolish => d.pick(q, PICK),
+            Tool::Align(_) | Tool::Mirror { draw: false, .. } => d.pick(q, PICK).filter(|id| !model.reference_lines(*id).is_empty()),
             // Something to measure to: with a line parallel to the first one picked, or for an angle,
             // one across it.
-            (Tool::Dimension(refs), Some(q)) => d
+            Tool::Dimension(refs) => d
                 .pick_all(q, PICK)
                 .into_iter()
                 .find(|id| reference_for(&model, DimKind::Aligned, refs.first(), *id, view.mm(q), near).is_some()),
-            (Tool::Angular(refs), Some(q)) if refs.len() < 2 => d
+            Tool::Angular(refs) if refs.len() < 2 => d
                 .pick_all(q, PICK)
                 .into_iter()
                 .find(|id| reference_for(&model, DimKind::Angular, refs.first(), *id, view.mm(q), near).is_some()),
-            (Tool::Radial(None), Some(q)) => {
+            Tool::Radial(None) => {
                 d.pick_all(q, PICK).into_iter().find(|id| model.reference_arc(&Reference { id: *id, face: Face::Centre }).is_ok())
             }
             // What a spot elevation would read.
-            (Tool::Spot, Some(q)) => model.spot_host(level, view.mm(q)),
-            (Tool::Tag, Some(q)) => {
-                d.pick(q, PICK).filter(|id| matches!(model.elements.get(id), Some(Element::Door(_) | Element::Window(_))))
-            }
-            (Tool::Attach, Some(q)) => {
+            Tool::Spot => model.spot_host(level, view.mm(q)),
+            Tool::Tag => d.pick(q, PICK).filter(|id| matches!(model.elements.get(id), Some(Element::Door(_) | Element::Window(_)))),
+            Tool::Attach => {
                 d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Roof(_) | Element::Floor(_))))
             }
-            (Tool::Dormer, Some(q)) => model.roof_at(level, view.mm(q)),
-            (Tool::GableEdge, Some(q)) => model.roof_edge(level, view.mm(q), f64::from(PICK) / view.scale).map(|(id, _)| id),
-            (Tool::Railing(path), Some(q)) if path.is_empty() => {
+            Tool::Dormer => model.roof_at(level, view.mm(q)),
+            Tool::GableEdge => model.roof_edge(level, view.mm(q), f64::from(PICK) / view.scale).map(|(id, _)| id),
+            Tool::Railing(path) if path.is_empty() => {
                 d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Stair(_) | Element::Ramp(_))))
             }
+            _ => None,
+        };
+        let hovered = match (&tool, local) {
+            (Tool::Modify, Some(_)) => c.under.get(c.cycle).copied(),
+            (_, Some(q)) => under_at(q),
             _ => None,
         };
 
@@ -696,12 +741,10 @@ impl BimApp {
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
         {
             let o = (o.x - rect.min.x, o.y - rect.min.y);
+            self.canvas.prior = None;
             self.canvas.drag = Some(match d.pick(o, PICK) {
                 Some(id) => {
-                    if !self.selection.contains(&id) {
-                        self.selection = vec![id];
-                        self.raise_context();
-                    }
+                    self.grab(id);
                     Drag::Move(view.mm(o))
                 }
                 None => Drag::Box(o),
@@ -710,6 +753,7 @@ impl BimApp {
         let at = ui.input(|i| i.pointer.latest_pos()).map(|p| (p.x - rect.min.x, p.y - rect.min.y));
         if response.drag_stopped()
             && let (Some(drag), Some(q)) = (self.canvas.drag.take(), at)
+            && self.finish_drag()
         {
             match drag {
                 Drag::Move(from) => {
@@ -728,8 +772,11 @@ impl BimApp {
             self.open_sheet(Sheet::Section(id));
             return;
         }
-        if let Some(at) = self.clicked_at(ui, &response) {
-            self.click(&model, level, &view, (at.x - rect.min.x, at.y - rect.min.y), hovered, click_modifiers(ui));
+        if let Some(at) = self.clicked_at(&response) {
+            let q = (at.x - rect.min.x, at.y - rect.min.y);
+            // What lay under the press, which the hand may have left by the time the button came up.
+            let found = if Some(q) == local { hovered } else { under_at(q) };
+            self.click(&model, level, &view, q, found, click_modifiers(ui));
             // A snap override typed was for that point.
             self.snap_once = None;
         }
@@ -839,7 +886,9 @@ impl BimApp {
             && let Some(k) = held
         {
             self.canvas.crop_drag = None;
-            let moved = shown != region && self.run("crop", json!({"view": id, "region": [point(shown[0]), point(shown[1])]})).is_some();
+            let moved = !self.canvas.quick()
+                && shown != region
+                && self.run("crop", json!({"view": id, "region": [point(shown[0]), point(shown[1])]})).is_some();
             // A section's start went along its line: what's on screen stays where it was.
             if moved && k == 0 && self.session.model.section(id).is_some() {
                 self.canvas.slide(id, -shown[0].0);
@@ -1572,7 +1621,9 @@ impl BimApp {
         }
         if response.drag_stopped() {
             self.canvas.grip = None;
-            if let Some(q) = ui.input(|i| i.pointer.latest_pos()) {
+            if !self.canvas.quick()
+                && let Some(q) = ui.input(|i| i.pointer.latest_pos())
+            {
                 let mods = ui.input(|i| i.modifiers);
                 let (_, to) = self.grip_target(&m, level, view, (w, start), (q.x - rect.min.x, q.y - rect.min.y), mods);
                 self.snap_once = None;
