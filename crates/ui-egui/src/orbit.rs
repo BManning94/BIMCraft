@@ -1,7 +1,8 @@
 //! The 3D view: the core's picture of the model (`view3d::Scene`), orbited, panned and zoomed as
 //! in Revit. Shift and the middle button orbit, and so does a drag with the primary button (for
 //! a hand without a middle button); the middle button pans; the wheel zooms about the cursor. A
-//! click picks the element the picture shows there.
+//! click picks the element the picture shows there, and so does a press let go quickly, however
+//! far the hand went with it (`Canvas::quick_press`): the camera it turned goes back.
 
 use std::sync::Arc;
 
@@ -36,11 +37,13 @@ pub struct Orbit {
     texture: Option<TextureHandle>,
     /// A drag under way: whether it orbits (else it pans), and where the pointer was last.
     drag: Option<(bool, Pos2)>,
+    /// The camera as that drag found it, for a drag that turns out a click.
+    before: Option<Camera>,
 }
 
 impl Default for Orbit {
     fn default() -> Orbit {
-        Orbit { camera: None, rect: Rect::ZERO, ppp: 1.0, scene: None, image: None, shown: None, texture: None, drag: None }
+        Orbit { camera: None, rect: Rect::ZERO, ppp: 1.0, scene: None, image: None, shown: None, texture: None, drag: None, before: None }
     }
 }
 
@@ -82,6 +85,7 @@ impl BimApp {
     /// The 3D view, filling `ui`.
     pub(crate) fn view3d(&mut self, ui: &mut Ui) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        self.canvas.track(ui, &response);
         let ppp = ui.ctx().pixels_per_point();
         let side = |v: f32| ((v * ppp).round().max(1.0) as u32).min(MAX_SIDE);
         let (w, h) = (side(rect.width()), side(rect.height()));
@@ -112,6 +116,7 @@ impl BimApp {
             && let Some(origin) = ui.input(|i| i.pointer.press_origin())
         {
             o.drag = Some((response.dragged_by(PointerButton::Primary) || shift, origin));
+            o.before = Some(cam);
         }
         if let (Some((orbit, last)), Some(now)) = (o.drag, latest)
             && response.dragged()
@@ -122,6 +127,10 @@ impl BimApp {
         }
         if response.drag_stopped() {
             o.drag = None;
+            // A click made on the move: the camera the hand turned meanwhile goes back.
+            if let (true, Some(before)) = (self.canvas.quick(), o.before.take()) {
+                cam = before;
+            }
         }
         o.camera = Some(cam);
         let pick = |image: &Option<Image>, at: Pos2| {
@@ -156,7 +165,12 @@ impl BimApp {
         if let Some(t) = &o.texture {
             p.image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
-        let clicked = response.clicked().then(|| response.interact_pointer_pos()).flatten().map(|at| pick(&o.image, at));
+        let clicked = response
+            .clicked()
+            .then(|| response.interact_pointer_pos())
+            .flatten()
+            .or(self.canvas.quick_press())
+            .map(|at| pick(&o.image, at));
         match clicked {
             Some(found) if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
             Some(Some(id)) if demolish => self.demolish(id),

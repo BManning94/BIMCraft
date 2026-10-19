@@ -129,10 +129,25 @@ impl Canvas {
         self.cursor.is_some()
     }
 
-    /// Whether the primary button came up this frame within [`QUICK`] of going down: a click,
-    /// whatever the hand did between, and no drag it began is to be finished.
+    /// Where the primary button went down, if it came up this frame within [`QUICK`] of that: a
+    /// click, whatever the hand did between, and no drag it began is to be finished.
+    pub(crate) fn quick_press(&self) -> Option<Pos2> {
+        self.lifted.filter(|(_, quick)| *quick).map(|(at, _)| at)
+    }
+
+    /// Whether the primary button came up quickly this frame ([`Canvas::quick_press`]).
     pub(crate) fn quick(&self) -> bool {
-        self.lifted.is_some_and(|(_, quick)| quick)
+        self.quick_press().is_some()
+    }
+
+    /// Note this frame's primary press or release over a view's `response`: where it went down and
+    /// when, and on a release, whether it came up within [`QUICK`].
+    pub(crate) fn track(&mut self, ui: &Ui, response: &Response) {
+        let (pressed, released, now) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.time));
+        if pressed && response.is_pointer_button_down_on() {
+            self.press = ui.input(|i| i.pointer.press_origin()).map(|at| (at, now));
+        }
+        self.lifted = if released { self.press.take().map(|(at, began)| (at, now - began <= QUICK)) } else { None };
     }
 
     /// Show all of `level` again, the next time it's drawn.
@@ -151,11 +166,7 @@ impl Canvas {
         id: Id,
         fit: impl FnOnce(u32, u32) -> View,
     ) -> Option<(View, Option<(f32, f32)>)> {
-        let (pressed, released, now) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_released(), i.time));
-        if pressed && response.is_pointer_button_down_on() {
-            self.press = ui.input(|i| i.pointer.press_origin()).map(|at| (at, now));
-        }
-        self.lifted = if released { self.press.take().map(|(at, began)| (at, now - began <= QUICK)) } else { None };
+        self.track(ui, response);
         self.rect = rect;
         self.level = Some(id);
         self.cams.entry(id).or_insert_with(|| {

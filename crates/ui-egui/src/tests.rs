@@ -1223,6 +1223,18 @@ fn the_default_3d_view_opens_from_the_toolbar_and_clicks_pick_what_it_shows() {
 }
 
 #[test]
+fn a_click_made_on_the_move_in_3d_picks_what_was_under_the_press_and_leaves_the_camera_alone() {
+    let mut h = app_at(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"), 0.05);
+    press(&mut h, "Default 3D View");
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    let before = h.state().orbit.camera;
+    let on = h.state().screen3([5000.0, -100.0, 1500.0]);
+    flick(&mut h, on, on + vec2(70.0, 30.0), Modifiers::NONE);
+    assert_eq!(h.state().selection, [wall], "the south wall's face, where the button went down");
+    assert_eq!(h.state().orbit.camera, before, "the view did not turn");
+}
+
+#[test]
 fn in_3d_a_drag_orbits_the_middle_button_pans_and_the_wheel_zooms() {
     let mut h = app(BOX);
     press(&mut h, "Default 3D View");

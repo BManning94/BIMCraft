@@ -127,8 +127,9 @@ makes, so for every tool but Modify that is a click where the button went down (
 sheets take their clicks), and what lay under it is read there (`under_at`), not where the hand has got to. In Modify a drag is its
 move and its box, so only a press let go within `QUICK` (0.2 s) is a click wherever the hand went: the drag it began is not
 finished (`Canvas::quick`, `BimApp::finish_drag`: grips, crop regions, a sheet's views, the plan's move and box) and the selection
-that drag's start replaced comes back (`BimApp::grab`) for the click to pick from. A slower press is the drag it is. The 3D view
-clicks as egui has it.
+that drag's start replaced comes back (`BimApp::grab`) for the click to pick from. A slower press is the drag it is. In the 3D view,
+where every drag orbits, a quick press is a click whatever the tool, and the camera the hand turned meanwhile goes back
+(`Orbit::before`).
 A family (`Model::families`, `family.rs`) is parameters, types that set them and forms in its own axes: x along a
 component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
 `yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;
