@@ -54,14 +54,12 @@ pkgdesc='Open-source building information modeling: plans, sections, 3D, schedul
 arch=('@ARCH@')
 url='https://github.com/IPedrax/BIMCraft'
 license=('MIT OR Apache-2.0')
-# The window (Wayland or X11) and OpenGL are loaded while it runs, so most of them are optional.
-depends=('glibc' 'gcc-libs' 'libxkbcommon' 'libglvnd' 'hicolor-icon-theme')
+# The window and OpenGL are loaded while it runs. Without the X11 libraries a session that isn't Wayland
+# gets no window at all, so they are dependencies (an optional dependency isn't installed with the package).
+depends=('glibc' 'gcc-libs' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'libglvnd'
+         'hicolor-icon-theme')
 optdepends=(
   'wayland: native Wayland windows'
-  'libx11: X11 and XWayland windows'
-  'libxcursor: X11 cursors'
-  'libxi: X11 input'
-  'libxrandr: X11 screen sizes'
   'mesa: OpenGL drivers'
   'xdg-desktop-portal: file dialogs'
   'dbus: file dialogs through the portal'
