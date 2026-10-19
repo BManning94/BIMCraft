@@ -80,7 +80,9 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         apple_events(&mut app, &cc.egui_ctx, inbox);
         let ctx = cc.egui_ctx.clone();
-        app.updates = bimcraft_update::Updater::desktop(move || ctx.request_repaint());
+        // The settings sit beside the favorites, in the folder the core finds for the user's own files.
+        let prefs = bimcraft_core::favorites::default_path().map(|path| bimcraft_update::prefs::beside(&path));
+        app.updates = bimcraft_update::Updater::desktop(prefs, move || ctx.request_repaint());
         if let Some(updates) = app.updates.as_mut() {
             updates.check_at_startup();
         }

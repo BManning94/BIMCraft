@@ -12,7 +12,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use semver::Version;
 
 use crate::net::Ureq;
-use crate::prefs::{self, Prefs};
+use crate::prefs::Prefs;
 use crate::{Install, Net, Release, Target, check, detect, download, install};
 
 /// Set (to anything but nothing), this keeps the app from phoning home at all: no check, no menu items.
@@ -124,15 +124,16 @@ impl Updater {
         updater
     }
 
-    /// The desktop app's: this version, GitHub over HTTPS, the user's own settings file. None when the environment
-    /// variable `BIMCRAFT_NO_UPDATE_CHECK` is set, for a machine that must not phone home, and in a Flatpak, which has no network.
-    pub fn desktop(wake: impl Fn() + Send + Sync + 'static) -> Option<Updater> {
+    /// The desktop app's: this version, GitHub over HTTPS, the user's own settings file at `prefs_path` ([`prefs::beside`] the favorites;
+    /// none keeps nothing). None when the environment variable `BIMCRAFT_NO_UPDATE_CHECK` is set, for a machine that must not phone
+    /// home, and in a Flatpak, which has no network.
+    pub fn desktop(prefs_path: Option<PathBuf>, wake: impl Fn() + Send + Sync + 'static) -> Option<Updater> {
         let flatpak = detect::in_flatpak(std::env::var_os("FLATPAK_ID"), Path::new("/.flatpak-info").exists());
         if !phones_home(std::env::var_os(NO_CHECK), flatpak) {
             return None;
         }
         let current = Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
-        Some(Updater::new(Arc::new(Ureq::new()), current, prefs::default_path(), wake))
+        Some(Updater::new(Arc::new(Ureq::new()), current, prefs_path, wake))
     }
 
     /// For tests: does its work on the thread that asks, so a result is there to poll at once.

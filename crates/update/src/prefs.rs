@@ -1,7 +1,6 @@
 //! What the user chose about updates, kept in a file of their own in their configuration folder, not in a project (which
 //! travels, and which somebody else opens): whether to look when BIMCraft starts, and the version they asked not to hear about.
 
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
@@ -50,33 +49,12 @@ impl Prefs {
     }
 }
 
-/// The systems whose configuration folders differ.
-#[derive(Clone, Copy, Debug)]
-pub enum Os {
-    Windows,
-    Mac,
-    Other,
-}
+/// What the preference file is called.
+const FILE: &str = "update.json";
 
-/// Where the preferences are kept: in the user's own configuration folder, as the favorites are.
-pub fn default_path() -> Option<PathBuf> {
-    let os = if cfg!(windows) {
-        Os::Windows
-    } else if cfg!(target_os = "macos") {
-        Os::Mac
-    } else {
-        Os::Other
-    };
-    path_in(os, |name| std::env::var_os(name))
-}
-
-/// [`default_path`] on `os`, where `var` looks up an environment variable.
-pub fn path_in(os: Os, var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-    let get = |name: &str| var(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let folder = match os {
-        Os::Windows => get("APPDATA")?.join("BIMCraft"),
-        Os::Mac => get("HOME")?.join("Library").join("Application Support").join("BIMCraft"),
-        Os::Other => get("XDG_CONFIG_HOME").or_else(|| get("HOME").map(|h| h.join(".config")))?.join("bimcraft"),
-    };
-    Some(folder.join("update.json"))
+/// Where the preferences are kept, given where the favorites are (`favorites::default_path` in the core, which finds the user's own
+/// configuration folder): beside them, in a file of their own. The desktop passes this to [`crate::Updater::desktop`], since this
+/// crate does not depend on the core.
+pub fn beside(favorites: &Path) -> PathBuf {
+    favorites.with_file_name(FILE)
 }

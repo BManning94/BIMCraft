@@ -238,8 +238,9 @@ Updates (`crates/update`, drawn by `crates/ui-egui/src/updates.rs`). At startup 
 release (`LATEST_URL`: never a draft or a pre-release) on a thread of its own, and compares its tag, `vMAJOR.MINOR.PATCH`, with the
 running version as semver (`tag_version`, `is_newer`). Errors are quiet at startup and said in the status box when the user
 asked (File > Check for Updates Now). A release whose installer isn't sound is still told of, with a Download button. The user's
-choices are `update.json` in their configuration folder (`Prefs`, `prefs::default_path`: `%APPDATA%\BIMCraft`,
-`~/Library/Application Support/BIMCraft`, `$XDG_CONFIG_HOME/bimcraft` else `~/.config/bimcraft`), never a project: whether to
+choices are `update.json` beside the favorites (`Prefs`, `prefs::beside` the path `favorites::default_path` finds: `%APPDATA%\BIMCraft`,
+`~/Library/Application Support/BIMCraft`, `$XDG_CONFIG_HOME/bimcraft` else `~/.config/bimcraft`, or the folder of the file
+`BIMCRAFT_FAVORITES` names; the desktop's `main` hands it to `Updater::desktop`, because this crate doesn't depend on the core), never a project: whether to
 check at startup, and the version they skipped (it and anything older are quiet at startup, a newer one is offered). The
 environment variable `BIMCRAFT_NO_UPDATE_CHECK`, set to anything but empty, leaves the app with no updater at all. The release workflow must keep naming its
 assets as `Target::asset_name` does (`bimcraft-<version>-windows-x64.msi` and the other two) and publish them with `gh release

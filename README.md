@@ -415,7 +415,7 @@ crates/core            bimcraft-core: everything but the front ends; no UI
 crates/update          bimcraft-update: the updater, which only the desktop app uses; the core, the CLI and MCP never depend on it
   lib.rs               a release read from GitHub's reply, its file for this kind of install chosen and downloaded into a folder of its own, checked
   net.rs               HTTPS to GitHub and its release CDN, redirects followed by hand
-  prefs.rs             update.json, in the user's own configuration folder
+  prefs.rs             update.json, beside the favorites in the user's own configuration folder
   detect.rs            which kind of install this is (the Windows installer's copy, an AppImage, the macOS app) and what replaces it
   install.rs           the Windows hand-over: a copy of the app waits for it to exit, runs the installer, starts the app again
   appimage.rs          an AppImage replaced by the new file once the new file has run
@@ -526,9 +526,9 @@ a later version than the one running, as semver orders them. A banner then offer
 time), or Skip this version (it stays quiet until a newer one comes). File > Check for Updates Now looks by hand, and says
 when there's nothing newer or the check failed.
 
-The check is switched off in File > Check for updates at startup; that choice is kept in `update.json` in your own
-configuration folder (`%APPDATA%\BIMCraft`, `~/Library/Application Support/BIMCraft`, or `$XDG_CONFIG_HOME/bimcraft`, else
-`~/.config/bimcraft`), not in a project. Setting the environment variable `BIMCRAFT_NO_UPDATE_CHECK` (to anything but empty)
+The check is switched off in File > Check for updates at startup; that choice is kept in `update.json` beside your
+favorites, in your own configuration folder (`%APPDATA%\BIMCraft`, `~/Library/Application Support/BIMCraft`, or
+`$XDG_CONFIG_HOME/bimcraft`, else `~/.config/bimcraft`; `BIMCRAFT_FAVORITES` moves both), not in a project. Setting the environment variable `BIMCRAFT_NO_UPDATE_CHECK` (to anything but empty)
 keeps the app from making any request, and hides the menu items. `bimcraft-cli` and the MCP server never check for anything.
 
 **Windows.** Update now works for the copy the installer put in `Program Files\BIMCraft`. It downloads

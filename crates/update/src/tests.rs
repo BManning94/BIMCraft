@@ -346,7 +346,7 @@ fn only_the_desktop_app_can_reach_the_network() {
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use crate::prefs::{self, Os, Prefs};
+use crate::prefs::{self, Prefs};
 
 #[test]
 fn preferences_check_by_default_and_keep_what_was_saved() {
@@ -380,19 +380,13 @@ fn a_damaged_preferences_file_gives_the_defaults_a_field_at_a_time() {
 }
 
 #[test]
-fn preferences_live_in_the_users_own_configuration_folder() {
-    let env = |pairs: &'static [(&str, &str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| OsString::from(*v));
-    let windows = prefs::path_in(Os::Windows, env(&[("APPDATA", "C:\\Users\\x\\AppData\\Roaming")]));
-    assert_eq!(windows, Some(PathBuf::from("C:\\Users\\x\\AppData\\Roaming").join("BIMCraft").join("update.json")));
-    assert_eq!(
-        prefs::path_in(Os::Mac, env(&[("HOME", "/Users/x")])),
-        Some("/Users/x/Library/Application Support/BIMCraft/update.json".into())
-    );
-    assert_eq!(prefs::path_in(Os::Other, env(&[("XDG_CONFIG_HOME", "/x"), ("HOME", "/h")])), Some("/x/bimcraft/update.json".into()));
-    assert_eq!(prefs::path_in(Os::Other, env(&[("HOME", "/h")])), Some("/h/.config/bimcraft/update.json".into()));
-    assert_eq!(prefs::path_in(Os::Other, env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/h")])), Some("/h/.config/bimcraft/update.json".into()));
-    assert_eq!(prefs::path_in(Os::Other, env(&[])), None);
-    assert_eq!(prefs::path_in(Os::Windows, env(&[("HOME", "/h")])), None);
+fn preferences_sit_beside_the_favorites_under_a_name_of_their_own() {
+    let same = |favorites: &str, update: &str| assert_eq!(prefs::beside(Path::new(favorites)), PathBuf::from(update), "{favorites}");
+    same("/h/.config/bimcraft/favorites.json", "/h/.config/bimcraft/update.json");
+    same("/Users/x/Library/Application Support/BIMCraft/favorites.json", "/Users/x/Library/Application Support/BIMCraft/update.json");
+    same("favorites.json", "update.json");
+    // Wherever the user pointed the favorites (`BIMCRAFT_FAVORITES`), whatever the file is called.
+    same("/data/mine.json", "/data/update.json");
 }
 
 // ---------- the network's own rule ----------

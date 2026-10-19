@@ -16,7 +16,7 @@ The README lists what the engine, the desktop, the CLI and the MCP server do. Wh
 
 - **Done lately, so not repeated below:** families (revolves and voids, doors and windows as hosted families, the Family
   Editor), textures by material or from a picture, Paint, favorites kept for every project, and packages for Windows,
-  Linux (AppImage, Flatpak, deb, rpm, Arch, tarball, riscv64) and macOS. Auto-update from GitHub releases is in progress.
+  Linux (AppImage, Flatpak, deb, rpm, Arch, tarball, riscv64) and macOS. Auto-update from GitHub releases is done for the Windows installer's copy, an AppImage and the macOS app, though none of it has run on a real system yet.
 - **The file** is `.bimcraft` JSON with no format version, and its types refuse unknown fields, so a file from a newer
   build won't open in an older one.
 - **Element ids** are counters within a file. IFC GlobalIds are seeded by the project's `uid`, so they stay put across
