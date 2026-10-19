@@ -153,3 +153,5 @@ view too). What was made in the first phase holds no value, so a phase put in be
 (`phasing::pin_first`; a door or window follows its wall, which is named). Deleting or combining a phase moves what was in it to
 `into` (`phasing::move_phase`), and renaming a phase, an option or a set takes the elements, the views and the rules of filters
 and schedules along; accepting a set keeps the primary's elements and deletes the rest.
+A schedule sorts and groups `Phase Created` and `Phase Demolished` by the phase's place in `Model::phases`, not by its name, no
+`Phase Demolished` coming after every phase (`schedule::sorts_as`); its filters still compare the names.

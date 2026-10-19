@@ -1047,6 +1047,53 @@ mod tests {
     }
 
     #[test]
+    fn schedules_sort_and_group_a_phase_field_in_the_projects_order_not_by_its_name() {
+        let mut s = Session::new();
+        let walls = house(&mut s);
+        // Existing, Demolition, New Construction: not the order the names sort in.
+        run(&mut s, "phase", json!({"name": "Demolition", "before": "New Construction"}));
+        let held = [
+            (walls[0], json!({"Phase Demolished": "New Construction"})),
+            (walls[1], json!({"Phase Created": "Demolition"})),
+            (walls[2], json!({"Phase Created": "New Construction"})),
+            (walls[3], json!({"Phase Demolished": "Demolition"})),
+        ];
+        for (id, params) in held {
+            run(&mut s, "modify", json!({"id": id, "params": params}));
+        }
+        // The walls in the order a schedule sorted by `field` lists them; the ones that tie keep their order.
+        let order = |s: &mut Session, field: &str, descending: bool| -> Vec<u64> {
+            let sort = json!([{"field": field, "descending": descending}]);
+            let r = run(s, "schedule", json!({"name": "Phases", "category": "walls", "fields": ["Id"], "sort": sort}));
+            r["rows"].as_array().unwrap().iter().map(|row| row[0].as_f64().unwrap() as u64).collect()
+        };
+        let w = &walls;
+        assert_eq!(order(&mut s, "Phase Created", false), [w[0], w[3], w[1], w[2]], "no phase is the first");
+        assert_eq!(order(&mut s, "Phase Created", true), [w[2], w[1], w[0], w[3]]);
+        assert_eq!(order(&mut s, "Phase Demolished", false), [w[3], w[0], w[1], w[2]], "none after every phase");
+        assert_eq!(order(&mut s, "Phase Demolished", true), [w[1], w[2], w[0], w[3]]);
+        // Grouped, a row for each phase, in its order.
+        let by = |s: &mut Session, field: &str, descending: bool| {
+            let sort = json!([{"field": field, "descending": descending}]);
+            let fields = json!([field, "Count"]);
+            run(s, "schedule", json!({"name": field, "category": "walls", "fields": fields, "sort": sort, "grouped": true}))["rows"].clone()
+        };
+        assert_eq!(by(&mut s, "Phase Created", false), json!([["Existing", 2.0], ["Demolition", 1.0], ["New Construction", 1.0]]));
+        assert_eq!(by(&mut s, "Phase Demolished", true), json!([[null, 2.0], ["New Construction", 1.0], ["Demolition", 1.0]]));
+        // A door with no phase of its own sorts where its wall's phase puts it.
+        run(&mut s, "door", json!({"at": [2000, 0]}));
+        run(&mut s, "door", json!({"at": [8000, 3000]}));
+        let fields = json!(["Wall", "Phase Created"]);
+        let r = run(&mut s, "schedule", json!({"name": "Doors", "category": "doors", "fields": fields, "sort": ["Phase Created"]}));
+        assert_eq!(r["rows"], json!([[w[0] as f64, "Existing"], [w[1] as f64, "Demolition"]]));
+        // Levels hold no phases: a calculated field of that name there sorts as the numbers it comes to.
+        let fields = json!(["Name", {"name": "Phase Created", "formula": "Elevation", "kind": "length"}]);
+        let sort = json!([{"field": "Phase Created", "descending": true}]);
+        let r = run(&mut s, "schedule", json!({"name": "Heights", "category": "levels", "fields": fields, "sort": sort}));
+        assert_eq!(r["rows"], json!([["Level 2", 3000.0], ["Level 1", 0.0]]));
+    }
+
+    #[test]
     fn a_view_or_a_template_that_chose_among_a_set_stops_when_the_set_goes() {
         let mut s = Session::new();
         house(&mut s);
