@@ -72,7 +72,7 @@ impl BimApp {
     /// Zoom to Fit: all the view shows of the model, from where the camera is.
     pub(crate) fn fit3d(&mut self) {
         let model = Arc::clone(&self.session.model);
-        let look = model.default_3d().map_or_else(Look::default, |id| Look::of(&model, id));
+        let look = Look::of_3d(&model);
         let o = &mut self.orbit;
         if let (Some(c), Some((_, scene))) = (o.camera, &o.scene) {
             o.camera = Some(scene.fit_in(c.azimuth, c.elevation, c.width, c.height, &look));
@@ -97,7 +97,7 @@ impl BimApp {
         let scene = scene_of(&mut o.scene, &model);
         let mut cam = match o.camera {
             Some(c) => Camera { width: w, height: h, ..c },
-            None => scene.fit_in(AZIMUTH, ELEVATION, w, h, &model.default_3d().map_or_else(Look::default, |id| Look::of(&model, id))),
+            None => scene.fit_in(AZIMUTH, ELEVATION, w, h, &Look::of_3d(&model)),
         };
         if let Some(at) = hover {
             // A wheel notch (about 50 points) zooms by a fifth.
@@ -137,7 +137,7 @@ impl BimApp {
         let dark = crate::style::dark();
         if !matches!(&o.shown, Some((m, c, t, k)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark) {
             // As the default 3D view says: what it hides, and the colours it draws in.
-            let look = model.default_3d().map_or_else(Look::default, |id| Look::of(&model, id));
+            let look = Look::of_3d(&model);
             let image = scene.render_in(&cam, &tints, &look);
             // The model shaded as ever, on the theme's ground: only the background is paper white.
             let ground = color(render::PAPER);

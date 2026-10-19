@@ -645,6 +645,7 @@ impl BimApp {
             self.parameters(ui, &model, &ids, rows);
             self.component_parameters(ui, &model, &ids);
             self.project_parameters(ui, &model, &ids);
+            self.element_phasing(ui, &model, &ids);
         }
         if subject == Subject::Schedule {
             self.schedule_parameters(ui);
@@ -661,6 +662,7 @@ impl BimApp {
             || (matches!(subject, Subject::Element(_)) && self.selection.is_empty() && matches!(self.sheet, Sheet::Section(_)));
         if view_shown {
             self.graphics_properties(ui);
+            self.phasing_properties(ui);
         }
         ui.add_space(8.0);
         // Fields commit on Enter or when they lose the keyboard, which a click here does.

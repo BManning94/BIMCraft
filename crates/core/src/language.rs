@@ -71,6 +71,14 @@ impl Language {
 
 /// The core's words in English, Brazilian Portuguese and Spanish.
 const WORDS: &[[&str; 3]] = &[
+    // Phases and the phase filters a project starts with.
+    ["Existing", "Existente", "Existente"],
+    ["New Construction", "Nova construção", "Nueva construcción"],
+    ["Show All", "Mostrar tudo", "Mostrar todo"],
+    ["Show Complete", "Mostrar completo", "Mostrar completo"],
+    ["Show New", "Mostrar novo", "Mostrar nuevo"],
+    ["Show Previous + Demolished", "Mostrar anterior + demolido", "Mostrar anterior + demolido"],
+    ["Show Previous + New", "Mostrar anterior + novo", "Mostrar anterior + nuevo"],
     // Names commands give.
     ["Project", "Projeto", "Proyecto"],
     ["Level", "Nível", "Nivel"],

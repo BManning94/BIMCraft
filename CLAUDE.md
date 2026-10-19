@@ -130,6 +130,26 @@ sections, `cut_outlines`, `seen_below`, `view3d::Scene::picture`) and `look.dres
 by `Part` (`Drawing::part` marks what is drawn as projection, cut, lettering or hatching (and the lines between layers), so a
 new drawing of what a view cuts sets `Part::Cut`; a hidden door's opening is drawn owned by none, the wall's; the cut walls' union fill has no owner and takes its colour at the draw site, `cut_unions`). A view template
 (`Model::view_templates`) controls groups of the views that follow it (categories, filters, a plan's view range through
-`Model::view_range_of`), and they can't change those (`graphics` and `modify` refuse). Snaps, Tag All, the desktop's Select All
+`Model::view_range_of`, a phase with its phase filter, design options), and they can't change those (`graphics` and `modify`
+refuse). Snaps, Tag All, the desktop's Select All
 Instances and the framing of sections and 3D views take what `Look` shows too. A level's ceiling plan is its plan's view;
 transparency shows in 3D only.
+Phases (`Model::phases`, in order) and design options (`Model::option_sets`, `phasing.rs`) are values an element holds among its
+`params`, under names no project parameter or family parameter may take (`phasing::CREATED`, `DEMOLISHED`, `OPTION`; `Phase Created` is the first
+phase when it has no value, `Design Option` is `set: option`; `open` renames an older file's project parameter of such a name), so `modify`, copies, schedules (`From::Param` in `schedule::OWN`)
+and view filters reach them as any other. `phasing::status` says what an element is at a phase's place in the order (new,
+existing, demolished, temporary, or not there); a door or window with none of its own follows its wall (`phasing::value`), and
+annotation, which holds no params, belongs to a view. A view's `Graphics` hold `phase` (the project's last unless it says),
+`phase_filter` (every status by category unless it says; `Model::phase_filters` show each status by category, overridden or
+not at all, and `Model::phase_overrides` draw the overridden ones, never hidden or see-through) and `options` (`{set: option}`,
+a set's primary unless it says); `Look::of` hides what a phase, a filter or an option leaves out and paints what a filter
+overrides, below the view's own overrides. `Session::phase` and `Session::option` are what commands make (`Session::stamp`
+gives each new element its `Phase Created` (none for the first phase, but a door or window is named, or it would follow its
+wall) and its `Design Option` where it holds none; a copy takes the session's and loses its `Phase Demolished`; `split`, undo,
+redo and the commands that replace the project stamp nothing); a refused command leaves them as they were; they
+belong to the session, not the model, and the desktop sets them before each command (`BimApp::made_in`): the phase of the view
+on screen when it has a phase or a phase filter of its own, and the active design option (`activate`, which shows it in the
+view too). What was made in the first phase holds no value, so a phase put in before the first, or the first deleted, names it first
+(`phasing::pin_first`; a door or window follows its wall, which is named). Deleting or combining a phase moves what was in it to
+`into` (`phasing::move_phase`), and renaming a phase, an option or a set takes the elements, the views and the rules of filters
+and schedules along; accepting a set keeps the primary's elements and deletes the rest.

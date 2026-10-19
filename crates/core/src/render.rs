@@ -861,9 +861,11 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
         d.part(Part::Cut);
     }
     for (&id, e) in &m.elements {
+        // The opening is the wall's: with neither the wall nor the opening shown, there is nothing to leave a gap in.
         if let Element::Door(o) | Element::Window(o) = e
             && let Some(w) = m.wall(o.host)
             && m.spans(w, range.cut)
+            && (shown(id) || shown(o.host))
         {
             d.owner = Some(id);
             opening(&mut d, m, e, o, w, range.cut, shown(id));
@@ -941,7 +943,9 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
         match e {
             Element::Dimension(_) | Element::Tag(_) | Element::Text(_) | Element::Spot(_) if up => {}
             Element::Dimension(dm) if dm.level == level && inside(dm.at) => dimension(&mut d, m, dm),
-            Element::Tag(t) if m.level_of(e) == Some(level) && m.anchor(t.host).is_some_and(|a| inside(a + t.offset)) => tag(&mut d, m, t),
+            Element::Tag(t) if m.level_of(e) == Some(level) && shown(t.host) && m.anchor(t.host).is_some_and(|a| inside(a + t.offset)) => {
+                tag(&mut d, m, t)
+            }
             Element::Text(n) if n.view == level && inside(n.at) => note(&mut d, n),
             Element::Spot(sp) if sp.view == level && inside(sp.at) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp), m.units),
             // A section's line is cropped as a line is.

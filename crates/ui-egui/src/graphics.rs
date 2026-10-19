@@ -22,7 +22,7 @@ use crate::style::pal;
 use crate::{BimApp, Sheet, Status};
 
 /// Visibility/Graphics' tabs.
-const TABS: [&str; 4] = ["Model Categories", "Annotation Categories", "Filters", "Elements"];
+const TABS: [&str; 5] = ["Model Categories", "Annotation Categories", "Filters", "Elements", "Design Options"];
 
 /// What a list of the dialog has picked, to edit its override.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,7 +63,7 @@ pub(crate) struct TemplatesDialog {
 }
 
 /// The JSON Merge Patch that turns `old` into `new`: what's new or changed, and null for what's gone.
-fn merge_patch(old: &Value, new: &Value) -> Value {
+pub(crate) fn merge_patch(old: &Value, new: &Value) -> Value {
     match (old, new) {
         (Value::Object(a), Value::Object(b)) => {
             let mut out = serde_json::Map::new();
@@ -94,7 +94,7 @@ fn element_name(m: &Model, id: Id) -> String {
 }
 
 /// What view template `name` controls of the views following it, if there is one.
-fn controls(m: &Model, name: Option<&String>) -> BTreeSet<Group> {
+pub(crate) fn controls(m: &Model, name: Option<&String>) -> BTreeSet<Group> {
     name.and_then(|n| m.view_templates.get(n)).map(|t| t.controls.clone()).unwrap_or_default()
 }
 
@@ -104,6 +104,8 @@ fn group_name(g: Group) -> &'static str {
         Group::Categories => "Categories",
         Group::Filters => "Filters",
         Group::Range => "View Range",
+        Group::Phase => "Phase and Phase Filter",
+        Group::Options => "Design Options",
     }
 }
 
@@ -120,7 +122,7 @@ impl BimApp {
     }
 
     /// The graphics the active view holds now: the default 3D view has none until something changes it.
-    fn graphics_now(&self) -> Graphics {
+    pub(crate) fn graphics_now(&self) -> Graphics {
         let m = &self.session.model;
         let id = match self.sheet {
             Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) => Some(id),
@@ -195,7 +197,8 @@ impl BimApp {
             ui.set_min_height(500.0);
             ui.label(RichText::new(tf("Visibility/Graphics Overrides for {}", &[&d.title])).heading());
             if let Some(name) = &d.draft.template {
-                let what: Vec<&str> = followed.iter().filter(|g| **g != Group::Range).map(|g| t(group_name(*g))).collect();
+                let what: Vec<&str> =
+                    followed.iter().filter(|g| !matches!(g, Group::Range | Group::Phase)).map(|g| t(group_name(*g))).collect();
                 if !what.is_empty() {
                     ui.label(
                         RichText::new(tf("{} follow view template {}: change them there.", &[&what.join(", "), name])).color(pal().muted),
@@ -219,7 +222,8 @@ impl BimApp {
                     categories(ui, &mut d, &shown, names, !followed.contains(&Group::Categories));
                 }
                 2 => filters(ui, &mut d, &model, &shown, !followed.contains(&Group::Filters)),
-                _ => elements(ui, &mut d, &model, &self.selection),
+                3 => elements(ui, &mut d, &model, &self.selection),
+                _ => design_options(ui, &mut d, &model, &shown, !followed.contains(&Group::Options)),
             }
             ui.add_space(6.0);
             ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
@@ -481,6 +485,7 @@ fn patch(d: &VgDialog, followed: &BTreeSet<Group>) -> Option<Value> {
     };
     put("categories", json!(d.own.categories), json!(d.draft.categories), followed.contains(&Group::Categories));
     put("elements", json!(d.own.elements), json!(d.draft.elements), false);
+    put("options", json!(d.own.options), json!(d.draft.options), followed.contains(&Group::Options));
     if !followed.contains(&Group::Filters) && d.own.filters != d.draft.filters {
         p.insert("filters".into(), json!(d.draft.filters));
     }
@@ -540,7 +545,7 @@ fn categories(ui: &mut Ui, d: &mut VgDialog, shown: &Graphics, names: &[&str], e
         let mut o = category_override(shown, &cat);
         ui.separator();
         ui.label(RichText::new(tf("Overrides for {}", &[&lang::category(&cat, true)])).strong());
-        if editor(ui, &mut o, enabled) {
+        if editor(ui, &mut o, enabled, true) {
             put_category(d, &cat, o);
         }
     }
@@ -631,7 +636,7 @@ fn filters(ui: &mut Ui, d: &mut VgDialog, model: &Model, shown: &Graphics, enabl
         let mut o = a.over.clone();
         ui.separator();
         ui.label(RichText::new(tf("Overrides for {}", &[&a.filter])).strong());
-        if editor(ui, &mut o, enabled)
+        if editor(ui, &mut o, enabled, true)
             && let Some(x) = d.draft.filters.get_mut(i)
         {
             x.over = o;
@@ -701,10 +706,51 @@ fn elements(ui: &mut Ui, d: &mut VgDialog, model: &Model, selection: &[Id]) {
         let mut o = d.draft.elements.get(&id).cloned().unwrap_or_default();
         ui.separator();
         ui.label(RichText::new(tf("Overrides for {}", &[&element_name(model, id)])).strong());
-        if editor(ui, &mut o, true) {
+        if editor(ui, &mut o, true, true) {
             put_element(d, id, o);
         }
     }
+}
+
+/// The Design Options tab: for each set of options, the one this view shows, the primary unless
+/// it chooses another.
+fn design_options(ui: &mut Ui, d: &mut VgDialog, model: &Model, shown: &Graphics, enabled: bool) {
+    if model.option_sets.is_empty() {
+        ui.label(RichText::new(t("The project has no design options: Manage > Design Options makes them.")).color(pal().muted));
+        return;
+    }
+    Grid::new("vg-options").num_columns(2).striped(true).spacing(vec2(16.0, 6.0)).show(ui, |ui| {
+        for (set, s) in &model.option_sets {
+            let label = ui.label(set);
+            let primary = tf("Primary ({})", &[&s.primary]);
+            let chosen = shown.options.get(set);
+            let text = chosen.cloned().unwrap_or_else(|| primary.clone());
+            let mut pick = None;
+            ui.add_enabled_ui(enabled, |ui| {
+                let c = ComboBox::from_id_salt(("vg-option", set)).selected_text(text).width(220.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(chosen.is_none(), &primary).clicked() {
+                        pick = Some(None);
+                    }
+                    for o in &s.options {
+                        if ui.selectable_label(chosen == Some(o), o).clicked() {
+                            pick = Some(Some(o.clone()));
+                        }
+                    }
+                });
+                c.response.labelled_by(label.id);
+            });
+            match pick {
+                Some(Some(o)) => {
+                    d.draft.options.insert(set.clone(), o);
+                }
+                Some(None) => {
+                    d.draft.options.remove(set);
+                }
+                None => {}
+            }
+            ui.end_row();
+        }
+    });
 }
 
 /// Put `o` back as element `id`'s override in the draft: none when it has nothing.
@@ -717,8 +763,8 @@ fn put_element(d: &mut VgDialog, id: Id, o: Override) {
 }
 
 /// An override's settings, to edit: its projection's and its cut's lines and fill, halftone, and
-/// transparency. Whether any changed.
-fn editor(ui: &mut Ui, o: &mut Override, enabled: bool) -> bool {
+/// (with `see_through`) transparency. Whether any changed.
+pub(crate) fn editor(ui: &mut Ui, o: &mut Override, enabled: bool, see_through: bool) -> bool {
     let before = o.clone();
     ui.add_enabled_ui(enabled, |ui| {
         // The projection's settings and the cut's side by side.
@@ -728,11 +774,13 @@ fn editor(ui: &mut Ui, o: &mut Override, enabled: bool) -> bool {
         });
         ui.horizontal(|ui| {
             ui.checkbox(&mut o.halftone, t("Halftone"));
-            let l = ui.label(t("Transparency"));
-            let mut pct = f64::from(o.transparency);
-            let r = ui.add(DragValue::new(&mut pct).range(0.0..=100.0).speed(1.0).suffix("%"));
-            r.labelled_by(l.id);
-            o.transparency = pct.round().clamp(0.0, 100.0) as u8;
+            if see_through {
+                let l = ui.label(t("Transparency"));
+                let mut pct = f64::from(o.transparency);
+                let r = ui.add(DragValue::new(&mut pct).range(0.0..=100.0).speed(1.0).suffix("%"));
+                r.labelled_by(l.id);
+                o.transparency = pct.round().clamp(0.0, 100.0) as u8;
+            }
             if ui.button(t("Reset")).clicked() {
                 *o = Override { hidden: o.hidden, ..Override::default() };
             }

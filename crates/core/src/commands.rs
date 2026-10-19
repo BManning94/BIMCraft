@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{Map, Value, json};
 
@@ -18,6 +19,7 @@ use crate::model::{
     Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL,
     TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
+use crate::phasing;
 use crate::render::Drawing;
 use crate::units::Units;
 use crate::walls::{self, Axis, stacked};
@@ -442,8 +444,8 @@ pub static ALL: &[Command] = &[
         &[],
         "{view?: a level's, section's or elevation's name or id, or {3D} (the lowest level's plan unless given), hide?: [category, \
          …], show?: […], hide_elements?: [id, …], show_elements?: […], categories?: {category: override | null, …}, elements?: \
-         {id: override | null, …}, filters?: [{filter, hidden?, projection?, cut?, halftone?, transparency?}, …], template?: \
-         name | null, reset?: true} what a view hides and how it draws the rest, as Revit's Visibility/Graphics does; with \
+         {id: override | null, …}, filters?: [{filter, hidden?, projection?, cut?, halftone?, transparency?}, …], phase?: name \
+         | null, phase_filter?: name | null, options?: {set: option | null, …}, template?: name | null, reset?: true} what a view hides and how it draws the rest, as Revit's Visibility/Graphics does; with \
          none of those, the view's settings as they are. A category hidden (walls, floors, rooms, grids, dimensions, levels…, \
          in any case, singular or plural) leaves all its elements out of that view, and `hide_elements` the elements given. An \
          override is {hidden?, projection?: style, cut?: style, halftone?, transparency?}, a style {color?, weight? (px, \
@@ -454,7 +456,9 @@ pub static ALL: &[Command] = &[
          halfway to the paper; transparency (percent) sees through it in a 3D view. Halftone and transparency only add: a \
          filter or an element can lighten what its category doesn't, not take its category's away. Overrides merge into the last (null takes a field or the override away); an element's own \
          beats the filters applied (the first prevailing), which beat the category's. `filters` replaces the list applied; \
-         `template` follows a view template; `reset` takes away all of the view's own settings",
+         `template` follows a view template; `reset` takes away all of the view's own settings. `phase` is the phase the view \
+         shows (the project's last unless it says) and `phase_filter` how it shows each status of what's in it (see `phase`); \
+         `options` chooses the design option it shows of a set (the set's primary unless it says; see `option`)",
         view_graphics,
     ),
     edit(
@@ -474,14 +478,60 @@ pub static ALL: &[Command] = &[
         "template",
         "View Template",
         &[],
-        "{name, from?: a level's, section's, elevation's or 3D view's name or id, controls?: [categories, filters, range], \
-         view_range?: {top?, cut?, bottom?, depth?}, hide?, show?, categories?, filters?, reset?, delete?: true} a view template, \
-         as Revit's: settings under a name for views to follow with `graphics {template}`. `from` takes a view's categories \
-         (hidden and overridden), filters and, a plan's, view range; `controls` is what views following it get from it \
-         (all three unless it says) and cannot change for themselves: its categories, its filters, a plan's view range. \
-         `hide`, `show`, `categories`, `filters` and `reset` change it as they change a view; `view_range` merges into its \
-         range. Changed, every view following it follows. Gone, they keep their own settings. `name` alone reads one",
+        "{name, from?: a level's, section's, elevation's or 3D view's name or id, controls?: [categories, filters, range, \
+         phase, options], view_range?: {top?, cut?, bottom?, depth?}, phase?, phase_filter?, options?, hide?, show?, \
+         categories?, filters?, reset?, delete?: true} a view template, as Revit's: settings under a name for views to follow \
+         with `graphics {template}`. `from` takes a view's categories (hidden and overridden), filters and, a plan's, view \
+         range, its phase and phase filter and its design options; `controls` is what views following it get from it (all \
+         five unless it says) and cannot change for themselves: its categories, its filters, a plan's view range, its phase \
+         with its phase filter, its design options. `hide`, `show`, `categories`, `filters`, `phase`, `phase_filter`, \
+         `options` and `reset` change it as they change a view; `view_range` merges into its range. Changed, every view \
+         following it follows. Gone, they keep their own settings. `name` alone reads one",
         view_template,
+    ),
+    edit(
+        "phase",
+        "Phasing",
+        &[],
+        "{name?, before?, after?, rename?, delete?, into?, now?, overrides?} the project's phases, in order, as Revit's \
+         Phasing does: a project starts with Existing and New Construction. `name` alone adds a phase at the end (or `before` \
+         or `after` another); with `rename`, renames it (its elements, views and templates follow); with `delete`, takes it \
+         out, its elements made and taken down in `into` instead (needed while anything holds it). An element is made in a \
+         phase (its `Phase Created` parameter, the first unless it says) and may be taken down in a later one (`Phase \
+         Demolished`), set with `modify {params}`; `now` (a phase, or null) is the phase what this session's commands make \
+         is made in (the first phase leaves no value). A view shows a phase and a phase filter (`graphics {phase, \
+         phase_filter}`): what's made after it isn't there, what's taken down before it neither, and the rest is new (made in \
+         it), existing, demolished (taken down in it) or temporary (both), each shown as its phase filter says (see \
+         `phase_filter`). `overrides` ({new|existing|demolished|temporary: override | null}, merged: an override as \
+         `graphics` has it, without hidden) is how a phase filter draws what it says overridden; the first two statuses \
+         start halftone and dashed red. Replies with the phases, `now` and the overrides",
+        view_phases,
+    ),
+    edit(
+        "phase_filter",
+        "Phase Filter",
+        &[],
+        "{name, new?, existing?, demolished?, temporary?, delete?} a phase filter: how a view shows each status of what's in \
+         its phase, each `by-category` (as its category and the view's overrides say), `overridden` (as the project's \
+         overrides for that status say) or `not-displayed`. A project has Show All, Show Complete, Show New, Show Previous + \
+         Demolished and Show Previous + New; any may change. A new one starts by category throughout. One in use by a view or a \
+         template can't be deleted. Replies with the filter",
+        view_phase_filter,
+    ),
+    edit(
+        "option",
+        "Design Options",
+        &[],
+        "{set?, options?, primary?, option?, rename?, delete?, accept?, now?} sets of design options, as Revit's Design \
+         Options has them: `set` with `options` ([names]; no colons) makes a set or changes its options (one with elements in \
+         it stays), `primary` is the option a view shows unless it chooses (the first by default). An element is in an option \
+         by its `Design Option` parameter, `set: option`, set with `modify {params}` (a door or window with none is in its wall's); \
+         it shows only in a view that shows that option: `graphics {options: {set: option | null}}`. `now` (`set: option`, or \
+         null) is the option what this session's commands make is made in. `rename` renames the set, or with `option`, one of \
+         its options (elements and views follow). `accept` keeps the primary option's elements in the model and deletes the \
+         others' (and the set); `delete` deletes the set and every element in its options. Replies with the set (`deleted` \
+         lists the elements that went)",
+        design_options,
     ),
     Command {
         id: "measure",
@@ -977,10 +1027,30 @@ fn open(s: &mut Session, p: &Value) -> R {
     let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
     let mut m: Model = serde_json::from_str(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
     m.adopt_materials();
+    // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
+    let mut renamed = BTreeMap::new();
+    if m.parameters.keys().any(|n| phasing::reserved(n)) {
+        let mut t = Session::new();
+        t.model = Arc::new(m);
+        let olds: Vec<String> = t.model.parameters.keys().filter(|n| phasing::reserved(n)).cloned().collect();
+        for old in olds {
+            let new = (1..)
+                .map(|i| if i == 1 { format!("{old} Parameter") } else { format!("{old} Parameter {i}") })
+                .find(|n| !t.model.parameters.contains_key(n))
+                .unwrap_or_default();
+            parameter(&mut t, &json!({"name": old, "rename": new})).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+            renamed.insert(old, new);
+        }
+        m = Arc::unwrap_or_clone(t.model);
+    }
     m.check().map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
     let name = m.name.clone();
     s.reset(m, Some(path.clone()));
-    Ok(json!({"path": path, "name": name}))
+    let mut reply = json!({"path": path, "name": name});
+    if !renamed.is_empty() {
+        reply["renamed"] = json!(renamed);
+    }
+    Ok(reply)
 }
 
 fn save(s: &mut Session, p: &Value) -> R {
@@ -1069,7 +1139,7 @@ fn render_view(s: &mut Session, p: &Value) -> R {
     if matches!(view, Some(Value::String(v)) if v.eq_ignore_ascii_case("{3D}") || v.eq_ignore_ascii_case("3D")) {
         let (azimuth, elevation) = (num(c, p, "azimuth")?.unwrap_or(view3d::AZIMUTH), num(c, p, "elevation")?.unwrap_or(view3d::ELEVATION));
         let scene = view3d::Scene::new(m);
-        let look = m.default_3d().map_or_else(Look::default, |id| Look::of(m, id));
+        let look = Look::of_3d(m);
         let png = scene.render_in(&scene.fit_in(azimuth, elevation, w3, h3, &look), &[], &look).png().map_err(|e| bad(c, e))?;
         return png_reply(
             c,
@@ -1270,11 +1340,11 @@ fn merged_override(c: &str, what: &str, from: Option<&Override>, patch: &Value) 
 /// The changes `p` asks of graphics `g`, made: hiding and showing categories and elements,
 /// overrides, filters and the template to follow. Whether it changed any. A template's are its
 /// categories' and its filters' alone.
-fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: bool) -> Result<bool, String> {
+fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: bool) -> Result<(), String> {
     let given = |k: &str| !absent(p.get(k));
     let views_own = ["hide_elements", "show_elements", "elements"];
     if of_template && let Some(k) = views_own.iter().find(|k| given(k)).or(p.get("template").map(|_| &"template")) {
-        return Err(bad(c, format!("`{k}` is a view's own; a template holds categories and filters")));
+        return Err(bad(c, format!("`{k}` is a view's own; a template holds categories, filters, a phase and design options")));
     }
     // The template the view will follow once this call is done: one named, or none, in the same call, rules.
     let template_then = match p.get("template") {
@@ -1286,9 +1356,15 @@ fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: b
     let follows = |group: Group| controlled.filter(|t| t.controls.contains(&group)).map(|_| template_then.clone().unwrap_or_default());
     let touches_categories = ["hide", "show", "categories"].iter().any(|k| given(k));
     let touches_filters = given("filters");
+    let touches_phase = p.get("phase").is_some() || p.get("phase_filter").is_some();
+    let touches_options = given("options");
     if !flag(c, p, "reset")? {
-        for (touches, group, what) in [(touches_categories, Group::Categories, "categories"), (touches_filters, Group::Filters, "filters")]
-        {
+        for (touches, group, what) in [
+            (touches_categories, Group::Categories, "categories"),
+            (touches_filters, Group::Filters, "filters"),
+            (touches_phase, Group::Phase, "phase and phase filter"),
+            (touches_options, Group::Options, "design options"),
+        ] {
             if touches && let Some(t) = follows(group) {
                 return Err(bad(
                     c,
@@ -1297,8 +1373,6 @@ fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: b
             }
         }
     }
-    let changed =
-        views_own.iter().chain(&["hide", "show", "categories", "filters", "reset"]).any(|k| given(k)) || p.get("template").is_some();
     if flag(c, p, "reset")? {
         *g = Graphics::default();
     }
@@ -1383,14 +1457,45 @@ fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: b
         Some(Value::String(n)) => g.template = Some(n.clone()),
         Some(v) => return Err(bad(c, format!("`template` is a view template's name, or null, not {v}"))),
     }
-    Ok(changed)
+    // The phase it shows, and its phase filter: a name, or null for the last, and for every status as its category.
+    for (key, slot) in [("phase", &mut g.phase), ("phase_filter", &mut g.phase_filter)] {
+        match p.get(key) {
+            None => {}
+            Some(Value::Null) => *slot = None,
+            Some(Value::String(n)) => *slot = Some(n.clone()),
+            Some(v) => return Err(bad(c, format!("`{key}` is a name, or null, not {v}"))),
+        }
+    }
+    // The design option it shows of each set, null taking a choice back.
+    match p.get("options") {
+        v if absent(v) => {}
+        Some(Value::Object(o)) if o.len() <= phasing::MAX_OPTION_SETS => {
+            for (set, option) in o {
+                match option {
+                    Value::Null => {
+                        g.options.remove(set);
+                    }
+                    Value::String(n) => {
+                        g.options.insert(set.clone(), n.clone());
+                    }
+                    v => return Err(bad(c, format!("`options`: set `{set}`'s option is a name, or null, not {v}"))),
+                }
+            }
+        }
+        Some(v) => return Err(bad(c, format!("`options` is {{set: option}}, not {v}"))),
+        None => {}
+    }
+    Ok(())
 }
 
 /// A view's settings as the `graphics` command and the `template` command tell them: the
 /// categories hidden and overridden, and the filters applied.
 fn graphics_reply(g: &Graphics) -> Value {
     let hidden: Vec<&String> = g.categories.iter().filter(|(_, o)| o.hidden).map(|(k, _)| k).collect();
-    json!({"hidden": hidden, "categories": g.categories, "filters": g.filters})
+    json!({
+        "hidden": hidden, "categories": g.categories, "filters": g.filters,
+        "phase": g.phase, "phase_filter": g.phase_filter, "options": g.options,
+    })
 }
 
 fn view_graphics(s: &mut Session, p: &Value) -> R {
@@ -1467,8 +1572,22 @@ fn view_template(s: &mut Session, p: &Value) -> R {
     }
     let m = &s.model;
     let was = m.view_templates.get(&name).cloned();
-    let keys =
-        ["from", "controls", "view_range", "hide", "show", "categories", "filters", "reset", "hide_elements", "show_elements", "elements"];
+    let keys = [
+        "from",
+        "controls",
+        "view_range",
+        "hide",
+        "show",
+        "categories",
+        "filters",
+        "reset",
+        "hide_elements",
+        "show_elements",
+        "elements",
+        "phase",
+        "phase_filter",
+        "options",
+    ];
     let makes = keys.iter().any(|k| !absent(p.get(k))) || p.get("template").is_some();
     if was.is_none() && !makes {
         let there: Vec<&str> = m.view_templates.keys().map(String::as_str).collect();
@@ -1485,7 +1604,14 @@ fn view_template(s: &mut Session, p: &Value) -> R {
             bad(c, format!("{} isn't a plan, a section, an elevation or a 3D view; templates are made from those", view_title(m, view)))
         })?;
         let resolved = own.resolved(m);
-        t.graphics = Graphics { categories: resolved.categories.clone(), filters: resolved.filters.clone(), ..Graphics::default() };
+        t.graphics = Graphics {
+            categories: resolved.categories.clone(),
+            filters: resolved.filters.clone(),
+            phase: resolved.phase.clone(),
+            phase_filter: resolved.phase_filter.clone(),
+            options: resolved.options.clone(),
+            ..Graphics::default()
+        };
         t.view_range = match m.elements.get(&view) {
             Some(Element::Level(_)) => Some(m.view_range_of(view)),
             _ => None,
@@ -1601,6 +1727,343 @@ fn view_filter(s: &mut Session, p: &Value) -> R {
         f.check(&s.model).map_err(|e| bad(c, e))?;
     }
     Ok(json!({"name": name, "categories": f.categories, "rules": f.rules, "matches": f.matching(&s.model)}))
+}
+
+/// A name as a command takes it: text, trimmed, 1 to `MAX_TEXT` characters.
+fn name_of(c: &str, v: &Value, what: &str) -> Result<String, String> {
+    match v.as_str().map(str::trim) {
+        Some(n) if !n.is_empty() && n.chars().count() <= MAX_TEXT => Ok(n.to_string()),
+        _ => Err(bad(c, format!("{what} is a name of 1 to {MAX_TEXT} characters, not {v}"))),
+    }
+}
+
+/// `key` of `p` as an optional name: none when absent or null.
+fn name_opt(c: &str, p: &Value, key: &str) -> Result<Option<String>, String> {
+    match p.get(key) {
+        v if absent(v) => Ok(None),
+        Some(v) => name_of(c, v, &format!("`{key}`")).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn view_phases(s: &mut Session, p: &Value) -> R {
+    let c = "phase";
+    let name = name_opt(c, p, "name")?;
+    let (before, after) = (name_opt(c, p, "before")?, name_opt(c, p, "after")?);
+    let rename = match p.get("rename") {
+        None => None,
+        Some(v) => Some(name_of(c, v, "`rename`")?),
+    };
+    let into = name_opt(c, p, "into")?;
+    let delete = flag(c, p, "delete")?;
+    let now = match p.get("now") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(n)) => Some(Some(n.clone())),
+        Some(v) => return Err(bad(c, format!("`now` is a phase's name, or null, not {v}"))),
+    };
+    let known = |m: &Model, n: &str| -> Result<usize, String> {
+        phasing::index(m, n).ok_or_else(|| bad(c, format!("no phase `{n}` (there are: {})", m.phases.join(", "))))
+    };
+    if let Some(name) = &name {
+        let m = &s.model;
+        let held = phasing::holds_phase(m, s.phase.as_deref(), name);
+        if delete {
+            known(m, name)?;
+            if m.phases.len() == 1 {
+                return Err(bad(c, format!("`{name}` is the project's only phase; a project has one at least")));
+            }
+            if let Some(to) = &into {
+                if to == name {
+                    return Err(bad(c, "`into` is another phase than the one that goes"));
+                }
+                known(m, to)?;
+            } else if held {
+                return Err(bad(c, format!("`{name}` is in use: say `into` which phase takes its elements and views")));
+            }
+            let m = s.model_mut();
+            // What was made in the first phase holds no value: name it, so it goes where the others go.
+            if m.phases.first() == Some(name) {
+                phasing::pin_first(m);
+            }
+            m.phases.retain(|x| x != name);
+            if let Some(to) = &into {
+                phasing::move_phase(m, name, Some(to));
+            }
+            if s.phase.as_ref() == Some(name) {
+                s.phase = into;
+            }
+        } else if let Some(to) = &rename {
+            known(m, name)?;
+            if to != name && m.phases.contains(to) {
+                return Err(bad(c, format!("there's a phase `{to}` already")));
+            }
+            let m = s.model_mut();
+            if let Some(slot) = m.phases.iter_mut().find(|x| *x == name) {
+                *slot = to.clone();
+            }
+            phasing::move_phase(m, name, Some(to));
+            if s.phase.as_ref() == Some(name) {
+                s.phase = Some(to.clone());
+            }
+        } else {
+            if m.phases.contains(name) {
+                return Err(bad(c, format!("there's a phase `{name}` already; rename or delete it")));
+            }
+            if before.is_some() && after.is_some() {
+                return Err(bad(c, "`before` and `after` are two ways to say where; give one"));
+            }
+            let at = match (&before, &after) {
+                (Some(b), _) => known(m, b)?,
+                (_, Some(a)) => known(m, a)? + 1,
+                _ => m.phases.len(),
+            };
+            let m = s.model_mut();
+            // What holds no value was made in the first phase: a new first must not take it.
+            if at == 0 {
+                phasing::pin_first(m);
+            }
+            m.phases.insert(at, name.clone());
+        }
+    } else if rename.is_some() || delete || into.is_some() || before.is_some() || after.is_some() {
+        return Err(bad(c, "`name` is required: the phase to rename, delete, or add"));
+    }
+    match p.get("overrides") {
+        v if absent(v) => {}
+        Some(Value::Object(o)) => {
+            for (key, patch) in o {
+                let status: phasing::Status = serde_json::from_value(json!(key))
+                    .map_err(|_| bad(c, format!("`overrides`: `{key}` isn't a status: new, existing, demolished or temporary")))?;
+                let now = s.model.phase_overrides.get(&status).cloned();
+                let over = if patch.is_null() {
+                    Override::default()
+                } else {
+                    merged_override(c, &format!("the {key} phase"), now.as_ref(), patch)?
+                };
+                let m = s.model_mut();
+                if over.is_empty() {
+                    m.phase_overrides.remove(&status);
+                } else {
+                    m.phase_overrides.insert(status, over);
+                }
+            }
+        }
+        Some(v) => return Err(bad(c, format!("`overrides` is {{status: override}}, not {v}"))),
+        None => {}
+    }
+    if let Some(now) = now {
+        if let Some(n) = &now {
+            known(&s.model, n)?;
+        }
+        s.phase = now;
+    }
+    let m = &s.model;
+    Ok(json!({"phases": m.phases, "now": s.phase, "overrides": m.phase_overrides}))
+}
+
+fn view_phase_filter(s: &mut Session, p: &Value) -> R {
+    let c = "phase_filter";
+    let name = name_opt(c, p, "name")?.ok_or_else(|| bad(c, "`name` is required"))?;
+    let m = &s.model;
+    if flag(c, p, "delete")? {
+        if !m.phase_filters.contains_key(&name) {
+            return Err(bad(c, format!("there's no phase filter `{name}`")));
+        }
+        if let Some((id, _)) =
+            m.elements.iter().find(|(_, e)| graphics::graphics_of_element(e).is_some_and(|g| g.phase_filter.as_ref() == Some(&name)))
+        {
+            return Err(bad(c, format!("`{name}` is the phase filter of {}; give it another first", view_title(m, *id))));
+        }
+        if let Some(t) = m.view_templates.iter().find(|(_, t)| t.graphics.phase_filter.as_ref() == Some(&name)) {
+            return Err(bad(c, format!("`{name}` is the phase filter of view template `{}`; give it another first", t.0)));
+        }
+        s.model_mut().phase_filters.remove(&name);
+        return Ok(json!({"name": name, "deleted": true}));
+    }
+    let mut f = m.phase_filters.get(&name).cloned().unwrap_or_default();
+    for status in phasing::Status::ALL {
+        match p.get(status.name()) {
+            v if absent(v) => {}
+            Some(v) => {
+                let how = serde_json::from_value(v.clone())
+                    .map_err(|_| bad(c, format!("`{}` is by-category, overridden or not-displayed, not {v}", status.name())))?;
+                f.set(status, how);
+            }
+            None => {}
+        }
+    }
+    if m.phase_filters.get(&name) != Some(&f) {
+        s.model_mut().phase_filters.insert(name.clone(), f.clone());
+    }
+    Ok(json!({"name": name, "filter": f}))
+}
+
+fn design_options(s: &mut Session, p: &Value) -> R {
+    let c = "option";
+    let set = name_opt(c, p, "set")?;
+    let now = match p.get("now") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(Value::String(n)) => Some(Some(n.clone())),
+        Some(v) => return Err(bad(c, format!("`now` is `set: option`, or null, not {v}"))),
+    };
+    let Some(set) = set else {
+        let Some(now) = now else { return Err(bad(c, "`set` is required: the design option set to make, change, rename or delete")) };
+        if let Some(n) = &now
+            && !phasing::option_exists(&s.model, n)
+        {
+            return Err(bad(c, format!("`now` is `set: option`, one the project has; `{n}` isn't")));
+        }
+        s.option = now;
+        return Ok(json!({"now": s.option}));
+    };
+    let m = &s.model;
+    let mine = |key: &str| name_opt(c, p, key);
+    let (option, rename) = (mine("option")?, mine("rename")?);
+    let (primary, delete, accept) = (mine("primary")?, flag(c, p, "delete")?, flag(c, p, "accept")?);
+    let options: Option<Vec<String>> = match p.get("options") {
+        v if absent(v) => None,
+        Some(Value::Array(a)) if a.len() <= phasing::MAX_OPTIONS => {
+            Some(a.iter().map(|v| name_of(c, v, "an option")).collect::<Result<_, _>>()?)
+        }
+        Some(v) => return Err(bad(c, format!("`options` is a list of up to {} names, not {v}", phasing::MAX_OPTIONS))),
+        None => None,
+    };
+    let exists = m.option_sets.get(&set).cloned();
+    if set.contains(':') {
+        return Err(bad(c, format!("set `{set}`: a name has no colon in it")));
+    }
+    if let Some(list) = &options {
+        if list.is_empty() {
+            return Err(bad(c, format!("set `{set}`: `options` names at least one option, not none")));
+        }
+        for (i, o) in list.iter().enumerate() {
+            if o.contains(':') {
+                return Err(bad(c, format!("set `{set}`: option `{o}`: a name has no colon in it")));
+            }
+            if list[..i].contains(o) {
+                return Err(bad(c, format!("set `{set}` has option `{o}` twice")));
+            }
+        }
+    }
+    // Delete and accept: what is in the set goes, or the primary's stays.
+    if delete || accept {
+        let existing = exists.ok_or_else(|| {
+            bad(c, format!("no design option set `{set}`{}", known_names(&m.option_sets.keys().map(String::as_str).collect::<Vec<_>>())))
+        })?;
+        let keep = accept.then(|| existing.primary.clone());
+        let mut gone = Vec::new();
+        let mut kept = Vec::new();
+        for o in &existing.options {
+            let held = phasing::holders(m, phasing::OPTION, &format!("{set}: {o}"));
+            if keep.as_ref() == Some(o) { kept.extend(held) } else { gone.extend(held) }
+        }
+        let deleted = if gone.is_empty() { json!([]) } else { delete_elements(s, &gone)? };
+        let m = s.model_mut();
+        for id in kept {
+            if let Some(params) = m.elements.get_mut(&id).and_then(Element::params_mut) {
+                params.remove(phasing::OPTION);
+            }
+        }
+        m.option_sets.remove(&set);
+        phasing::forget_set(m, &set);
+        if s.option.as_deref().is_some_and(|o| o.starts_with(&format!("{set}: "))) {
+            s.option = None;
+        }
+        return Ok(json!({"set": set, "deleted": deleted}));
+    }
+    // Rename the set, or one of its options.
+    if let Some(to) = rename {
+        let existing = exists.ok_or_else(|| bad(c, format!("no design option set `{set}`")))?;
+        if to.contains(':') {
+            return Err(bad(c, format!("`{to}`: a name has no colon in it")));
+        }
+        match option {
+            Some(o) => {
+                if !existing.options.contains(&o) {
+                    return Err(bad(c, format!("set `{set}` has no option `{o}` (there are: {})", existing.options.join(", "))));
+                }
+                if to != o && existing.options.contains(&to) {
+                    return Err(bad(c, format!("set `{set}` has an option `{to}` already")));
+                }
+                let m = s.model_mut();
+                phasing::rename_option(m, &set, &o, &to);
+                if s.option.as_deref() == Some(&format!("{set}: {o}")) {
+                    s.option = Some(format!("{set}: {to}"));
+                }
+            }
+            None => {
+                if to != set && s.model.option_sets.contains_key(&to) {
+                    return Err(bad(c, format!("there's a design option set `{to}` already")));
+                }
+                phasing::rename_set(s.model_mut(), &set, &to);
+                if let Some(rest) = s.option.as_deref().and_then(|o| o.strip_prefix(&format!("{set}: "))) {
+                    s.option = Some(format!("{to}: {rest}"));
+                }
+                let m = &s.model;
+                let set = m.option_sets.get(&to).cloned();
+                if let Some(now) = now {
+                    if let Some(n) = &now
+                        && !phasing::option_exists(m, n)
+                    {
+                        return Err(bad(c, format!("`now` is `set: option`, one the project has; `{n}` isn't")));
+                    }
+                    s.option = now;
+                }
+                return Ok(json!({"set": to, "options": set.as_ref().map(|x| &x.options), "primary": set.map(|x| x.primary)}));
+            }
+        }
+    } else if options.is_some() || primary.is_some() || exists.is_none() {
+        // Make the set, or change its options and its primary.
+        let new_options = match (&options, &exists) {
+            (Some(list), _) => list.clone(),
+            (None, Some(e)) => e.options.clone(),
+            (None, None) => {
+                return Err(bad(
+                    c,
+                    format!("design option set `{set}` doesn't exist: make it with `options`, [\"Option 1\", \"Option 2\"]"),
+                ));
+            }
+        };
+        let new_primary = primary
+            .or_else(|| exists.as_ref().map(|e| e.primary.clone()).filter(|x| new_options.contains(x)))
+            .unwrap_or_else(|| new_options.first().cloned().unwrap_or_default());
+        let made = phasing::OptionSet { options: new_options, primary: new_primary };
+        // An option with elements in it can't go.
+        if let Some(old) = &exists
+            && let Some(o) = old
+                .options
+                .iter()
+                .find(|o| !made.options.contains(o) && !phasing::holders(&s.model, phasing::OPTION, &format!("{set}: {o}")).is_empty())
+        {
+            return Err(bad(
+                c,
+                format!("option `{o}` has elements in it; move them (modify {{params}}) or `accept`/`delete` the set first"),
+            ));
+        }
+        let m = s.model_mut();
+        if let Some(old) = &exists {
+            for o in old.options.iter().filter(|o| !made.options.contains(o)) {
+                phasing::forget_option(m, &set, o);
+            }
+        }
+        m.option_sets.insert(set.clone(), made);
+    }
+    if let Some(now) = now {
+        if let Some(n) = &now
+            && !phasing::option_exists(&s.model, n)
+        {
+            return Err(bad(c, format!("`now` is `set: option`, one the project has; `{n}` isn't")));
+        }
+        s.option = now;
+    }
+    let made = s.model.option_sets.get(&set).cloned();
+    Ok(json!({"set": set, "options": made.as_ref().map(|x| &x.options), "primary": made.map(|x| x.primary), "now": s.option}))
+}
+
+/// Delete elements `ids` as the `delete` command does: what hangs on them goes too. The reply's ids.
+fn delete_elements(s: &mut Session, ids: &[Id]) -> Result<Value, String> {
+    delete(s, &json!({"ids": ids})).map(|r| r["deleted"].clone())
 }
 
 fn measure(_: &mut Session, p: &Value) -> R {
@@ -2837,6 +3300,12 @@ fn family(s: &mut Session, p: &Value) -> R {
     }
     if let Some(v) = p.get("parameters").filter(|v| !v.is_null()) {
         f.parameters = serde_json::from_value(v.clone()).map_err(|e| field("parameters", e))?;
+        if let Some(q) = f.parameters.iter().find(|q| phasing::reserved(&q.name)) {
+            return Err(bad(
+                c,
+                format!("parameter `{}`: a component holds its phase and its design option under that name; name it otherwise", q.name),
+            ));
+        }
     }
     if let Some(v) = p.get("forms").filter(|v| !v.is_null()) {
         f.forms = serde_json::from_value(v.clone()).map_err(|e| field("forms", e))?;
@@ -3764,7 +4233,8 @@ fn inspect(s: &mut Session, _: &Value) -> R {
         "name": m.name, "units": "mm", "project_units": m.units.name(), "language": m.language.code(), "path": s.path, "levels": levels,
         "counts": counts,
         "types": m.types, "materials": m.materials, "families": families(m), "parameters": m.parameters,
-        "view_filters": m.view_filters, "view_templates": m.view_templates, "warnings": warnings,
+        "view_filters": m.view_filters, "view_templates": m.view_templates, "phases": m.phases, "phase_filters": m.phase_filters,
+        "phase_overrides": m.phase_overrides, "option_sets": m.option_sets, "warnings": warnings,
         "history": s.history(),
     }))
 }

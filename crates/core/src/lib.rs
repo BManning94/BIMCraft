@@ -13,6 +13,7 @@ pub mod import;
 pub mod language;
 pub mod model;
 pub mod pdf;
+pub mod phasing;
 pub mod render;
 pub mod sample;
 pub mod schedule;

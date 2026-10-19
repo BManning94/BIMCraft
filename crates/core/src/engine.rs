@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use crate::model::Model;
+use crate::model::{Element, Id, Model};
 
 pub type Run = fn(&mut Session, &Value) -> Result<Value, String>;
 
@@ -26,10 +26,17 @@ pub struct Command {
 
 const UNDO_LIMIT: usize = 200;
 
+/// The commands that copy what stands: a copy is made in the session's phase and isn't taken down with its original.
+const COPIES: [&str; 3] = ["copy", "mirror", "rotate"];
+
 pub struct Session {
     pub model: Arc<Model>,
     /// Where the model was opened from or last saved to.
     pub path: Option<PathBuf>,
+    /// The phase, and the design option (`set: option`), what a command makes is made in; none: the
+    /// project's first phase, and no option. Not the model's: set with `phase` and `option`.
+    pub phase: Option<String>,
+    pub option: Option<String>,
     undo: Vec<(&'static str, Arc<Model>)>,
     redo: Vec<(&'static str, Arc<Model>)>,
 }
@@ -56,7 +63,7 @@ pub fn catalog() -> Value {
 
 impl Session {
     pub fn new() -> Session {
-        Session { model: Arc::new(Model::new("Project")), path: None, undo: Vec::new(), redo: Vec::new() }
+        Session { model: Arc::new(Model::new("Project")), path: None, phase: None, option: None, undo: Vec::new(), redo: Vec::new() }
     }
 
     /// The model to change, copied first when an undo step still shares it.
@@ -68,6 +75,7 @@ impl Session {
     pub fn reset(&mut self, model: Model, path: Option<PathBuf>) {
         self.model = Arc::new(model);
         self.path = path;
+        (self.phase, self.option) = (None, None);
         self.undo.clear();
         self.redo.clear();
     }
@@ -82,13 +90,25 @@ impl Session {
     pub fn execute(&mut self, name: &str, params: &Value) -> Result<Value, String> {
         let cmd = find(name).ok_or_else(|| format!("unknown command `{name}`; list_commands shows them"))?;
         let before = Arc::clone(&self.model);
-        let run = cmd.run;
+        let (run, first_new, session) = (cmd.run, self.model.next_id, (self.phase.clone(), self.option.clone()));
         let result = catch_unwind(AssertUnwindSafe(|| run(self, params)))
             .unwrap_or_else(|p| Err(format!("internal error in `{}`: {}", cmd.id, panic_text(p.as_ref()))))
-            .and_then(|v| if Arc::ptr_eq(&before, &self.model) { Ok(v) } else { self.model.check().map(|()| v) });
+            .and_then(|v| {
+                if Arc::ptr_eq(&before, &self.model) {
+                    return Ok(v);
+                }
+                // A command that splits what stands keeps its phase; one that makes something makes it in the session's;
+                // undo, redo and the commands that replace the project make nothing.
+                if cmd.undoable && cmd.id != "split" {
+                    self.stamp(first_new, COPIES.contains(&cmd.id));
+                }
+                self.model.check().map(|()| v)
+            });
         match result {
             Err(e) => {
+                // A refused command changes nothing: not the model, nor the phase and the option it asked the session for.
                 self.model = before;
+                (self.phase, self.option) = session;
                 Err(e)
             }
             Ok(v) => {
@@ -122,6 +142,41 @@ impl Session {
             out.push(self.execute(id, &params).map_err(|e| format!("line {} ({id}): {e}", n + 1))?);
         }
         Ok(out)
+    }
+
+    /// What elements from id `first` on, which a command just made, are made in: the session's phase
+    /// (the first phase is no value at all, but for a door or window, which would follow its wall) and design
+    /// option. A name the project no longer has is left out. A copy is made in them whatever it was copied from,
+    /// and isn't taken down with its original; anything else holds the phase or the option it was given.
+    fn stamp(&mut self, first: Id, copies: bool) {
+        if self.phase.is_none() && self.option.is_none() || self.model.next_id <= first {
+            return;
+        }
+        let m = Arc::make_mut(&mut self.model);
+        let phase = self.phase.clone().filter(|p| m.phases.contains(p));
+        let option = self.option.clone().filter(|o| crate::phasing::option_exists(m, o));
+        let is_first = phase.as_ref() == m.phases.first();
+        for (_, e) in m.elements.range_mut(first..) {
+            let follows = matches!(e, Element::Door(_) | Element::Window(_));
+            let Some(params) = e.params_mut() else { continue };
+            if let Some(p) = &phase
+                && (copies || !params.contains_key(crate::phasing::CREATED))
+            {
+                if is_first && !follows {
+                    params.remove(crate::phasing::CREATED);
+                } else {
+                    params.insert(crate::phasing::CREATED.into(), json!(p));
+                }
+                if copies {
+                    params.remove(crate::phasing::DEMOLISHED);
+                }
+            }
+            if let Some(o) = &option
+                && (copies || !params.contains_key(crate::phasing::OPTION))
+            {
+                params.insert(crate::phasing::OPTION.into(), json!(o));
+            }
+        }
     }
 
     pub(crate) fn step_back(&mut self, redo: bool) -> Result<Value, String> {

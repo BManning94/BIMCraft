@@ -1466,7 +1466,16 @@ fn nothing_a_translated_interface_shows_is_left_in_english() {
             .collect()
     };
     let extra = r#"parameter {"name": "Finish Height", "kind": "length", "categories": ["wall"]}
-schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Length", "total": true}, {"name": "Twice", "formula": "Length * 2"}], "filters": [{"field": "Length", "op": "greater", "value": 1}], "sort": ["Length"]}"#;
+schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Length", "total": true}, {"name": "Twice", "formula": "Length * 2"}], "filters": [{"field": "Length", "op": "greater", "value": 1}], "sort": ["Length"]}
+phase {"name": "Existing", "rename": "Survey"}
+phase {"name": "New Construction", "rename": "Works"}
+phase_filter {"name": "Show All", "delete": true}
+phase_filter {"name": "Show Complete", "delete": true}
+phase_filter {"name": "Show New", "delete": true}
+phase_filter {"name": "Show Previous + Demolished", "delete": true}
+phase_filter {"name": "Show Previous + New", "delete": true}
+phase_filter {"name": "Mine", "existing": "overridden"}
+option {"set": "Massing", "options": ["Tall", "Low"]}"#;
     let mut h =
         app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}\n{extra}"));
     // The probe finds what it looks for: in English, the same labels are all English.
@@ -1541,11 +1550,24 @@ schedule {"name": "Areas", "category": "walls", "fields": ["Type", {"name": "Len
         let over = tr("Override {}").replace("{}", &crate::lang::category("wall", true));
         pick(&mut h, Role::Button, &over);
         missed.extend(english(&h, l));
-        for tab in ["Annotation Categories", "Filters", "Elements"] {
+        for tab in ["Annotation Categories", "Filters", "Elements", "Design Options"] {
             press(&mut h, tr(tab));
             missed.extend(english(&h, l));
         }
         press(&mut h, tr("Cancel"));
+        // Phasing on every tab with a status being edited, and Design Options.
+        shortcut(&mut h, "PH");
+        missed.extend(english(&h, l));
+        for tab in ["Phase Filters", "Graphic Overrides"] {
+            press(&mut h, tr(tab));
+            missed.extend(english(&h, l));
+        }
+        pick(&mut h, Role::CheckBox, &format!("{}: {}", tr("Cut"), tr("Line weight")));
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Close"));
+        shortcut(&mut h, "DO");
+        missed.extend(english(&h, l));
+        press(&mut h, tr("Close"));
         shortcut(&mut h, "FT");
         press(&mut h, tr("New"));
         press(&mut h, tr("Add Filter"));
@@ -2606,7 +2628,7 @@ fn view_templates_are_made_from_a_view_and_followed_from_properties() {
     assert_eq!(plan_graphics(&h, 2).template.as_deref(), Some("Presentation"));
     // Its dialog says where the categories are set, and shows them as the template has them.
     shortcut(&mut h, "VV");
-    assert!(h.query_by_label("Categories, Filters follow view template Presentation: change them there.").is_some());
+    assert!(h.query_by_label("Categories, Filters, Design Options follow view template Presentation: change them there.").is_some());
     use egui_kittest::kittest::NodeT;
     let rooms = h.get_by_role_and_label(Role::CheckBox, "Rooms").accesskit_node().toggled();
     assert_eq!(rooms, Some(egui::accesskit::Toggled::False), "hidden, by the template");
@@ -2676,4 +2698,388 @@ fn sheets_and_schedules_have_no_graphics_to_override() {
     shortcut(&mut h, "VV");
     assert!(h.query_by_label("Visibility/Graphics Overrides for Sheet: Plans").is_none());
     assert!(h.query_by_label("This view has no graphics to override.").is_some());
+}
+
+/// The value of parameter `key` that element `id` holds, if it holds one.
+fn param(h: &Harness<BimApp>, id: Id, key: &str) -> Option<Value> {
+    h.state().session.model.elements.get(&id).and_then(Element::params).and_then(|p| p.get(key)).cloned()
+}
+
+/// A wall drawn with the Wall tool from `a` to `b`, the tool left again: its id.
+fn draw_wall(h: &mut Harness<BimApp>, a: P2, b: P2) -> Id {
+    tool(h, "Wall");
+    click(h, a);
+    click(h, b);
+    key(h, Key::Enter);
+    key(h, Key::Escape);
+    ids(h, "wall").last().copied().unwrap()
+}
+
+/// A drop-down opened the way a screen reader does, for the ones lying below the palette's fold.
+fn open_combo(h: &mut Harness<BimApp>, label: &str) {
+    h.get_by_role_and_label(Role::ComboBox, label).click_accesskit();
+    h.run();
+}
+
+const MASSING: &str = r#"option {"set": "Massing", "options": ["Tall", "Low"]}"#;
+
+#[test]
+fn ph_and_do_open_phasing_and_design_options_and_so_do_the_manage_tabs_buttons() {
+    let mut h = app(BOX);
+    shortcut(&mut h, "PH");
+    assert!(h.query_by_label("Phases, in order:").is_some());
+    press(&mut h, "Close");
+    shortcut(&mut h, "DO");
+    assert!(h.query_by_label("No design option sets yet: New Set makes one.").is_some());
+    press(&mut h, "Close");
+    assert!(h.query_by_label("Active design option:").is_none(), "no sets of options, no active one to pick");
+    // The Manage tab's buttons; the Properties palette has a Phasing group of its own, below.
+    press(&mut h, "Manage");
+    topmost(&mut h, "Phasing");
+    assert!(h.query_by_label("Phases, in order:").is_some());
+    press(&mut h, "Close");
+    topmost(&mut h, "Design Options");
+    assert!(h.query_by_label("Option set:").is_some());
+    press(&mut h, "Close");
+    assert!(h.query_by_label("Option set:").is_none());
+}
+
+#[test]
+fn the_phasing_dialog_adds_renames_and_combines_phases() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    let phases = |h: &Harness<BimApp>| h.state().session.model.phases.clone();
+    shortcut(&mut h, "PH");
+    // After the one picked.
+    pick(&mut h, Role::Button, "Existing");
+    type_into(&mut h, "Name:", "Demolition");
+    press(&mut h, "Insert After");
+    assert_eq!(phases(&h), ["Existing", "Demolition", "New Construction"]);
+    // The new one is picked: renamed, it keeps the elements made in it.
+    h.state_mut().session.execute("modify", &json!({"ids": [walls[0]], "params": {"Phase Created": "Demolition"}})).unwrap();
+    type_into(&mut h, "Name:", "Interim");
+    press(&mut h, "Rename");
+    assert_eq!(phases(&h), ["Existing", "Interim", "New Construction"]);
+    assert_eq!(param(&h, walls[0], "Phase Created"), Some(json!("Interim")));
+    // Before it, and at the end.
+    type_into(&mut h, "Name:", "Survey");
+    press(&mut h, "Insert Before");
+    type_into(&mut h, "Name:", "Handover");
+    press(&mut h, "Add at End");
+    assert_eq!(phases(&h), ["Existing", "Survey", "Interim", "New Construction", "Handover"]);
+    // Combined into its neighbour, a phase leaves what was made in it there.
+    pick(&mut h, Role::Button, "Interim");
+    press(&mut h, "Combine with Previous");
+    assert_eq!(phases(&h), ["Existing", "Survey", "New Construction", "Handover"]);
+    assert_eq!(param(&h, walls[0], "Phase Created"), Some(json!("Survey")));
+    // The first has no one before it; the last none after.
+    pick(&mut h, Role::Button, "Existing");
+    assert!(h.get_by_label("Combine with Previous").accesskit_node().is_disabled());
+    pick(&mut h, Role::Button, "Handover");
+    assert!(h.get_by_label("Combine with Next").accesskit_node().is_disabled());
+    // A name the project has can't be added again.
+    type_into(&mut h, "Name:", "Existing");
+    assert!(h.get_by_label("Add at End").accesskit_node().is_disabled());
+    press(&mut h, "Close");
+}
+
+#[test]
+fn phase_filters_are_made_and_set_status_by_status_in_the_phasing_dialog() {
+    use bimcraft_core::phasing::{Presentation, Status};
+    let mut h = app(BOX);
+    let filter = |h: &Harness<BimApp>, name: &str| h.state().session.model.phase_filters.get(name).cloned();
+    shortcut(&mut h, "PH");
+    press(&mut h, "Phase Filters");
+    type_into(&mut h, "New filter:", "Survey Only");
+    press(&mut h, "New Filter");
+    let made = filter(&h, "Survey Only").unwrap();
+    assert!(Status::ALL.iter().all(|s| made.of(*s) == Presentation::ByCategory), "a new one shows everything as its category does");
+    // The new one is picked; each status has a drop-down.
+    pick(&mut h, Role::ComboBox, "Existing");
+    press(&mut h, "Overridden");
+    pick(&mut h, Role::ComboBox, "Demolished");
+    press(&mut h, "Not Displayed");
+    let f = filter(&h, "Survey Only").unwrap();
+    assert_eq!((f.existing, f.demolished, f.new), (Presentation::Overridden, Presentation::NotDisplayed, Presentation::ByCategory));
+    // The ones a project starts with are listed, and a filter a view uses can't go.
+    pick(&mut h, Role::ComboBox, "Phase filter:");
+    press(&mut h, "Show New");
+    h.state_mut().session.execute("graphics", &json!({"view": 1, "phase_filter": "Show New"})).unwrap();
+    press(&mut h, "Delete");
+    assert!(filter(&h, "Show New").is_some() && h.state().status.error, "{:?}", h.state().status.text);
+    pick(&mut h, Role::ComboBox, "Phase filter:");
+    press(&mut h, "Survey Only");
+    press(&mut h, "Delete");
+    assert!(filter(&h, "Survey Only").is_none());
+    press(&mut h, "Close");
+}
+
+#[test]
+fn a_statuss_graphic_overrides_are_applied_as_one_command() {
+    use bimcraft_core::phasing::Status;
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(BOX);
+    let over = |h: &Harness<BimApp>, s: Status| h.state().session.model.phase_overrides.get(&s).cloned().unwrap_or_default();
+    let steps = h.state().session.history().len();
+    shortcut(&mut h, "PH");
+    press(&mut h, "Graphic Overrides");
+    pick(&mut h, Role::Button, "Demolished");
+    // Dashed red to begin with. The edit is a draft until Apply.
+    pick(&mut h, Role::CheckBox, "Cut: Line weight");
+    assert_eq!(over(&h, Status::Demolished).cut.weight, None);
+    press(&mut h, "Apply Overrides");
+    assert_eq!(over(&h, Status::Demolished).cut.weight, Some(4.0));
+    assert_eq!(over(&h, Status::Demolished).cut.dash, Some(bimcraft_core::graphics::Dash::Dashed), "the rest stays as it was");
+    assert_eq!(h.state().session.history().len(), steps + 1, "one command");
+    // Unticked again, the patch takes that one away and leaves the rest.
+    pick(&mut h, Role::CheckBox, "Cut: Line weight");
+    press(&mut h, "Apply Overrides");
+    assert_eq!(over(&h, Status::Demolished).cut.weight, None);
+    assert_eq!(over(&h, Status::Demolished).cut.dash, Some(bimcraft_core::graphics::Dash::Dashed));
+    // A phase filter hides what it doesn't display; overrides draw, so no transparency to set.
+    assert!(h.query_by_label("Transparency").is_none());
+    // Another status, edited and dropped by moving on.
+    pick(&mut h, Role::Button, "Temporary");
+    pick(&mut h, Role::CheckBox, "Projection: Line color");
+    pick(&mut h, Role::Button, "Demolished");
+    pick(&mut h, Role::Button, "Temporary");
+    assert!(over(&h, Status::Temporary).is_empty());
+    assert!(h.get_by_label("Apply Overrides").accesskit_node().is_disabled(), "nothing to apply");
+    press(&mut h, "Close");
+}
+
+#[test]
+fn the_active_design_option_in_the_status_bar_is_what_new_walls_are_made_in() {
+    let mut h = app(&format!("{BOX}\n{MASSING}"));
+    let option = |h: &Harness<BimApp>, id: Id| param(h, id, "Design Option");
+    // The main model first: a wall made there is in no option.
+    let main = draw_wall(&mut h, P2(2000.0, 1500.0), P2(6000.0, 1500.0));
+    assert!(!ids(&h, "wall")[..4].contains(&main), "a new wall");
+    assert_eq!(option(&h, main), None);
+    // The option picked is the one new walls are made in, and the view on screen shows it.
+    pick(&mut h, Role::ComboBox, "Active design option:");
+    press(&mut h, "Massing: Low");
+    assert_eq!(h.state().active_option.as_deref(), Some("Massing: Low"));
+    assert_eq!(plan_graphics(&h, 1).options["Massing"], "Low");
+    let low = draw_wall(&mut h, P2(2000.0, 3000.0), P2(6000.0, 3000.0));
+    assert_eq!(option(&h, low), Some(json!("Massing: Low")));
+    let look = bimcraft_core::graphics::Look::of(&h.state().session.model, 1);
+    assert!(look.shows(low) && look.shows(main), "what was made in it is in the view");
+    // Back to the main model: what is made now is in none.
+    pick(&mut h, Role::ComboBox, "Active design option:");
+    press(&mut h, "Main Model");
+    let again = draw_wall(&mut h, P2(2000.0, 4500.0), P2(6000.0, 4500.0));
+    assert_eq!(option(&h, again), None);
+    let steps = ["Wall", "Design Options", "Wall", "Visibility/Graphics", "Wall", "Wall"];
+    assert_eq!(h.state().session.history(), steps, "picking an option is no undo step, but showing it in the view is");
+}
+
+#[test]
+fn what_is_drawn_in_a_view_with_a_phase_of_its_own_is_made_in_that_phase() {
+    let mut h = app(BOX);
+    let made = |h: &Harness<BimApp>, id: Id| param(h, id, "Phase Created");
+    // A view with neither a phase nor a phase filter makes nothing phased: the first phase, no value.
+    let plain = draw_wall(&mut h, P2(2000.0, 1500.0), P2(6000.0, 1500.0));
+    assert_eq!(made(&h, plain), None);
+    // A phase filter makes it phased; it shows the project's last phase, and walls are made in it.
+    open_combo(&mut h, "Phase Filter");
+    press(&mut h, "Show New");
+    assert_eq!(plan_graphics(&h, 1).phase_filter.as_deref(), Some("Show New"));
+    let new = draw_wall(&mut h, P2(2000.0, 3000.0), P2(6000.0, 3000.0));
+    assert_eq!(made(&h, new), Some(json!("New Construction")));
+    // The first phase picked for the view: what is drawn there is made in it, which leaves no value.
+    open_combo(&mut h, "Phase");
+    press(&mut h, "Existing");
+    assert_eq!(plan_graphics(&h, 1).phase.as_deref(), Some("Existing"));
+    let old = draw_wall(&mut h, P2(2000.0, 4500.0), P2(6000.0, 4500.0));
+    assert_eq!(made(&h, old), None);
+    // The last phase picked again is the view's own now, whatever the project gains after it.
+    open_combo(&mut h, "Phase");
+    press(&mut h, "New Construction");
+    assert_eq!(plan_graphics(&h, 1).phase.as_deref(), Some("New Construction"));
+    // The filter takes the view back to no phasing; the phase stays its own.
+    open_combo(&mut h, "Phase Filter");
+    press(&mut h, "<None>");
+    assert!(plan_graphics(&h, 1).phase_filter.is_none());
+}
+
+#[test]
+fn an_elements_phases_and_design_option_are_set_in_properties() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(&format!("{BOX}\n{MASSING}"));
+    let wall = ids(&h, "wall")[0];
+    let shown = |h: &Harness<BimApp>, label: &str| h.get_by_role_and_label(Role::ComboBox, label).accesskit_node().value();
+    click(&mut h, P2(4000.0, 0.0));
+    assert_eq!(h.state().selection, [wall]);
+    assert_eq!(shown(&h, "Phase Created").as_deref(), Some("Existing"), "no value is the first phase");
+    open_combo(&mut h, "Phase Created");
+    press(&mut h, "New Construction");
+    assert_eq!(param(&h, wall, "Phase Created"), Some(json!("New Construction")));
+    // Taken down in the phase it was made in: a temporary thing. None takes it back.
+    open_combo(&mut h, "Phase Demolished");
+    press(&mut h, "New Construction");
+    assert_eq!(param(&h, wall, "Phase Demolished"), Some(json!("New Construction")));
+    open_combo(&mut h, "Phase Demolished");
+    press(&mut h, "<None>");
+    assert_eq!(param(&h, wall, "Phase Demolished"), None);
+    // Before it was made is refused, and says why.
+    open_combo(&mut h, "Phase Demolished");
+    press(&mut h, "Existing");
+    assert!(h.state().status.error && param(&h, wall, "Phase Demolished").is_none(), "{:?}", h.state().status);
+    // In an option of a set, and back in the main model.
+    open_combo(&mut h, "Design Option");
+    press(&mut h, "Massing: Tall");
+    assert_eq!(param(&h, wall, "Design Option"), Some(json!("Massing: Tall")));
+    open_combo(&mut h, "Design Option");
+    press(&mut h, "Main Model");
+    assert_eq!(param(&h, wall, "Design Option"), None);
+    // Two walls that differ leave the field blank rather than say one of them; one pick sets both.
+    click_with(&mut h, P2(8000.0, 3000.0), Modifiers::COMMAND);
+    assert_eq!(h.state().selection.len(), 2);
+    assert_eq!(shown(&h, "Phase Created").as_deref(), Some(""));
+    open_combo(&mut h, "Phase Created");
+    press(&mut h, "Existing");
+    let both: Vec<Option<Value>> = h.state().selection.iter().map(|id| param(&h, *id, "Phase Created")).collect();
+    assert_eq!(both, [Some(json!("Existing")), Some(json!("Existing"))]);
+}
+
+#[test]
+fn the_design_options_dialog_makes_sets_and_options_and_edits_one() {
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    let set = |h: &Harness<BimApp>| h.state().session.model.option_sets.get("Massing").cloned();
+    shortcut(&mut h, "DO");
+    type_into(&mut h, "Name:", "Massing");
+    press(&mut h, "New Set");
+    assert_eq!(set(&h).map(|s| (s.options, s.primary)), Some((vec!["Option 1".to_string()], "Option 1".to_string())));
+    // A second option, made the primary.
+    type_into(&mut h, "Name:", "Option 2");
+    press(&mut h, "Add Option");
+    pick(&mut h, Role::Button, "Option 2");
+    press(&mut h, "Make Primary");
+    assert_eq!(set(&h).map(|s| s.primary).as_deref(), Some("Option 2"));
+    // Renamed; an element in it follows.
+    h.state_mut().session.execute("modify", &json!({"ids": [walls[0]], "params": {"Design Option": "Massing: Option 1"}})).unwrap();
+    pick(&mut h, Role::Button, "Option 1");
+    type_into(&mut h, "Name:", "Tall");
+    press(&mut h, "Rename Option");
+    assert_eq!(set(&h).map(|s| s.options), Some(vec!["Tall".to_string(), "Option 2".to_string()]));
+    assert_eq!(param(&h, walls[0], "Design Option"), Some(json!("Massing: Tall")));
+    // An option with elements in it can't go; one without can.
+    pick(&mut h, Role::Button, "Tall");
+    press(&mut h, "Delete Option");
+    assert!(h.state().status.error && set(&h).is_some_and(|s| s.options.len() == 2), "{:?}", h.state().status.text);
+    pick(&mut h, Role::Button, "Option 2 (primary)");
+    type_into(&mut h, "Name:", "Low");
+    press(&mut h, "Rename Option");
+    // Edit Option: new elements are made in it, and the view shows it.
+    pick(&mut h, Role::Button, "Tall");
+    press(&mut h, "Edit Option");
+    assert_eq!(h.state().active_option.as_deref(), Some("Massing: Tall"));
+    assert_eq!(plan_graphics(&h, 1).options["Massing"], "Tall");
+    assert!(h.query_by_label("Active design option:").is_some(), "now there are options to pick from");
+    // Accepting the primary keeps its elements, drops the others', and the set with them.
+    press(&mut h, "Accept Primary");
+    assert!(set(&h).is_none());
+    assert!(!h.state().session.model.elements.contains_key(&walls[0]), "the wall in Tall went");
+    assert_eq!(h.state().active_option, None, "the active option went with its set");
+    assert!(plan_graphics(&h, 1).options.is_empty());
+    press(&mut h, "Close");
+}
+
+#[test]
+fn visibility_graphics_picks_the_option_a_view_shows_of_each_set_unless_a_template_does() {
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(&format!("{BOX}\n{MASSING}"));
+    shortcut(&mut h, "VV");
+    press(&mut h, "Design Options");
+    pick(&mut h, Role::ComboBox, "Massing");
+    press(&mut h, "Low");
+    // A draft until OK, as every tab's.
+    assert!(plan_graphics(&h, 1).options.is_empty());
+    press(&mut h, "OK");
+    assert_eq!(plan_graphics(&h, 1).options["Massing"], "Low");
+    // The primary again takes the choice away.
+    shortcut(&mut h, "VV");
+    press(&mut h, "Design Options");
+    pick(&mut h, Role::ComboBox, "Massing");
+    press(&mut h, "Primary (Tall)");
+    press(&mut h, "OK");
+    assert!(plan_graphics(&h, 1).options.is_empty());
+    // A template that controls the options holds them: the box is there, and can't be used.
+    h.state_mut().session.execute("template", &json!({"name": "T", "from": 1, "controls": ["options"]})).unwrap();
+    h.state_mut().session.execute("graphics", &json!({"view": 1, "template": "T"})).unwrap();
+    shortcut(&mut h, "VV");
+    press(&mut h, "Design Options");
+    assert!(h.get_by_role_and_label(Role::ComboBox, "Massing").accesskit_node().is_disabled());
+    assert!(h.query_by_label("Design Options follow view template T: change them there.").is_some());
+    press(&mut h, "Cancel");
+    // A project with no sets says where to make them.
+    let mut h = app(BOX);
+    shortcut(&mut h, "VV");
+    press(&mut h, "Design Options");
+    assert!(h.query_by_label("The project has no design options: Manage > Design Options makes them.").is_some());
+}
+
+#[test]
+fn a_templates_phase_and_options_are_ticked_like_its_other_controls_and_hold_a_views_phase() {
+    use bimcraft_core::graphics::Group;
+    use egui_kittest::kittest::NodeT;
+    let mut h = app(BOX);
+    h.state_mut().session.execute("template", &json!({"name": "T", "from": 1, "controls": ["categories"], "phase": "Existing"})).unwrap();
+    shortcut(&mut h, "VT");
+    let controls = |h: &Harness<BimApp>| h.state().session.model.view_templates["T"].controls.iter().copied().collect::<Vec<_>>();
+    pick(&mut h, Role::CheckBox, "Phase and Phase Filter");
+    pick(&mut h, Role::CheckBox, "Design Options");
+    assert_eq!(controls(&h), [Group::Categories, Group::Phase, Group::Options]);
+    // Followed, the view shows the template's phase and can't change it.
+    press(&mut h, "Follow in This View");
+    press(&mut h, "Close");
+    assert_eq!(plan_graphics(&h, 1).template.as_deref(), Some("T"));
+    let phase = h.get_by_role_and_label(Role::ComboBox, "Phase");
+    assert_eq!(phase.accesskit_node().value().as_deref(), Some("Existing"));
+    assert!(phase.accesskit_node().is_disabled());
+    // The view's own, if it follows nothing.
+    shortcut(&mut h, "VT");
+    press(&mut h, "Stop Following in This View");
+    press(&mut h, "Close");
+    assert!(!h.get_by_role_and_label(Role::ComboBox, "Phase").accesskit_node().is_disabled());
+}
+
+#[test]
+fn an_active_option_the_project_no_longer_has_is_dropped() {
+    let mut h = app(&format!("{BOX}\n{MASSING}"));
+    pick(&mut h, Role::ComboBox, "Active design option:");
+    press(&mut h, "Massing: Low");
+    assert_eq!(h.state().active_option.as_deref(), Some("Massing: Low"));
+    // Undo takes the choice the view made, then the set itself.
+    for _ in 0..2 {
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        h.run();
+    }
+    assert!(h.state().session.model.option_sets.is_empty());
+    assert_eq!(h.state().active_option, None);
+    assert!(h.query_by_label("Active design option:").is_none(), "nothing left to pick from");
+    // Walls made now are in no option.
+    let wall = draw_wall(&mut h, P2(2000.0, 1500.0), P2(6000.0, 1500.0));
+    assert_eq!(param(&h, wall, "Design Option"), None);
+}
+
+#[test]
+fn a_view_that_does_not_show_the_active_option_says_so_and_picking_it_again_shows_it_there() {
+    let mut h = app(&format!("{BOX}\n{MASSING}"));
+    assert!(!h.state().active_option_unseen(), "no option active: nothing to miss");
+    pick(&mut h, Role::ComboBox, "Active design option:");
+    press(&mut h, "Massing: Low");
+    assert!(!h.state().active_option_unseen(), "Level 1 shows it now");
+    // Level 2's plan still shows the primary: what is made there in Low would not be seen.
+    topmost(&mut h, "Level 2");
+    assert!(plan_graphics(&h, 2).options.is_empty());
+    assert!(h.state().active_option_unseen());
+    // The same pick again shows it in the view on screen.
+    pick(&mut h, Role::ComboBox, "Active design option:");
+    press(&mut h, "Massing: Low");
+    assert_eq!(plan_graphics(&h, 2).options["Massing"], "Low");
+    assert!(!h.state().active_option_unseen());
 }

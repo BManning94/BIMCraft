@@ -14,6 +14,7 @@ use crate::family::{Family, Piece};
 use crate::geom::{self, P2, Region};
 use crate::graphics::{self, Graphics, ViewFilter, ViewTemplate};
 use crate::language::Language;
+use crate::phasing::{self, OptionSet, PhaseFilter, Status};
 use crate::units::Units;
 use crate::walls;
 
@@ -1101,6 +1102,18 @@ pub struct Model {
     /// Its view templates, by name: settings views follow.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub view_templates: BTreeMap<String, ViewTemplate>,
+    /// Its phases, in order: what an element is made in, and may be taken down in, a later one.
+    #[serde(default = "phasing::default_phases", skip_serializing_if = "phasing::is_default_phases")]
+    pub phases: Vec<String>,
+    /// How a view's phase filter shows each status of what's in its phase, by name.
+    #[serde(default = "phasing::default_filters", skip_serializing_if = "phasing::is_default_filters")]
+    pub phase_filters: BTreeMap<String, PhaseFilter>,
+    /// What each status is drawn as where a phase filter says overridden.
+    #[serde(default = "phasing::default_overrides", skip_serializing_if = "phasing::is_default_overrides")]
+    pub phase_overrides: BTreeMap<Status, graphics::Override>,
+    /// Its sets of design options, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub option_sets: BTreeMap<String, OptionSet>,
     pub elements: BTreeMap<Id, Element>,
 }
 
@@ -1124,6 +1137,10 @@ impl Model {
             parameters: BTreeMap::new(),
             view_filters: BTreeMap::new(),
             view_templates: BTreeMap::new(),
+            phases: phasing::phases(language),
+            phase_filters: phasing::filters(language),
+            phase_overrides: phasing::overrides(),
+            option_sets: BTreeMap::new(),
             elements: BTreeMap::new(),
         };
         // A library to start from: each material its colour, its cut's pattern and its surface's.
@@ -2114,6 +2131,7 @@ impl Model {
             }
         }
         graphics::check_project(self)?;
+        phasing::check_project(self)?;
         for (cat, n, thickness, layers) in self.layered_types() {
             let who = format!("{cat} type `{n}`");
             size(&format!("{who} thickness"), thickness)?;
@@ -2179,6 +2197,11 @@ impl Model {
             // Its values of the project's parameters, each one of its category's, of its kind; a
             // component's family's are its family's to check.
             for (k, v) in e.params().into_iter().flatten() {
+                // Its phases and its design option are values it holds under names no parameter may take.
+                if let Some(checked) = phasing::check_value(self, &who, k, v) {
+                    checked?;
+                    continue;
+                }
                 if let Element::Component(c) = e
                     && self.families.get(&c.family).is_some_and(|f| f.parameters.iter().any(|p| p.name == *k))
                 {
@@ -2199,6 +2222,7 @@ impl Model {
                     return Err(format!("{who}: `{k}` holds {what}, not {v}"));
                 }
             }
+            phasing::check_order(self, &who, e)?;
             match e {
                 Element::Level(l) => {
                     text(&who, "name", &l.name)?;

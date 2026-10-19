@@ -159,6 +159,8 @@ enum From {
     Metres(&'static str),
     PathLength,
     Count,
+    /// A value among the element's parameters, under the field's own name (its phases, its design option).
+    Param,
 }
 
 type Own = (&'static str, Kind, From);
@@ -176,6 +178,9 @@ const MARK: Own = ("Mark", Kind::Text, From::Key("mark"));
 const NAME: Own = ("Name", Kind::Text, From::Key("name"));
 const HOST: Own = ("Wall", Kind::Number, From::Key("host"));
 const COUNT: Own = ("Count", Kind::Number, From::Count);
+const PHASE_CREATED: Own = ("Phase Created", Kind::Text, From::Param);
+const PHASE_DEMOLISHED: Own = ("Phase Demolished", Kind::Text, From::Param);
+const DESIGN_OPTION: Own = ("Design Option", Kind::Text, From::Param);
 
 /// Each category's own fields, and how many of them, from the first, its schedule shows unless it
 /// chooses.
@@ -183,20 +188,72 @@ const OWN: &[(&str, usize, &[Own])] = &[
     (
         "room",
         5,
-        &[("Number", Kind::Text, From::Key("number")), NAME, LEVEL, AREA, ("Perimeter", Kind::Length, From::Metres("perimeter_m")), COUNT],
+        &[
+            ("Number", Kind::Text, From::Key("number")),
+            NAME,
+            LEVEL,
+            AREA,
+            ("Perimeter", Kind::Length, From::Metres("perimeter_m")),
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
     ),
-    ("door", 6, &[MARK, TYPE, WIDTH, HEIGHT, LEVEL, HOST, COUNT]),
-    ("window", 7, &[MARK, TYPE, WIDTH, HEIGHT, ("Sill", Kind::Length, From::Key("sill")), LEVEL, HOST, COUNT]),
-    ("wall", 6, &[ID, TYPE, LEVEL, LENGTH, HEIGHT, THICKNESS, COUNT]),
-    ("floor", 5, &[ID, TYPE, LEVEL, AREA, THICKNESS, OFFSET, COUNT]),
-    ("ceiling", 5, &[ID, TYPE, LEVEL, OFFSET, AREA, THICKNESS, COUNT]),
+    ("door", 6, &[MARK, TYPE, WIDTH, HEIGHT, LEVEL, HOST, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "window",
+        7,
+        &[
+            MARK,
+            TYPE,
+            WIDTH,
+            HEIGHT,
+            ("Sill", Kind::Length, From::Key("sill")),
+            LEVEL,
+            HOST,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
+    ("wall", 6, &[ID, TYPE, LEVEL, LENGTH, HEIGHT, THICKNESS, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("floor", 5, &[ID, TYPE, LEVEL, AREA, THICKNESS, OFFSET, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("ceiling", 5, &[ID, TYPE, LEVEL, OFFSET, AREA, THICKNESS, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "roof",
         4,
-        &[ID, TYPE, LEVEL, ("Slope", Kind::Number, From::Key("slope")), ("Plan Area", Kind::Area, From::Key("area_m2")), OFFSET, COUNT],
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            ("Slope", Kind::Number, From::Key("slope")),
+            ("Plan Area", Kind::Area, From::Key("area_m2")),
+            OFFSET,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
     ),
-    ("column", 6, &[ID, TYPE, LEVEL, WIDTH, ("Depth", Kind::Length, From::Key("depth")), HEIGHT, COUNT]),
-    ("component", 4, &[("Family", Kind::Text, From::Key("family")), TYPE, LEVEL, COUNT]),
+    (
+        "column",
+        6,
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            WIDTH,
+            ("Depth", Kind::Length, From::Key("depth")),
+            HEIGHT,
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
+    ("component", 4, &[("Family", Kind::Text, From::Key("family")), TYPE, LEVEL, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "stair",
         7,
@@ -210,10 +267,32 @@ const OWN: &[(&str, usize, &[Own])] = &[
             ("Tread", Kind::Length, From::Key("tread")),
             LENGTH,
             COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
         ],
     ),
-    ("ramp", 6, &[ID, LEVEL, WIDTH, HEIGHT, LENGTH, ("Slope", Kind::Number, From::Key("slope")), COUNT]),
-    ("railing", 5, &[ID, TYPE, LEVEL, ("Length", Kind::Length, From::PathLength), HEIGHT, COUNT]),
+    (
+        "ramp",
+        6,
+        &[
+            ID,
+            LEVEL,
+            WIDTH,
+            HEIGHT,
+            LENGTH,
+            ("Slope", Kind::Number, From::Key("slope")),
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
+    (
+        "railing",
+        5,
+        &[ID, TYPE, LEVEL, ("Length", Kind::Length, From::PathLength), HEIGHT, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION],
+    ),
     ("level", 2, &[("Elevation", Kind::Length, From::Key("elevation")), NAME, COUNT]),
 ];
 
@@ -544,6 +623,13 @@ impl Row<'_> {
                     serde_json::json!(fine(path.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>()))
                 }
                 From::Count => serde_json::json!(1.0),
+                // Its parameter of that name, or its wall's for a door or window with none; a phase it holds none of
+                // is the project's first.
+                From::Param => match crate::phasing::value(m, self.e, name) {
+                    Some(v) if !v.is_empty() => Value::String(v.to_string()),
+                    _ if name == crate::phasing::CREATED => m.phases.first().map_or(Value::Null, |p| Value::String(p.clone())),
+                    _ => Value::Null,
+                },
             };
         }
         let cat = self.e.category();

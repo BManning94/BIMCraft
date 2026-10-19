@@ -181,7 +181,7 @@ impl Override {
         }
     }
 
-    fn check(&self, who: &str) -> Result<(), String> {
+    pub(crate) fn check(&self, who: &str) -> Result<(), String> {
         self.projection.check(&format!("{who} projection"))?;
         self.cut.check(&format!("{who} cut"))?;
         if self.transparency > 100 {
@@ -244,6 +244,15 @@ pub struct Graphics {
     pub filters: Vec<Applied>,
     #[serde(with = "by_id", skip_serializing_if = "BTreeMap::is_empty")]
     pub elements: BTreeMap<Id, Override>,
+    /// The phase it shows (the project's last unless it says), and the phase filter that says how
+    /// each status of what's in it shows (every status as its category does, unless it says).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase_filter: Option<String>,
+    /// The design option it shows of each set, by set (a set's primary, unless it says).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub options: BTreeMap<String, String>,
 }
 
 impl Graphics {
@@ -260,6 +269,12 @@ impl Graphics {
         }
         if t.controls.contains(&Group::Filters) {
             g.filters = t.graphics.filters.clone();
+        }
+        if t.controls.contains(&Group::Phase) {
+            (g.phase, g.phase_filter) = (t.graphics.phase.clone(), t.graphics.phase_filter.clone());
+        }
+        if t.controls.contains(&Group::Options) {
+            g.options = t.graphics.options.clone();
         }
         std::borrow::Cow::Owned(g)
     }
@@ -304,6 +319,32 @@ impl Graphics {
             && !m.view_templates.contains_key(t)
         {
             return Err(format!("there's no view template `{t}`{}", known(m.view_templates.keys())));
+        }
+        if let Some(p) = &self.phase
+            && !m.phases.contains(p)
+        {
+            return Err(format!("there's no phase `{p}` (there are: {})", m.phases.join(", ")));
+        }
+        if let Some(f) = &self.phase_filter
+            && !m.phase_filters.contains_key(f)
+        {
+            return Err(format!("there's no phase filter `{f}`{}", known(m.phase_filters.keys())));
+        }
+        if self.options.len() > crate::phasing::MAX_OPTION_SETS {
+            return Err(format!(
+                "it chooses options of {} sets; a project has up to {}",
+                self.options.len(),
+                crate::phasing::MAX_OPTION_SETS
+            ));
+        }
+        for (set, option) in &self.options {
+            match m.option_sets.get(set) {
+                None => return Err(format!("there's no design option set `{set}`{}", known(m.option_sets.keys()))),
+                Some(s) if !s.options.contains(option) => {
+                    return Err(format!("design option set `{set}` has no option `{option}` (there are: {})", s.options.join(", ")));
+                }
+                Some(_) => {}
+            }
         }
         Ok(())
     }
@@ -357,10 +398,14 @@ pub enum Group {
     Filters,
     /// A plan's view range.
     Range,
+    /// The phase it shows and its phase filter.
+    Phase,
+    /// The design options it shows.
+    Options,
 }
 
 impl Group {
-    pub const ALL: [Group; 3] = [Group::Categories, Group::Filters, Group::Range];
+    pub const ALL: [Group; 5] = [Group::Categories, Group::Filters, Group::Range, Group::Phase, Group::Options];
 }
 
 /// A view template: settings under a name for views to follow, the groups in `controls`.
@@ -427,6 +472,8 @@ pub fn check_followed(m: &Model, old: &Element, new: &Element) -> Result<(), Str
     };
     follows(Group::Categories, a.categories == b.categories, "categories")?;
     follows(Group::Filters, a.filters == b.filters, "filters")?;
+    follows(Group::Phase, (&a.phase, &a.phase_filter) == (&b.phase, &b.phase_filter), "phase and phase filter")?;
+    follows(Group::Options, a.options == b.options, "design options")?;
     if let (Element::Level(x), Element::Level(y)) = (old, new) {
         follows(Group::Range, x.view_range == y.view_range, "view range")?;
     }
@@ -473,12 +520,29 @@ fn halftone(c: Rgb) -> Rgb {
 
 impl Look {
     /// What view `view` looks like: nothing hidden or painted when it isn't a view, or has no graphics.
+    pub fn of(m: &Model, view: Id) -> Look {
+        graphics_of(m, view).map_or_else(Look::default, |own| Look::with(m, own))
+    }
+
+    /// What the default 3D view looks like: as its own view's graphics say once something has changed
+    /// them, else as those of a view with none (its last phase, and its sets' primary options).
+    pub fn of_3d(m: &Model) -> Look {
+        m.default_3d().map_or_else(|| Look::with(m, &Graphics::default()), |id| Look::of(m, id))
+    }
+
+    /// What a view with graphics `own` looks like.
     /// ponytail: worked out on every draw; cache it per model and view if a filter on a slow field
     /// (a room's area) makes redraws slow.
-    pub fn of(m: &Model, view: Id) -> Look {
+    pub fn with(m: &Model, own: &Graphics) -> Look {
         let mut look = Look::default();
-        let Some(own) = graphics_of(m, view).filter(|g| !g.is_default()) else { return look };
+        // Nothing to look for: no graphics of its own, and nothing in the project phased or in an option.
+        if own.is_default() && !crate::phasing::any(m) {
+            return look;
+        }
         let g = own.resolved(m);
+        // The phase it shows, as where it stands in the project's order, and how its phase filter shows each status.
+        let at = g.phase.as_deref().and_then(|n| crate::phasing::index(m, n)).unwrap_or(m.phases.len().saturating_sub(1));
+        let filter = g.phase_filter.as_deref().and_then(|n| m.phase_filters.get(n));
         // Each applied filter, and the elements it picks out.
         let applied: Vec<(&Applied, BTreeSet<Id>)> =
             g.filters.iter().filter_map(|a| Some((a, m.view_filters.get(&a.filter)?.matching(m)))).collect();
@@ -487,8 +551,29 @@ impl Look {
             if !drawn(cat) {
                 continue;
             }
+            // What isn't in its phase isn't there; what its phase filter doesn't display is hidden; what it
+            // overrides is drawn as the project's override says, under whatever else the view says.
+            let mut base = Override::default();
+            if let Some(status) = crate::phasing::status(m, e, at) {
+                match filter.map_or(crate::phasing::Presentation::ByCategory, |f| f.of(status)) {
+                    crate::phasing::Presentation::NotDisplayed => {
+                        look.hidden.insert(id);
+                        continue;
+                    }
+                    crate::phasing::Presentation::Overridden => base = m.phase_overrides.get(&status).cloned().unwrap_or_default(),
+                    crate::phasing::Presentation::ByCategory => {}
+                }
+            } else if e.params().is_some() {
+                look.hidden.insert(id);
+                continue;
+            }
+            // In a design option the view doesn't show, it isn't shown either.
+            if !crate::phasing::option_shown(m, &g, e) {
+                look.hidden.insert(id);
+                continue;
+            }
             // The category's, then each filter's from the last to the first, then the element's own.
-            let mut over = g.categories.get(cat).cloned().unwrap_or_default();
+            let mut over = g.categories.get(cat).map_or_else(|| base.clone(), |c| c.over(&base));
             for (a, picked) in applied.iter().rev().filter(|(_, picked)| picked.contains(&id)) {
                 let _ = picked;
                 over = a.over.over(&over);
@@ -590,37 +675,36 @@ impl Look {
 /// Longest name of a filter or a template.
 pub const MAX_NAME: usize = MAX_TEXT;
 
+/// What the graphics tests and the phasing tests share: commands, a house to draw, and ways to read what was drawn.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use serde_json::{Value, json};
 
     use crate::engine::Session;
     use crate::geom::P2;
-    use crate::graphics::Look;
-    use crate::model::Element;
-    use crate::render::{self, Drawing, POCHE, Prim, Rgb};
+    use crate::render::{self, Drawing, Prim, Rgb};
 
-    fn run(s: &mut Session, id: &str, p: Value) -> Value {
+    pub(crate) fn run(s: &mut Session, id: &str, p: Value) -> Value {
         s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
     }
 
     /// An 8 x 6 m box of walls on Level 1 (ids 3 to 6, the bottom one first).
-    fn house(s: &mut Session) -> Vec<u64> {
+    pub(crate) fn house(s: &mut Session) -> Vec<u64> {
         let r = run(s, "wall", json!({"points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "closed": true}));
         r["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect()
     }
 
-    fn plan(s: &Session, level: u64) -> Drawing {
+    pub(crate) fn plan(s: &Session, level: u64) -> Drawing {
         render::plan(&s.model, level, 1600, 1000)
     }
 
     /// The primitives `id` owns.
-    fn owned(d: &Drawing, id: u64) -> Vec<&Prim> {
+    pub(crate) fn owned(d: &Drawing, id: u64) -> Vec<&Prim> {
         d.prims.iter().zip(&d.owners).filter(|(_, o)| **o == Some(id)).map(|(p, _)| p).collect()
     }
 
     /// Width, colour and dash of the lines `id` owns.
-    fn lines(d: &Drawing, id: u64) -> Vec<(f32, Rgb, Option<[f32; 2]>)> {
+    pub(crate) fn lines(d: &Drawing, id: u64) -> Vec<(f32, Rgb, Option<[f32; 2]>)> {
         owned(d, id)
             .into_iter()
             .filter_map(|p| match p {
@@ -630,15 +714,53 @@ mod tests {
             .collect()
     }
 
-    fn pixel(d: &Drawing, p: P2) -> Rgb {
+    /// How many primitives of `d` have a point within `r` px of model point `at`: what is drawn there.
+    pub(crate) fn drawn_near(d: &Drawing, at: P2, r: f32) -> usize {
+        let (x, y) = d.view.px(at);
+        let near = |p: &(f32, f32)| (p.0 - x).hypot(p.1 - y) <= r;
+        d.prims
+            .iter()
+            .filter(|p| match p {
+                Prim::Fill { rings, .. } => rings.iter().flatten().any(near),
+                Prim::Line { pts, .. } => pts.iter().any(near),
+                Prim::Image { .. } => false,
+            })
+            .count()
+    }
+
+    pub(crate) fn pixel(d: &Drawing, p: P2) -> Rgb {
         let pm = tiny_skia::Pixmap::decode_png(&render::png(d).unwrap()).unwrap();
         let (x, y) = d.view.px(p);
         let c = pm.pixel(x as u32, y as u32).unwrap();
         Rgb(c.red(), c.green(), c.blue())
     }
 
-    const RED: Rgb = Rgb(200, 0, 0);
-    const PAPER: Rgb = render::PAPER;
+    pub(crate) const RED: Rgb = Rgb(200, 0, 0);
+    pub(crate) const PAPER: Rgb = render::PAPER;
+
+    pub(crate) fn picture(s: &mut Session, view: &str, name: &str) -> tiny_skia::Pixmap {
+        let path = std::env::temp_dir().join(format!("bimcraft-gfx-{}-{name}.png", std::process::id()));
+        run(s, "render", json!({"view": view, "width": 240, "height": 180, "path": path.to_str().unwrap()}));
+        let pm = tiny_skia::Pixmap::load_png(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        pm
+    }
+
+    pub(crate) fn painted(pm: &tiny_skia::Pixmap, keep: impl Fn(u8, u8, u8) -> bool) -> usize {
+        pm.pixels().iter().filter(|c| keep(c.red(), c.green(), c.blue())).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use crate::engine::Session;
+    use crate::geom::P2;
+    use crate::graphics::Look;
+    use crate::graphics::testing::*;
+    use crate::model::Element;
+    use crate::render::{self, Drawing, POCHE, Prim, Rgb};
 
     #[test]
     fn a_category_hidden_in_a_view_is_left_out_of_that_view_only() {
@@ -748,18 +870,6 @@ mod tests {
         let half = |c: u8| c + (255 - c) / 2;
         assert_eq!(pixel(&d, P2(4000.0, 0.0)), Rgb(half(POCHE.0), half(POCHE.1), half(POCHE.2)));
         assert!(lines(&d, walls[0]).contains(&(4.0, Rgb(half(25), half(25), half(25)), None)));
-    }
-
-    fn picture(s: &mut Session, view: &str, name: &str) -> tiny_skia::Pixmap {
-        let path = std::env::temp_dir().join(format!("bimcraft-gfx-{}-{name}.png", std::process::id()));
-        run(s, "render", json!({"view": view, "width": 240, "height": 180, "path": path.to_str().unwrap()}));
-        let pm = tiny_skia::Pixmap::load_png(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        pm
-    }
-
-    fn painted(pm: &tiny_skia::Pixmap, keep: impl Fn(u8, u8, u8) -> bool) -> usize {
-        pm.pixels().iter().filter(|c| keep(c.red(), c.green(), c.blue())).count()
     }
 
     #[test]
@@ -1064,7 +1174,7 @@ mod tests {
         let section = run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["id"].as_u64().unwrap();
         let framed = |s: &Session| {
             let scene = Scene::new(&s.model);
-            let look = s.model.default_3d().map_or_else(Look::default, |id| Look::of(&s.model, id));
+            let look = Look::of_3d(&s.model);
             (
                 render::section_fit(&s.model, section, 800, 600),
                 scene.fit_in(-45.0, 30.0, 400, 300, &look),
@@ -1126,7 +1236,7 @@ mod tests {
         let cam = scene.fit(-45.0, 50.0, 320, 240);
         let render = |s: &mut Session, walls_as: Value| {
             run(s, "graphics", json!({"view": "{3D}", "reset": true, "categories": {"walls": walls_as}}));
-            let look = s.model.default_3d().map_or_else(Look::default, |id| Look::of(&s.model, id));
+            let look = Look::of_3d(&s.model);
             scene.render_in(&cam, &[], &look)
         };
         let solid = render(&mut s, json!({"halftone": false}));
@@ -1416,7 +1526,7 @@ mod tests {
         let grid = run(&mut s, "grid", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["id"].as_u64().unwrap();
         run(&mut s, "graphics", json!({"view": 1, "hide": ["grids"], "categories": {"walls": {"cut": {"color": [200, 0, 0]}}}}));
         let r = run(&mut s, "template", json!({"name": "Presentation", "from": "Level 1"}));
-        assert_eq!(r["controls"], json!(["categories", "filters", "range"]));
+        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options"]));
         assert_eq!((r["hidden"].clone(), r["categories"]["wall"]["cut"]["color"].clone()), (json!(["grid"]), json!([200, 0, 0])));
         assert!(!owned(&plan(&s, 2), grid).is_empty() && lines(&plan(&s, 2), up).iter().all(|l| l.1 != RED));
         run(&mut s, "graphics", json!({"view": "Level 2", "template": "Presentation"}));
@@ -1426,7 +1536,7 @@ mod tests {
         let r = run(&mut s, "graphics", json!({"view": "Level 2"}));
         assert_eq!(
             (r["template"].clone(), r["hidden"].clone(), r["controlled"].clone()),
-            (json!("Presentation"), json!(["grid"]), json!(["categories", "filters", "range"]))
+            (json!("Presentation"), json!(["grid"]), json!(["categories", "filters", "range", "phase", "options"]))
         );
         // Change the template, and its views follow; the view it came from doesn't.
         run(&mut s, "template", json!({"name": "Presentation", "categories": {"walls": {"cut": {"color": [0, 0, 200]}}}}));

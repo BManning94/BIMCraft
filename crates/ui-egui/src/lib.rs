@@ -10,6 +10,7 @@ mod graphics;
 pub mod lang;
 mod orbit;
 mod paper;
+mod phasing;
 mod properties;
 mod section;
 mod style;
@@ -194,7 +195,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 29] = [
+const SHORTCUTS: [(&str, &str); 31] = [
     ("MD", "Modify"),
     ("MM", "Mirror Pick Axis"),
     ("DM", "Mirror Draw Axis"),
@@ -223,6 +224,8 @@ const SHORTCUTS: [(&str, &str); 29] = [
     ("EO", "Override Graphics by Element"),
     ("FT", "Filters"),
     ("VT", "View Templates"),
+    ("PH", "Phasing"),
+    ("DO", "Design Options"),
     ("KS", "Keyboard Shortcuts"),
 ];
 
@@ -373,6 +376,11 @@ pub struct BimApp {
     vg_dialog: Option<graphics::VgDialog>,
     filters_dialog: Option<graphics::FiltersDialog>,
     templates_dialog: Option<graphics::TemplatesDialog>,
+    /// Phasing and Design Options, while they're open, and the design option (`set: option`) new
+    /// elements are made in: none is the main model.
+    phasing_dialog: Option<phasing::PhasingDialog>,
+    options_dialog: Option<phasing::OptionsDialog>,
+    active_option: Option<String>,
     new_schedule: Option<properties::NewSchedule>,
     /// The family and type the Component tool places, as picked, and how far it's turned, degrees.
     component: Option<(String, String)>,
@@ -614,6 +622,9 @@ impl BimApp {
             vg_dialog: None,
             filters_dialog: None,
             templates_dialog: None,
+            phasing_dialog: None,
+            options_dialog: None,
+            active_option: None,
             new_schedule: None,
             component: None,
             component_angle: 0.0,
@@ -637,9 +648,12 @@ impl BimApp {
 
     /// Run a command; when it fails, say why.
     fn run(&mut self, id: &str, params: Value) -> Option<Value> {
+        self.made_in();
         match self.session.execute(id, &params) {
             Ok(v) => {
                 self.status = Status::default();
+                // The core renames and drops the option with its set.
+                self.active_option = self.session.option.clone();
                 Some(v)
             }
             Err(e) => {
@@ -835,6 +849,7 @@ impl BimApp {
         }
         let m = &self.session.model;
         self.selection.retain(|id| m.elements.contains_key(id));
+        self.active_option = self.active_option.take().filter(|o| bimcraft_core::phasing::option_exists(m, o));
         let exists = |s: &Sheet| match s {
             Sheet::Plan(level) | Sheet::Ceiling(level) => m.level(*level).is_some(),
             Sheet::Section(id) => m.section(*id).is_some(),
@@ -864,6 +879,8 @@ impl BimApp {
             || self.vg_dialog.is_some()
             || self.filters_dialog.is_some()
             || self.templates_dialog.is_some()
+            || self.phasing_dialog.is_some()
+            || self.options_dialog.is_some()
             || self.new_schedule.is_some()
             || self.show_shortcuts
             || self.show_snaps
@@ -1005,6 +1022,14 @@ impl BimApp {
             }
             "VT" => {
                 self.templates_dialog = Some(graphics::TemplatesDialog::default());
+                return true;
+            }
+            "PH" => {
+                self.phasing_dialog = Some(phasing::PhasingDialog::default());
+                return true;
+            }
+            "DO" => {
+                self.options_dialog = Some(phasing::OptionsDialog::default());
                 return true;
             }
             // Revit's snap overrides: for the next point picked, that snap alone, or none.
@@ -1165,8 +1190,7 @@ impl BimApp {
             }
             // The whole model, but for what the default 3D view hides.
             Sheet::View3D => {
-                let look =
-                    m.default_3d().map_or_else(bimcraft_core::graphics::Look::default, |id| bimcraft_core::graphics::Look::of(&m, id));
+                let look = bimcraft_core::graphics::Look::of_3d(&m);
                 m.elements.keys().copied().filter(|id| look.shows(*id)).collect()
             }
             Sheet::Paper(_) | Sheet::Schedule(_) | Sheet::Table(_) => BTreeSet::new(),
@@ -1976,6 +2000,18 @@ impl BimApp {
                 }
             });
         });
+        panel(ui, "Phasing", |ui| {
+            let tip = "Phasing (PH): the project's phases in order, the phase filters that show them, and how a filter draws each";
+            if big_button(ui, Icon::Phasing, "Phasing", self.phasing_dialog.is_some(), tip).clicked() {
+                self.phasing_dialog = Some(phasing::PhasingDialog::default());
+            }
+        });
+        panel(ui, "Design Options", |ui| {
+            let tip = "Design Options (DO): sets of options for a part of the design, and the one new elements are made in";
+            if big_button(ui, Icon::Options, "Design Options", self.options_dialog.is_some(), tip).clicked() {
+                self.options_dialog = Some(phasing::OptionsDialog::default());
+            }
+        });
     }
 
     fn modify_tab(&mut self, ui: &mut Ui) {
@@ -2422,6 +2458,7 @@ impl BimApp {
                 if self.dirty() {
                     ui.label(RichText::new(t("Unsaved changes")).color(pal().muted));
                 }
+                self.option_selector(ui);
             });
         });
     }
@@ -2658,6 +2695,8 @@ impl BimApp {
         self.graphics_window(ctx);
         self.filters_window(ctx);
         self.templates_window(ctx);
+        self.phasing_window(ctx);
+        self.options_window(ctx);
         self.shortcuts_window(ctx);
         let Some(pending) = self.pending else { return };
         #[derive(PartialEq)]
