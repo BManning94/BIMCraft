@@ -18,12 +18,17 @@ flate2 = "1"
 # Reads the JPEGs a texture is made of; the PNGs come in through tiny-skia.
 zune-jpeg = "0.5"
 bimcraft-ui-egui = { path = "crates/ui-egui" }
+bimcraft-update = { path = "crates/update" }
 egui = "0.36"
 eframe = "0.36"
 egui_kittest = "0.36"
 rfd = "0.17"
 # The system's language, on Windows and macOS too, where no environment variable says it.
 sys-locale = "0.3"
+# The updater's: versions, HTTPS (rustls, with ring and the Mozilla roots built in) and SHA-256 (ring's, the one rustls brings).
+semver = "1"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+ring = "0.17"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -3669,3 +3669,417 @@ fn the_door_tool_places_the_projects_single_door_of_a_family_and_the_type_select
     press(&mut h, "Edit Type");
     assert!(h.query_by_label("Family:").is_some());
 }
+
+// ---------- updates ----------
+
+mod updates {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use bimcraft_update::testing::{Fake, Scratch, release_json};
+    use bimcraft_update::{Handover, LATEST_URL, State, Target, Updater, Version};
+
+    use super::*;
+
+    const INSTALLER: &[u8] = b"pretend this is an installer";
+
+    /// What the stand-in for the installer's hand-over was given.
+    type Handed = Arc<Mutex<Vec<(PathBuf, Option<PathBuf>)>>>;
+
+    struct Rig {
+        h: Harness<'static, BimApp>,
+        net: Arc<Fake>,
+        dir: Scratch,
+        handed: Handed,
+        /// While set, the stand-in for the install fails.
+        failing: Arc<AtomicBool>,
+    }
+
+    /// The app, running 0.4.0, with an updater on a network where `tag` is the latest release (with an installer), working as it's
+    /// asked; `installing` is whether this copy can be updated in place.
+    fn rig(tag: &str, installing: bool) -> Rig {
+        let mut h = app(BOX);
+        let dir = Scratch::new("ui-updates");
+        let installer_url =
+            format!("https://github.com/IPedrax/BIMCraft/releases/download/{tag}/bimcraft-{}-windows-x64.msi", tag.trim_start_matches('v'));
+        let net = Arc::new(Fake::default().answer(LATEST_URL, release_json(tag, Some(INSTALLER))).answer(&installer_url, INSTALLER));
+        let handed: Handed = Arc::default();
+        let (log, failing) = (Arc::clone(&handed), Arc::new(AtomicBool::new(false)));
+        let fails = Arc::clone(&failing);
+        let updater = Updater::new(net.clone(), Version::new(0, 4, 0), Some(dir.0.join("update.json")), || {})
+            .inline()
+            .target(installing.then_some(Target::Windows))
+            .in_folder(dir.0.clone())
+            .handing_over(move |job: &Handover| {
+                log.lock().unwrap().push((job.file.clone(), job.project.clone()));
+                if fails.load(Ordering::SeqCst) { Err("no room".to_string()) } else { Ok(()) }
+            });
+        h.state_mut().updates = Some(updater);
+        Rig { h, net, dir, handed, failing }
+    }
+
+    impl Rig {
+        fn updater(&mut self) -> &mut Updater {
+            self.h.state_mut().updates.as_mut().unwrap()
+        }
+
+        /// The startup check, and the frames that take its answer.
+        fn start(&mut self) {
+            self.updater().check_at_startup();
+            self.h.run();
+        }
+
+        fn menu(&mut self, item: &str) {
+            press(&mut self.h, "File");
+            self.h.get_by_label(item).click();
+            self.h.run();
+        }
+    }
+
+    const OFFER: &str = "BIMCraft 0.5.0 is available. You have 0.4.0.";
+
+    #[test]
+    fn a_window_without_an_updater_shows_none_of_it() {
+        let mut h = app(BOX);
+        assert!(h.state().updates.is_none());
+        press(&mut h, "File");
+        assert!(h.query_by_label("Check for Updates Now").is_none() && h.query_by_label("Check for updates at startup").is_none());
+    }
+
+    #[test]
+    fn a_newer_release_is_offered_in_a_banner_and_nothing_else_changes() {
+        let mut r = rig("v0.5.0", true);
+        assert!(r.h.query_by_label(OFFER).is_none(), "nothing before the check comes back");
+        let model = Arc::clone(&r.h.state().session.model);
+        r.start();
+        assert!(r.h.query_by_label(OFFER).is_some());
+        for label in ["Update now", "Later", "Skip this version", "What's new"] {
+            assert!(r.h.query_by_label(label).is_some(), "{label}");
+        }
+        assert!(r.h.query_by_label("Download").is_none(), "this copy can install it");
+        assert!(Arc::ptr_eq(&model, &r.h.state().session.model) && !r.h.state().dirty(), "the project is as it was");
+        assert!(r.h.state().status.text.is_empty(), "and the status box has nothing to say");
+        assert_eq!(r.net.asked(), [LATEST_URL], "only the release was asked for");
+    }
+
+    #[test]
+    fn later_hides_the_banner_and_skip_hides_it_for_good() {
+        let mut r = rig("v0.5.0", true);
+        r.start();
+        press(&mut r.h, "Later");
+        assert!(r.h.query_by_label(OFFER).is_none());
+        r.start();
+        assert!(r.h.query_by_label(OFFER).is_some(), "asked again at the next start");
+        press(&mut r.h, "Skip this version");
+        assert!(r.h.query_by_label(OFFER).is_none());
+        r.start();
+        assert!(r.h.query_by_label(OFFER).is_none(), "skipped stays skipped, and is kept in the settings file");
+        assert!(r.dir.0.join("update.json").exists());
+    }
+
+    #[test]
+    fn update_now_downloads_then_restart_hands_the_installer_over_and_closes() {
+        let mut r = rig("v0.5.0", true);
+        r.start();
+        press(&mut r.h, "Update now");
+        assert!(r.h.query_by_label("BIMCraft 0.5.0 is ready. It will close, update and start again.").is_some());
+        assert!(r.h.query_by_label("Update now").is_none() && r.handed.lock().unwrap().is_empty(), "nothing is installed yet");
+        assert!(!r.h.state().closing);
+        press(&mut r.h, "Restart and install");
+        let handed = r.handed.lock().unwrap().clone();
+        assert_eq!(handed.len(), 1);
+        assert_eq!(std::fs::read(&handed[0].0).unwrap(), INSTALLER, "what was downloaded and checked");
+        assert_eq!(handed[0].1, None, "a project never saved has no file to open again");
+        assert!(r.h.state().closing, "the window closes so the installer can replace the program");
+        assert!(r.h.query_by_label("Restart and install").is_none(), "the banner goes once the installer is handed over");
+    }
+
+    #[test]
+    fn restart_keeps_the_project_open_and_asks_about_unsaved_changes_first() {
+        let mut r = rig("v0.5.0", true);
+        let project = r.dir.0.join("house.bimcraft");
+        assert!(r.h.state_mut().save_to(&project));
+        r.h.state_mut().session.execute("wall", &json!({"points": [[0, 0], [4000, 0]]})).unwrap();
+        assert!(r.h.state().dirty());
+        r.start();
+        press(&mut r.h, "Update now");
+        press(&mut r.h, "Restart and install");
+        assert!(r.h.query_by_label_contains("Save changes to").is_some(), "unsaved work is asked about, not dropped");
+        assert!(r.handed.lock().unwrap().is_empty() && !r.h.state().closing);
+        press(&mut r.h, "Cancel");
+        assert!(r.handed.lock().unwrap().is_empty() && !r.h.state().closing, "Cancel leaves everything as it was");
+        assert!(r.h.query_by_label("Restart and install").is_some(), "and the update still ready");
+        press(&mut r.h, "Restart and install");
+        // The Quick Access Toolbar has a Save too: the dialog's is the lower one.
+        let save = r.h.get_all_by_label("Save").max_by(|a, b| a.rect().top().total_cmp(&b.rect().top())).map(|n| n.rect().center());
+        click_at(&mut r.h, save.unwrap());
+        assert!(!r.h.state().dirty(), "saved");
+        let handed = r.handed.lock().unwrap().clone();
+        assert_eq!(handed[0].1.as_deref(), Some(project.as_path()), "the project is opened again when BIMCraft starts");
+        assert!(r.h.state().closing);
+    }
+
+    #[test]
+    fn an_install_that_fails_says_why_and_the_update_is_ready_to_try_again() {
+        let mut r = rig("v0.5.0", true);
+        r.failing.store(true, Ordering::SeqCst);
+        r.start();
+        press(&mut r.h, "Update now");
+        press(&mut r.h, "Restart and install");
+        let status = r.h.state().status.clone();
+        assert!(status.error && status.text == "Couldn't install the update: no room", "{status:?}");
+        assert!(!r.h.state().closing, "the window stays, with the project in it");
+        assert!(r.h.query_by_label("Restart and install").is_some() && r.h.query_by_label("Installing BIMCraft 0.5.0…").is_none());
+        r.failing.store(false, Ordering::SeqCst);
+        press(&mut r.h, "Restart and install");
+        assert!(r.h.state().closing && r.handed.lock().unwrap().len() == 2, "the second try went through");
+    }
+
+    /// Frames a few milliseconds apart until `done`: for an updater on threads of its own, as in the app.
+    fn wait(h: &mut Harness<'static, BimApp>, done: impl Fn(&BimApp) -> bool) {
+        for _ in 0..2000 {
+            h.step();
+            if done(h.state()) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("gave up waiting: {:?}", h.state().updates.as_ref().map(|u| u.state().clone()));
+    }
+
+    #[test]
+    fn while_an_update_installs_the_window_says_so_and_holds_still_until_it_closes() {
+        let mut r = rig("v0.5.0", true);
+        // An install that waits for the test, as a slow one does, and then goes through or fails as it's told.
+        let (open, gate) = std::sync::mpsc::channel::<bool>();
+        let gate = Mutex::new(gate);
+        let updater = Updater::new(r.net.clone(), Version::new(0, 4, 0), None, || {})
+            .target(Some(Target::Windows))
+            .in_folder(r.dir.0.clone())
+            .handing_over(move |_| {
+                let works = gate.lock().map_err(|e| e.to_string())?.recv_timeout(Duration::from_secs(20)).map_err(|e| e.to_string())?;
+                if works { Ok(()) } else { Err("no room".to_string()) }
+            });
+        r.h.state_mut().updates = Some(updater);
+        // A project that is saved, with a wall in its history that Ctrl+Z could take out: nothing is asked when the install starts.
+        let bare = app(BOX).state().view_rect;
+        r.h.state_mut().session.execute("wall", &json!({"points": [[0, 0], [0, 9000]]})).unwrap();
+        assert!(r.h.state_mut().save_to(&r.dir.0.join("house.bimcraft")));
+        r.updater().check_at_startup();
+        wait(&mut r.h, |app| app.has_update_banner());
+        r.h.get_by_label("Update now").click();
+        wait(&mut r.h, |app| app.updates.as_ref().is_some_and(|u| matches!(u.state(), State::Ready { .. })));
+        r.h.get_by_label("Restart and install").click();
+        // The box has a spinner, which asks for frame after frame: `run` would never settle.
+        r.h.step();
+        r.h.step();
+        assert!(r.h.state().installing());
+        assert!(r.h.query_by_label("Installing BIMCraft 0.5.0…").is_some(), "the box says what is going on");
+        assert!(r.h.query_by_label("Restart and install").is_none(), "and the banner gives way to it");
+        assert_eq!(r.h.state().view_rect, bare, "leaving no empty strip of it over the views");
+        // Nothing can start or change under it: a new project, an undo, the system asking to quit or to open a file, or the window's
+        // close button, which would end the install half way.
+        let model = Arc::clone(&r.h.state().session.model);
+        let walls_now = walls(&r.h).len();
+        r.h.key_press_modifiers(Modifiers::COMMAND, Key::N);
+        r.h.step();
+        assert!(Arc::ptr_eq(&model, &r.h.state().session.model), "Ctrl+N started a new project under the box");
+        r.h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        r.h.step();
+        assert_eq!(walls(&r.h).len(), walls_now, "Ctrl+Z undid a wall under the box");
+        // The system asking to quit waits in its inbox, which is not emptied meanwhile.
+        let inbox: std::rc::Rc<std::cell::RefCell<Vec<crate::OsEvent>>> = Default::default();
+        let queue = std::rc::Rc::clone(&inbox);
+        r.h.state_mut().os_events = Some(Box::new(move || queue.borrow_mut().drain(..).collect()));
+        inbox.borrow_mut().push(crate::OsEvent::Quit);
+        r.h.step();
+        assert_eq!(inbox.borrow().len(), 1, "the system's Quit was left for after the install");
+        assert!(!r.h.state().closing && r.h.state().pending.is_none() && r.h.state().status.text.is_empty());
+        r.h.input_mut().viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+        r.h.step();
+        let cancelled =
+            r.h.output()
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(cancelled && !r.h.state().closing && r.h.state().pending.is_none(), "closing the window waits for the install");
+        // The install fails: the window says so, and is heard about the Quit that waited.
+        open.send(false).unwrap();
+        wait(&mut r.h, |app| app.closing);
+        let status = r.h.state().status.clone();
+        assert!(status.error && status.text == "Couldn't install the update: no room", "{status:?}");
+        assert!(inbox.borrow().is_empty(), "the Quit was heard once the install was over");
+    }
+
+    #[test]
+    fn a_copy_that_cannot_update_itself_is_told_and_given_the_link() {
+        let mut r = rig("v0.5.0", false);
+        r.start();
+        assert!(r.h.query_by_label(OFFER).is_some());
+        assert!(r.h.query_by_label("Update now").is_none(), "no promise it can't keep");
+        // What the frame of the click asked the system to open.
+        let opened = |h: &Harness<BimApp>| -> Vec<String> {
+            let commands = &h.output().platform_output.commands;
+            commands.iter().filter_map(|c| if let egui::OutputCommand::OpenUrl(u) = c { Some(u.url.clone()) } else { None }).collect()
+        };
+        let page = "https://github.com/IPedrax/BIMCraft/releases/tag/v0.5.0";
+        for button in ["Download", "What's new"] {
+            r.h.get_by_label(button).click();
+            r.h.step();
+            assert_eq!(opened(&r.h), [page], "{button} opens the release's page, which was built from its tag");
+            r.h.run();
+        }
+        assert!(matches!(r.h.state().updates.as_ref().unwrap().state(), State::Available(_)), "it only opens the page");
+        assert_eq!(r.net.asked(), [LATEST_URL], "and downloads nothing");
+        for label in ["Later", "Skip this version"] {
+            assert!(r.h.query_by_label(label).is_some(), "{label}");
+        }
+    }
+
+    #[test]
+    fn a_release_without_an_installer_is_only_told_of_even_where_it_could_be_installed() {
+        let mut r = rig("v0.5.0", true);
+        let net = Arc::new(Fake::default().answer(LATEST_URL, release_json("v0.5.0", None)));
+        r.h.state_mut().updates =
+            Some(Updater::new(net, Version::new(0, 4, 0), None, || {}).inline().target(Some(Target::Windows)).in_folder(r.dir.0.clone()));
+        r.start();
+        assert!(r.h.query_by_label(OFFER).is_some());
+        assert!(r.h.query_by_label("Update now").is_none(), "there is nothing to download");
+        assert!(r.h.query_by_label("Download").is_some(), "so the page is what it offers");
+    }
+
+    #[test]
+    fn an_updater_with_nothing_to_say_takes_no_room() {
+        let mut r = rig("v0.4.0", true);
+        let bare = app(BOX).state().view_rect;
+        r.start();
+        assert!(matches!(r.h.state().updates.as_ref().unwrap().state(), State::Idle));
+        assert_eq!(r.h.state().view_rect, bare, "the views sit where they do without one: no empty strip over them");
+    }
+
+    #[test]
+    fn the_file_menu_checks_by_hand_and_switches_the_startup_check() {
+        let mut r = rig("v0.4.0", true);
+        r.menu("Check for Updates Now");
+        assert_eq!(r.h.state().status.text, "BIMCraft 0.4.0 is up to date.");
+        assert!(!r.h.state().status.error);
+        assert!(r.h.query_by_label(OFFER).is_none());
+        // Off, and it stays off for the next run.
+        press(&mut r.h, "File");
+        r.h.get_by_label("Check for updates at startup").click();
+        r.h.run();
+        assert!(!r.updater().checks_at_startup());
+        let net = Arc::clone(&r.net);
+        r.updater().check_at_startup();
+        assert_eq!(net.asked().len(), 1, "no check at startup once it's off");
+        let settings = bimcraft_update::prefs::Prefs::load(&r.dir.0.join("update.json"));
+        assert!(!settings.check, "kept in the settings file");
+    }
+
+    #[test]
+    fn a_failed_check_by_hand_says_so_in_the_status_box_and_one_at_startup_does_not() {
+        let mut r = rig("v0.5.0", true);
+        let net = Arc::new(Fake::default().fail(LATEST_URL, "offline"));
+        let updater = Updater::new(net, Version::new(0, 4, 0), None, || {}).inline();
+        r.h.state_mut().updates = Some(updater);
+        r.start();
+        assert!(r.h.state().status.text.is_empty() && r.h.query_by_label(OFFER).is_none());
+        r.menu("Check for Updates Now");
+        let status = r.h.state().status.clone();
+        assert!(status.error && status.text.starts_with("Couldn't check for updates:") && status.text.contains("offline"), "{status:?}");
+    }
+
+    #[test]
+    fn a_download_that_fails_its_check_says_why_and_the_offer_stays() {
+        let mut r = rig("v0.5.0", true);
+        let url = "https://github.com/IPedrax/BIMCraft/releases/download/v0.5.0/bimcraft-0.5.0-windows-x64.msi";
+        let net = Arc::new(Fake::default().answer(LATEST_URL, release_json("v0.5.0", Some(INSTALLER))).answer(url, "another file"));
+        let updater =
+            Updater::new(net, Version::new(0, 4, 0), None, || {}).inline().target(Some(Target::Windows)).in_folder(r.dir.0.clone());
+        r.h.state_mut().updates = Some(updater);
+        r.start();
+        press(&mut r.h, "Update now");
+        let status = r.h.state().status.clone();
+        assert!(status.error && status.text.starts_with("Couldn't download the update:"), "{status:?}");
+        assert!(r.h.query_by_label(OFFER).is_some() && r.h.query_by_label("Update now").is_some(), "it can be tried again");
+    }
+
+    #[test]
+    fn the_updater_survives_new_and_open() {
+        let mut r = rig("v0.5.0", true);
+        r.start();
+        press(&mut r.h, "File");
+        r.h.get_by_label_contains("New").click();
+        r.h.run();
+        assert!(r.h.state().updates.is_some() && r.h.query_by_label(OFFER).is_some(), "a new project is still in the version offered");
+    }
+
+    #[test]
+    fn the_banner_and_the_menu_speak_portuguese_and_spanish() {
+        use bimcraft_core::language::Language;
+        let cases = [
+            (
+                Language::Portuguese,
+                "O BIMCraft 0.5.0 está disponível. Você tem a versão 0.4.0.",
+                ["Atualizar agora", "Depois", "Ignorar esta versão", "O que há de novo"],
+                ["Verificar atualizações ao iniciar", "Verificar atualizações agora"],
+                "O BIMCraft 0.5.0 está pronto. Ele vai fechar, atualizar e abrir de novo.",
+                "Reiniciar e instalar",
+            ),
+            (
+                Language::Spanish,
+                "BIMCraft 0.5.0 está disponible. Tienes la versión 0.4.0.",
+                ["Actualizar ahora", "Más tarde", "Omitir esta versión", "Novedades"],
+                ["Buscar actualizaciones al iniciar", "Buscar actualizaciones ahora"],
+                "BIMCraft 0.5.0 está listo. Se cerrará, se actualizará y se abrirá de nuevo.",
+                "Reiniciar e instalar",
+            ),
+        ];
+        for (language, offer, buttons, menu, ready, restart) in cases {
+            let mut r = rig("v0.5.0", true);
+            r.h.state_mut().lang = language;
+            r.start();
+            assert!(r.h.query_by_label(offer).is_some(), "{language:?}: {offer}");
+            for label in buttons {
+                assert!(r.h.query_by_label(label).is_some(), "{language:?}: {label}");
+            }
+            press(&mut r.h, buttons[0]);
+            assert!(r.h.query_by_label(ready).is_some(), "{language:?}: {ready}");
+            assert!(r.h.query_by_label(restart).is_some(), "{language:?}: {restart}");
+            press(&mut r.h, crate::lang::translated(language, "File").unwrap());
+            for label in menu {
+                assert!(r.h.query_by_label(label).is_some(), "{language:?}: {label}");
+            }
+        }
+        // Every word the updater's windows use is in the table in both languages, however it got there.
+        let words = [
+            "BIMCraft {} is available. You have {}.",
+            "Update now",
+            "Download",
+            "Later",
+            "Skip this version",
+            "What's new",
+            "Downloading BIMCraft {}…",
+            "BIMCraft {} is ready. It will close, update and start again.",
+            "Restart and install",
+            "Check for updates at startup",
+            "Check for Updates Now",
+            "BIMCraft {} is up to date.",
+            "Couldn't check for updates: {}",
+            "Couldn't download the update: {}",
+            "Couldn't install the update: {}",
+            "Installing BIMCraft {}…",
+            "Couldn't save the setting: {}",
+            "Downloads and checks the update; BIMCraft then closes, updates and starts again.",
+            "Opens the release page on GitHub. This copy can't update itself.",
+            "Asks to save first if there are unsaved changes, then closes BIMCraft, installs the update and starts it again.",
+        ];
+        for language in [Language::Portuguese, Language::Spanish] {
+            for word in words {
+                assert!(crate::lang::translated(language, word).is_some(), "{language:?} has no {word:?}");
+            }
+        }
+    }
+}

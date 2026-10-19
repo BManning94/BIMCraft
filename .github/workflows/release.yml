@@ -4,6 +4,9 @@
 #   Linux    bimcraft-<version>-linux-<x86_64|aarch64>.{AppImage,AppImage.zsync,deb,rpm,tar.gz,flatpak,pkg.tar.zst}
 #            bimcraft-<version>-linux-riscv64.{deb,rpm,tar.gz}
 #   macOS    bimcraft-<version>-macos-universal.dmg, bimcraft-cli-<version>-macos-universal.zip
+# The desktop app updates itself from three of these, by name: the .msi, the .AppImage of each architecture and the .dmg
+# (`Target::asset_name` in crates/update). Rename one here and there, or updates stop installing. Each must be published with
+# `gh release create`, which is what gives it the SHA-256 digest the updater checks it against.
 name: Release
 
 on:
@@ -57,6 +60,8 @@ jobs:
           $wix = "$env:USERPROFILE\.dotnet\tools\wix.exe"
           & $wix extension add -g WixToolset.UI.wixext/5.0.2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The desktop app's updater takes this exact name from the release (`Target::asset_name` in crates/update), and installs it
+          # only if it matches the SHA-256 digest GitHub gives the uploaded asset: rename it there too, or updates stop installing.
           $msi = "bimcraft-$version-windows-x64.msi"
           & $wix build packaging/windows/bimcraft.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=$version -d BinDir=target\x86_64-pc-windows-msvc\release -o $msi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

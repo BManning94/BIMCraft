@@ -164,6 +164,7 @@ BIMCraft is in early, fast development. Honest status:
 | Files | `.bimcraft` projects (JSON); IFC4 export with storeys, walls swept up from their plan outline (mitred where they join, an arc in short chords) or, attached to a roof, as closed shells, walls, floors, roofs and ceilings with their material layer sets (each material with its colour), slabs (sloped ones as closed shells), ceilings as coverings, spaces and columns, stairs and ramps as their flights, landings and railings (each railing with its rail's top line as its axis), roofs as closed shells of flat faces (hip, gable, shed or flat), openings that cut the walls and hold the doors and windows, an opening for each slab, ceiling and roof a shaft passes through, and components as furniture, sanitary terminals, light fixtures or proxies, named `Family:Type` as Revit names them, each form a closed face set in its material's colour, each element's values of the project parameters in a `Project Parameters` property set (dimensions, tags, notes and spot elevations belong to views, and stay out of it), and each element's phase and design option in a `BIMCraft_Phasing` property set: its `Phase Created` is always named in it, the first phase too (said to be implied, for another tool to read; a door or window says only what it holds, as one with no phase follows its wall), `Phase Demolished` and `Design Option` where it holds them, and the project's phases in order, with the phase filters, overrides and option sets it changed, in one on the project; a project that uses none of it writes none |
 | Agents | MCP server, scripts, and every command callable with JSON |
 | Desktop | Revit's layout: ribbon tabs with a contextual Modify tab, the Options Bar, Properties with the Type Selector and Type Properties, the Project Browser and views in tabs; a plan and a reflected ceiling plan per level that pan and zoom, sections and elevations, a 3D view that orbits, and sheets; tools for walls (straight or arcs, on the location line picked), doors, windows, columns, roofs by footprint (and Gable Edge, to stand a roof's edge upright) and by extrusion, dormers, floors (and a floor's slope arrow), ceilings, shaft openings, stairs and ramps (run by run, turning at landings), railings, rooms, levels, grids, dimensions (aligned, angular, radial), spot elevations, text, tags, sections and elevations; Flip, Attach Top/Base and Detach Top/Base for walls; a wall, floor, roof or ceiling type's layers in Type Properties, and the project's materials in Manage > Materials; project parameters in Manage > Project Parameters, and their values in Properties; schedules from View > Schedules, their fields, filters, sorting and totals in Schedule Properties; the Component tool, families and their types in the Type Selector, the Project Browser and Type Properties, a component's own parameters in Properties, and Load Family; Crop View with grips to drag a crop region's edges, and the view range in Properties; project units, metric or feet and inches; Revit's selection (click, Ctrl, Shift, Tab, window and crossing boxes); dragging and the Modify panel (Align, Offset, Mirror, Split, Move, Copy, Rotate, Trim/Extend to Corner) and its Phasing panel (Demolish); Paint and Remove Paint on its Geometry panel, for the 3D view; typed lengths and temporary dimensions; undo and redo; open, save and export; a light and a dark theme; English, Portuguese or Spanish. The Manage tab has the Materials window (with textures and pictures), the Favorites, and the Family Editor (New Family, Edit Family) |
+| Updates | The desktop app asks GitHub for the latest release when it starts, on a thread of its own, so it never delays the start, and says so in a banner when one is newer: Update now, Later or Skip this version. Update now downloads the new version and checks its SHA-256 against the digest GitHub lists for it; Restart and install then asks to save, closes, replaces the program in place and starts again with the same project. That works for the copy the Windows installer made, an AppImage and the macOS app, where you can write to their folder. Any other copy (a package from your distribution, a tarball, a build from source) gets a Download button for the release's page, and a Flatpak, which has no network, never checks. File > Check for updates at startup switches the check off, and `BIMCRAFT_NO_UPDATE_CHECK` keeps the app from making any request. `bimcraft-cli` and the MCP server never phone home; see [Updates](#updates) for what the check does and doesn't protect against, and for what has run on which system |
 
 The IFC4 export is checked with [IfcOpenShell](https://ifcopenshell.org) 0.9: the sample house has no schema or EXPRESS rule
 errors, every element builds its geometry, and the walls' volumes (with the openings cut out), the roof's and the slabs' and
@@ -286,6 +287,7 @@ switches.
 | Language | View > User Interface > Language: English, Português (Brasil) or Español; the window starts in the system's language (on Windows and macOS, its display language). Manage > Project Language: the language the project's drawings print, and that new levels, views, sheets and rooms are named in. A new project takes the window's |
 | Undo, redo | Ctrl+Z, Ctrl+Y, or the Quick Access Toolbar |
 | Files | Ctrl+N, Ctrl+O, Ctrl+S; Open takes IFC files too, and a note says what came in and what was left out; the File tab saves, and exports IFC, the sheets as PDF, and the view on screen as PNG (or a plan as SVG) |
+| Updates | File > Check for Updates Now looks by hand, and File > Check for updates at startup (on) says whether BIMCraft looks when it starts. A banner under the Options Bar offers a newer version: Update now (for the Windows installer's copy, an AppImage or the macOS app: it downloads and checks the update, then Restart and install asks to save, closes BIMCraft, replaces it and opens the same project again), or Download (every other copy: it opens the release's page), Later (it asks again next time), and Skip this version (not until a newer one) |
 
 Each of these runs a command, so what you do in the window is checked, undone and saved exactly as from the CLI or an agent.
 
@@ -410,6 +412,16 @@ crates/core            bimcraft-core: everything but the front ends; no UI
   units.rs             project units: lengths and areas as drawings and the desktop show them, typed lengths read
   language.rs          a project's language: the words its drawings print, the names commands give
   step.rs, import.rs   ISO 10303-21 files read; IFC import, every element measured from its geometry
+crates/update          bimcraft-update: the updater, which only the desktop app uses; the core, the CLI and MCP never depend on it
+  lib.rs               a release read from GitHub's reply, its file for this kind of install chosen and downloaded into a folder of its own, checked
+  net.rs               HTTPS to GitHub and its release CDN, redirects followed by hand
+  prefs.rs             update.json, in the user's own configuration folder
+  detect.rs            which kind of install this is (the Windows installer's copy, an AppImage, the macOS app) and what replaces it
+  install.rs           the Windows hand-over: a copy of the app waits for it to exit, runs the installer, starts the app again
+  appimage.rs          an AppImage replaced by the new file once the new file has run
+  macos.rs             the macOS app replaced from the disk image: mounted, copied, verified, run, swapped in
+  exec.rs              the programs an update runs, under a time limit, and the check of a new build's version
+  updater.rs           the state the banner draws (idle, offered, downloading, ready, installing), worked on threads of their own
 crates/ui-egui         bimcraft-ui-egui: the desktop front end, a thin shell over the session
   lib.rs               the window: Quick Access Toolbar, ribbon tabs, Options Bar, browser, view tabs, status bar, files
   canvas.rs            the plan: pan, zoom, the navigation bar, picking, the tools and their previews
@@ -423,6 +435,7 @@ crates/ui-egui         bimcraft-ui-egui: the desktop front end, a thin shell ove
   phasing.rs           Phasing, Design Options, the active option and the Phasing groups of Properties
   lang.rs              the desktop's words in Portuguese and Spanish, and the language it starts in
   style.rs             a light and a dark palette, spacing, and the icons, drawn in code
+  updates.rs           the update banner under the Options Bar, and the File menu's update items
 apps/bimcraft          the desktop app
 apps/bimcraft-cli      run, info, convert, commands, and the MCP server
 ```
@@ -442,10 +455,10 @@ walls attached to roofs and floors, other location lines), sloped floors with op
 openings, stairs of several runs with landings, ramps and railings, and roofs over any footprint (hips and valleys, gable
 ends, courtyards), extrusion roofs and dormers, materials, with floors, roofs and ceilings built of layers as walls
 are, families, BIMCraft's own parametric components (never Autodesk's `.rfa`), and project parameters and schedules with
-chosen fields, filters, sorting and formulas, and visibility and graphics (overrides, view filters, view templates, phases and design options, which go out to IFC and come back), and families done: revolves and voids, doors and windows as families, the Family Editor, textures by material or from pictures you add, Paint, and favorites kept for every project.
+chosen fields, filters, sorting and formulas, and visibility and graphics (overrides, view filters, view templates, phases and design options, which go out to IFC and come back), and families done: revolves and voids, doors and windows as families, the Family Editor, textures by material or from pictures you add, Paint, and favorites kept for every project, and updates (a check at startup, and the Windows installer's copy, an AppImage and the macOS app upgrading themselves).
 Next, in order: locked and equal dimensions, arrays and groups; fill patterns of your own, perspective views and a section box; DWG and DXF, more of
 IFC, and gbXML; structure, then MEP; site and massing; several people editing one model; and signed installers (macOS
-signing and notarization are wired up, waiting on a Developer ID) and auto-update. Revit's own `.rvt` format is closed and undocumented, so BIMCraft won't read it itself;
+signing and notarization are wired up, waiting on a Developer ID). Revit's own `.rvt` format is closed and undocumented, so BIMCraft won't read it itself;
 IFC is the way in and out, and `.rvt` files will come in through Autodesk's own converter.
 
 ## Downloads
@@ -466,7 +479,7 @@ DESKTOPSHORTCUT=1`. It isn't code-signed yet, so Windows SmartScreen asks before
 
 | Format | x86_64 | aarch64 (64-bit Arm) | Notes |
 |---|---|---|---|
-| AppImage | `bimcraft-<ver>-linux-x86_64.AppImage` | `bimcraft-<ver>-linux-aarch64.AppImage` | Runs anywhere; updates itself with [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) (`.zsync` files) |
+| AppImage | `bimcraft-<ver>-linux-x86_64.AppImage` | `bimcraft-<ver>-linux-aarch64.AppImage` | Runs anywhere; BIMCraft replaces it with a newer one itself (see [Updates](#updates)), or [AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) does, from the `.zsync` files |
 | Flatpak | `bimcraft-<ver>-linux-x86_64.flatpak` | `bimcraft-<ver>-linux-aarch64.flatpak` | Sandboxed; `flatpak install --user <file>` |
 | Debian, Ubuntu | `bimcraft-<ver>-linux-x86_64.deb` | `bimcraft-<ver>-linux-aarch64.deb` | `sudo apt install ./<file>` |
 | Fedora, RHEL, openSUSE | `bimcraft-<ver>-linux-x86_64.rpm` | `bimcraft-<ver>-linux-aarch64.rpm` | `sudo dnf install ./<file>` |
@@ -477,9 +490,10 @@ RISC-V (riscv64): `bimcraft-<ver>-linux-riscv64.deb`, `.rpm` and `.tar.gz`, cros
 (Ubuntu 24.04, Debian 13).
 
 The others run on any distro with glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36 and after). The AppImage runs
-as it is, with nothing installed and no FUSE needed (`chmod +x`, then run it), and AppImageUpdate or AppImageLauncher
-bring it up to date from the `.zsync` next to it, downloading only what changed. The Flatpak runs in a sandbox that
-reaches the display, the GPU and your Documents folder, and opens any other file through the file chooser. The `.deb`, the
+as it is, with nothing installed and no FUSE needed (`chmod +x`, then run it). BIMCraft looks for a newer one itself and
+replaces the file, and AppImageUpdate or AppImageLauncher do the same from the `.zsync` next to it, downloading only what
+changed. The Flatpak runs in a sandbox that reaches the display, the GPU and your Documents folder, and opens any other file
+through the file chooser; it has no network, so it never looks for updates (install the newer `.flatpak` the same way). The `.deb`, the
 `.rpm` and the Arch package put `bimcraft` and `bimcraft-cli` on the path, add BIMCraft to the applications menu and open
 `.bimcraft` projects and `.ifc` files in it. The tarball holds the same tree (`bin/`, `share/`).
 
@@ -492,13 +506,103 @@ reaches the display, the GPU and your Documents folder, and opens any other file
 
 Open the DMG and drag BIMCraft to Applications. It opens `.bimcraft` projects from Finder and offers itself under Open
 With for `.ifc` files. Until releases are signed with a Developer ID, macOS asks before it opens the app the first time:
-Control-click it, then Open (on macOS 15, System Settings > Privacy & Security > Open Anyway).
+Control-click it, then Open (on macOS 15, System Settings > Privacy & Security > Open Anyway). BIMCraft looks for a newer
+version itself and replaces the app in place (see [Updates](#updates)).
 
 Versions are published on the [releases page](https://github.com/IPedrax/bimcraft/releases) as they're tagged, with a
 `SHA256SUMS` of every file. Between releases, the Release workflow (Actions > Release > Run workflow) builds them all
 for any commit, as that run's artifacts. The scripts behind them are in `packaging/` (`linux/package.sh`,
 `linux/flatpak-bundle.sh`, `linux/arch-package.sh`, `macos/package.sh`, each with its `--help`), and run on your own
 machine too.
+
+### Updates
+
+The desktop app looks for a newer release when it starts: one HTTPS request to `api.github.com` for this repository's latest
+release, made on a thread of its own with a 15 second timeout, so the window never waits for it. Being offline, being rate
+limited, or getting a reply that isn't a release is ignored without a word. It sends nothing of yours beyond what any HTTPS
+request carries: your address, and a `User-Agent` naming BIMCraft's version (it follows `HTTPS_PROXY` and `ALL_PROXY` like
+other tools do). A release counts when it's published (not a draft, not a pre-release) and its tag, `vMAJOR.MINOR.PATCH`, is
+a later version than the one running, as semver orders them. A banner then offers it: Update now, Later (it asks again next
+time), or Skip this version (it stays quiet until a newer one comes). File > Check for Updates Now looks by hand, and says
+when there's nothing newer or the check failed.
+
+The check is switched off in File > Check for updates at startup; that choice is kept in `update.json` in your own
+configuration folder (`%APPDATA%\BIMCraft`, `~/Library/Application Support/BIMCraft`, or `$XDG_CONFIG_HOME/bimcraft`, else
+`~/.config/bimcraft`), not in a project. Setting the environment variable `BIMCRAFT_NO_UPDATE_CHECK` (to anything but empty)
+keeps the app from making any request, and hides the menu items. `bimcraft-cli` and the MCP server never check for anything.
+
+**Windows.** Update now works for the copy the installer put in `Program Files\BIMCraft`. It downloads
+`bimcraft-<ver>-windows-x64.msi` from the release into a new folder in your temp folder and checks it. Restart and install
+then asks to save any unsaved changes, closes BIMCraft, and hands over to a copy of itself that waits for BIMCraft to be
+gone, checks the file once more, runs Windows' own `msiexec` on it while holding the file open, so that nothing can change it
+(`/passive`: a progress bar, and Windows asks permission, because the installer is for every user) and starts BIMCraft again
+with the project that was open. If you cancel the permission prompt the old version starts again, and the offer comes back at
+the next start unless you skipped it. The installer's log is `install.log` in that folder, which BIMCraft removes at a start
+a day or more later.
+
+**Linux.** Update now works for an AppImage whose folder you can write to, on x86_64 or aarch64 (if you start it through a
+link, the file the link points to is the one replaced). It downloads `bimcraft-<ver>-linux-<arch>.AppImage` into a new folder
+in your temp folder and checks it. Restart and install then asks to save, checks the file once more, and copies it next to your
+AppImage under a hidden name, on the same disk, so that the last step can't be left half done. It runs that copy with
+`--version`, as you would run it and, if that fails (no FUSE, say), once more asking it to unpack itself first, which needs
+none, giving each try at most a minute; the copy must print `bimcraft <version>` for the release's version. Only then is it
+renamed over your AppImage, and the new one starts (unpacking itself, if it had to for the check) with the project that was
+open as BIMCraft closes. The file keeps its name, so a shortcut to it keeps working, even when the name holds the old version.
+If the new build doesn't run, or says another version, your AppImage is as it was, the hidden copy is deleted and a note says
+why. A package from your distribution (`.deb`, `.rpm`, Arch) is files that belong to root and to your package manager, so it is
+told of the newer release and not replaced; so are the tarball, a build from source, and an AppImage in a folder you can't
+write to. A Flatpak has no network and never checks. None of this has run against a real AppImage: it is tested with scripts
+that stand in for one, which is what the checks on the new file and the swap need, but not the AppImage runtime itself.
+
+**macOS.** Update now works for BIMCraft.app when its folder is one you can write to (Applications, for an administrator, or
+`~/Applications`). It downloads `bimcraft-<ver>-macos-universal.dmg` into a new folder in your temp folder and checks it.
+Restart and install then asks to save, checks the file once more, mounts the disk image read-only and out of Finder's sight,
+copies BIMCraft.app out of it with `ditto` to a hidden app beside yours, lets the image go, and runs `codesign --verify
+--strict --deep` on the copy, as the release script does. It runs the copy once with `--version`, which must print `bimcraft
+<version>`, and swaps it in by two renames: the old app is put back if the second fails, and deleted once the new one is in.
+The new app starts with the project that was open as BIMCraft closes. If a step before the swap fails, your app is as it was, and
+a note says why; if the new app is in but won't start, the note says that, and BIMCraft stays open. **This has not run on a Mac.** The steps are tested only against shell scripts that stand in for `hdiutil`, `ditto`,
+`codesign` and `open`, so three things stay open until someone tries it. Whether macOS asks permission, or refuses, when an
+app signed ad hoc replaces its own bundle (macOS 13 and later guard apps against changes by others; if it refuses, the update
+fails with that error and the old app stays). Whether Gatekeeper asks again about the new app: it is signed ad hoc like the
+old one, and the copy BIMCraft makes carries no mark from a download. And whether `open` hands the project to the new app: Finder
+hands projects over another way, which the app also reads, and if `open` doesn't do it the new version starts with a blank
+project, while the project is still in the file you saved. An app run from the disk image itself, or from the folder it was
+downloaded to, can't be replaced (macOS runs a downloaded app from a read-only copy until it is moved): it is told of the newer
+version and sent to the page, so move BIMCraft to Applications first.
+
+**Everything else.** A build from source, a copy kept anywhere else, and a Windows copy running as an administrator are told
+of a newer release, and the banner's Download button opens its page. Replacing a program that came from `cargo` or a package
+manager is not the updater's to do, and the copy that runs the Windows installer would have an administrator's rights, in a
+folder other programs can write to. Run BIMCraft as yourself.
+
+**What the check protects against.** The update is fetched only from this repository's release on github.com and GitHub's
+release CDN, over HTTPS: the address is built from the release's tag, never taken from the reply, redirects are followed one
+by one and only into this repository's releases on github.com or to the CDN, and an asset is taken only if it's named exactly
+for that version and kind of install. The reply is read up to 1 MiB, and the download is held to the size GitHub lists for the
+file (at most 128 MiB) and must match it to the byte. Its SHA-256 must equal the digest GitHub's API gives for that asset, when
+it arrives and again just before it is installed; and where the release lists a `SHA256SUMS` file, the sum in it must be the
+same one. The two come from different places (the release workflow writes the file, GitHub works out the digest when an asset is
+uploaded), so a file replaced afterwards without the other being updated is refused. Nothing runs that failed a check, and the
+file is deleted. A damaged or truncated download, a cache or a mirror serving something else, and a server that sends more than
+it should are all stopped by this. On Linux and macOS the new build must also run and say its version before it takes the old
+one's place, which shows that it loads here, though not that its window opens.
+
+**What it doesn't.** None of the three files is signed by a developer identity that BIMCraft checks: the Windows installer isn't
+code-signed (so Windows can't say who made it), the macOS app is signed ad hoc (which says that it is intact, not who made it),
+and the AppImage isn't signed. The digest says only that the file is the one GitHub lists: someone who could publish a release
+in this repository (a stolen token or account), or GitHub itself, would publish a digest that matches their file. On Linux and
+macOS the new build is run once, as you, with `--version` before it replaces the old one; that is no more trust than starting it
+after, and the digest check comes first, but it is a program from the internet that runs because you clicked. A program already
+running as you could swap the file in your temp folder after the first check, and the second check, made just before the install,
+catches that. On Linux and macOS nothing holds the file between that check and its use, which is a matter of moments, and a
+program that could win that race could replace your AppImage or your app directly. On Windows the copy that runs the installer
+holds the file open so that nothing can write to it until Windows Installer is done. If Windows Installer won't open a file held
+that way, the copy lets go, checks it once more and runs it unheld, and then a swap is possible for as long as you take over the
+permission prompt, which looks the same either way, since it can't say whose file it is. The updater doesn't mark the file as
+downloaded from the internet, so SmartScreen doesn't ask as it does for one saved by a browser; the permission prompt still
+comes from Windows. The certificates it trusts are Mozilla's, built in, so a network that inspects HTTPS with a certificate of
+its own makes the check fail, quietly, and a corporate root isn't consulted. Signed installers are on the roadmap.
 
 ## License and credits
 

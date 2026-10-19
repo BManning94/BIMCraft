@@ -1,0 +1,21 @@
+[package]
+name = "bimcraft-update"
+description = "BIMCraft's updater: asks GitHub for a newer release, downloads its installer and checks it"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `testing::Fake`, a network that is a table of answers, for the desktop's tests too.
+testing = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+ureq = { workspace = true }
+ring = { workspace = true }

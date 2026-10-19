@@ -18,6 +18,7 @@ mod section;
 mod style;
 #[cfg(test)]
 mod tests;
+mod updates;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -192,6 +193,8 @@ enum Pending {
     /// A file the system asked to open ([`OsEvent::Open`]).
     OpenPath(PathBuf),
     Close,
+    /// Close, so the installer can replace the program, and start it again updated.
+    Update,
 }
 
 /// What the system asks of the app from outside its window. macOS sends a file Finder, the Dock or
@@ -426,6 +429,8 @@ pub struct BimApp {
     closing: bool,
     title: String,
     styled: bool,
+    /// The updater, which the desktop app attaches: a window starts without one, and so never phones home.
+    pub updates: Option<bimcraft_update::Updater>,
 }
 
 /// The Options Bar's Height: up to a level above the plan's `level` (by default the next one up),
@@ -673,6 +678,7 @@ impl BimApp {
             closing: false,
             title: String::new(),
             styled: false,
+            updates: None,
         }
     }
 
@@ -813,6 +819,7 @@ impl BimApp {
         style::follow(&ctx);
         lang::set(self.lang);
         self.tidy();
+        self.poll_updates(&ctx);
         self.keys(&ctx);
         self.os_requests(&ctx);
         let view = self.view_title(self.sheet);
@@ -821,14 +828,20 @@ impl BimApp {
             ctx.send_viewport_cmd(ViewportCommand::Title(title.clone()));
             self.title = title;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && !self.closing && self.dirty() {
+        if ctx.input(|i| i.viewport().close_requested()) && !self.closing && (self.installing() || self.dirty()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            self.pending = Some(Pending::Close);
+            // An update being put in place holds the window: it closes it when it's in.
+            if !self.installing() {
+                self.pending = Some(Pending::Close);
+            }
         }
         let bar = Frame::new().fill(pal().bar).inner_margin(vec2(8.0, 4.0)).stroke(Stroke::new(1.0, pal().border));
         Panel::top("quick-access").frame(bar).show(ui, |ui| self.quick_access(ui, &view));
         Panel::top("ribbon").frame(Frame::new().fill(pal().surface)).show(ui, |ui| self.ribbon(ui));
         Panel::top("options").frame(bar).show(ui, |ui| self.options(ui));
+        if self.has_update_banner() {
+            Panel::top("update").frame(Frame::NONE).show(ui, |ui| self.update_banner(ui));
+        }
         Panel::bottom("status").frame(bar).show(ui, |ui| self.status_bar(ui));
         if self.show_properties || self.show_browser {
             let palette = Frame::new().fill(pal().panel).stroke(Stroke::new(1.0, pal().border));
@@ -935,6 +948,7 @@ impl BimApp {
             || self.show_shortcuts
             || self.show_snaps
             || self.pending.is_some()
+            || self.installing()
         {
             return;
         }
@@ -1614,12 +1628,18 @@ impl BimApp {
         fresh.os_events = self.os_events.take();
         (fresh.thin, fresh.show_properties, fresh.show_browser, fresh.lang, fresh.snaps) =
             (self.thin, self.show_properties, self.show_browser, self.lang, self.snaps);
+        fresh.updates = self.updates.take();
         *self = fresh;
     }
 
     /// What the system asked for, as File > Open and closing the window do it: a file opened in turn
     /// (the last one wins), and Quit, each asking first about unsaved changes.
     fn os_requests(&mut self, ctx: &Context) {
+        // An update being put in place holds the window, so what the system asks waits in its inbox until that has gone through
+        // (the window closes) or failed.
+        if self.installing() {
+            return;
+        }
         let Some(events) = self.os_events.as_mut().map(|poll| poll()) else { return };
         for event in events {
             match event {
@@ -1656,6 +1676,7 @@ impl BimApp {
                 self.closing = true;
                 ctx.send_viewport_cmd(ViewportCommand::Close);
             }
+            Pending::Update => self.install_update(),
         }
     }
 
@@ -1773,6 +1794,7 @@ impl BimApp {
                 self.export("PDF", "pdf");
             }
         });
+        self.update_menu(ui);
         ui.separator();
         if item(ui, "Exit", None) {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -2831,6 +2853,7 @@ impl BimApp {
         self.phasing_window(ctx);
         self.options_window(ctx);
         self.shortcuts_window(ctx);
+        self.installing_box(ctx);
         let Some(pending) = self.pending.clone() else { return };
         #[derive(PartialEq)]
         enum Choice {

@@ -13,13 +13,20 @@ use serde_json::json;
 const USAGE: &str = "USAGE: bimcraft [FILE] [--sample]
   FILE       a .bimcraft project to open, or an .ifc file to import
   --sample   start on the sample house
-  --version  the release";
+  --version  the release
+
+It looks for a newer version when it starts (File > Check for updates at startup switches that off).
+Set BIMCRAFT_NO_UPDATE_CHECK=1 and it never makes a request.";
 
 /// What the desktop knows the app by: Wayland's app id and X11's window class, which a Linux desktop
 /// matches to the `.desktop` file of that name for the window's icon, and the macOS bundle's identifier.
 const APP_ID: &str = "io.github.ipedrax.bimcraft";
 
 fn main() -> ExitCode {
+    // An update runs the installer from a copy of this program, once the app has exited: nothing else here applies to it.
+    if let Some(finish) = bimcraft_update::install::parse(std::env::args_os().skip(1)) {
+        return bimcraft_update::install::run(&finish);
+    }
     let language = lang::from_env();
     let mut session = Session::new();
     // A blank project starts in the interface's language: its levels named in it.
@@ -34,7 +41,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "-V" | "--version" => {
-                println!("bimcraft {}", env!("CARGO_PKG_VERSION"));
+                println!("{}", bimcraft_update::version_line(env!("CARGO_PKG_VERSION")));
                 return ExitCode::SUCCESS;
             }
             "--sample" => session.script(SAMPLE).map(|_| ()),
@@ -68,10 +75,15 @@ fn main() -> ExitCode {
     // held until it closes.
     #[cfg(target_os = "macos")]
     let (_registration, inbox) = fmv_macos_events::Registration::install();
+    // The update check runs on a thread of its own, started once the window exists: it never delays the start.
     let start = move |cc: &eframe::CreationContext| -> Result<Box<dyn eframe::App>, _> {
         #[cfg(target_os = "macos")]
         apple_events(&mut app, &cc.egui_ctx, inbox);
-        let _ = cc;
+        let ctx = cc.egui_ctx.clone();
+        app.updates = bimcraft_update::Updater::desktop(move || ctx.request_repaint());
+        if let Some(updates) = app.updates.as_mut() {
+            updates.check_at_startup();
+        }
         Ok(Box::new(app))
     };
     match eframe::run_native("BIMCraft", options, Box::new(start)) {
