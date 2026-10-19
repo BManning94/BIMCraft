@@ -633,6 +633,7 @@ impl BimApp {
             (Tool::Door | Tool::Window | Tool::Trim(_) | Tool::Split | Tool::Offset, Some(q)) => {
                 d.pick(q, PICK).filter(|id| model.wall(*id).is_some())
             }
+            (Tool::Demolish, Some(q)) => d.pick(q, PICK),
             (Tool::Align(_) | Tool::Mirror { draw: false, .. }, Some(q)) => {
                 d.pick(q, PICK).filter(|id| !model.reference_lines(*id).is_empty())
             }
@@ -947,6 +948,11 @@ impl BimApp {
                     && let Some(by) = self.offset_by(m, id, v.mm(at))
                 {
                     self.run(if self.offset_copy { "copy" } else { "move" }, json!({"ids": [id], "by": point(by)}));
+                }
+            }
+            Tool::Demolish => {
+                if let Some(id) = hovered {
+                    self.demolish(id);
                 }
             }
             // A reference under the cursor joins the dimension; a click away from them places it.

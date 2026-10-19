@@ -1371,6 +1371,27 @@ const WORDS: &[[&str; 3]] = &[
         "Os novos elementos são feitos nesta opção; a vista na tela a mostra",
         "Los elementos nuevos se hacen en esta opción; la vista en pantalla la muestra",
     ],
+    ["Demolish", "Demolir", "Demoler"],
+    [
+        "Demolish (DW): click an element to take it down in the view's phase; click it again to take it back",
+        "Demolir (DW): clique num elemento para demoli-lo na fase da vista; clique de novo para desfazer",
+        "Demoler (DW): haga clic en un elemento para demolerlo en la fase de la vista; haga clic otra vez para deshacerlo",
+    ],
+    [
+        "Click an element to take it down in the view's phase; click it again to take it back.",
+        "Clique num elemento para demoli-lo na fase da vista; clique de novo para desfazer.",
+        "Haga clic en un elemento para demolerlo en la fase de la vista; haga clic otra vez para deshacerlo.",
+    ],
+    [
+        "{} holds no parameters, so it has no phase to demolish",
+        "{} não tem parâmetros, então não tem fase a demolir",
+        "{} no tiene parámetros, así que no tiene fase que demoler",
+    ],
+    [
+        "{} follows its wall, which comes down in {}: take the wall back instead",
+        "{} acompanha a parede, que é demolida em {}: desfaça a demolição da parede",
+        "{} acompaña al muro, que se demuele en {}: deshaga la demolición del muro",
+    ],
 ];
 
 #[cfg(test)]

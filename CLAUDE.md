@@ -154,4 +154,8 @@ view too). What was made in the first phase holds no value, so a phase put in be
 `into` (`phasing::move_phase`), and renaming a phase, an option or a set takes the elements, the views and the rules of filters
 and schedules along; accepting a set keeps the primary's elements and deletes the rest.
 A schedule sorts and groups `Phase Created` and `Phase Demolished` by the phase's place in `Model::phases`, not by its name, no
-`Phase Demolished` coming after every phase (`schedule::sorts_as`); its filters still compare the names.
+`Phase Demolished` coming after every phase (`schedule::sorts_as`); its filters still compare the names. The desktop's Demolish
+tool (DW, `BimApp::demolish`, in the Modify tab's Phasing panel) runs `modify {params: {Phase Demolished}}` on the element clicked in a
+plan, a section or the 3D view: the phase of the view on screen (the project's last unless it has one), or null when the element
+already comes down in it, one undo step a click. A door or window that only follows its wall gets a note instead, and an element that
+holds no `params` (annotation, levels, grids, shafts) says so and changes nothing.

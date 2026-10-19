@@ -91,7 +91,7 @@ impl BimApp {
             (hover, i.smooth_scroll_delta.y, i.zoom_delta(), i.modifiers.shift, i.pointer.latest_pos())
         });
         let model = Arc::clone(&self.session.model);
-        let (modify, selection) = (self.tool == Tool::Modify, self.selection.clone());
+        let (modify, demolish, selection) = (self.tool == Tool::Modify, self.tool == Tool::Demolish, self.selection.clone());
         let o = &mut self.orbit;
         (o.rect, o.ppp) = (rect, ppp);
         let scene = scene_of(&mut o.scene, &model);
@@ -128,7 +128,7 @@ impl BimApp {
             let (x, y) = px(at);
             image.as_ref().and_then(|i| i.pick(x, y))
         };
-        let hovered = hover.filter(|_| modify && o.drag.is_none()).and_then(|at| pick(&o.image, at));
+        let hovered = hover.filter(|_| (modify || demolish) && o.drag.is_none()).and_then(|at| pick(&o.image, at));
         let tints: Vec<(Id, Rgb)> = selection
             .iter()
             .map(|id| (*id, rgb(pal().accent)))
@@ -159,6 +159,9 @@ impl BimApp {
         let clicked = response.clicked().then(|| response.interact_pointer_pos()).flatten().map(|at| pick(&o.image, at));
         match clicked {
             Some(found) if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
+            Some(Some(id)) if demolish => self.demolish(id),
+            // Nothing under the cursor: nothing to take down.
+            Some(None) if demolish => {}
             Some(_) => {
                 self.status =
                     Status { text: crate::lang::t("this tool works in plan views: open one from the Project Browser").into(), error: true }
