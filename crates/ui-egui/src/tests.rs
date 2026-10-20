@@ -1118,7 +1118,7 @@ fn the_view_control_bar_sets_a_views_scale_and_detail_level() {
     assert_eq!(g(&h, 1).scale, Some(50.0));
     assert!(painted_text(&h).contains(&"1 : 50".to_string()));
     assert_eq!(h.state().session.history().last(), Some(&"View Scale"));
-    press(&mut h, "Detail Level");
+    pick(&mut h, Role::Button, "Detail Level");
     press(&mut h, "Coarse");
     assert_eq!(g(&h, 1).detail, Detail::Coarse);
     assert!(painted_text(&h).contains(&"Coarse".to_string()));
@@ -1140,7 +1140,7 @@ fn the_view_control_bar_sets_a_views_scale_and_detail_level() {
     // The section has its own, and the bar shows the one of the view on screen.
     browse(&mut h, "Section 1");
     assert_eq!(h.state().sheet, Sheet::Section(section));
-    press(&mut h, "Detail Level");
+    pick(&mut h, Role::Button, "Detail Level");
     press(&mut h, "Medium");
     assert_eq!((g(&h, section).detail, g(&h, 1).detail), (Detail::Medium, Detail::Coarse));
     assert!(painted_text(&h).contains(&"Medium".to_string()));
@@ -1156,7 +1156,7 @@ fn the_view_control_bar_sets_the_3d_views_visual_style_and_wf_hl_and_sd_do_too()
     // Shaded until told otherwise; a 3D view has no scale or detail level.
     assert!(painted_text(&h).contains(&"Shaded".to_string()));
     assert!(h.query_by_label("Scale").is_none() && h.query_by_label("Detail Level").is_none());
-    press(&mut h, "Visual Style");
+    pick(&mut h, Role::Button, "Visual Style");
     press(&mut h, "Wireframe");
     assert_eq!(style(&h), VisualStyle::Wireframe);
     assert!(painted_text(&h).contains(&"Wireframe".to_string()));
@@ -1173,6 +1173,85 @@ fn the_view_control_bar_sets_the_3d_views_visual_style_and_wf_hl_and_sd_do_too()
     shortcut(&mut h, "HL");
     assert!(h.state().status.error);
     assert_eq!(style(&h), VisualStyle::Wireframe);
+}
+
+/// What the drop-down named `label` shows, as a screen reader reads it.
+fn combo_value(h: &Harness<BimApp>, label: &str) -> String {
+    h.get_by_role_and_label(Role::ComboBox, label).value().unwrap_or_default()
+}
+
+/// What the text field named `label` holds.
+fn field_text(h: &Harness<BimApp>, label: &str) -> String {
+    h.get_by_role_and_label(Role::TextInput, label).value().unwrap_or_default()
+}
+
+/// Open the drop-down named `label` and pick `option` from it, as screen readers do. A palette's foot, and a list's, can lie below
+/// the window.
+fn choose(h: &mut Harness<BimApp>, label: &str, option: &str) {
+    h.get_by_role_and_label(Role::ComboBox, label).click_accesskit();
+    h.run();
+    h.get_by_label(option).click_accesskit();
+    h.run();
+    // Such a click leaves the list open, which a pointer's closes: the drop-down again shuts it.
+    if egui::Popup::is_any_open(&h.ctx) {
+        h.get_by_role_and_label(Role::ComboBox, label).click_accesskit();
+        h.run();
+    }
+}
+
+#[test]
+fn properties_of_a_view_show_and_set_its_scale_detail_level_and_visual_style() {
+    use bimcraft_core::graphics::{Detail, Look, VisualStyle};
+    let mut h = app(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    let section = ids(&h, "section")[0];
+    let steps = |h: &Harness<BimApp>| h.state().session.history().len();
+    // A plan: no scale (Auto) and fine detail, until set; a plan has no visual style.
+    assert_eq!((combo_value(&h, "View Scale"), combo_value(&h, "Detail Level")), ("Auto".into(), "Fine".into()));
+    assert!(h.query_by_role_and_label(Role::ComboBox, "Visual Style").is_none());
+    let before = steps(&h);
+    choose(&mut h, "View Scale", "1 : 50");
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (Some(50.0), before + 1), "one undo step");
+    assert_eq!(h.state().session.history().last(), Some(&"View Scale"));
+    assert_eq!(combo_value(&h, "View Scale"), "1 : 50");
+    choose(&mut h, "Detail Level", "Coarse");
+    assert_eq!((plan_graphics(&h, 1).detail, steps(&h)), (Detail::Coarse, before + 2));
+    assert_eq!(h.state().session.history().last(), Some(&"Detail Level"));
+    assert_eq!(combo_value(&h, "Detail Level"), "Coarse");
+    // The scale's value, typed: any number a scale may be; what isn't one is said and changes nothing.
+    assert_eq!(field_text(&h, "Scale Value 1:"), "50");
+    type_role(&mut h, Role::TextInput, "Scale Value 1:", "75");
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (Some(75.0), before + 3));
+    assert_eq!(combo_value(&h, "View Scale"), "1 : 75");
+    type_role(&mut h, Role::TextInput, "Scale Value 1:", "big");
+    assert!(h.state().status.error);
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (Some(75.0), before + 3));
+    choose(&mut h, "View Scale", "Auto");
+    assert_eq!(plan_graphics(&h, 1).scale, None);
+    assert_eq!(field_text(&h, "Scale Value 1:"), "");
+    // A section has its own, and Properties shows the one on screen. Its palette is long: a tall window shows the foot of it.
+    h.set_size(vec2(1280.0, 1600.0));
+    browse(&mut h, "Section 1");
+    assert_eq!(h.state().sheet, Sheet::Section(section));
+    assert_eq!((combo_value(&h, "View Scale"), combo_value(&h, "Detail Level")), ("Auto".into(), "Fine".into()));
+    choose(&mut h, "View Scale", "1 : 200");
+    choose(&mut h, "Detail Level", "Medium");
+    let g = bimcraft_core::graphics::graphics_of(&h.state().session.model, section).unwrap();
+    assert_eq!((g.scale, g.detail), (Some(200.0), Detail::Medium));
+    assert_eq!((plan_graphics(&h, 1).scale, plan_graphics(&h, 1).detail), (None, Detail::Coarse));
+    // The 3D view: a visual style, no scale or detail level.
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().sheet, Sheet::View3D);
+    assert!(h.query_by_role_and_label(Role::ComboBox, "View Scale").is_none());
+    assert!(h.query_by_role_and_label(Role::ComboBox, "Detail Level").is_none());
+    assert_eq!(combo_value(&h, "Visual Style"), "Shaded");
+    choose(&mut h, "Visual Style", "Hidden Line");
+    assert_eq!(Look::of_3d(&h.state().session.model).style(), VisualStyle::HiddenLine);
+    assert_eq!(h.state().session.history().last(), Some(&"Visual Style"));
+    assert_eq!(combo_value(&h, "Visual Style"), "Hidden Line");
+    // Undone, it is shaded again, and so is the drop-down.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(combo_value(&h, "Visual Style"), "Shaded");
 }
 
 /// The text the last frame painted, whatever widget or painter put it there.

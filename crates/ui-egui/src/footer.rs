@@ -47,8 +47,13 @@ pub(crate) struct Shadow {
     model: Arc<Model>,
 }
 
-/// The scales the Scale menu lists, 1 : n.
-const SCALES: [u32; 10] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+/// The scales the Scale menu and Properties list, 1 : n.
+pub(crate) const SCALES: [u32; 10] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+
+/// A view's scale as the Scale menu and Properties name it: `1 : 50`, or `Auto` for none.
+pub(crate) fn scale_label(n: Option<f64>) -> String {
+    n.map_or_else(|| "Auto".to_string(), |n| format!("1 : {n}"))
+}
 
 /// A button of the bar that opens a menu: named `label` for screen readers, and showing `shown`, the setting it holds.
 fn menu_button(ui: &mut Ui, label: &str, shown: &str, tip: &str) -> Response {
@@ -209,7 +214,7 @@ impl BimApp {
     /// The Scale and Detail Level menus of a plan, a ceiling plan, a section or an elevation, `view`: what the view keeps.
     fn scale_and_detail(&mut self, ui: &mut Ui, view: &Value) {
         let now = self.graphics_now();
-        let shown = now.scale.map_or_else(|| "Auto".to_string(), |n| format!("1 : {n}"));
+        let shown = scale_label(now.scale);
         let tip = "Scale: the scale this view's annotation is sized for, as paper at that scale would hold it; Auto keeps it the size it has on screen";
         let r = menu_button(ui, "Scale", &shown, tip);
         Popup::menu(&r).show(|ui| {

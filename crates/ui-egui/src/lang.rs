@@ -659,6 +659,8 @@ const WORDS: &[[&str; 3]] = &[
         "los estilos visuales son de la vista 3D: ábrala desde el Explorador de proyectos",
     ],
     ["Detail Level", "Nível de detalhe", "Nivel de detalle"],
+    ["View Scale", "Escala da vista", "Escala de la vista"],
+    ["Scale Value 1:", "Valor da escala 1:", "Valor de la escala 1:"],
     ["Coarse", "Grosseiro", "Bajo"],
     ["Medium", "Médio", "Medio"],
     ["Fine", "Fino", "Alto"],

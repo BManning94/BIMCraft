@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use bimcraft_core::graphics::{ANNOTATION, Applied, Dash, Graphics, Group, MODEL, Override, Style, WEIGHTS};
+use bimcraft_core::graphics::{ANNOTATION, Applied, Dash, Detail, Graphics, Group, MODEL, Override, Style, VisualStyle, WEIGHTS};
 use bimcraft_core::model::{Element, Id, Model};
 use bimcraft_core::schedule;
 use egui::{
@@ -17,7 +17,9 @@ use egui::{
 };
 use serde_json::{Value, json};
 
+use crate::footer::{SCALES, scale_label};
 use crate::lang::{self, t, tf};
+use crate::properties::number;
 use crate::style::pal;
 use crate::{BimApp, Sheet, Status};
 
@@ -445,16 +447,60 @@ impl BimApp {
         if !open {
             return;
         }
-        let (mut edit, mut set) = (false, None::<Value>);
+        let (mut edit, mut set) = (false, None::<(&str, Value)>);
+        // The id the scale's field edits under: the view's own, which the 3D view's has no field for.
+        let own_id = match self.sheet {
+            Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) => Some(id),
+            _ => None,
+        };
         egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
             let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             Grid::new("graphics-properties").num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
+                if let Some(id) = own_id {
+                    let label = ui.label(t("View Scale"));
+                    let choices: Vec<(String, Option<u32>)> =
+                        std::iter::once(None).chain(SCALES.map(Some)).map(|n| (t(&scale_label(n.map(f64::from))).to_string(), n)).collect();
+                    let options: Vec<String> = choices.iter().map(|c| c.0.clone()).collect();
+                    if let Some(picked) = crate::properties::combo(ui, (0, "view-scale"), label.id, t(&scale_label(own.scale)), &options)
+                        && let Some((_, n)) = choices.iter().find(|c| c.0 == picked)
+                    {
+                        set = Some(("scale", json!({"view": view, "scale": n})));
+                    }
+                    ui.end_row();
+                    let label = ui.label(t("Scale Value 1:"));
+                    let shown = own.scale.map_or_else(String::new, |n| n.to_string());
+                    if let Some(typed) = self.field(ui, id, "scale", shown, label.id, t("Auto")) {
+                        match (typed.trim().is_empty(), number(&typed)) {
+                            (true, _) => set = Some(("scale", json!({"view": view, "scale": null}))),
+                            (_, Some(n)) => set = Some(("scale", json!({"view": view, "scale": n}))),
+                            _ => self.status = Status { text: tf("`{}` is not a scale", &[typed.trim()]), error: true },
+                        }
+                    }
+                    ui.end_row();
+                    let label = ui.label(t("Detail Level"));
+                    let options: Vec<String> = Detail::ALL.iter().map(|d| t(d.name()).to_string()).collect();
+                    if let Some(picked) = crate::properties::combo(ui, (0, "detail-level"), label.id, t(own.detail.name()), &options)
+                        && let Some(d) = Detail::ALL.into_iter().find(|d| t(d.name()) == picked)
+                    {
+                        set = Some(("detail", json!({"view": view, "detail": d.name()})));
+                    }
+                    ui.end_row();
+                } else if self.sheet == Sheet::View3D {
+                    let label = ui.label(t("Visual Style"));
+                    let options: Vec<String> = VisualStyle::ALL.iter().map(|v| t(v.name()).to_string()).collect();
+                    if let Some(picked) = crate::properties::combo(ui, (0, "visual-style"), label.id, t(own.style.name()), &options)
+                        && let Some(v) = VisualStyle::ALL.into_iter().find(|v| t(v.name()) == picked)
+                    {
+                        set = Some(("visual_style", json!({"style": v.name()})));
+                    }
+                    ui.end_row();
+                }
                 let label = ui.label(t("View Template"));
                 let none = t("<None>").to_string();
                 let now = own.template.clone().unwrap_or_else(|| none.clone());
                 let options: Vec<String> = std::iter::once(none.clone()).chain(model.view_templates.keys().cloned()).collect();
                 if let Some(picked) = crate::properties::combo(ui, (0, "view-template"), label.id, &now, &options) {
-                    set = Some(json!({"view": view, "template": if picked == none { Value::Null } else { json!(picked) }}));
+                    set = Some(("graphics", json!({"view": view, "template": if picked == none { Value::Null } else { json!(picked) }})));
                 }
                 ui.end_row();
                 ui.label(t("Visibility/Graphics Overrides"));
@@ -464,8 +510,8 @@ impl BimApp {
                 ui.end_row();
             });
         });
-        if let Some(p) = set {
-            self.run("graphics", p);
+        if let Some((command, p)) = set {
+            self.run(command, p);
         }
         if edit {
             self.open_graphics(0);
