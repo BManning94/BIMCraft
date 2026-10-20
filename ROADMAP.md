@@ -101,6 +101,7 @@ The goal is a printable, coordinated drawing set.
 | Revisions, revision clouds, and a revision schedule on title blocks | M |
 | Editable title blocks (a 2D family with label fields), view titles under viewports, a sheet list | M |
 | Print dialog: sheets to PDF or a printer, sizes, ranges, colour or monochrome | S |
+| The rest of Revit's view control bar: Show/Hide Crop Region and Crop View buttons, Sun Path and Shadows, Temporary View Properties, a visual style for plans and sections and a detail level for the 3D view (scale, detail level, visual style, Temporary Hide/Isolate and Reveal Hidden Elements are done, and view templates control the first three) | M |
 | Keynotes from a user-supplied keynote table (no bundled third-party data) | M |
 
 **Exit criteria**: a small house's permit set (plans, reflected ceiling plans, sections, elevations, details, schedules,

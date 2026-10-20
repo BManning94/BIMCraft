@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use bimcraft_core::engine::Session;
-use bimcraft_core::graphics::{self, ANNOTATION, Detail, MODEL, VisualStyle};
+use bimcraft_core::graphics::{self, ANNOTATION, Detail, Group, MODEL, VisualStyle};
 use bimcraft_core::model::{Id, Model};
 use egui::{
     Color32, FontId, Frame, Key, Margin, Popup, Response, RichText, Sense, Shape, Stroke, StrokeKind, TextEdit, Ui, WidgetInfo, WidgetType,
@@ -16,6 +16,7 @@ use egui::{
 };
 use serde_json::{Value, json};
 
+use crate::graphics::controlled_note;
 use crate::lang::{t, tf};
 use crate::properties::number;
 use crate::style::{Icon, pal};
@@ -47,27 +48,40 @@ pub(crate) struct Shadow {
     model: Arc<Model>,
 }
 
-/// The scales the Scale menu lists, 1 : n.
-const SCALES: [u32; 10] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+/// The scales the Scale menu and Properties list, 1 : n.
+pub(crate) const SCALES: [u32; 10] = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
 
-/// A button of the bar that opens a menu: named `label` for screen readers, and showing `shown`, the setting it holds.
-fn menu_button(ui: &mut Ui, label: &str, shown: &str, tip: &str) -> Response {
+/// A view's scale as the Scale menu and Properties name it: `1 : 50`, or `Auto` for none.
+pub(crate) fn scale_label(n: Option<f64>) -> String {
+    n.map_or_else(|| "Auto".to_string(), |n| format!("1 : {n}"))
+}
+
+/// A button of the bar that opens a menu: named `label` for screen readers, and showing `shown`, the setting it holds. Greyed
+/// out, and saying so, when view template `set_by` sets it.
+fn menu_button(ui: &mut Ui, label: &str, shown: &str, tip: &str, set_by: Option<&str>) -> Response {
     let (label, tip) = (t(label), t(tip));
     let galley = ui.painter().layout_no_wrap(t(shown).to_string(), FontId::proportional(12.0), pal().text);
-    let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 25.0), Sense::click());
-    let enabled = ui.is_enabled();
-    r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
-    let p = ui.painter();
-    if r.hovered() {
-        p.rect_filled(rect, 4.0, pal().hover_fill);
-    }
-    if r.has_focus() {
-        p.rect_stroke(rect, 4.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
-    }
-    p.galley(pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, pal().text);
-    let c = pos2(rect.right() - 10.0, rect.center().y);
-    p.add(Shape::convex_polygon(vec![c + vec2(-3.5, -2.0), c + vec2(3.5, -2.0), c + vec2(0.0, 2.5)], pal().icon, Stroke::NONE));
-    r.on_hover_text(tip)
+    ui.add_enabled_ui(set_by.is_none(), |ui| {
+        let (rect, r) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 25.0), Sense::click());
+        let enabled = ui.is_enabled();
+        r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, enabled, label));
+        let p = ui.painter();
+        if r.hovered() {
+            p.rect_filled(rect, 4.0, pal().hover_fill);
+        }
+        if r.has_focus() {
+            p.rect_stroke(rect, 4.0, Stroke::new(2.0, pal().accent), StrokeKind::Inside);
+        }
+        let ink = if enabled { pal().text } else { pal().muted };
+        p.galley(pos2(rect.left() + 8.0, rect.center().y - galley.size().y / 2.0), galley, ink);
+        let c = pos2(rect.right() - 10.0, rect.center().y);
+        p.add(Shape::convex_polygon(vec![c + vec2(-3.5, -2.0), c + vec2(3.5, -2.0), c + vec2(0.0, 2.5)], pal().icon, Stroke::NONE));
+        match set_by {
+            Some(template) => r.on_disabled_hover_text(controlled_note(template)),
+            None => r.on_hover_text(tip),
+        }
+    })
+    .inner
 }
 
 /// What Reveal Hidden Elements draws what a view hides in.
@@ -84,9 +98,12 @@ fn shadowed(base: &Arc<Model>, sheet: Sheet, temp: &Temp) -> Result<Arc<Model>, 
     let drawn = |id: &Id| base.elements.get(id).is_some_and(|e| graphics::drawn(e.category()));
     let mut p = json!({
         "view": view,
-        "hide": temp.categories,
         "hide_elements": temp.elements.iter().copied().filter(drawn).collect::<Vec<_>>(),
     });
+    // An empty list is still asking for categories, which a view template that controls them refuses.
+    if !temp.categories.is_empty() {
+        p["hide"] = json!(temp.categories);
+    }
     if temp.reveal
         && let Some(own) = id.and_then(|id| graphics::graphics_of(base, id))
     {
@@ -96,7 +113,9 @@ fn shadowed(base: &Arc<Model>, sheet: Sheet, temp: &Temp) -> Result<Arc<Model>, 
         // Each of them, and each element of a category hidden, in magenta.
         let paint = json!({"projection": {"color": REVEALED}, "cut": {"color": REVEALED}});
         let by_category = base.elements.iter().filter(|(_, e)| cats.contains(&e.category())).map(|(i, _)| *i);
-        p["show"] = json!(cats);
+        if !cats.is_empty() {
+            p["show"] = json!(cats);
+        }
         p["show_elements"] = json!(els);
         p["elements"] =
             els.iter().copied().chain(by_category).map(|i| (i.to_string(), paint.clone())).collect::<serde_json::Map<_, _>>().into();
@@ -200,7 +219,10 @@ impl BimApp {
     /// Apply Hide/Isolate to View: what the view hides for now, hidden in it for good.
     fn temp_apply(&mut self) {
         let (Some(view), Some(t)) = (self.graphic_view(), self.temporary().cloned()) else { return };
-        let p: Value = json!({"view": view, "hide": t.categories, "hide_elements": t.elements.iter().copied().collect::<Vec<_>>()});
+        let mut p: Value = json!({"view": view, "hide_elements": t.elements.iter().copied().collect::<Vec<_>>()});
+        if !t.categories.is_empty() {
+            p["hide"] = json!(t.categories);
+        }
         if self.run("graphics", p).is_some() {
             self.temporary.remove(&self.sheet);
         }
@@ -208,10 +230,13 @@ impl BimApp {
 
     /// The Scale and Detail Level menus of a plan, a ceiling plan, a section or an elevation, `view`: what the view keeps.
     fn scale_and_detail(&mut self, ui: &mut Ui, view: &Value) {
-        let now = self.graphics_now();
-        let shown = now.scale.map_or_else(|| "Auto".to_string(), |n| format!("1 : {n}"));
-        let tip = "Scale: the scale this view's annotation is sized for, as paper at that scale would hold it; Auto keeps it the size it has on screen";
-        let r = menu_button(ui, "Scale", &shown, tip);
+        let now = self.graphics_shown();
+        let shown = scale_label(now.scale);
+        let (set_by, tip) = (
+            self.controlled_by(Group::Scale),
+            "Scale: the scale this view's annotation is sized for, as paper at that scale would hold it; Auto keeps it the size it has on screen",
+        );
+        let r = menu_button(ui, "Scale", &shown, tip, set_by.as_deref());
         Popup::menu(&r).show(|ui| {
             // Wide enough for the Custom row's field.
             ui.set_min_width(150.0);
@@ -244,7 +269,7 @@ impl BimApp {
         });
         let tip =
             "Detail Level: Coarse draws what is cut in one poché, Medium adds the layers and the symbols of openings, Fine the patterns";
-        let r = menu_button(ui, "Detail Level", now.detail.name(), tip);
+        let r = menu_button(ui, "Detail Level", now.detail.name(), tip, self.controlled_by(Group::Detail).as_deref());
         Popup::menu(&r).show(|ui| {
             for d in Detail::ALL {
                 if ui.selectable_label(now.detail == d, t(d.name())).clicked() {
@@ -277,9 +302,9 @@ impl BimApp {
                 match (self.graphic_view(), self.sheet == Sheet::View3D) {
                     (Some(view), false) => self.scale_and_detail(ui, &view),
                     (_, true) => {
-                        let now = self.graphics_now().style;
+                        let now = self.graphics_shown().style;
                         let tip = "Visual Style: how the 3D view draws surfaces: Shaded, Hidden Line (WF, HL and SD set them) or Wireframe";
-                        let r = menu_button(ui, "Visual Style", now.name(), tip);
+                        let r = menu_button(ui, "Visual Style", now.name(), tip, self.controlled_by(Group::Style).as_deref());
                         Popup::menu(&r).show(|ui| {
                             for v in VisualStyle::ALL {
                                 if ui.selectable_label(now == v, t(v.name())).clicked() {
@@ -293,6 +318,8 @@ impl BimApp {
                 }
                 let tip = "Temporary Hide/Isolate: hide or isolate what is selected, or its categories, in this view until you reset it";
                 let r = small_button(ui, Icon::TempHide, "Temporary Hide/Isolate", temp.hides(), tip);
+                // Revit greys out what needs a selection until there is one.
+                let picked = !self.drawn_selection(&self.session.model).is_empty();
                 Popup::menu(&r).show(|ui| {
                     for (label, hide, category) in [
                         ("Hide Element (HH)", true, false),
@@ -300,7 +327,7 @@ impl BimApp {
                         ("Isolate Element (HI)", false, false),
                         ("Isolate Category (IC)", false, true),
                     ] {
-                        if ui.button(t(label)).clicked() {
+                        if ui.add_enabled(picked, egui::Button::new(t(label))).clicked() {
                             match hide {
                                 true => self.temp_hide(category),
                                 false => self.temp_isolate(category),

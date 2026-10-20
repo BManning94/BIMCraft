@@ -836,7 +836,7 @@ mod tests {
         run(&mut s, "modify", json!({"id": walls[0], "params": {"Design Option": "Facade: Glass"}}));
         run(&mut s, "graphics", json!({"view": 1, "phase": "Existing", "phase_filter": "Show Complete", "options": {"Facade": "Glass"}}));
         let r = run(&mut s, "template", json!({"name": "Survey", "from": 1}));
-        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options"]));
+        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style"]));
         assert_eq!(
             (r["phase"].clone(), r["phase_filter"].clone(), r["options"].clone()),
             (json!("Existing"), json!("Show Complete"), json!({"Facade": "Glass"}))

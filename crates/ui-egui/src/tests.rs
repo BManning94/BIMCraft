@@ -1118,7 +1118,7 @@ fn the_view_control_bar_sets_a_views_scale_and_detail_level() {
     assert_eq!(g(&h, 1).scale, Some(50.0));
     assert!(painted_text(&h).contains(&"1 : 50".to_string()));
     assert_eq!(h.state().session.history().last(), Some(&"View Scale"));
-    press(&mut h, "Detail Level");
+    pick(&mut h, Role::Button, "Detail Level");
     press(&mut h, "Coarse");
     assert_eq!(g(&h, 1).detail, Detail::Coarse);
     assert!(painted_text(&h).contains(&"Coarse".to_string()));
@@ -1140,7 +1140,7 @@ fn the_view_control_bar_sets_a_views_scale_and_detail_level() {
     // The section has its own, and the bar shows the one of the view on screen.
     browse(&mut h, "Section 1");
     assert_eq!(h.state().sheet, Sheet::Section(section));
-    press(&mut h, "Detail Level");
+    pick(&mut h, Role::Button, "Detail Level");
     press(&mut h, "Medium");
     assert_eq!((g(&h, section).detail, g(&h, 1).detail), (Detail::Medium, Detail::Coarse));
     assert!(painted_text(&h).contains(&"Medium".to_string()));
@@ -1156,7 +1156,7 @@ fn the_view_control_bar_sets_the_3d_views_visual_style_and_wf_hl_and_sd_do_too()
     // Shaded until told otherwise; a 3D view has no scale or detail level.
     assert!(painted_text(&h).contains(&"Shaded".to_string()));
     assert!(h.query_by_label("Scale").is_none() && h.query_by_label("Detail Level").is_none());
-    press(&mut h, "Visual Style");
+    pick(&mut h, Role::Button, "Visual Style");
     press(&mut h, "Wireframe");
     assert_eq!(style(&h), VisualStyle::Wireframe);
     assert!(painted_text(&h).contains(&"Wireframe".to_string()));
@@ -1173,6 +1173,89 @@ fn the_view_control_bar_sets_the_3d_views_visual_style_and_wf_hl_and_sd_do_too()
     shortcut(&mut h, "HL");
     assert!(h.state().status.error);
     assert_eq!(style(&h), VisualStyle::Wireframe);
+}
+
+/// What the drop-down named `label` shows, as a screen reader reads it.
+fn combo_value(h: &Harness<BimApp>, label: &str) -> String {
+    h.get_by_role_and_label(Role::ComboBox, label).value().unwrap_or_default()
+}
+
+/// What the text field named `label` holds.
+fn field_text(h: &Harness<BimApp>, label: &str) -> String {
+    h.get_by_role_and_label(Role::TextInput, label).value().unwrap_or_default()
+}
+
+/// Open the drop-down named `label` and pick `option` from it, as screen readers do. A palette's foot, and a list's, can lie below
+/// the window.
+fn choose(h: &mut Harness<BimApp>, label: &str, option: &str) {
+    h.get_by_role_and_label(Role::ComboBox, label).click_accesskit();
+    h.run();
+    h.get_by_label(option).click_accesskit();
+    h.run();
+    // Such a click leaves the list open, which a pointer's closes: the drop-down again shuts it.
+    if egui::Popup::is_any_open(&h.ctx) {
+        h.get_by_role_and_label(Role::ComboBox, label).click_accesskit();
+        h.run();
+    }
+}
+
+#[test]
+fn properties_of_a_view_show_and_set_its_scale_detail_level_and_visual_style() {
+    use bimcraft_core::graphics::{Detail, Look, VisualStyle};
+    let mut h = app(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    let section = ids(&h, "section")[0];
+    let steps = |h: &Harness<BimApp>| h.state().session.history().len();
+    // A plan: no scale (Auto) and fine detail, until set; a plan has no visual style.
+    assert_eq!((combo_value(&h, "View Scale"), combo_value(&h, "Detail Level")), ("Auto".into(), "Fine".into()));
+    assert!(h.query_by_role_and_label(Role::ComboBox, "Visual Style").is_none());
+    let before = steps(&h);
+    choose(&mut h, "View Scale", "1 : 50");
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (Some(50.0), before + 1), "one undo step");
+    assert_eq!(h.state().session.history().last(), Some(&"View Scale"));
+    assert_eq!(combo_value(&h, "View Scale"), "1 : 50");
+    choose(&mut h, "Detail Level", "Coarse");
+    assert_eq!((plan_graphics(&h, 1).detail, steps(&h)), (Detail::Coarse, before + 2));
+    assert_eq!(h.state().session.history().last(), Some(&"Detail Level"));
+    assert_eq!(combo_value(&h, "Detail Level"), "Coarse");
+    // The scale's value, typed: any number a scale may be; what isn't one is said and changes nothing.
+    assert_eq!(field_text(&h, "Scale Value 1:"), "50");
+    type_role(&mut h, Role::TextInput, "Scale Value 1:", "75");
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (Some(75.0), before + 3));
+    assert_eq!(combo_value(&h, "View Scale"), "1 : 75");
+    type_role(&mut h, Role::TextInput, "Scale Value 1:", "big");
+    assert!(h.state().status.error);
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (Some(75.0), before + 3));
+    // Emptied, it is Auto again.
+    type_role(&mut h, Role::TextInput, "Scale Value 1:", "");
+    assert_eq!((plan_graphics(&h, 1).scale, steps(&h)), (None, before + 4));
+    choose(&mut h, "View Scale", "1 : 20");
+    choose(&mut h, "View Scale", "Auto");
+    assert_eq!(plan_graphics(&h, 1).scale, None);
+    assert_eq!(field_text(&h, "Scale Value 1:"), "");
+    // A section has its own, and Properties shows the one on screen. Its palette is long: a tall window shows the foot of it.
+    h.set_size(vec2(1280.0, 1600.0));
+    browse(&mut h, "Section 1");
+    assert_eq!(h.state().sheet, Sheet::Section(section));
+    assert_eq!((combo_value(&h, "View Scale"), combo_value(&h, "Detail Level")), ("Auto".into(), "Fine".into()));
+    choose(&mut h, "View Scale", "1 : 200");
+    choose(&mut h, "Detail Level", "Medium");
+    let g = bimcraft_core::graphics::graphics_of(&h.state().session.model, section).unwrap();
+    assert_eq!((g.scale, g.detail), (Some(200.0), Detail::Medium));
+    assert_eq!((plan_graphics(&h, 1).scale, plan_graphics(&h, 1).detail), (None, Detail::Coarse));
+    // The 3D view: a visual style, no scale or detail level.
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().sheet, Sheet::View3D);
+    assert!(h.query_by_role_and_label(Role::ComboBox, "View Scale").is_none());
+    assert!(h.query_by_role_and_label(Role::ComboBox, "Detail Level").is_none());
+    assert_eq!(combo_value(&h, "Visual Style"), "Shaded");
+    choose(&mut h, "Visual Style", "Hidden Line");
+    assert_eq!(Look::of_3d(&h.state().session.model).style(), VisualStyle::HiddenLine);
+    assert_eq!(h.state().session.history().last(), Some(&"Visual Style"));
+    assert_eq!(combo_value(&h, "Visual Style"), "Hidden Line");
+    // Undone, it is shaded again, and so is the drop-down.
+    h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    h.run();
+    assert_eq!(combo_value(&h, "Visual Style"), "Shaded");
 }
 
 /// The text the last frame painted, whatever widget or painter put it there.
@@ -3100,6 +3183,11 @@ fn temporary_hide_and_isolate_change_what_a_view_shows_and_nothing_in_the_projec
     shortcut(&mut h, "HI");
     assert!(plan_shows(&mut h, door) && walls.iter().all(|w| !plan_shows(&mut h, *w)));
     shortcut(&mut h, "HR");
+    // Isolate Element picks the element, not its category: one wall of four, and nothing else.
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "HI");
+    assert!(plan_shows(&mut h, walls[0]) && walls[1..].iter().all(|w| !plan_shows(&mut h, *w)) && !plan_shows(&mut h, door));
+    shortcut(&mut h, "HR");
     // Isolate Category (IC): the walls, and not the door.
     click(&mut h, P2(8000.0, 3000.0));
     shortcut(&mut h, "IC");
@@ -3108,6 +3196,229 @@ fn temporary_hide_and_isolate_change_what_a_view_shows_and_nothing_in_the_projec
     h.state_mut().sheet = Sheet::View3D;
     let model = h.state_mut().view_model();
     assert!(bimcraft_core::graphics::Look::of_3d(&model).shows(door));
+}
+
+#[test]
+fn the_temporary_hide_menu_greys_out_what_needs_a_selection_as_revits_does() {
+    let mut h = app(BOX);
+    let items = ["Hide Element (HH)", "Hide Category (HC)", "Isolate Element (HI)", "Isolate Category (IC)"];
+    // Nothing selected: nothing to hide or isolate, and the menu says so before it is tried.
+    press(&mut h, "Temporary Hide/Isolate");
+    for label in items {
+        assert!(is_disabled(&h, Role::Button, label), "{label}");
+    }
+    assert!(is_disabled(&h, Role::Button, "Reset Temporary Hide/Isolate (HR)"));
+    key(&mut h, Key::Escape);
+    // Something drawn selected: all four work.
+    click(&mut h, P2(5000.0, 0.0));
+    press(&mut h, "Temporary Hide/Isolate");
+    for label in items {
+        assert!(!is_disabled(&h, Role::Button, label), "{label}");
+    }
+    key(&mut h, Key::Escape);
+}
+
+/// Whether a frame in the colour Revit draws round a view that hides or reveals for now was painted.
+fn framed(h: &Harness<BimApp>) -> bool {
+    h.output().shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Rect(r) if r.stroke.color == egui::Color32::from_rgb(0, 190, 220)))
+}
+
+/// Whether the bar's button named `label` is lit.
+fn lit(h: &Harness<BimApp>, label: &str) -> bool {
+    use egui_kittest::kittest::NodeT;
+    h.get_by_role_and_label(Role::Button, label).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+}
+
+#[test]
+fn isolating_leaves_out_the_annotation_the_selection_isnt_too() {
+    let mut h = app(&format!("{BOX}\ngrid {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    let (walls, grid) = (ids(&h, "wall"), ids(&h, "grid")[0]);
+    let seen = |h: &mut Harness<BimApp>, id: Id| {
+        let model = h.state_mut().view_model();
+        bimcraft_core::graphics::Look::of(&model, 1).shows(id)
+    };
+    assert!(seen(&mut h, grid));
+    // Isolate Category (IC) on a wall: the walls, and neither the grid nor anything else.
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "IC");
+    assert!(walls.iter().all(|w| seen(&mut h, *w)) && !seen(&mut h, grid));
+    shortcut(&mut h, "HR");
+    assert!(seen(&mut h, grid));
+    // So does Isolate Element (HI).
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "HI");
+    assert!(seen(&mut h, walls[0]) && !seen(&mut h, grid) && !seen(&mut h, walls[1]));
+}
+
+#[test]
+fn a_temporary_hide_the_views_template_forbids_is_dropped_and_says_why() {
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    h.state_mut().session.execute("template", &json!({"name": "T", "from": 1})).unwrap();
+    h.state_mut().session.execute("graphics", &json!({"view": 1, "template": "T"})).unwrap();
+    h.run();
+    // The template sets which categories the view hides; hiding one for now asks the same of it.
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "HC");
+    h.run();
+    let status = &h.state().status;
+    assert!(status.error && status.text.contains("`T`"), "{}", status.text);
+    assert!(h.state().temporary().is_none(), "what can't be done is not kept");
+    assert!(walls.iter().all(|w| plan_shows(&mut h, *w)));
+    // An element is the view's own to hide, whatever its template says.
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "HH");
+    assert!(!plan_shows(&mut h, walls[0]) && h.state().temporary().is_some());
+    // And so is revealing what the view hides, and applying an element's hide to it: no category in either.
+    h.state_mut().status = crate::Status { text: String::new(), error: false };
+    shortcut(&mut h, "RH");
+    assert!(!plan_shows(&mut h, walls[0]), "revealing shows what the view hides for good, and the wall is hidden for now");
+    assert!(!h.state().status.error && lit(&h, "Reveal Hidden Elements"), "{}", h.state().status.text);
+    shortcut(&mut h, "RH");
+    press(&mut h, "Temporary Hide/Isolate");
+    press(&mut h, "Apply Hide/Isolate to View");
+    assert!(plan_graphics(&h, 1).elements[&walls[0]].hidden, "{}", h.state().status.text);
+}
+
+#[test]
+fn a_plan_and_a_section_draw_what_they_hide_for_now() {
+    let mut h = app(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    // The plan: the south wall can't be clicked once the view hides it, and can again after a reset.
+    click(&mut h, P2(5000.0, 0.0));
+    let south = h.state().selection.first().copied();
+    assert_eq!(south, Some(ids(&h, "wall")[0]));
+    shortcut(&mut h, "HH");
+    h.run();
+    click(&mut h, P2(5000.0, 0.0));
+    assert_ne!(h.state().selection.first().copied(), south, "what the plan hides for now isn't there to click");
+    shortcut(&mut h, "HR");
+    h.run();
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!(h.state().selection.first().copied(), south);
+    browse(&mut h, "Section 1");
+    // The west wall, where the section's line cuts it: 1000 along from its start, half way up.
+    click(&mut h, P2(1000.0, 1500.0));
+    let wall = h.state().selection.first().copied();
+    assert!(
+        wall.is_some_and(|w| h.state().session.model.elements.get(&w).is_some_and(|e| e.category() == "wall")),
+        "{:?}",
+        h.state().selection
+    );
+    shortcut(&mut h, "HH");
+    h.run();
+    click(&mut h, P2(1000.0, 1500.0));
+    assert_ne!(h.state().selection.first().copied(), wall, "what the section hides for now isn't there to click");
+    shortcut(&mut h, "HR");
+    h.run();
+    click(&mut h, P2(1000.0, 1500.0));
+    assert_eq!(h.state().selection.first().copied(), wall);
+}
+
+#[test]
+fn a_3d_view_following_a_template_shows_its_visual_style_greyed_out() {
+    let mut h = app(BOX);
+    let run = |h: &mut Harness<BimApp>, id: &str, p: serde_json::Value| h.state_mut().session.execute(id, &p).unwrap();
+    run(&mut h, "visual_style", json!({"style": "wireframe"}));
+    run(&mut h, "template", json!({"name": "Wire", "from": "{3D}"}));
+    // Its own is shaded again, but the template says wireframe.
+    run(&mut h, "graphics", json!({"view": "{3D}", "reset": true, "template": "Wire"}));
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().sheet, Sheet::View3D);
+    assert!(painted_text(&h).contains(&"Wireframe".to_string()) && !painted_text(&h).contains(&"Shaded".to_string()));
+    assert!(is_disabled(&h, Role::Button, "Visual Style") && is_disabled(&h, Role::ComboBox, "Visual Style"));
+    assert_eq!(combo_value(&h, "Visual Style"), "Wireframe");
+    // WF, HL and SD are refused the same way, and say why.
+    shortcut(&mut h, "HL");
+    assert!(h.state().status.error && h.state().status.text.contains("`Wire`"), "{}", h.state().status.text);
+}
+
+#[test]
+fn a_view_that_hides_isolates_or_reveals_wears_a_frame_and_lights_the_bar_and_says_so() {
+    let mut h = app(BOX);
+    let note = |h: &Harness<BimApp>| painted_text(h).into_iter().find(|t| t.contains("(HR resets)") || t.contains("Revealing"));
+    assert!(!framed(&h) && !lit(&h, "Temporary Hide/Isolate") && !lit(&h, "Reveal Hidden Elements") && note(&h).is_none());
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "HH");
+    assert!(framed(&h) && lit(&h, "Temporary Hide/Isolate") && !lit(&h, "Reveal Hidden Elements"));
+    assert_eq!(note(&h).as_deref(), Some("Temporary Hide/Isolate (HR resets)"));
+    // Revealing too: still hiding, and it says so.
+    shortcut(&mut h, "RH");
+    assert!(framed(&h) && lit(&h, "Reveal Hidden Elements"));
+    assert_eq!(note(&h).as_deref(), Some("Temporary Hide/Isolate (HR resets)"));
+    shortcut(&mut h, "HR");
+    assert!(!framed(&h) && !lit(&h, "Temporary Hide/Isolate") && !lit(&h, "Reveal Hidden Elements") && note(&h).is_none());
+    // Only revealing: framed, and the button's Reset takes it off.
+    shortcut(&mut h, "RH");
+    assert!(framed(&h) && lit(&h, "Reveal Hidden Elements") && !lit(&h, "Temporary Hide/Isolate"));
+    assert_eq!(note(&h).as_deref(), Some("Revealing hidden elements (HR resets)"));
+    press(&mut h, "Temporary Hide/Isolate");
+    assert!(!is_disabled(&h, Role::Button, "Reset Temporary Hide/Isolate (HR)"), "there is something to reset");
+    assert!(is_disabled(&h, Role::Button, "Apply Hide/Isolate to View"), "but nothing to apply");
+    press(&mut h, "Reset Temporary Hide/Isolate (HR)");
+    assert!(!framed(&h) && h.state().temporary().is_none());
+}
+
+#[test]
+fn temporary_hide_and_isolate_want_a_selection_and_a_view_with_graphics_and_belong_to_one_view() {
+    let mut h = app(&format!("{BOX}\nsheet {{\"name\": \"Plans\"}}"));
+    let (walls, sheet) = (ids(&h, "wall"), ids(&h, "sheet")[0]);
+    // Nothing selected: each says so, and nothing is hidden, least of all by an isolate of nothing.
+    for letters in ["HH", "HC", "HI", "IC"] {
+        h.state_mut().status = crate::Status { text: String::new(), error: false };
+        shortcut(&mut h, letters);
+        assert!(h.state().status.error && h.state().temporary().is_none(), "{letters}");
+        assert!(walls.iter().all(|w| plan_shows(&mut h, *w)), "{letters}");
+    }
+    // A sheet has no graphics to hide in or reveal.
+    h.state_mut().open_sheet(Sheet::Paper(sheet));
+    h.run();
+    for letters in ["RH", "HR"] {
+        shortcut(&mut h, letters);
+        assert!(h.state().temporary().is_none(), "{letters}");
+    }
+    h.state_mut().selection = vec![walls[0]];
+    shortcut(&mut h, "HH");
+    assert!(h.state().temporary().is_none() && h.state().status.error, "a sheet has no graphics to override");
+    // A plan draws walls, not sheets: what it doesn't draw isn't there to hide.
+    h.state_mut().open_sheet(Sheet::Plan(1));
+    h.run();
+    h.state_mut().status = crate::Status { text: String::new(), error: false };
+    h.state_mut().selection = vec![sheet];
+    shortcut(&mut h, "HI");
+    assert!(h.state().temporary().is_none() && h.state().status.error, "a sheet isn't drawn in a plan");
+    // What one view hides for now another that hides the same keeps shown until it does: each is its own.
+    let shows = |h: &mut Harness<BimApp>, level: Id| {
+        let model = h.state_mut().view_model();
+        bimcraft_core::graphics::Look::of(&model, level).shows(walls[0])
+    };
+    for level in [1, 2] {
+        h.state_mut().open_sheet(Sheet::Plan(level));
+        h.run();
+        assert!(shows(&mut h, level), "level {level} shows it before");
+        h.state_mut().selection = vec![walls[0]];
+        shortcut(&mut h, "HH");
+        assert!(!shows(&mut h, level), "level {level} hides it now");
+    }
+    h.state_mut().open_sheet(Sheet::Plan(1));
+    h.run();
+    assert!(!shows(&mut h, 1));
+}
+
+#[test]
+fn the_3d_view_draws_what_it_hides_for_now_and_the_project_again_after_a_reset() {
+    let mut h = app(BOX);
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().sheet, Sheet::View3D);
+    // The model the 3D view last drew: the project's own, until something is hidden for now.
+    let project = |h: &Harness<BimApp>| h.state().orbit.scene.as_ref().is_some_and(|(m, _)| Arc::ptr_eq(m, &h.state().session.model));
+    assert!(project(&h));
+    h.state_mut().selection = vec![ids(&h, "wall")[0]];
+    shortcut(&mut h, "HH");
+    h.run();
+    assert!(!project(&h), "the picture is of the view's copy");
+    shortcut(&mut h, "HR");
+    h.run();
+    assert!(project(&h));
 }
 
 #[test]
@@ -3120,11 +3431,27 @@ fn reveal_hidden_elements_shows_what_the_view_hides_for_good_and_apply_makes_a_h
     shortcut(&mut h, "RH");
     assert!(plan_shows(&mut h, walls[0]), "revealed");
     let model = h.state_mut().view_model();
-    let magenta = bimcraft_core::graphics::graphics_of(&model, 1).and_then(|g| g.elements.get(&walls[0])).map(|o| o.projection.clone());
-    assert!(magenta.is_some_and(|s| !s.is_empty()), "drawn in its own colour");
+    let magenta = bimcraft_core::graphics::graphics_of(&model, 1).and_then(|g| g.elements.get(&walls[0])).cloned().unwrap_or_default();
+    assert_eq!((magenta.projection.color, magenta.cut.color), (Some([255, 0, 255]), Some([255, 0, 255])), "drawn in magenta, cut or seen");
     assert!(!plan_graphics(&h, 1).elements.is_empty() && plan_graphics(&h, 1).elements[&walls[0]].hidden, "the project still hides it");
     shortcut(&mut h, "RH");
     assert!(!plan_shows(&mut h, walls[0]), "hidden again");
+    // A category the view hides for good is revealed too: every one of its members, in magenta.
+    click(&mut h, P2(8000.0, 3000.0));
+    shortcut(&mut h, "VH");
+    assert!(plan_graphics(&h, 1).hides("wall") && !plan_shows(&mut h, walls[2]));
+    shortcut(&mut h, "RH");
+    let model = h.state_mut().view_model();
+    let colours = |id: &Id| {
+        let o = bimcraft_core::graphics::graphics_of(&model, 1).and_then(|g| g.elements.get(id)).cloned().unwrap_or_default();
+        (o.projection.color, o.cut.color)
+    };
+    assert!(walls.iter().all(|w| plan_shows(&mut h, *w) && colours(w) == (Some([255, 0, 255]), Some([255, 0, 255]))));
+    shortcut(&mut h, "RH");
+    shortcut(&mut h, "VV");
+    pick(&mut h, Role::CheckBox, "Walls");
+    press(&mut h, "OK");
+    assert!(!plan_graphics(&h, 1).hides("wall"));
     // Apply Hide/Isolate to View: a temporary hide of another wall becomes the view's own.
     click(&mut h, P2(8000.0, 3000.0));
     shortcut(&mut h, "HH");
@@ -3133,6 +3460,12 @@ fn reveal_hidden_elements_shows_what_the_view_hides_for_good_and_apply_makes_a_h
     assert!(plan_graphics(&h, 1).elements[&walls[1]].hidden);
     assert!(h.state().temporary().is_none(), "nothing left to hide for now");
     assert!(h.state().dirty(), "it is a change to the project now");
+    // A category hidden for now goes in with it.
+    click(&mut h, P2(0.0, 3000.0));
+    shortcut(&mut h, "HC");
+    press(&mut h, "Temporary Hide/Isolate");
+    press(&mut h, "Apply Hide/Isolate to View");
+    assert!(plan_graphics(&h, 1).hides("wall") && h.state().temporary().is_none());
 }
 
 #[test]
@@ -3250,6 +3583,90 @@ fn view_templates_are_made_from_a_view_and_followed_from_properties() {
     press(&mut h, "Stop Following in This View");
     assert!(plan_graphics(&h, 2).template.is_none());
     press(&mut h, "Close");
+}
+
+/// Whether the widget of `role` named `label` is greyed out.
+fn is_disabled(h: &Harness<BimApp>, role: Role, label: &str) -> bool {
+    use egui_kittest::kittest::NodeT;
+    h.get_by_role_and_label(role, label).accesskit_node().is_disabled()
+}
+
+#[test]
+fn view_templates_hold_show_and_hand_on_a_scale_detail_level_and_visual_style() {
+    use bimcraft_core::graphics::{Detail, Group, VisualStyle};
+    let mut h = app(BOX);
+    let run = |h: &mut Harness<BimApp>, id: &str, p: serde_json::Value| h.state_mut().session.execute(id, &p).unwrap();
+    run(&mut h, "scale", json!({"view": 1, "scale": 50}));
+    run(&mut h, "detail", json!({"view": 1, "detail": "coarse"}));
+    let template = |h: &Harness<BimApp>| h.state().session.model.view_templates["Plans"].clone();
+    // Made from a view, a template holds what the view has, and says so.
+    shortcut(&mut h, "VT");
+    type_into(&mut h, "New template:", "Plans");
+    press(&mut h, "Create from This View");
+    assert_eq!((template(&h).graphics.scale, template(&h).graphics.detail), (Some(50.0), Detail::Coarse));
+    assert_eq!(
+        (combo_value(&h, "View Scale:"), combo_value(&h, "Detail Level:"), combo_value(&h, "Visual Style:")),
+        ("1 : 50".into(), "Coarse".into(), "Shaded".into())
+    );
+    use egui_kittest::kittest::NodeT;
+    for group in ["View Scale", "Detail Level", "Visual Style"] {
+        let on = h.get_by_role_and_label(Role::CheckBox, group).accesskit_node().toggled();
+        assert_eq!(on, Some(egui::accesskit::Toggled::True), "{group}: it controls them all to start with");
+    }
+    // Set in the dialog, each is one command on the template.
+    let steps = h.state().session.history().len();
+    choose(&mut h, "View Scale:", "1 : 20");
+    choose(&mut h, "Detail Level:", "Medium");
+    choose(&mut h, "Visual Style:", "Wireframe");
+    let t = template(&h);
+    assert_eq!((t.graphics.scale, t.graphics.detail, t.graphics.style), (Some(20.0), Detail::Medium, VisualStyle::Wireframe));
+    assert_eq!(h.state().session.history().len(), steps + 3);
+    choose(&mut h, "View Scale:", "Auto");
+    assert_eq!(template(&h).graphics.scale, None);
+    choose(&mut h, "View Scale:", "1 : 20");
+    // What it controls, one at a time.
+    pick(&mut h, Role::CheckBox, "Visual Style");
+    assert!(!template(&h).controls.contains(&Group::Style) && template(&h).controls.contains(&Group::Scale));
+    pick(&mut h, Role::CheckBox, "Visual Style");
+    assert!(template(&h).controls.contains(&Group::Style));
+    press(&mut h, "Close");
+    // Level 2 follows it: the bar and Properties show the template's, greyed, and say whose they are.
+    topmost(&mut h, "Level 2");
+    assert_eq!(h.state().sheet, Sheet::Plan(2));
+    assert_eq!(combo_value(&h, "View Scale"), "Auto");
+    shortcut(&mut h, "VT");
+    press(&mut h, "Follow in This View");
+    press(&mut h, "Close");
+    assert_eq!(plan_graphics(&h, 2).template.as_deref(), Some("Plans"));
+    assert_eq!((combo_value(&h, "View Scale"), combo_value(&h, "Detail Level")), ("1 : 20".into(), "Medium".into()));
+    assert!(is_disabled(&h, Role::ComboBox, "View Scale") && is_disabled(&h, Role::ComboBox, "Detail Level"));
+    assert!(is_disabled(&h, Role::TextInput, "Scale Value 1:"));
+    let shown = painted_text(&h);
+    assert!(shown.contains(&"1 : 20".to_string()) && shown.contains(&"Medium".to_string()), "{shown:?}");
+    assert!(is_disabled(&h, Role::Button, "Scale") && is_disabled(&h, Role::Button, "Detail Level"));
+    // Hovering over one says whose it is.
+    let at = h.get_by_role_and_label(Role::Button, "Scale").rect().center();
+    h.hover_at(at);
+    for _ in 0..4 {
+        h.run();
+    }
+    let note = "Set by view template Plans: change the template, or stop following it.";
+    assert!(painted_text(&h).contains(&note.to_string()), "{:?}", painted_text(&h));
+    // Level 1 follows nothing, and keeps its own.
+    topmost(&mut h, "Level 1");
+    assert!(!is_disabled(&h, Role::Button, "Scale"));
+    assert_eq!(combo_value(&h, "View Scale"), "1 : 50");
+    // A template that leaves the scale be leaves it to the view.
+    run(&mut h, "template", json!({"name": "Plans", "controls": ["detail"]}));
+    topmost(&mut h, "Level 2");
+    assert!(!is_disabled(&h, Role::ComboBox, "View Scale") && is_disabled(&h, Role::ComboBox, "Detail Level"));
+    assert!(!is_disabled(&h, Role::Button, "Scale") && is_disabled(&h, Role::Button, "Detail Level"), "the bar too");
+    // Stop following: its own again.
+    shortcut(&mut h, "VT");
+    press(&mut h, "Stop Following in This View");
+    press(&mut h, "Close");
+    assert!(!is_disabled(&h, Role::ComboBox, "Detail Level"));
+    assert_eq!(combo_value(&h, "Detail Level"), "Fine");
 }
 
 #[test]

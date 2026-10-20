@@ -1072,7 +1072,7 @@ impl BimApp {
 
     /// A text field that edits as the user types and commits once, when they press Enter or
     /// click away (Escape drops the edit): the text typed, if it changed.
-    fn field(&mut self, ui: &mut Ui, id: Id, key: &str, current: String, label: UiId, hint: &str) -> Option<String> {
+    pub(crate) fn field(&mut self, ui: &mut Ui, id: Id, key: &str, current: String, label: UiId, hint: &str) -> Option<String> {
         let wid = ui.make_persistent_id(("field", id, key));
         let focused = ui.memory(|m| m.has_focus(wid));
         let mut typed = match &self.edit {

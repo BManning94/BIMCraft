@@ -635,14 +635,17 @@ pub static ALL: &[Command] = &[
         "View Template",
         &[],
         "{name, from?: a level's, section's, elevation's or 3D view's name or id, controls?: [categories, filters, range, \
-         phase, options], view_range?: {top?, cut?, bottom?, depth?}, phase?, phase_filter?, options?, hide?, show?, \
-         categories?, filters?, reset?, delete?: true} a view template, as Revit's: settings under a name for views to follow \
-         with `graphics {template}`. `from` takes a view's categories (hidden and overridden), filters and, a plan's, view \
-         range, its phase and phase filter and its design options; `controls` is what views following it get from it (all \
-         five unless it says) and cannot change for themselves: its categories, its filters, a plan's view range, its phase \
-         with its phase filter, its design options. `hide`, `show`, `categories`, `filters`, `phase`, `phase_filter`, \
-         `options` and `reset` change it as they change a view; `view_range` merges into its range. Changed, every view \
-         following it follows. Gone, they keep their own settings. `name` alone reads one",
+         phase, options, scale, detail, style], view_range?: {top?, cut?, bottom?, depth?}, phase?, phase_filter?, options?, \
+         scale?: 1 | … | 100000 | null, detail?: coarse | medium | fine, visual_style?: shaded | hidden_line | wireframe, \
+         hide?, show?, categories?, filters?, reset?, delete?: true} a view template, as Revit's: settings under a name for \
+         views to follow with `graphics {template}`. `from` takes a view's categories (hidden and overridden), filters and, a \
+         plan's, view range, its phase and phase filter, its design options, its scale, detail level and visual style; \
+         `controls` is what views following it get from it (all eight unless it says) and cannot change for themselves: its \
+         categories, its filters, a plan's view range, its phase with its phase filter, its design options, its scale (`scale` \
+         command), its detail level (`detail`), its visual style (`visual_style`). `hide`, `show`, `categories`, `filters`, \
+         `phase`, `phase_filter`, `options`, `scale`, `detail`, `visual_style` and `reset` change it as they change a view; \
+         `view_range` merges into its range. Changed, every view following it follows. Gone, they keep their own settings. \
+         `name` alone reads one",
         view_template,
     ),
     edit(
@@ -1674,6 +1677,7 @@ fn graphics_reply(g: &Graphics) -> Value {
     json!({
         "hidden": hidden, "categories": g.categories, "filters": g.filters,
         "phase": g.phase, "phase_filter": g.phase_filter, "options": g.options,
+        "scale": g.scale, "detail": g.detail, "visual_style": g.style,
     })
 }
 
@@ -1766,6 +1770,9 @@ fn view_template(s: &mut Session, p: &Value) -> R {
         "phase",
         "phase_filter",
         "options",
+        "scale",
+        "detail",
+        "visual_style",
     ];
     let makes = keys.iter().any(|k| !absent(p.get(k))) || p.get("template").is_some();
     if was.is_none() && !makes {
@@ -1789,6 +1796,9 @@ fn view_template(s: &mut Session, p: &Value) -> R {
             phase: resolved.phase.clone(),
             phase_filter: resolved.phase_filter.clone(),
             options: resolved.options.clone(),
+            scale: resolved.scale,
+            detail: resolved.detail,
+            style: resolved.style,
             ..Graphics::default()
         };
         t.view_range = match m.elements.get(&view) {
@@ -1822,6 +1832,11 @@ fn view_template(s: &mut Session, p: &Value) -> R {
         None => {}
     }
     edit_graphics(c, m, p, &mut t.graphics, true)?;
+    if let Some(scale) = scale_param(c, p)? {
+        t.graphics.scale = scale;
+    }
+    t.graphics.detail = detail_param(c, p)?.unwrap_or(t.graphics.detail);
+    t.graphics.style = style_param(c, p, "visual_style")?.unwrap_or(t.graphics.style);
     if was.as_ref() != Some(&t) {
         s.model_mut().view_templates.insert(name.clone(), t.clone());
         t.check(&s.model).map_err(|e| bad(c, e))?;
@@ -3467,25 +3482,65 @@ fn change_graphics(s: &mut Session, view: Id, f: impl Fn(&mut Graphics)) {
     }
 }
 
+/// The scale `p` asks for: none given, or 1 : n, or null for none.
+fn scale_param(c: &str, p: &Value) -> Result<Option<Option<f64>>, String> {
+    match p.get("scale") {
+        None => Ok(None),
+        Some(Value::Null) => Ok(Some(None)),
+        Some(v) => match v.as_f64() {
+            Some(n) if graphics::SCALES.contains(&n) => Ok(Some(Some(n))),
+            _ => {
+                let (lo, hi) = (graphics::SCALES.start(), graphics::SCALES.end());
+                Err(bad(c, format!("`scale` is the n of 1 : n, from {lo} to {hi}, or null for none, not {v}")))
+            }
+        },
+    }
+}
+
+/// The detail level `p` asks for, if it does.
+fn detail_param(c: &str, p: &Value) -> Result<Option<graphics::Detail>, String> {
+    match p.get("detail") {
+        v if absent(v) => Ok(None),
+        Some(v) => Ok(Some(
+            v.as_str().and_then(graphics::Detail::parse).ok_or_else(|| bad(c, format!("`detail` is coarse, medium or fine, not {v}")))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The visual style `p` asks for, as `key` gives it, if it does.
+fn style_param(c: &str, p: &Value, key: &str) -> Result<Option<graphics::VisualStyle>, String> {
+    match p.get(key) {
+        v if absent(v) => Ok(None),
+        Some(v) => Ok(Some(
+            v.as_str()
+                .and_then(graphics::VisualStyle::parse)
+                .ok_or_else(|| bad(c, format!("`{key}` is shaded, hidden_line or wireframe, not {v}")))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// An error unless view `view` may set what `group` holds: its template, if it controls that, sets it.
+fn own_to_set(c: &str, m: &Model, view: Id, group: Group, what: &str) -> Result<(), String> {
+    match graphics::graphics_of(m, view).and_then(|g| g.controlled_by(m, group)) {
+        Some(t) => {
+            Err(bad(c, format!("its {what} follow view template `{t}`; change the template, or `template: null` to stop following it")))
+        }
+        None => Ok(()),
+    }
+}
+
 fn view_scale(s: &mut Session, p: &Value) -> R {
     let c = "scale";
     let view = scaled_view(c, &s.model, p)?;
-    let scale = match p.get("scale") {
-        None => None,
-        Some(Value::Null) => Some(None),
-        Some(v) => match v.as_f64() {
-            Some(n) if graphics::SCALES.contains(&n) => Some(Some(n)),
-            _ => {
-                let (lo, hi) = (graphics::SCALES.start(), graphics::SCALES.end());
-                return Err(bad(c, format!("`scale` is the n of 1 : n, from {lo} to {hi}, or null for none, not {v}")));
-            }
-        },
-    };
-    if let Some(scale) = scale {
+    if let Some(scale) = scale_param(c, p)? {
+        own_to_set(c, &s.model, view, Group::Scale, "scale")?;
         change_graphics(s, view, |g| g.scale = scale);
     }
-    let now = graphics::graphics_of(&s.model, view).and_then(|g| g.scale);
-    Ok(json!({"view": view, "name": s.model.view_name(view), "scale": now}))
+    let m = &s.model;
+    let now = graphics::graphics_of(m, view).and_then(|g| g.resolved(m).scale);
+    Ok(json!({"view": view, "name": m.view_name(view), "scale": now}))
 }
 
 fn visual_style(s: &mut Session, p: &Value) -> R {
@@ -3501,16 +3556,12 @@ fn visual_style(s: &mut Session, p: &Value) -> R {
     if let Some(v) = view.filter(|v| !matches!(m.elements.get(v), Some(Element::View3D(_)))) {
         return Err(bad(c, format!("{} isn't a 3D view; only those have a visual style", view_title(m, v))));
     }
-    let style = match p.get("style") {
-        v if absent(v) => None,
-        Some(v) => Some(
-            v.as_str()
-                .and_then(graphics::VisualStyle::parse)
-                .ok_or_else(|| bad(c, format!("`style` is shaded, hidden_line or wireframe, not {v}")))?,
-        ),
-        None => None,
-    };
-    let has = |view: Option<Id>, m: &Model| view.and_then(|v| graphics::graphics_of(m, v)).map_or_else(Default::default, |g| g.style);
+    let style = style_param(c, p, "style")?;
+    if let (Some(_), Some(v)) = (style, view) {
+        own_to_set(c, m, v, Group::Style, "visual style")?;
+    }
+    let has =
+        |view: Option<Id>, m: &Model| view.and_then(|v| graphics::graphics_of(m, v)).map_or_else(Default::default, |g| g.resolved(m).style);
     let view = match (style, view) {
         (Some(style), view) if style != has(view, m) => {
             let v = view.unwrap_or_else(|| {
@@ -3532,18 +3583,13 @@ fn visual_style(s: &mut Session, p: &Value) -> R {
 fn view_detail(s: &mut Session, p: &Value) -> R {
     let c = "detail";
     let view = scaled_view(c, &s.model, p)?;
-    let level = match p.get("detail") {
-        v if absent(v) => None,
-        Some(v) => Some(
-            v.as_str().and_then(graphics::Detail::parse).ok_or_else(|| bad(c, format!("`detail` is coarse, medium or fine, not {v}")))?,
-        ),
-        None => None,
-    };
-    if let Some(level) = level {
+    if let Some(level) = detail_param(c, p)? {
+        own_to_set(c, &s.model, view, Group::Detail, "detail level")?;
         change_graphics(s, view, |g| g.detail = level);
     }
-    let now = graphics::graphics_of(&s.model, view).map(|g| g.detail).unwrap_or_default();
-    Ok(json!({"view": view, "name": s.model.view_name(view), "detail": now}))
+    let m = &s.model;
+    let now = graphics::graphics_of(m, view).map(|g| g.resolved(m).detail).unwrap_or_default();
+    Ok(json!({"view": view, "name": m.view_name(view), "detail": now}))
 }
 
 /// What to call element `id` in a message: a view's or a sheet's name, else its category and id.
@@ -3622,7 +3668,7 @@ fn place(s: &mut Session, p: &Value) -> R {
         None => return Err(bad(c, "`view`, a level's, section's, elevation's, schedule's or 3D view's name or id, is required")),
     };
     // The view's own scale, unless told another; 1 : 100 for a view with none.
-    let scale = scale.or_else(|| graphics::graphics_of(&s.model, view).and_then(|g| g.scale)).unwrap_or(100.0);
+    let scale = scale.or_else(|| graphics::graphics_of(&s.model, view).and_then(|g| g.resolved(&s.model).scale)).unwrap_or(100.0);
     let at = at.unwrap_or_else(|| sheet::spot(&s.model, sheet, view, scale));
     let id = s.model_mut().insert(Element::Viewport(Viewport { sheet, view, at, scale }));
     Ok(json!({"id": id, "at": at}))
