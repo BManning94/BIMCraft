@@ -30,9 +30,10 @@
   <br><sub><b>The sample house</b> (<code>cargo run --release -p bimcraft -- --sample</code>): Revit's layout in BIMCraft's own icons and colours, with dimensions, door and window tags, a spot elevation, a note, a section and the four elevation marks, all built from BIMCraft commands.</sub>
 </p>
 
+https://github.com/user-attachments/assets/46488109-fdc4-4ce5-a6bd-92b3b95af16c
+
 <p align="center">
-  <a href="docs/video/showcase.mp4"><img src="docs/images/showcase.jpg" alt="Play the 34-second BIMCraft tour: the sample house in its 3D view, with the 58 lines of text that build it beside it, its hipped roof just dropped on" width="70%"></a>
-  <br><sub><b>BIMCraft in 34 seconds</b> (<a href="docs/video/showcase.mp4">mp4, about 9 MB</a>, AI-generated voiceover): the sample house built from 58 lines of text, its plans, sections, sheets and 3D view, a wall moved with its doors and room areas following, IFC in and out, and an agent building a house over MCP.</sub>
+  <sub><b>BIMCraft in 34 seconds</b> (AI-generated voiceover; <a href="docs/video/showcase.mp4">download the mp4, 8.4 MB</a>): the sample house built from 58 lines of text, its plans, sections, sheets and 3D view, a wall moved with its doors and room areas following, IFC in and out, and an agent building a house over MCP.</sub>
 </p>
 
 <p align="center">
