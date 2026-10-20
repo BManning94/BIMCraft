@@ -1181,7 +1181,7 @@ impl BimApp {
                     }
                 }
             }
-            Tool::Component => {
+            Tool::Component | Tool::Fixture(_) => {
                 if let Some((family, ty)) = self.placing() {
                     let at = self.snap(m, level, v, at, &[], false).at;
                     self.run(
@@ -2217,7 +2217,7 @@ impl BimApp {
                 }
                 return;
             }
-            Tool::Component => {
+            Tool::Component | Tool::Fixture(_) => {
                 if let Some((family, type_name)) = self.placing() {
                     let at = self.found(sc, q, &[], false);
                     let angle = self.component_angle;

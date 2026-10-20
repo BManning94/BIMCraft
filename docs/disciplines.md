@@ -2,7 +2,7 @@
 
 A client asked for the complementary-project tabs Revit users know: structure (estrutural), plumbing and drainage
 (hidrossanitário), electrical (elétrico), lightning protection (SPDA) and data and voice (lógica, dados e voz). This note
-is how BIMCraft builds all five with as little new machinery as possible. The Structure tab is built; the other four are
+is how BIMCraft builds all five with as little new machinery as possible. Structure and Plumbing are built; the other three are
 follow-ups that add data to what is described here, not new engine code. The rules in [CLAUDE.md](../CLAUDE.md) apply
 to all of it (everything is a command, `Model::check` validates, the core has no UI, clean-room).
 
@@ -48,8 +48,8 @@ section, and the 3D view draws it as a sloped prism, or a round one as a tube.
 
 A run is one Rust type serialized under several categories, as `Door` and `Window` share `Opening`. The category is the
 `Element` variant, so Visibility/Graphics, schedules, project parameters, phases, view filters and the IFC class all
-work per category without a line of per-category machinery. Today: `beam` and `stripfooting`. A tab adds a variant and
-a row to each table below:
+work per category without a line of per-category machinery. Today: `beam`, `stripfooting` and `pipe`. A tab adds a variant, a name
+in `model::run_arm!` and a row to each table below:
 
 | Category | Tab | Revit's name |
 |---|---|---|
@@ -62,8 +62,9 @@ a row to each table below:
 Types live in `Types::runs`, a map from category to type name to `RunType`, so a tab adds no field to `Types`. The model
 starts with a few (`Beam 200 x 500`…), and the `type` command creates and changes them. Geometry is in `runs.rs`: the
 centre line's ends, the footprint in plan, the prism or tube in 3D. The plan, the section, the 3D view, the snaps and
-IFC call it and know no category. A rectangular run is a sloped prism, so sections cut it; a round one is a tube mesh,
-which sections show beyond their line and don't cut, as they treat a component's forms (`Solid::Mesh` has no `across`).
+IFC call it and know no category. A rectangular run is a sloped prism, so sections cut it; a round one is a tube mesh, a convex
+solid, which a section cuts by the plane through its line (`Solid::cuts`: where the tube's edges cross the plane, their hull, a
+ring, an ellipse when the line is oblique). A component's forms, which are not convex, are shown beyond the line and never cut.
 
 ## (b) Points and verticals
 
@@ -97,8 +98,8 @@ IFC4 (ISO 16739-1:2018). Class names are checked against the IFC4 and IFC4X3_ADD
 | `footing` | `IfcFooting` `.PAD_FOOTING.` | yes |
 | `stripfooting` | `IfcFooting` `.STRIP_FOOTING.` (a grade beam, baldrame, is `.FOOTING_BEAM.`) | yes |
 | structural `floor` | `IfcSlab` `.FLOOR.` (`.BASESLAB.` for a foundation slab) with `Pset_SlabCommon.LoadBearing` | yes |
-| `pipe` | `IfcPipeSegment` `.RIGIDSEGMENT.`; fittings `IfcPipeFitting` | |
-| sanitary fixtures | `IfcSanitaryTerminal` (`.WASHHANDBASIN.`, `.TOILETPAN.`, `.SINK.`, `.SHOWER.`…); floor drains `IfcWasteTerminal` `.FLOORTRAP.` | |
+| `pipe` | `IfcPipeSegment` `.RIGIDSEGMENT.`; fittings `IfcPipeFitting`, valves `IfcValve` | yes |
+| sanitary fixtures | `IfcSanitaryTerminal` (`.NOTDEFINED.`: a family has one category and its forms, not a kind of fixture; `.WASHHANDBASIN.`, `.TOILETPAN.`, `.SINK.`, `.SHOWER.` would need one per kind); floor drains `IfcWasteTerminal` `.FLOORTRAP.` | yes |
 | `conduit` | `IfcCableCarrierSegment` `.CONDUITSEGMENT.` | |
 | `cabletray` | `IfcCableCarrierSegment` `.CABLETRAYSEGMENT.` (`.CABLELADDERSEGMENT.`) | |
 | `wire`, `cable` | `IfcCableSegment` `.CABLESEGMENT.` | |
@@ -110,7 +111,10 @@ IFC4 (ISO 16739-1:2018). Class names are checked against the IFC4 and IFC4X3_ADD
 | air terminals, earthing rods | **no IFC class.** IFC4 and IFC4X3 have none for lightning protection. `IfcBuildingElementProxy` with `ObjectType` `LightningTerminal` or `EarthingRod`, so a reader can filter on it. Surge protection has `IfcProtectiveDevice` `.VARISTOR.` | |
 
 A run is written as an extrusion along its own axis (`IfcExtrudedAreaSolid`), so a reader gets the profile and the
-length and not a mesh, and a property set carries what has no attribute (`System`, the project's parameters).
+length and not a mesh. Its system is an `IfcSystem`, named for it, that an `IfcRelAssignsToGroup` assigns the runs in it to;
+`BIMCraft_Run` carries what has no attribute: the line its heights are at (`Justification`) and its `Category`, for the classes
+that several categories share. One table, `runs::IFC`, gives the class and predefined type of each category, and import reads it
+back (`runs::from_ifc`); the same for a family's category (`family::Category::ifc`, `from_ifc`).
 
 ## (e) The tabs
 
@@ -122,7 +126,7 @@ and says so.
 | Tab (EN / PT / ES) | Tools and shortcuts | Brazilian vocabulary |
 |---|---|---|
 | **Structure** / Estrutura / Estructura | Column CL, Beam BM, Floor (Structural) SB; Foundation: Isolated FI, Wall FW (Revit's FT is Filters here) | pilar, viga, laje, sapata, sapata corrida, baldrame |
-| **Plumbing** / Hidrossanitário / Fontanería | Pipe PI, Plumbing Fixture PX, Pipe Fitting PF, Pipe Accessory PA | tubulação, peça sanitária, ramal, prumada, água fria (NBR 5626), esgoto (NBR 8160) |
+| **Plumbing** / Hidrossanitário / Fontanería | Pipe PI, Plumbing Fixture PX, Pipe Fitting PF, Pipe Accessory PA (built) | tubulação, peça sanitária, ramal, prumada, água fria (NBR 5626), esgoto (NBR 8160) |
 | **Electrical** / Elétrico / Eléctrico | Conduit CN, Cable Tray CT, Wire EW, Electrical Equipment EE, Lighting Fixture LF, Device | eletroduto, eletrocalha, quadro de distribuição, luminária, tomada, circuito (NBR 5410) |
 | **Lightning Protection (SPDA)** / SPDA / SPDA | Air Terminal, Down Conductor, Earthing Electrode, Inspection Box | captor, condutor de descida, haste de aterramento, caixa de inspeção, malha (NBR 5419) |
 | **Data** / Lógica, Dados e Voz / Datos y Voz | Data Outlet, Voice Outlet, Rack, Cable Tray CT, Cabling | ponto de dados, ponto de voz, rack, patch panel, cabeamento estruturado (NBR 14565) |
@@ -158,12 +162,13 @@ The Structure tab is the worked example; a tab is these steps and no engine code
 
 ## Honest limits of the foundation
 
-- A round run is a tube that sections show beyond their line and never cut (`Solid::Mesh` has no `across`). A pipe cut by a
-  section draws nothing at the cut until `Mesh` can be cut.
 - Runs that meet butt against each other: no mitre, elbow or tee, and no connectors, so a pipe network cannot yet be
-  checked for continuity or sized.
-- A run's `system` is a name, and IFC carries it as a property, not an `IfcSystem` with an `IfcRelAssignsToGroup`; the
-  MEP slice writes the real thing when systems get rules.
+  checked for continuity or sized. A fitting or a valve is a component of a family, placed by hand on a pipe's height.
+- A run's `system` is a name and an `IfcSystem`, with no rules: nothing checks that a pipe of "Esgoto" meets only pipes of it.
 - Braces are beams that slope; they will want their own type and `IfcMember`.
 - Import finds a run's section as the box round its body in the frame the axis gives it, so a member rolled about its axis
-  reads as the box; its justification is lost (it comes in `centre`, with both heights, the same geometry).
+  reads as the box. An upright run comes back running up with its width along east, whichever end it was drawn from.
+- A fixture's `IfcSanitaryTerminal` has no predefined type (a basin, a WC, a sink and a shower are one category).
+
+What the first four of these were, and is fixed: a section cutting a round run; the `IfcSystem`; a run's justification surviving
+an import; Edit Type setting a run type's roundness and material.

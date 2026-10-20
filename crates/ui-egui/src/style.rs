@@ -181,6 +181,10 @@ pub enum Icon {
     Beam,
     Footing,
     WallFooting,
+    Pipe,
+    Fixture,
+    Fitting,
+    Accessory,
     Stair,
     Roof,
     Theme,
@@ -441,6 +445,34 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(9.0, 3.0), (15.0, 3.0), (15.0, 13.0), (9.0, 13.0)]),
             ring(&[(2.0, 13.0), (22.0, 13.0), (22.0, 18.0), (2.0, 18.0)]),
             line(&[(2.0, 20.0), (22.0, 20.0)]),
+        ],
+        // A pipe running up to the right, its ends open.
+        Icon::Pipe => vec![
+            line(&[(3.0, 17.0), (17.0, 3.0)]),
+            line(&[(7.0, 21.0), (21.0, 7.0)]),
+            line(&[(3.0, 17.0), (7.0, 21.0)]),
+            line(&[(17.0, 3.0), (21.0, 7.0)]),
+        ],
+        // A washbasin with its tap, on its pedestal.
+        Icon::Fixture => vec![
+            ring(&[(4.0, 10.0), (20.0, 10.0), (17.0, 16.0), (7.0, 16.0)]),
+            line(&[(12.0, 10.0), (12.0, 5.0), (16.0, 5.0)]),
+            line(&[(12.0, 16.0), (12.0, 21.0)]),
+            line(&[(8.0, 21.0), (16.0, 21.0)]),
+        ],
+        // An elbow: two pipes meeting at a bend, a flange on each end.
+        Icon::Fitting => vec![
+            line(&[(4.0, 8.0), (15.0, 8.0), (15.0, 19.0)]),
+            line(&[(4.0, 14.0), (9.0, 14.0), (9.0, 19.0)]),
+            line(&[(4.0, 6.0), (4.0, 16.0)]),
+            line(&[(7.0, 19.0), (17.0, 19.0)]),
+        ],
+        // A gate valve: two cones meeting, a stem and its wheel.
+        Icon::Accessory => vec![
+            ring(&[(3.0, 12.0), (3.0, 20.0), (12.0, 16.0)]),
+            ring(&[(21.0, 12.0), (21.0, 20.0), (12.0, 16.0)]),
+            line(&[(12.0, 16.0), (12.0, 6.0)]),
+            line(&[(8.0, 6.0), (16.0, 6.0)]),
         ],
         Icon::Stair => vec![ring(&[
             (3.0, 20.0),

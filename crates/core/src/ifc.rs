@@ -12,7 +12,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use crate::family::Category;
 use crate::geom::{self, P2};
 use serde_json::Value;
 
@@ -51,11 +50,13 @@ const RUN_PROPERTIES: u64 = 41;
 const RUN_DEFINES: u64 = 42;
 const COMMON: u64 = 43;
 const COMMON_DEFINES: u64 = 44;
+const SYSTEMS: u64 = 45;
+const SYSTEM_MEMBERS: u64 = 46;
 
 /// The property set an element's values of the project's parameters go in.
 pub const PARAMETERS: &str = "Project Parameters";
 
-/// The property set a run's system goes in.
+/// The property set a run's justification and category go in (its system is an IfcSystem it is assigned to).
 pub const RUN: &str = "BIMCraft_Run";
 
 /// The property set an element's phase and design option go in; on the project, its phases and design option sets.
@@ -456,6 +457,8 @@ pub fn export(m: &Model) -> String {
     let mut hosts: BTreeMap<Id, (u64, u64, f64)> = BTreeMap::new();
     // Stairs and ramps as (entity, placement, its height, its parts), for the railings along them.
     let mut wholes: BTreeMap<Id, (u64, u64, f64, Vec<u64>)> = BTreeMap::new();
+    // The runs in each system, by its name, for the IfcSystem they are assigned to.
+    let mut systems: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     for (&id, e) in &m.elements {
         match e {
             Element::Wall(wl) => {
@@ -611,13 +614,14 @@ pub fn export(m: &Model) -> String {
                     _ => {}
                 }
             }
-            // A run: its section swept along its axis, a beam or a footing in its material, with the system it is in.
-            Element::Beam(r) | Element::StripFooting(r) => {
-                let (Some(&(_, storey)), Some(t), Some(g)) = (storeys.get(&r.level), m.run_type(e), m.run_geom(e)) else { continue };
-                let (axis, class, kind, pset) = match e {
-                    Element::Beam(_) => (crate::view3d::unit(crate::view3d::sub(g.b, g.a)), "IFCBEAM", ".BEAM.", "Pset_BeamCommon"),
-                    _ => (crate::view3d::unit(crate::view3d::sub(g.b, g.a)), "IFCFOOTING", ".STRIP_FOOTING.", "Pset_FootingCommon"),
+            // A run: its section swept along its axis, in its material, a member of the system it is in.
+            crate::model::run_arm!(r) => {
+                let (Some(&(_, storey)), Some(t), Some(g), Some((class, kind))) =
+                    (storeys.get(&r.level), m.run_type(e), m.run_geom(e), crate::runs::ifc(e.category()))
+                else {
+                    continue;
                 };
+                let axis = crate::view3d::unit(crate::view3d::sub(g.b, g.a));
                 // Placed at the start of its centre line; its section's x across it, level, its y up.
                 let at = w.place(Some(storey), (g.a[0], g.a[1], g.a[2] - m.elevation(r.level)), None);
                 let across = if g.vertical() { [1.0, 0.0, 0.0] } else { crate::view3d::unit([-axis[1], axis[0], 0.0]) };
@@ -638,15 +642,21 @@ pub fn export(m: &Model) -> String {
                 ));
                 contained.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
-                w.load_bearing(ent, pset, id);
+                match e {
+                    Element::Beam(_) => w.load_bearing(ent, "Pset_BeamCommon", id),
+                    Element::StripFooting(_) => w.load_bearing(ent, "Pset_FootingCommon", id),
+                    _ => {}
+                }
                 if !t.material.is_empty() {
                     let material = w.material(m, &t.material);
                     w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{material})", w.guid(RUN_MATERIALS, id)));
                 }
                 if !r.system.is_empty() {
-                    let system = w.text_property("System", None, &r.system);
-                    w.define(ent, RUN, &[system], (RUN_PROPERTIES, RUN_DEFINES), id);
+                    systems.entry(&r.system).or_default().push(ent);
                 }
+                // Where its heights are on its section, and which category it is, for a reader that finds only a class.
+                let props = [w.text_property("Justification", None, r.justify.word()), w.text_property("Category", None, e.category())];
+                w.define(ent, RUN, &props, (RUN_PROPERTIES, RUN_DEFINES), id);
             }
             // A component: its category's element, named by its family and type as Revit names them,
             // each form a closed face set styled in its material's colour.
@@ -674,15 +684,11 @@ pub fn export(m: &Model) -> String {
                 }
                 let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
                 let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
-                let entity = match f.category {
-                    Category::Furniture | Category::Casework => "IFCFURNITURE",
-                    Category::Plumbing => "IFCSANITARYTERMINAL",
-                    Category::Lighting => "IFCLIGHTFIXTURE",
-                    // A door's or a window's family is placed in a wall, never as a component.
-                    Category::Generic | Category::Door | Category::Window => "IFCBUILDINGELEMENTPROXY",
-                };
+                // A door's or a window's family is placed in a wall, never as a component.
+                let (entity, kind, object_type) = f.category.ifc();
                 let name = s(&format!("{}:{}", cp.family, cp.type_name));
-                let ent = w.add(format!("{entity}({},$,{name},$,{name},#{at},#{shape},'{id}',.NOTDEFINED.)", w.guid(ELEMENT, id)));
+                let object = object_type.map_or_else(|| name.clone(), s);
+                let ent = w.add(format!("{entity}({},$,{name},$,{object},#{at},#{shape},'{id}',{kind})", w.guid(ELEMENT, id)));
                 contained.entry(cp.level).or_default().push(ent);
                 products.insert(id, ent);
                 // What it's made of: its material, or the set of them.
@@ -964,6 +970,12 @@ pub fn export(m: &Model) -> String {
         let Some(set) = sets.get(name) else { continue };
         let usage = w.add(format!("IFCMATERIALLAYERSETUSAGE(#{set},.AXIS2.,.NEGATIVE.,{offset},$)"));
         w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,({}),#{usage})", w.guid(MATERIALS, k as u64), refs(&ents)));
+    }
+    // A system is an IfcSystem its runs are assigned to; its GlobalIds follow its name, so they stay when another is added.
+    for (name, members) in &systems {
+        let key = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        let system = w.add(format!("IFCSYSTEM({},$,{},$,$)", w.guid(SYSTEMS, key), s(name)));
+        w.add(format!("IFCRELASSIGNSTOGROUP({},$,$,$,({}),$,#{system})", w.guid(SYSTEM_MEMBERS, key), refs(members)));
     }
     for (level, (storey, _)) in &storeys {
         if let Some(items) = contained.get(level) {

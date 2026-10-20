@@ -413,7 +413,7 @@ fn seen_below(m: &Model, r: &PlanRange, look: &Look) -> Vec<(Id, Vec<P2>, f64)> 
                 }
             };
             // A footing or a run hangs under the level it is drawn on, its top flush with the view's bottom: that is seen.
-            let flush = if matches!(e, Element::Footing(_) | Element::Beam(_) | Element::StripFooting(_)) { TOL } else { 0.0 };
+            let flush = if matches!(e, Element::Footing(_) | crate::model::run_arm!(_)) { TOL } else { 0.0 };
             (r.depth - flush < top && top <= r.cut).then_some((id, outline, top))
         })
         .collect()
@@ -484,7 +484,7 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
                 }
             }
             Element::Railing(rl) if m.level_of(e) == Some(level) => extent.extend(stairs::railing(m, rl).into_iter().map(|(p, _)| p)),
-            Element::Beam(_) | Element::StripFooting(_) if m.level_of(e) == Some(level) => {
+            crate::model::run_arm!(_) if m.level_of(e) == Some(level) => {
                 extent.extend(m.run_geom(e).map(|g| g.footprint()).unwrap_or_default())
             }
             Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(m.roof_outline(r)),
@@ -518,7 +518,7 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
         Element::Section(v) => section_mark(&mut d, v),
         Element::Elevation(v) => elevation_mark(&mut d, v),
         Element::Column(_) | Element::StructuralColumn(_) | Element::Footing(_) => d.line(&m.column_outline(e), 2.0, INK, true),
-        Element::Beam(_) | Element::StripFooting(_) => {
+        crate::model::run_arm!(_) => {
             if let Some(g) = m.run_geom(e) {
                 d.line(&g.footprint(), 2.0, INK, true)
             }
@@ -647,13 +647,8 @@ pub fn section_at(m: &Model, id: Id, view: View, k: f32) -> Drawing {
     d.part(Part::Cut);
     // A mass is outlined where the line cuts it, below, not filled.
     for s in solids.iter().filter(|s| !matches!(m.elements.get(&s.owner()), Some(Element::Mass(_)))) {
-        for (a, b) in s.across(v.start, u) {
-            let (a, b) = (a.max(0.0), b.min(len));
-            if b - a > 1e-6 {
-                // Level, or along a sloped face.
-                let ((a0, a1), (b0, b1)) = (s.z_at(v.start + u * a), s.z_at(v.start + u * b));
-                cuts.entry(s.owner()).or_default().push(vec![P2(a, a0), P2(b, b0), P2(b, b1), P2(a, a1)]);
-            }
+        for ring in s.cuts(v.start, u, len) {
+            cuts.entry(s.owner()).or_default().push(ring);
         }
     }
     // Outlines, then poché over their inner halves: joined walls show their union, as in plan,
@@ -1074,7 +1069,7 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool, k: f32) -> Drawing {
                 }
             }
             // Overhead too: a run over the cut plane and under the view range's top, dashed.
-            Element::Beam(_) | Element::StripFooting(_) => {
+            crate::model::run_arm!(_) => {
                 if let Some(g) = m.run_geom(e).filter(|g| range.cut < g.z_span().0 && g.z_span().0 <= range.top) {
                     let pts = g.footprint().iter().map(|p| d.view.px(*p)).collect();
                     d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });

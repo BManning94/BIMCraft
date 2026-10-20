@@ -299,7 +299,8 @@ struct Found {
 
 /// The run `pts` make: its centre line along the direction they spread furthest in (the covariance's dominant axis, by
 /// power iteration), its section the box round them across it, square to it, with `width` level and `depth` square to that;
-/// round where the section's corners are many and all as far out. None for an axis that stands, or for too few points.
+/// round where the section's corners are many and all as far out. An axis that stands has its width along east. None for too
+/// few points.
 fn run_in(pts: &[P3]) -> Option<Found> {
     use crate::view3d::{add, cross, dot, mul, sub, unit};
     if pts.len() < 4 {
@@ -323,14 +324,13 @@ fn run_in(pts: &[P3]) -> Option<Found> {
         }
         d = unit(next);
     }
-    // Toward the east, else the north, so a run reads the same whichever end the file starts at.
-    if d[0] < -1e-9 || (d[0].abs() <= 1e-9 && d[1] < 0.0) {
+    // Toward the east, else the north, else up, so a run reads the same whichever end the file starts at.
+    let upright = d[0].hypot(d[1]) < 1e-6;
+    if d[0] < -1e-9 || (d[0].abs() <= 1e-9 && d[1] < -1e-9) || (upright && d[2] < 0.0) {
         d = mul(d, -1.0);
     }
-    let across = unit([-d[1], d[0], 0.0]);
-    if dot(across, across) < 0.5 {
-        return None;
-    }
+    // Upright, its width is along east, as a run stood up draws it.
+    let across = if upright { [1.0, 0.0, 0.0] } else { unit([-d[1], d[0], 0.0]) };
     let up = cross(d, across);
     let ext = |axis: P3| span(pts.iter().map(|p| dot(sub(*p, c), axis)));
     let ((t0, t1), (u0, u1), (v0, v1)) = (ext(d)?, ext(across)?, ext(up)?);
@@ -833,6 +833,8 @@ struct Links {
     /// An element's type, and what an element or a type is made of.
     typed: HashMap<u64, u64>,
     material: HashMap<u64, u64>,
+    /// The group (a system) a product is assigned to.
+    group: HashMap<u64, u64>,
 }
 
 impl Links {
@@ -875,6 +877,11 @@ impl Links {
                 "IFCRELASSOCIATESMATERIAL" => {
                     if let Some(mat) = reference(a(5)) {
                         l.material.extend(refs(a(4)).into_iter().map(|x| (x, mat)));
+                    }
+                }
+                "IFCRELASSIGNSTOGROUP" => {
+                    if let Some(g) = reference(a(6)) {
+                        l.group.extend(refs(a(4)).into_iter().map(|x| (x, g)));
                     }
                 }
                 _ => {}
@@ -1272,6 +1279,33 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         })
         .flatten()
         .collect();
+
+    // What BIMCraft's property set on a run says: its justification and its category, by product.
+    let mut run_props: HashMap<u64, (Option<Justify>, Option<String>)> = HashMap::new();
+    for rel in named(&["IFCRELDEFINESBYPROPERTIES"]).into_iter().filter_map(e) {
+        let Some(set) =
+            reference(rel.args.get(5)).and_then(e).filter(|x| x.name == "IFCPROPERTYSET" && text(x.args.get(2)) == Some(crate::ifc::RUN))
+        else {
+            continue;
+        };
+        let said = |name: &str| {
+            refs(set.args.get(4))
+                .into_iter()
+                .filter_map(e)
+                .find(|p| p.name == "IFCPROPERTYSINGLEVALUE" && text(p.args.first()) == Some(name))
+                .and_then(|p| match p.args.get(2) {
+                    Some(V::Typed(_, v)) => match &**v {
+                        V::Str(s) => Some(s.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+        };
+        let (justify, category) = (said("Justification").and_then(|j| Justify::parse(&j)), said("Category"));
+        for product in refs(rel.args.get(4)) {
+            run_props.insert(product, (justify, category.clone()));
+        }
+    }
 
     let project = ids.iter().filter_map(|id| e(*id)).find(|x| x.name == "IFCPROJECT");
     let title = project.and_then(|p| text(p.args.get(2)).or_else(|| text(p.args.get(5)))).unwrap_or(name);
@@ -1794,15 +1828,14 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         seen.insert(id);
     }
 
-    // Beams, and strip footings: runs, found in their bodies as the longest direction they run along and the section
-    // square to it. A beam rolled about its axis reads as the box round it.
-    for id in named(&["IFCBEAM", "IFCBEAMSTANDARDCASE", "IFCFOOTING"])
-        .into_iter()
-        .filter(|id| e(*id).is_some_and(|x| x.name != "IFCFOOTING") || strip(*id))
-    {
+    // Runs (beams, strip footings, pipes): found in their bodies as the longest direction they run along and the section
+    // square to it. A run rolled about its axis reads as the box round it. A product's class and type say which, or, where
+    // it is one of BIMCraft's, its property set.
+    let classes: Vec<&str> = crate::runs::IFC.iter().map(|(_, class, _)| *class).chain(["IFCBEAMSTANDARDCASE"]).collect();
+    for id in named(&classes).into_iter().filter(|id| e(*id).is_some_and(|x| x.name != "IFCFOOTING") || strip(*id)) {
         let Some(b) = e(id) else { continue };
-        let (category, make): (&str, fn(Run) -> Element) =
-            if b.name == "IFCFOOTING" { ("stripfooting", Element::StripFooting) } else { ("beam", Element::Beam) };
+        let declared = run_props.get(&id).and_then(|(_, c)| c.as_deref());
+        let Some(category) = crate::runs::from_ifc(&b.name, enumeration(b.args.get(8)), declared) else { continue };
         let pts: Vec<P3> = r.body(b).into_iter().flatten().collect();
         let Some(found) = run_in(&pts) else {
             leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read, or it stands (a column) or lies flat");
@@ -1833,7 +1866,23 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let types = m.types.runs.entry(category.to_string()).or_default();
         let type_name = kind(types, &base, same, RunType { width: w, depth: d, round: found.round, material: material.clone() });
         let height = |z: f64| ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
-        let (z0, z1) = (height(found.start[2]), height(found.end[2]));
+        // The body is the centre line; the justification BIMCraft wrote puts the heights back on the line they were typed at.
+        let justify = run_props.get(&id).and_then(|(j, _)| *j).unwrap_or(Justify::Centre);
+        let g = crate::runs::Geom { a: found.start, b: found.end, width: w, depth: d, round: found.round };
+        let shift = match justify {
+            Justify::Top => g.half(),
+            Justify::Centre => 0.0,
+            Justify::Bottom => -g.half(),
+        };
+        let (z0, z1) = (height(found.start[2] + shift), height(found.end[2] + shift));
+        let system = l
+            .group
+            .get(&id)
+            .and_then(|g| e(*g))
+            .filter(|g| matches!(g.name.as_str(), "IFCSYSTEM" | "IFCDISTRIBUTIONSYSTEM"))
+            .and_then(|g| text(g.args.get(2)))
+            .map(clip)
+            .unwrap_or_default();
         let run = Run {
             type_name,
             level,
@@ -1841,11 +1890,12 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             end: micron(r.flat(found.end)),
             offset: z0,
             end_offset: ((z1 - z0).abs() > 1e-6).then_some(z1),
-            justify: Justify::Centre,
-            system: String::new(),
+            justify,
+            system,
             params: Default::default(),
         };
-        let rid = m.insert(make(run));
+        let Some(made) = Element::of_run(category, run) else { continue };
+        let rid = m.insert(made);
         from.insert(rid, who(id));
         elements_from.entry(id).or_default().push(rid);
         seen.insert(id);
@@ -1868,16 +1918,15 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     }
     let mut made: BTreeMap<String, Made> = BTreeMap::new();
     let mut placed: Vec<(u64, String, String, bool, P2, f64, f64)> = Vec::new();
-    let kinds: [(&[&str], Category); 4] = [
-        (&["IFCFURNITURE", "IFCFURNISHINGELEMENT", "IFCSYSTEMFURNITUREELEMENT"], Category::Furniture),
-        (&["IFCSANITARYTERMINAL"], Category::Plumbing),
-        (&["IFCLIGHTFIXTURE"], Category::Lighting),
-        (&["IFCBUILDINGELEMENTPROXY"], Category::Generic),
-    ];
-    for (names, category) in kinds {
-        for id in named(names) {
+    let read = Category::read_classes();
+    for category in Category::PLACED {
+        for id in named(&read) {
             // A mass is read above.
             let Some(x) = e(id).filter(|_| !seen.contains(&id)) else { continue };
+            // Its class and its type say which kind of family it is of; one of another kind is read in its turn.
+            if Category::from_ifc(&x.name, enumeration(x.args.get(8)), text(x.args.get(4))) != Some(category) {
+                continue;
+            }
             let f = r.frame(x);
             let flat = |v: P3| unit([v[0], v[1], 0.0]);
             let along = [flat(f.x), flat(f.y), [1.0, 0.0, 0.0]].into_iter().find(|v| dot(*v, *v) > 0.5).unwrap_or([1.0, 0.0, 0.0]);

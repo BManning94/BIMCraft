@@ -475,14 +475,27 @@ impl FamilyEditor {
 }
 
 /// The categories a family may be of, in the order they're offered.
-pub(crate) const CATEGORIES: [Category; 7] =
-    [Category::Furniture, Category::Casework, Category::Plumbing, Category::Lighting, Category::Generic, Category::Door, Category::Window];
+pub(crate) const CATEGORIES: [Category; 10] = [
+    Category::Furniture,
+    Category::Casework,
+    Category::Plumbing,
+    Category::Drain,
+    Category::PipeFitting,
+    Category::PipeAccessory,
+    Category::Lighting,
+    Category::Generic,
+    Category::Door,
+    Category::Window,
+];
 
 pub(crate) fn category_label(c: Category) -> String {
     t(match c {
         Category::Furniture => "Furniture",
         Category::Casework => "Casework",
-        Category::Plumbing => "Plumbing",
+        Category::Plumbing => "Plumbing Fixtures",
+        Category::Drain => "Drains",
+        Category::PipeFitting => "Pipe Fittings",
+        Category::PipeAccessory => "Pipe Accessories",
         Category::Lighting => "Lighting",
         Category::Generic => "Generic",
         Category::Door => "Door",
@@ -854,7 +867,7 @@ impl BimApp {
     pub(crate) fn family_in_hand(&self) -> Option<String> {
         let m = &self.session.model;
         let selected = self.selection.iter().find_map(|id| m.elements.get(id)?.family().map(|(f, _)| f.to_string()));
-        selected.or_else(|| if self.tool == Tool::Component { self.placing().map(|(f, _)| f) } else { None })
+        selected.or_else(|| if matches!(self.tool, Tool::Component | Tool::Fixture(_)) { self.placing().map(|(f, _)| f) } else { None })
     }
 
     /// The Family Editor, while it's open.

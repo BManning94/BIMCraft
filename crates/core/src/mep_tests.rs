@@ -1,0 +1,636 @@
+//! The MEP tabs' elements (plumbing, electrical, lightning protection, data) through the commands every front end drives. The
+//! run categories share one table, so a tab adds a row; what only one tab has (its fixtures, its devices) has tests of its own.
+
+use serde_json::{Value, json};
+
+use crate::element_json;
+use crate::engine::Session;
+use crate::geom::P2;
+use crate::render::{self, Drawing, POCHE, Prim, View};
+
+/// A run category and what is true of it.
+struct Case {
+    category: &'static str,
+    /// The command that makes it, and its Revit shortcut (or the letters BIMCraft gives it).
+    command: &'static str,
+    alias: &'static str,
+    /// The type a new one gets, and whether its section is round.
+    default_type: &'static str,
+    round: bool,
+    /// The schedule's columns, from the system on.
+    columns: &'static [&'static str],
+    /// Whether its class and predefined type say which category it is when another tool wrote them, with nothing of
+    /// BIMCraft's beside them.
+    alone: bool,
+    /// The IFC class and predefined type it is written as.
+    class: &'static str,
+    predefined: &'static str,
+}
+
+const CASES: &[Case] = &[Case {
+    category: "pipe",
+    command: "pipe",
+    alias: "PI",
+    default_type: "PVC 50",
+    round: true,
+    columns: &["System", "Length", "Diameter"],
+    alone: true,
+    class: "IFCPIPESEGMENT",
+    predefined: ".RIGIDSEGMENT.",
+}];
+
+fn run(s: &mut Session, id: &str, p: Value) -> Value {
+    s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
+}
+
+fn ids(r: &Value) -> Vec<u64> {
+    r["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect()
+}
+
+fn fails(s: &mut Session, id: &str, p: Value) -> String {
+    let before = s.model.clone();
+    let e = s.execute(id, &p).expect_err(&format!("{id} {p} should fail"));
+    assert_eq!(*s.model, *before, "a refused {id} changes nothing");
+    e
+}
+
+fn made(s: &mut Session, id: &str, p: Value) -> u64 {
+    let r = run(s, id, p);
+    r["id"].as_u64().or_else(|| ids(&r).first().copied()).unwrap()
+}
+
+/// The category's plural, as a person types it.
+fn plural(c: &Case) -> String {
+    format!("{}s", c.category)
+}
+
+/// The columns a run schedule starts with.
+fn columns(c: &Case) -> Value {
+    let mut all = vec!["Id", "Type", "Level"];
+    all.extend(c.columns);
+    json!(all)
+}
+
+#[test]
+fn a_run_of_the_mep_is_made_between_points_one_for_each_segment_centred_on_its_height() {
+    for c in CASES {
+        let mut s = Session::new();
+        let r = run(&mut s, c.command, json!({"points": [[0, 0], [6000, 0], [6000, 4000]]}));
+        let made = ids(&r);
+        assert_eq!(made.len(), 2, "{}", c.category);
+        let e = element_json(&s.model, made[0]);
+        assert_eq!(
+            (e["category"].as_str(), e["type"].as_str(), e["justify"].as_str(), e["round"].as_bool()),
+            (Some(c.category), Some(c.default_type), Some("centre"), Some(c.round)),
+            "{}",
+            c.category
+        );
+        // Its centre line is at the level, where its `offset` says.
+        assert_eq!(
+            (e["length"].as_f64(), e["axis"].clone()),
+            (Some(6000.0), json!([[0.0, 0.0, 0.0], [6000.0, 0.0, 0.0]])),
+            "{}",
+            c.category
+        );
+        assert_eq!(element_json(&s.model, made[1])["length"], 4000.0);
+        // The shortcut; closed, a ring; the plural finds them.
+        let ring = run(&mut s, c.alias, json!({"points": [[0, 0], [1000, 0], [1000, 1000]], "closed": true}));
+        assert_eq!(ids(&ring).len(), 3, "{}", c.alias);
+        assert_eq!(run(&mut s, "elements", json!({"category": plural(c)}))["count"], 5, "{}", c.category);
+    }
+}
+
+#[test]
+fn a_run_of_the_mep_falls_rises_stands_and_says_which_system_it_is_in() {
+    for c in CASES {
+        let mut s = Session::new();
+        // A drain falling 60 mm over 6 m, in a system; a riser from the floor to the ceiling above, upright.
+        let r = run(
+            &mut s,
+            c.command,
+            json!({"points": [[0, 0], [6000, 0]], "offset": 2400, "end_offset": 2340, "system": "Esgoto", "level": "Level 1"}),
+        );
+        let e = element_json(&s.model, ids(&r)[0]);
+        assert_eq!(e["axis"], json!([[0.0, 0.0, 2400.0], [6000.0, 0.0, 2340.0]]), "{}", c.category);
+        assert_eq!(e["system"], "Esgoto");
+        let up = run(&mut s, c.command, json!({"points": [[500, 500], [500, 500]], "offset": 0, "end_offset": 3000}));
+        let e = element_json(&s.model, ids(&up)[0]);
+        assert_eq!(
+            (e["length"].as_f64(), e["axis"].clone()),
+            (Some(3000.0), json!([[500.0, 500.0, 0.0], [500.0, 500.0, 3000.0]])),
+            "{}",
+            c.category
+        );
+        // And its height changes with `modify`, its system too.
+        run(&mut s, "modify", json!({"id": ids(&up)[0], "offset": 100, "system": "Água fria"}));
+        let e = element_json(&s.model, ids(&up)[0]);
+        assert_eq!((e["axis"][0][2].as_f64(), e["system"].as_str()), (Some(100.0), Some("Água fria")), "{}", c.category);
+    }
+}
+
+#[test]
+fn a_run_of_the_mep_that_cannot_be_one_is_refused_and_nothing_changes() {
+    for c in CASES {
+        let mut s = Session::new();
+        let line = json!([[0, 0], [3000, 0]]);
+        let cmd = c.command;
+        assert!(fails(&mut s, cmd, json!({"points": [[0, 0], [0, 0]]})).contains("too short"));
+        assert!(fails(&mut s, cmd, json!({"points": [[0, 0]]})).contains("at least 2"));
+        assert!(fails(&mut s, cmd, json!({"points": line, "type": "Nope"})).contains("type `Nope` doesn't exist"));
+        assert!(fails(&mut s, cmd, json!({"points": line, "justify": "sideways"})).contains("justify"));
+        assert!(fails(&mut s, cmd, json!({"points": line, "offset": 1e300})).contains("offset"));
+        assert!(fails(&mut s, cmd, json!({"points": line, "system": "x".repeat(300)})).contains("system"));
+        assert!(fails(&mut s, cmd, json!({"points": [[0, 0], [1000, 0], [2000, 0]], "end_offset": 100})).contains("end_offset"));
+    }
+}
+
+#[test]
+fn types_of_a_run_are_made_and_changed_with_type_round_or_not_and_in_a_material() {
+    for c in CASES {
+        let mut s = Session::new();
+        let made = run(&mut s, "type", json!({"category": c.category, "name": "Mine", "width": 75, "round": c.round, "material": "Metal"}));
+        assert_eq!(made["type"], json!({"width": 75.0, "depth": 75.0, "round": c.round, "material": "Metal"}), "{}", c.category);
+        let id = ids(&run(&mut s, c.command, json!({"points": [[0, 0], [3000, 0]], "type": "Mine"})))[0];
+        run(&mut s, "type", json!({"category": c.category, "name": "Mine", "width": 90}));
+        assert_eq!(element_json(&s.model, id)["width"], 90.0, "it changes where it is used");
+        assert!(
+            fails(
+                &mut s,
+                "type",
+                json!({"category": c.category, "name": "Odd", "width": 50, "depth": 50, "round": c.round, "material": "Unobtainium"})
+            )
+            .contains("library")
+        );
+    }
+}
+
+#[test]
+fn the_runs_of_the_mep_move_copy_rotate_mirror_and_delete() {
+    for c in CASES {
+        let mut s = Session::new();
+        let a = ids(&run(&mut s, c.command, json!({"points": [[0, 0], [4000, 0]], "offset": 2800, "end_offset": 3000})))[0];
+        let axis = |s: &Session, id| element_json(&s.model, id)["axis"].clone();
+        let (z0, z1) = (axis(&s, a)[0][2].clone(), axis(&s, a)[1][2].clone());
+        run(&mut s, "move", json!({"ids": [a], "by": [1000, 500]}));
+        assert_eq!(axis(&s, a)[0], json!([1000.0, 500.0, z0]), "heights stay");
+        run(&mut s, "rotate", json!({"ids": [a], "about": [1000, 500], "angle": 90}));
+        let end = axis(&s, a)[1].clone();
+        assert!((end[0].as_f64().unwrap() - 1000.0).abs() < 1e-6 && (end[1].as_f64().unwrap() - 4500.0).abs() < 1e-6, "{end}");
+        let m = run(&mut s, "mirror", json!({"ids": [a], "axis": [[0, 0], [0, 1000]], "copy": true}));
+        let mirrored = axis(&s, ids(&m)[0]);
+        assert_eq!((&mirrored[0][2], &mirrored[1][2]), (&z0, &z1), "each end keeps its height");
+        run(&mut s, "copy", json!({"ids": [a], "by": [0, -2000]}));
+        assert_eq!(run(&mut s, "elements", json!({"category": c.category}))["count"], 3);
+        run(&mut s, "delete", json!({"ids": [a]}));
+        run(&mut s, "undo", json!({}));
+        assert_eq!(run(&mut s, "elements", json!({"category": c.category}))["count"], 3);
+    }
+}
+
+#[test]
+fn a_project_with_runs_of_the_mep_saves_and_opens_again() {
+    let mut s = Session::new();
+    for c in CASES {
+        run(&mut s, c.command, json!({"points": [[0, 0], [4000, 0]], "system": "S"}));
+    }
+    let path = std::env::temp_dir().join(format!("bimcraft-test-{}-mep.bimcraft", std::process::id()));
+    run(&mut s, "save", json!({"path": path}));
+    let mut t = Session::new();
+    run(&mut t, "open", json!({"path": path}));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(*t.model, *s.model);
+}
+
+// ---------- drawn ----------
+
+fn view() -> View {
+    View { scale: 0.1, cx: 3000.0, cy: 0.0, width: 1000, height: 800 }
+}
+
+fn of(d: &Drawing, id: u64) -> Vec<&Prim> {
+    d.prims.iter().zip(&d.owners).filter(|(_, o)| **o == Some(id)).map(|(p, _)| p).collect()
+}
+
+/// The box the closed lines and fills of `id` take in the drawing, in model mm.
+fn extent(d: &Drawing, id: u64) -> (P2, P2) {
+    let pts: Vec<P2> = of(d, id)
+        .into_iter()
+        .flat_map(|p| match p {
+            Prim::Line { pts, .. } => pts.clone(),
+            Prim::Fill { rings, .. } => rings.iter().flatten().copied().collect(),
+            Prim::Image { .. } => Vec::new(),
+        })
+        .map(|q| d.view.mm(q))
+        .collect();
+    let lo = pts.iter().fold(P2(f64::MAX, f64::MAX), |a, q| P2(a.0.min(q.0), a.1.min(q.1)));
+    let hi = pts.iter().fold(P2(f64::MIN, f64::MIN), |a, q| P2(a.0.max(q.0), a.1.max(q.1)));
+    let tenth = |x: f64| (x * 10.0).round() / 10.0;
+    (P2(tenth(lo.0), tenth(lo.1)), P2(tenth(hi.0), tenth(hi.1)))
+}
+
+#[test]
+fn a_plan_sees_a_run_through_its_cut_plane_overhead_and_under_the_level_and_the_sketch_draws_it_too() {
+    for c in CASES {
+        let mut s = Session::new();
+        // 1200 up: the cut plane passes through it. 2800 up: overhead, under the level above. Hanging with its top at the level.
+        let cut = made(&mut s, c.command, json!({"points": [[0, 0], [6000, 0]], "offset": 1200}));
+        let over = made(&mut s, c.command, json!({"points": [[0, 1000], [6000, 1000]], "offset": 2800}));
+        let high = made(&mut s, c.command, json!({"points": [[0, 4000], [6000, 4000]], "offset": 6000}));
+        let d = render::draw(&s.model, 1, view());
+        let half = element_json(&s.model, cut)["width"].as_f64().unwrap() / 2.0;
+        assert_eq!(extent(&d, cut), (P2(0.0, -half), P2(6000.0, half)), "{}", c.category);
+        assert!(of(&d, cut).iter().any(|p| matches!(p, Prim::Fill { color, .. } if *color == POCHE)), "{} is cut", c.category);
+        assert!(
+            !of(&d, over).is_empty() && of(&d, over).iter().all(|p| matches!(p, Prim::Line { dash: Some(_), .. })),
+            "{} overhead is dashed",
+            c.category
+        );
+        assert!(of(&d, high).is_empty(), "{} over the view range's top is not seen", c.category);
+        let sketch = render::sketch(&s.model, view(), 999, &s.model.elements[&cut]);
+        assert_eq!(extent(&sketch, 999), (P2(0.0, -half), P2(6000.0, half)), "{}", c.category);
+    }
+}
+
+#[test]
+fn a_section_cuts_a_run_across_its_section_a_round_one_in_a_ring() {
+    for c in CASES {
+        let mut s = Session::new();
+        let a = made(&mut s, c.command, json!({"points": [[0, 0], [6000, 0]], "offset": 2400}));
+        let section = made(&mut s, "section", json!({"start": [3000, -2000], "end": [3000, 2000]}));
+        let d = render::section(&s.model, section, View { scale: 0.1, cx: 2000.0, cy: 1500.0, width: 1000, height: 800 });
+        let w = element_json(&s.model, a)["width"].as_f64().unwrap();
+        let (lo, hi) = extent(&d, a);
+        // Across the line at 2000 along it, centred on 2400 up; a round one's ring is a polygon in its circle, to the tenth.
+        let (dx, dz) = if c.round { (w / 2.0, w / 2.0) } else { (w / 2.0, element_json(&s.model, a)["depth"].as_f64().unwrap() / 2.0) };
+        let tol = if c.round { 0.2 * w / 2.0 / 50.0 + 0.5 } else { 0.05 };
+        assert!(
+            (lo.0 - (2000.0 - dx)).abs() <= tol + 0.1
+                && (hi.0 - (2000.0 + dx)).abs() <= tol + 0.1
+                && (lo.1 - (2400.0 - dz)).abs() <= tol + 0.1
+                && (hi.1 - (2400.0 + dz)).abs() <= tol + 0.1,
+            "{}: {lo:?} {hi:?}",
+            c.category
+        );
+        assert!(of(&d, a).iter().any(|p| matches!(p, Prim::Fill { color, .. } if *color == POCHE)), "{} is cut in poché", c.category);
+    }
+}
+
+#[test]
+fn the_3d_view_has_a_solid_for_a_run() {
+    for c in CASES {
+        let mut s = Session::new();
+        let a = made(&mut s, c.command, json!({"points": [[0, 0], [6000, 0]], "offset": 2400}));
+        let solids = crate::view3d::solids(&s.model);
+        let mine: Vec<_> = solids.iter().filter(|x| x.owner() == a).collect();
+        let w = element_json(&s.model, a)["width"].as_f64().unwrap();
+        let depth = element_json(&s.model, a)["depth"].as_f64().unwrap();
+        let (lo, hi) = mine[0].heights();
+        assert!((lo - (2400.0 - depth / 2.0)).abs() < 1e-6 && (hi - (2400.0 + depth / 2.0)).abs() < 1e-6, "{}: {lo} {hi} {w}", c.category);
+        assert_eq!(matches!(mine.as_slice(), [crate::view3d::Solid::Mesh { round: true, .. }]), c.round, "{}", c.category);
+    }
+}
+
+#[test]
+fn points_picked_snap_to_the_ends_and_middle_of_a_run() {
+    use crate::snap::{Kind, Reach, Snaps, snap};
+    for c in CASES {
+        let mut s = Session::new();
+        made(&mut s, c.command, json!({"points": [[0, 0], [6000, 0]], "offset": 2400}));
+        let reach = Reach { point: 100.0, line: 60.0 };
+        let at = |p: P2| {
+            let f = snap(&s.model, 1, p, reach, &[], false, &Snaps::default());
+            (f.at, f.kind)
+        };
+        assert_eq!(at(P2(6040.0, 30.0)), (P2(6000.0, 0.0), Kind::Endpoint), "{}", c.category);
+        assert_eq!(at(P2(3040.0, 30.0)), (P2(3000.0, 0.0), Kind::Midpoint), "{}", c.category);
+    }
+}
+
+#[test]
+fn a_run_of_the_mep_has_a_schedule_by_system_hides_by_category_and_holds_project_parameters() {
+    for c in CASES {
+        let mut s = Session::new();
+        let a = made(&mut s, c.command, json!({"points": [[0, 0], [6000, 0]], "system": "Sistema A"}));
+        made(&mut s, c.command, json!({"points": [[0, 3000], [3000, 3000]], "system": "Sistema B"}));
+        let r = run(&mut s, "schedule", json!({"name": "S", "category": plural(c)}));
+        assert_eq!(r["columns"], columns(c), "{}", c.category);
+        assert_eq!(r["rows"].as_array().unwrap().len(), 2);
+        let r = run(
+            &mut s,
+            "schedule",
+            json!({"name": "S", "fields": ["System", "Count", {"name": "Length", "total": true}], "sort": ["System"], "grouped": true}),
+        );
+        assert_eq!(r["rows"], json!([["Sistema A", 1.0, 6000.0], ["Sistema B", 1.0, 3000.0]]), "{}", c.category);
+        assert_eq!(r["totals"], json!([null, null, 9000.0]));
+        // Hidden by category in the plan.
+        let shown = |s: &Session| render::draw(&s.model, 1, view()).owners.iter().filter(|o| **o == Some(a)).count();
+        assert!(shown(&s) > 0, "{}", c.category);
+        run(&mut s, "graphics", json!({"view": "Level 1", "hide": [c.category]}));
+        assert_eq!(shown(&s), 0, "{}", c.category);
+        // A project parameter for the category, and a value of it.
+        run(&mut s, "parameter", json!({"name": "Circuito", "kind": "text", "categories": [c.category]}));
+        run(&mut s, "modify", json!({"id": a, "params": {"Circuito": "C1"}}));
+        assert_eq!(element_json(&s.model, a)["params"]["Circuito"], "C1");
+    }
+}
+
+// ---------- IFC ----------
+
+fn ifc(s: &mut Session) -> String {
+    let path = std::env::temp_dir().join(format!("bimcraft-test-{}-{}.ifc", std::process::id(), s.model.uid));
+    run(s, "save", json!({"path": path}));
+    let text = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(path);
+    text
+}
+
+fn entities<'a>(file: &'a str, name: &str) -> Vec<&'a str> {
+    let head = format!("={name}(");
+    file.lines().filter(|l| l.contains(&head)).collect()
+}
+
+#[test]
+fn a_run_of_the_mep_is_written_as_its_ifc_class_swept_along_its_axis_in_a_system() {
+    for c in CASES {
+        let mut s = Session::new();
+        made(&mut s, c.command, json!({"points": [[0, 0], [3000, 0]], "offset": 0, "end_offset": 4000, "system": "Cold water"}));
+        made(&mut s, c.command, json!({"points": [[0, 1000], [3000, 1000]], "system": "Cold water"}));
+        made(&mut s, c.command, json!({"points": [[0, 2000], [3000, 2000]], "system": "Esgoto"}));
+        let file = ifc(&mut s);
+        let class = entities(&file, c.class);
+        assert_eq!(class.len(), 3, "{}: {file}", c.category);
+        assert!(class[0].contains(&format!("'{}'", c.default_type)) && class[0].ends_with(&format!("{});", c.predefined)), "{}", class[0]);
+        let profile = if c.round { "IFCCIRCLEPROFILEDEF" } else { "IFCRECTANGLEPROFILEDEF" };
+        assert_eq!(entities(&file, profile).len(), 3, "{}", c.category);
+        // The sloped one is aimed along (3, 0, 4) / 5 and is 5000 long.
+        assert!(
+            file.contains("IFCDIRECTION((0.6,0.,0.8))") && entities(&file, "IFCEXTRUDEDAREASOLID")[0].ends_with(",5000.);"),
+            "{}",
+            c.category
+        );
+        // A system is an IfcSystem the runs in it are assigned to: two systems, three runs.
+        let systems = entities(&file, "IFCSYSTEM");
+        assert_eq!(systems.len(), 2, "{}", c.category);
+        assert!(systems.iter().any(|l| l.contains("'Cold water'")) && systems.iter().any(|l| l.contains("'Esgoto'")));
+        let assigns = entities(&file, "IFCRELASSIGNSTOGROUP");
+        assert_eq!(assigns.len(), 2, "{}", c.category);
+        assert!(assigns.iter().any(|l| l.matches('#').count() == 4), "two runs and the system, in one relationship: {assigns:?}");
+        // Nothing in a system when it names none.
+        made(&mut s, c.command, json!({"points": [[0, 3000], [3000, 3000]]}));
+        assert_eq!(entities(&ifc(&mut s), "IFCSYSTEM").len(), 2);
+    }
+}
+
+// ---------- IFC, back in ----------
+
+/// What a run is and where, to the tenth of a millimetre, whatever its id: its section, its system, where its justify line is
+/// at each end, and which way it is drawn left to the file's say (a run comes back running east, or north, or up).
+fn described(m: &crate::model::Model, category: &str) -> Vec<String> {
+    let tenths = |v: &Value| format!("{:.1}", v.as_f64().unwrap_or(f64::NAN) + 0.0);
+    let mut out: Vec<String> = m
+        .elements
+        .iter()
+        .filter(|(_, e)| e.category() == category)
+        .map(|(id, _)| {
+            let e = element_json(m, *id);
+            let end = |k: &str, h: &Value| format!("{},{},{}", tenths(&e[k][0]), tenths(&e[k][1]), tenths(h));
+            let (z0, z1) = (e["offset"].clone(), if e["end_offset"].is_null() { e["offset"].clone() } else { e["end_offset"].clone() });
+            let mut ends = [end("start", &z0), end("end", &z1)];
+            ends.sort();
+            format!(
+                "{}x{} round={} length={} justify={} system={} ends={}->{}",
+                tenths(&e["width"]),
+                tenths(&e["depth"]),
+                e["round"],
+                tenths(&e["length"]),
+                e["justify"],
+                e["system"],
+                ends[0],
+                ends[1]
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn the_mep(s: &mut Session) {
+    for c in CASES {
+        let cmd = c.command;
+        run(s, cmd, json!({"points": [[0, 0], [6000, 0]], "offset": 2400, "system": "Cold water"}));
+        run(s, cmd, json!({"points": [[0, 3000], [4000, 3000]], "offset": 2400, "end_offset": 2340, "justify": "top", "system": "Sewer"}));
+        run(s, cmd, json!({"points": [[500, 5000], [3500, 4000]], "offset": 1000, "end_offset": 1900, "justify": "bottom"}));
+        // Drawn west, and running north-north-west, whose direction the body's points alone cannot sign.
+        run(s, cmd, json!({"points": [[6000, 6500], [0, 6500]], "offset": 2000, "system": "Cold water"}));
+        run(s, cmd, json!({"points": [[7500, 500], [6500, 4500]], "offset": 2000, "justify": "top"}));
+        // A riser: upright, its heights from end to end; and one drawn down.
+        run(s, cmd, json!({"points": [[8000, 1000], [8000, 1000]], "offset": 0, "end_offset": 3000, "system": "Sewer"}));
+        run(s, cmd, json!({"points": [[9000, 1000], [9000, 1000]], "offset": 3000, "end_offset": 500}));
+        run(s, "type", json!({"category": c.category, "name": "Mine 75", "width": 75, "depth": 75, "round": c.round, "material": "Metal"}));
+        run(s, cmd, json!({"points": [[0, 8000], [3000, 8000]], "type": "Mine 75"}));
+    }
+}
+
+#[test]
+fn the_runs_of_the_mep_come_back_from_ifc_with_their_justification_and_their_system() {
+    let mut s = Session::new();
+    the_mep(&mut s);
+    let path = std::env::temp_dir().join(format!("bimcraft-test-{}-mep-round.ifc", std::process::id()));
+    run(&mut s, "save", json!({"path": path}));
+    let mut t = Session::new();
+    let r = run(&mut t, "open", json!({"path": path}));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r["skipped"], json!([]), "{r}");
+    for c in CASES {
+        let (before, after) = (described(&s.model, c.category), described(&t.model, c.category));
+        assert_eq!(before.len(), 8, "{}", c.category);
+        assert_eq!(after, before, "{}", c.category);
+        // The type they were of came with them, in its material.
+        let mine = &t.model.types.runs[c.category]["Mine 75"];
+        assert_eq!((mine.width, mine.round, mine.material.as_str()), (75.0, c.round, "Metal"), "{}", c.category);
+    }
+    assert!(t.model.check().is_ok());
+}
+
+#[test]
+fn a_system_an_ifc_file_names_comes_back_on_its_runs_and_a_class_alone_says_the_category() {
+    for c in CASES.iter().filter(|c| c.alone) {
+        let mut s = Session::new();
+        made(&mut s, c.command, json!({"points": [[0, 0], [3000, 0]], "system": "Cold water"}));
+        let path = std::env::temp_dir().join(format!("bimcraft-test-{}-mep-system-{}.ifc", std::process::id(), c.category));
+        run(&mut s, "save", json!({"path": path}));
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Another tool's file: the run and its system, with BIMCraft's own property set taken out.
+        let other: String = text.lines().filter(|l| !l.contains("BIMCraft_Run")).collect::<Vec<_>>().join("\n");
+        std::fs::write(&path, other).unwrap();
+        let mut t = Session::new();
+        run(&mut t, "open", json!({"path": path}));
+        let _ = std::fs::remove_file(&path);
+        let id = t.model.elements.iter().find(|(_, e)| e.category() == c.category).map(|(id, _)| *id);
+        let e = element_json(&t.model, id.unwrap_or_else(|| panic!("a {} came back", c.category)));
+        assert_eq!((e["system"].as_str(), e["justify"].as_str()), (Some("Cold water"), Some("centre")), "{}", c.category);
+    }
+}
+
+// ---------- fixtures and devices ----------
+
+use crate::family::Category;
+use crate::language::Language;
+
+/// A starter family of a tab (in English), its category, its IFC class and predefined type, and where its forms are over its base
+/// (mm: the range its lowest point may be in, and its highest), so a fixture's drawing is checked against what it is.
+struct Fixture {
+    family: &'static str,
+    category: Category,
+    class: &'static str,
+    predefined: &'static str,
+    /// The object type a proxy carries, if the class has no home for it.
+    object_type: Option<&'static str>,
+    base: (f64, f64),
+    top: (f64, f64),
+}
+
+const FIXTURES: &[Fixture] = &[
+    Fixture {
+        family: "WC",
+        category: Category::Plumbing,
+        class: "IFCSANITARYTERMINAL",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (0.0, 0.0),
+        top: (700.0, 900.0),
+    },
+    Fixture {
+        family: "Washbasin",
+        category: Category::Plumbing,
+        class: "IFCSANITARYTERMINAL",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (0.0, 0.0),
+        top: (800.0, 900.0),
+    },
+    Fixture {
+        family: "Kitchen Sink",
+        category: Category::Plumbing,
+        class: "IFCSANITARYTERMINAL",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (0.0, 0.0),
+        top: (850.0, 1300.0),
+    },
+    Fixture {
+        family: "Shower",
+        category: Category::Plumbing,
+        class: "IFCSANITARYTERMINAL",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (0.0, 0.0),
+        top: (2000.0, 2200.0),
+    },
+    Fixture {
+        family: "Floor Drain",
+        category: Category::Drain,
+        class: "IFCWASTETERMINAL",
+        predefined: ".FLOORTRAP.",
+        object_type: None,
+        base: (-100.0, 0.0),
+        top: (0.0, 0.0),
+    },
+    Fixture {
+        family: "Elbow 90",
+        category: Category::PipeFitting,
+        class: "IFCPIPEFITTING",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (-100.0, -10.0),
+        top: (10.0, 100.0),
+    },
+    Fixture {
+        family: "Tee",
+        category: Category::PipeFitting,
+        class: "IFCPIPEFITTING",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (-100.0, -10.0),
+        top: (10.0, 100.0),
+    },
+    Fixture {
+        family: "Gate Valve",
+        category: Category::PipeAccessory,
+        class: "IFCVALVE",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (-100.0, -10.0),
+        top: (40.0, 300.0),
+    },
+];
+
+#[test]
+fn a_new_project_has_the_starter_fixtures_of_its_tabs_in_every_language_and_each_one_builds() {
+    for l in Language::ALL {
+        let m = crate::model::Model::new_in("x", l);
+        assert_eq!(m.check(), Ok(()), "{l:?}: every family builds, every type of it");
+        for f in FIXTURES {
+            let name = l.word(f.family);
+            let family = m.families.get(name).unwrap_or_else(|| panic!("{l:?}: no family `{name}`"));
+            assert_eq!(family.category, f.category, "{l:?} {name}");
+            assert!(!family.types.is_empty(), "{l:?} {name}");
+        }
+    }
+}
+
+#[test]
+fn a_starter_fixture_stands_as_it_is_and_every_type_of_it_has_a_body() {
+    let mut s = Session::new();
+    for f in FIXTURES {
+        let types: Vec<String> = s.model.families[f.family].types.keys().cloned().collect();
+        for ty in types {
+            let id = made(&mut s, "component", json!({"family": f.family, "type": ty, "at": [1000, 1000]}));
+            let Some(crate::model::Element::Component(c)) = s.model.elements.get(&id) else { panic!("{} is a component", f.family) };
+            let pieces = s.model.component_pieces(c);
+            assert!(!pieces.is_empty(), "{} {ty}", f.family);
+            let top = pieces.iter().map(|p| p.top).fold(f64::MIN, f64::max);
+            let bottom = pieces.iter().map(|p| p.bottom).fold(f64::MAX, f64::min);
+            assert!(top >= f.top.0 - 1e-6 && top <= f.top.1 + 1e-6, "{} {ty}: reaches {top}", f.family);
+            assert!(bottom >= f.base.0 - 1e-6 && bottom <= f.base.1 + 1e-6, "{} {ty}: starts at {bottom}", f.family);
+        }
+    }
+}
+
+#[test]
+fn a_category_of_family_is_written_as_its_ifc_class_and_read_back_as_the_same_category() {
+    for f in FIXTURES {
+        assert_eq!(f.category.ifc(), (f.class, f.predefined, f.object_type), "{}", f.family);
+        assert_eq!(Category::from_ifc(f.class, Some(f.predefined.trim_matches('.')), f.object_type), Some(f.category), "{}", f.family);
+    }
+    // A class BIMCraft makes no family of, or a proxy that says nothing, is the generic one's, or none.
+    assert_eq!(Category::from_ifc("IFCBEAM", None, None), None);
+    assert_eq!(Category::from_ifc("IFCBUILDINGELEMENTPROXY", None, None), Some(Category::Generic));
+    assert_eq!(Category::from_ifc("IFCFURNISHINGELEMENT", None, None), Some(Category::Furniture));
+}
+
+#[test]
+fn fixtures_are_ifc_products_of_their_class_and_come_back_in_a_family_of_their_category() {
+    let mut s = Session::new();
+    for f in FIXTURES {
+        let ty = s.model.families[f.family].types.keys().next().cloned().unwrap();
+        made(&mut s, "component", json!({"family": f.family, "type": ty, "at": [1000, 1000]}));
+    }
+    let file = ifc(&mut s);
+    for f in FIXTURES {
+        let written: Vec<&str> = entities(&file, f.class).into_iter().filter(|l| l.contains(&format!("'{}:", f.family))).collect();
+        assert_eq!(written.len(), 1, "{}: {file}", f.family);
+        assert!(written[0].ends_with(&format!("{});", f.predefined)), "{}: {}", f.family, written[0]);
+    }
+    let path = std::env::temp_dir().join(format!("bimcraft-test-{}-fixtures.ifc", std::process::id()));
+    run(&mut s, "save", json!({"path": path}));
+    let mut t = Session::new();
+    let r = run(&mut t, "open", json!({"path": path}));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(r["skipped"], json!([]), "{r}");
+    for f in FIXTURES {
+        let family = t.model.families.get(f.family).unwrap_or_else(|| panic!("{} came back", f.family));
+        assert_eq!(family.category, f.category, "{}", f.family);
+    }
+    assert_eq!(t.model.elements.values().filter(|e| e.category() == "component").count(), FIXTURES.len());
+}

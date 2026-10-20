@@ -1,0 +1,403 @@
+//! The Plumbing, Electrical, Lightning Protection and Data tabs, driven the way a user drives them. Their tools share the
+//! Structure tab's run and standing tools and one fixture tool, so the checks that every tab passes are in tables.
+
+use super::*;
+
+/// A tool from a tab: its contextual tab takes the ribbon, as in Revit.
+fn from_tab(h: &mut Harness<BimApp>, tab: &str, label: &str) {
+    press(h, tab);
+    press(h, label);
+}
+
+fn axis(h: &Harness<BimApp>, id: Id) -> Value {
+    field(h, id, "axis")
+}
+
+/// A run tab's tool: the tab, the button, the category it makes, its contextual tab, the type it starts with and how wide its
+/// section is.
+struct RunTool {
+    tab: &'static str,
+    button: &'static str,
+    category: &'static str,
+    /// The command that makes it.
+    command: &'static str,
+    context: &'static str,
+    letters: &'static str,
+    default_type: &'static str,
+    width: f64,
+    /// Another type the Type Selector lists, and the label the palette's section row has.
+    other: &'static str,
+}
+
+const RUN_TOOLS: &[RunTool] = &[RunTool {
+    tab: "Plumbing",
+    button: "Pipe",
+    category: "pipe",
+    command: "pipe",
+    context: "Modify | Place Pipe",
+    letters: "PI",
+    default_type: "PVC 50",
+    width: 50.0,
+    other: "Copper 22",
+}];
+
+/// What Visibility/Graphics lists the categories of these tabs as.
+const CATEGORY_NAMES: &[&str] = &["Pipes"];
+
+/// A fixture tab's tool: the tab, the button, its contextual tab, the shortcut, the families it places and one it doesn't.
+struct FixtureTool {
+    tab: &'static str,
+    button: &'static str,
+    key: &'static str,
+    context: &'static str,
+    letters: &'static str,
+    /// A "Family: Type" the Type Selector lists, and one it doesn't.
+    listed: &'static str,
+    not_listed: &'static str,
+    /// The family placed when none is picked.
+    first: &'static str,
+}
+
+const FIXTURE_TOOLS: &[FixtureTool] = &[
+    FixtureTool {
+        tab: "Plumbing",
+        button: "Plumbing Fixture",
+        key: "plumbing",
+        context: "Modify | Place Plumbing Fixture",
+        letters: "PX",
+        listed: "WC: 400 x 650",
+        not_listed: "Table: 1600 x 900",
+        first: "Bathtub",
+    },
+    FixtureTool {
+        tab: "Plumbing",
+        button: "Pipe Fitting",
+        key: "fitting",
+        context: "Modify | Place Pipe Fitting",
+        letters: "PF",
+        listed: "Tee: 50",
+        not_listed: "WC: 400 x 650",
+        first: "Elbow 90",
+    },
+    FixtureTool {
+        tab: "Plumbing",
+        button: "Pipe Accessory",
+        key: "accessory",
+        context: "Modify | Place Pipe Accessory",
+        letters: "PA",
+        listed: "Gate Valve: 25",
+        not_listed: "Tee: 50",
+        first: "Gate Valve",
+    },
+];
+
+#[test]
+fn each_discipline_tab_has_its_tools_and_none_of_the_architecture_tabs() {
+    for (tab, labels) in [("Plumbing", ["Pipe", "Plumbing Fixture", "Pipe Fitting", "Pipe Accessory"])] {
+        let mut h = app(BOX);
+        press(&mut h, tab);
+        for label in labels {
+            assert!(h.query_by_label(label).is_some(), "{tab}: {label}");
+        }
+        assert!(h.query_by_label("Door").is_none(), "{tab} has the Architecture tab's tools");
+    }
+}
+
+#[test]
+fn runs_of_the_mep_go_between_two_clicks_centred_on_their_height_and_chain_on() {
+    for c in RUN_TOOLS {
+        let mut h = app(BOX);
+        from_tab(&mut h, c.tab, c.button);
+        assert!(h.query_by_label(c.context).is_some(), "{}", c.context);
+        click(&mut h, P2(1000.0, 1000.0));
+        click(&mut h, P2(5000.0, 1000.0));
+        let made = ids(&h, c.category);
+        assert_eq!(made.len(), 1, "{}", c.button);
+        assert_eq!((field(&h, made[0], "type"), field(&h, made[0], "justify")), (json!(c.default_type), json!("centre")));
+        assert_eq!(axis(&h, made[0]), json!([[1000.0, 1000.0, 0.0], [5000.0, 1000.0, 0.0]]));
+        // Chain: the next starts where it ended; Esc drops it, then the tool.
+        assert_eq!(h.state().tool, Tool::Run(c.category, Some(P2(5000.0, 1000.0))));
+        click(&mut h, P2(5000.0, 4000.0));
+        assert_eq!(ids(&h, c.category).len(), 2);
+        key(&mut h, Key::Escape);
+        key(&mut h, Key::Escape);
+        assert_eq!(h.state().tool, Tool::Modify);
+        assert_eq!(h.state().session.history().last().copied(), Some(c.button));
+    }
+}
+
+#[test]
+fn the_options_of_a_run_tool_set_its_justification_height_and_type_and_are_its_own() {
+    for c in RUN_TOOLS {
+        let mut h = app(BOX);
+        from_tab(&mut h, c.tab, c.button);
+        press(&mut h, "Chain");
+        h.get_by_role_and_label(Role::ComboBox, "Justification:").click();
+        h.run();
+        press(&mut h, "Bottom");
+        type_into(&mut h, "Offset:", "2400");
+        press(&mut h, "Type Selector");
+        press(&mut h, c.other);
+        click(&mut h, P2(1000.0, 1000.0));
+        click(&mut h, P2(5000.0, 1000.0));
+        let made = ids(&h, c.category)[0];
+        assert_eq!((field(&h, made, "type"), field(&h, made, "justify")), (json!(c.other), json!("bottom")));
+        assert_eq!(field(&h, made, "offset"), json!(2400.0));
+        // What isn't a height is said, and makes nothing.
+        type_into(&mut h, "Offset:", "high");
+        click(&mut h, P2(1000.0, 2000.0));
+        click(&mut h, P2(5000.0, 2000.0));
+        assert!(h.state().status.error && h.state().status.text.contains("high"), "{:?}", h.state().status);
+        assert_eq!(ids(&h, c.category).len(), 1);
+        // The options a beam was left with are not this tool's: it starts centred, at the level.
+        key(&mut h, Key::Escape);
+        key(&mut h, Key::Escape);
+        press(&mut h, "Structure");
+        press(&mut h, "Beam");
+        assert_eq!(h.state().run_justify, bimcraft_core::model::Justify::Top);
+        key(&mut h, Key::Escape);
+        from_tab(&mut h, c.tab, c.button);
+        assert_eq!(h.state().run_justify, bimcraft_core::model::Justify::Bottom, "each tool keeps its own");
+    }
+}
+
+#[test]
+fn a_run_tool_shows_the_run_a_click_would_make_and_how_long_it_is() {
+    for c in RUN_TOOLS {
+        let mut h = app(BOX);
+        from_tab(&mut h, c.tab, c.button);
+        click(&mut h, P2(1000.0, 1000.0));
+        h.hover_at(h.state().screen(P2(5000.0, 1000.0)));
+        h.run();
+        let outlines = tests_previewed(&h);
+        let (a, b) = (h.state().screen(P2(0.0, 0.0)), h.state().screen(P2(1000.0, 0.0)));
+        let width = f64::from(b.x - a.x) / 1000.0 * c.width;
+        assert!(
+            outlines.iter().any(|o| {
+                let (lo, hi) = o.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+                ((hi - lo) as f64 - width).abs() < 1.5 && o.len() == 4
+            }),
+            "{}: {outlines:?}",
+            c.button
+        );
+        assert!(painted_text(&h).contains(&"4000".to_string()), "{:?}", painted_text(&h));
+        assert!(ids(&h, c.category).is_empty(), "a sketch isn't an element");
+    }
+}
+
+/// The accent-coloured closed outlines the window drew, as the Structure tests find a preview.
+fn tests_previewed(h: &Harness<BimApp>) -> Vec<Vec<Pos2>> {
+    fn walk(s: &egui::Shape, out: &mut Vec<Vec<Pos2>>) {
+        match s {
+            egui::Shape::Path(p) if p.closed && p.stroke.color == egui::epaint::ColorMode::Solid(crate::style::pal().accent) => {
+                out.push(p.points.clone())
+            }
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    out
+}
+
+#[test]
+fn a_fixture_tool_places_a_family_of_its_kind_where_clicked_and_lists_only_those() {
+    for c in FIXTURE_TOOLS {
+        let mut h = app(BOX);
+        from_tab(&mut h, c.tab, c.button);
+        assert!(h.query_by_label(c.context).is_some(), "{}", c.context);
+        assert_eq!(h.state().tool, Tool::Fixture(c.key));
+        // With none picked, the first of its kind goes where clicked.
+        click(&mut h, P2(2000.0, 2000.0));
+        let placed = ids(&h, "component");
+        assert_eq!((placed.len(), field(&h, placed[0], "family")), (1, json!(c.first)), "{}", c.button);
+        // The Type Selector lists the families of its kind, and no others; the one picked is the one placed, turned by Space.
+        press(&mut h, "Type Selector");
+        assert!(h.query_by_label(c.listed).is_some(), "{} lists {}", c.button, c.listed);
+        assert!(h.query_by_label(c.not_listed).is_none(), "{} lists {}", c.button, c.not_listed);
+        press(&mut h, c.listed);
+        key(&mut h, Key::Space);
+        click(&mut h, P2(4000.0, 2000.0));
+        let (family, ty) = c.listed.split_once(": ").unwrap_or_default();
+        let second = ids(&h, "component")[1];
+        assert_eq!((field(&h, second, "family"), field(&h, second, "type")), (json!(family), json!(ty)), "{}", c.button);
+        assert_eq!(field(&h, second, "angle"), json!(90.0), "{}", c.button);
+        key(&mut h, Key::Escape);
+        assert_eq!(h.state().tool, Tool::Modify);
+    }
+}
+
+#[test]
+fn the_fixture_tool_shows_the_fixture_a_click_would_place() {
+    let mut h = app(BOX);
+    from_tab(&mut h, "Plumbing", "Plumbing Fixture");
+    h.hover_at(h.state().screen(P2(3000.0, 3000.0)));
+    h.run();
+    assert!(!tests_previewed(&h).is_empty(), "the bathtub it would place is drawn in the accent");
+    assert!(ids(&h, "component").is_empty());
+}
+
+#[test]
+fn revits_shortcuts_pick_the_tools_of_the_discipline_tabs() {
+    let mut h = app(BOX);
+    for c in RUN_TOOLS {
+        shortcut(&mut h, c.letters);
+        assert_eq!(h.state().tool, Tool::Run(c.category, None), "{}", c.letters);
+        key(&mut h, Key::Escape);
+    }
+    for c in FIXTURE_TOOLS {
+        shortcut(&mut h, c.letters);
+        assert_eq!(h.state().tool, Tool::Fixture(c.key), "{}", c.letters);
+        key(&mut h, Key::Escape);
+    }
+    let listed: Vec<(&str, &str)> = crate::shortcuts();
+    for (letters, name) in [("PI", "Pipe"), ("PX", "Plumbing Fixture"), ("PF", "Pipe Fitting"), ("PA", "Pipe Accessory")] {
+        assert!(listed.contains(&(letters, name)), "{letters}");
+    }
+}
+
+#[test]
+fn a_selected_run_of_the_mep_has_its_palette_and_edit_type_changes_its_round_section_and_material() {
+    for c in RUN_TOOLS {
+        let mut h = app(&format!("{BOX}\n{} {{\"points\": [[1000, 1000], [5000, 1000]], \"offset\": 2400}}", c.command));
+        let a = ids(&h, c.category)[0];
+        click(&mut h, P2(3000.0, 1000.0));
+        assert_eq!(h.state().selection, [a]);
+        for row in ["Reference Level", "Start Level Offset", "End Level Offset", "Z Justification", "System", "Length"] {
+            assert!(h.query_by_label(row).is_some(), "{row}");
+        }
+        type_into(&mut h, "System", "Esgoto");
+        key(&mut h, Key::Enter);
+        assert_eq!(field(&h, a, "system"), json!("Esgoto"));
+        // Edit Type: a round type says its diameter, not a depth, and its roundness and material can change.
+        press(&mut h, "Edit Type");
+        assert!(h.query_by_label("Diameter").is_some() && h.query_by_label("Depth").is_none());
+        type_into(&mut h, "Diameter", "63");
+        h.get_by_role_and_label(Role::ComboBox, "Material").click();
+        h.run();
+        press(&mut h, "Copper");
+        press(&mut h, "OK");
+        let t = h.state().session.model.types.runs[c.category][c.default_type].clone();
+        assert_eq!((t.width, t.depth, t.round, t.material.as_str()), (63.0, 63.0, true, "Copper"), "{}", c.category);
+        assert_eq!(field(&h, a, "width"), json!(63.0));
+        // Not round, it is a rectangle with a depth of its own.
+        press(&mut h, "Edit Type");
+        press(&mut h, "Round");
+        type_into(&mut h, "Depth", "40");
+        press(&mut h, "OK");
+        let t = h.state().session.model.types.runs[c.category][c.default_type].clone();
+        assert_eq!((t.width, t.depth, t.round), (63.0, 40.0, false), "{}", c.category);
+    }
+}
+
+#[test]
+fn a_duplicated_run_type_can_change_its_roundness_and_material() {
+    let mut h = app("pipe {\"points\": [[0, 0], [4000, 0]], \"offset\": 2400}");
+    let a = ids(&h, "pipe")[0];
+    click(&mut h, P2(2000.0, 0.0));
+    press(&mut h, "Edit Type");
+    press(&mut h, "Duplicate…");
+    type_into(&mut h, "New type", "Tray 100 x 50");
+    press(&mut h, "Create");
+    press(&mut h, "Round");
+    type_into(&mut h, "Width", "100");
+    type_into(&mut h, "Depth", "50");
+    h.get_by_role_and_label(Role::ComboBox, "Material").click();
+    h.run();
+    press(&mut h, "Copper");
+    press(&mut h, "OK");
+    let made = h.state().session.model.types.runs["pipe"]["Tray 100 x 50"].clone();
+    assert_eq!((made.width, made.depth, made.round, made.material.as_str()), (100.0, 50.0, false, "Copper"));
+    assert_eq!(field(&h, a, "type"), json!("Tray 100 x 50"));
+    // And the type it copied is as it was.
+    let was = h.state().session.model.types.runs["pipe"]["PVC 50"].clone();
+    assert_eq!((was.width, was.round, was.material.as_str()), (50.0, true, "PVC"));
+}
+
+#[test]
+fn create_similar_and_the_view_lists_know_the_categories_of_the_discipline_tabs() {
+    let mut h = app("pipe {\"points\": [[0, 0], [4000, 0]], \"type\": \"Copper 22\"}");
+    let a = ids(&h, "pipe")[0];
+    h.state_mut().selection = vec![a];
+    shortcut(&mut h, "CS");
+    assert_eq!(h.state().tool, Tool::Run("pipe", None));
+    click(&mut h, P2(100.0, 100.0));
+    click(&mut h, P2(2100.0, 100.0));
+    assert_eq!(field(&h, *ids(&h, "pipe").last().unwrap(), "type"), json!("Copper 22"), "the type of what it copies");
+    key(&mut h, Key::Escape);
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "VV");
+    for name in CATEGORY_NAMES {
+        assert!(h.query_by_label(name).is_some(), "{name}");
+    }
+}
+
+#[test]
+fn the_new_schedule_dialog_lists_the_categories_of_the_discipline_tabs_and_names_a_schedule_after_one() {
+    let mut h = app("pipe {\"points\": [[0, 0], [4000, 0]], \"system\": \"Esgoto\"}");
+    press(&mut h, "View");
+    press(&mut h, "Schedules");
+    press(&mut h, "Schedule/Quantities…");
+    // The list scrolls: its entry is there for a screen reader if not under the pointer.
+    h.get_by_role_and_label(Role::Button, "Pipes").click_accesskit();
+    h.run();
+    let named = {
+        use egui_kittest::kittest::NodeT;
+        h.get_by_role_and_label(Role::TextInput, "Name:").accesskit_node().value()
+    };
+    assert_eq!(named.as_deref(), Some("Pipe Schedule"));
+    press(&mut h, "OK");
+    assert_eq!(ids(&h, "schedule").len(), 1);
+}
+
+#[test]
+fn the_plumbing_tab_speaks_portuguese_and_spanish_and_leaves_no_english() {
+    use bimcraft_core::language::Language;
+    use egui_kittest::kittest::{By, NodeT};
+    let english = |h: &Harness<BimApp>, l: Language| -> Vec<String> {
+        h.query_all(By::new())
+            .filter_map(|n| n.accesskit_node().label().or_else(|| n.accesskit_node().value()))
+            .filter(|s| crate::lang::translated(l, s).is_some_and(|x| x != s))
+            .collect()
+    };
+    let mut h = app(&format!(
+        "{BOX}\npipe {{\"points\": [[1000, 1000], [5000, 1000]], \"offset\": 2400}}\ncomponent {{\"family\": \"WC\", \"at\": [3000, 3000]}}"
+    ));
+    assert!(english(&h, Language::Spanish).contains(&"Plumbing".to_string()), "the probe finds what it looks for");
+    let expected = [
+        (Language::Portuguese, "Hidrossanitário", ["Tubulação", "Peça sanitária", "Conexão de tubulação", "Acessório de tubulação"]),
+        (Language::Spanish, "Fontanería", ["Tubería", "Aparato sanitario", "Conexión de tubería", "Accesorio de tubería"]),
+    ];
+    for (l, tab, labels) in expected {
+        h.state_mut().lang = l;
+        h.run();
+        press(&mut h, tab);
+        let mut missed = english(&h, l);
+        for label in labels {
+            assert!(h.query_by_label(label).is_some(), "{label}");
+            press(&mut h, label);
+            missed.extend(english(&h, l));
+            click(&mut h, P2(100.0, 100.0));
+            missed.extend(english(&h, l));
+            key(&mut h, Key::Escape);
+            key(&mut h, Key::Escape);
+        }
+        click(&mut h, P2(3000.0, 1000.0));
+        missed.extend(english(&h, l));
+        press(&mut h, crate::lang::translated(l, "Edit Type").unwrap_or("Edit Type"));
+        missed.extend(english(&h, l));
+        press(&mut h, crate::lang::translated(l, "Cancel").unwrap_or("Cancel"));
+        key(&mut h, Key::Escape);
+        missed.sort();
+        missed.dedup();
+        assert!(missed.is_empty(), "{l:?}: {missed:?}");
+    }
+    h.state_mut().lang = Language::English;
+    h.run();
+    use crate::lang::category;
+    assert_eq!([category("pipe", false), category("pipe", true)], ["Pipe", "Pipes"]);
+    h.state_mut().lang = Language::Portuguese;
+    h.run();
+    assert_eq!([category("pipe", false), category("pipe", true)], ["Tubulação", "Tubulações"]);
+}

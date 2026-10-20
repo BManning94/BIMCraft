@@ -632,6 +632,27 @@ pub enum Justify {
     Bottom,
 }
 
+impl Justify {
+    /// Its name, as a project file and IFC write it.
+    pub fn word(self) -> &'static str {
+        match self {
+            Justify::Top => "top",
+            Justify::Centre => "centre",
+            Justify::Bottom => "bottom",
+        }
+    }
+
+    /// The one `word` names, or `center`.
+    pub fn parse(s: &str) -> Option<Justify> {
+        match s {
+            "top" => Some(Justify::Top),
+            "centre" | "center" => Some(Justify::Centre),
+            "bottom" => Some(Justify::Bottom),
+            _ => None,
+        }
+    }
+}
+
 /// A straight run from `start` to `end` in plan, of a type (a section `width` across and `depth` deep, or round): a beam,
 /// and what the other disciplines draw with it, a pipe, a conduit, a cable tray. Its `offset` mm over its `level` is the
 /// height of its `justify` line at the start, and `end_offset` at the end (level when none): a sloped run has both, a
@@ -934,6 +955,15 @@ pub struct Viewport {
     pub scale: f64,
 }
 
+/// A pattern for the element of any run category, its run bound as `$r`: a tab adds its categories here, and every place
+/// that treats runs alike takes them.
+macro_rules! run_arm {
+    ($r:pat) => {
+        Element::Beam($r) | Element::StripFooting($r) | Element::Pipe($r)
+    };
+}
+pub(crate) use run_arm;
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "category", rename_all = "lowercase")]
 pub enum Element {
@@ -960,6 +990,7 @@ pub enum Element {
     Footing(Column),
     Beam(Run),
     StripFooting(Run),
+    Pipe(Run),
     Component(Component),
     Stair(Stair),
     Ramp(Ramp),
@@ -986,8 +1017,7 @@ impl Element {
             | Element::Column(Column { params, .. })
             | Element::StructuralColumn(Column { params, .. })
             | Element::Footing(Column { params, .. })
-            | Element::Beam(Run { params, .. })
-            | Element::StripFooting(Run { params, .. })
+            | run_arm!(Run { params, .. })
             | Element::Component(Component { params, .. })
             | Element::Stair(Stair { params, .. })
             | Element::Ramp(Ramp { params, .. })
@@ -1010,8 +1040,7 @@ impl Element {
             | Element::Column(Column { params, .. })
             | Element::StructuralColumn(Column { params, .. })
             | Element::Footing(Column { params, .. })
-            | Element::Beam(Run { params, .. })
-            | Element::StripFooting(Run { params, .. })
+            | run_arm!(Run { params, .. })
             | Element::Component(Component { params, .. })
             | Element::Stair(Stair { params, .. })
             | Element::Ramp(Ramp { params, .. })
@@ -1032,7 +1061,7 @@ impl Element {
     /// The run a beam or a strip footing is, whatever its category.
     pub fn run(&self) -> Option<&Run> {
         match self {
-            Element::Beam(r) | Element::StripFooting(r) => Some(r),
+            run_arm!(r) => Some(r),
             _ => None,
         }
     }
@@ -1042,6 +1071,7 @@ impl Element {
         match category {
             "beam" => Some(Element::Beam(r)),
             "stripfooting" => Some(Element::StripFooting(r)),
+            "pipe" => Some(Element::Pipe(r)),
             _ => None,
         }
     }
@@ -1049,7 +1079,7 @@ impl Element {
     /// The run to change.
     pub fn run_mut(&mut self) -> Option<&mut Run> {
         match self {
-            Element::Beam(r) | Element::StripFooting(r) => Some(r),
+            run_arm!(r) => Some(r),
             _ => None,
         }
     }
@@ -1115,6 +1145,7 @@ impl Element {
             Element::Footing(_) => "footing",
             Element::Beam(_) => "beam",
             Element::StripFooting(_) => "stripfooting",
+            Element::Pipe(_) => "pipe",
             Element::Component(_) => "component",
             Element::Stair(_) => "stair",
             Element::Ramp(_) => "ramp",
@@ -1189,7 +1220,7 @@ pub struct RunType {
 }
 
 /// The categories whose elements are runs, as `Element::run` returns them.
-pub const RUN_CATEGORIES: [&str; 2] = ["beam", "stripfooting"];
+pub const RUN_CATEGORIES: [&str; 3] = ["beam", "stripfooting", "pipe"];
 
 /// A roof type: how thick its roofs are across their slope and, a compound one, its layers from
 /// the top down.
@@ -1260,7 +1291,7 @@ pub struct ProjectParameter {
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
 /// The categories project parameters are for.
-pub const PARAMETER_CATEGORIES: [&str; 17] = [
+pub const PARAMETER_CATEGORIES: [&str; 18] = [
     "wall",
     "floor",
     "ceiling",
@@ -1278,6 +1309,7 @@ pub const PARAMETER_CATEGORIES: [&str; 17] = [
     "footing",
     "beam",
     "stripfooting",
+    "pipe",
 ];
 
 impl ProjectParameter {
@@ -1383,6 +1415,8 @@ impl Model {
             ("Porcelain", [244, 244, 240], Pattern::None, Pattern::None, None),
             ("Glass", [166, 200, 228], Pattern::None, Pattern::None, None),
             ("Metal", [150, 152, 158], Pattern::Solid, Pattern::None, Some(Kind::Metal)),
+            ("PVC", [226, 226, 214], Pattern::Solid, Pattern::None, None),
+            ("Copper", [184, 115, 51], Pattern::Solid, Pattern::None, Some(Kind::Metal)),
         ] {
             let texture = texture.map(Texture::new);
             m.materials.insert(language.word(name).into(), Material { color, cut, surface, texture });
@@ -1428,6 +1462,14 @@ impl Model {
         ];
         m.types.runs.insert("beam".into(), beams.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         m.types.runs.insert("stripfooting".into(), BTreeMap::from([("Strip 600 x 300".to_string(), run(600.0, 300.0, false, "Concrete"))]));
+        // The plumbing's: PVC for cold water and drains (outside diameters, mm) and copper for hot water.
+        let pipes = [
+            ("PVC 25", run(25.0, 25.0, true, "PVC")),
+            ("PVC 50", run(50.0, 50.0, true, "PVC")),
+            ("PVC 110", run(110.0, 110.0, true, "PVC")),
+            ("Copper 22", run(22.0, 22.0, true, "Copper")),
+        ];
+        m.types.runs.insert("pipe".into(), pipes.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0, layers: Vec::new() });
         m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0, layers: Vec::new() });
         m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0, layers: Vec::new() });
@@ -1468,6 +1510,7 @@ impl Model {
     pub fn adopt_materials(&mut self) {
         let mut named: Vec<String> = self.layered_types().flat_map(|(.., l)| l.iter().map(|l| l.material.clone())).collect();
         named.extend(self.families.values().flat_map(|f| f.materials()).map(String::from));
+        named.extend(self.types.runs.values().flat_map(|t| t.values().map(|t| t.material.clone())));
         named.extend(self.elements.values().flat_map(|e| self.component_materials(e)).map(String::from));
         for n in named.into_iter().filter(|n| !n.is_empty()) {
             self.materials.entry(n).or_default();
@@ -1727,6 +1770,7 @@ impl Model {
             "footing" => "Footing 1200 x 1200",
             "beam" => "Beam 200 x 500",
             "stripfooting" => "Strip 600 x 300",
+            "pipe" => "PVC 50",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);
@@ -1863,7 +1907,7 @@ impl Model {
             Element::Room(r) => Some(r.level),
             Element::Dimension(d) => Some(d.level),
             Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) => Some(c.level),
-            Element::Beam(r) | Element::StripFooting(r) => Some(r.level),
+            run_arm!(r) => Some(r.level),
             Element::Component(c) => Some(c.level),
             Element::Stair(st) => Some(st.level),
             Element::Ramp(r) => Some(r.level),
@@ -3006,7 +3050,7 @@ impl Model {
                         return Err(format!("{who}: its top must be above its base"));
                     }
                 }
-                Element::Beam(r) | Element::StripFooting(r) => {
+                run_arm!(r) => {
                     let (category, none) = (e.category(), BTreeMap::new());
                     let t = known(&who, &r.type_name, self.types.runs.get(category).unwrap_or(&none))?;
                     level_ok(r.level)?;

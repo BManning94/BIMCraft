@@ -16,6 +16,32 @@ pub fn may_stand(category: &str) -> bool {
     !matches!(category, "beam" | "stripfooting")
 }
 
+/// How each run category is written in IFC: its class and predefined type (all of them take a product's nine attributes). Import
+/// reads the same table back, a class and a type to the first category that has them.
+pub const IFC: &[(&str, &str, &str)] =
+    &[("beam", "IFCBEAM", ".BEAM."), ("stripfooting", "IFCFOOTING", ".STRIP_FOOTING."), ("pipe", "IFCPIPESEGMENT", ".RIGIDSEGMENT.")];
+
+/// The IFC class and predefined type a run of `category` is written as.
+pub fn ifc(category: &str) -> Option<(&'static str, &'static str)> {
+    IFC.iter().find(|(c, ..)| *c == category).map(|(_, class, kind)| (*class, *kind))
+}
+
+/// The category of a run an IFC product is, from its `class`, its `kind` (the predefined type) and, when a file of BIMCraft's says
+/// so, the `declared` category: that one if the class has it, else the one whose type it is, else the class's first.
+pub fn from_ifc(class: &str, kind: Option<&str>, declared: Option<&str>) -> Option<&'static str> {
+    let class = if class == "IFCBEAMSTANDARDCASE" { "IFCBEAM" } else { class };
+    let rows = || IFC.iter().filter(move |(_, c, _)| *c == class);
+    let by_kind = |k: &str| rows().find(|(_, _, t)| t.trim_matches('.') == k);
+    let by_name = |d: &str| rows().find(|(c, ..)| *c == d);
+    declared.and_then(by_name).or_else(|| kind.and_then(by_kind)).or_else(|| rows().next()).map(|(c, ..)| *c)
+}
+
+/// The line of its section a run of `category` has its heights at unless told: the top of a beam or a footing, as engineers
+/// think of them (top of beam at the top of slab), the middle of anything that carries something (a pipe, a cable).
+pub fn default_justify(category: &str) -> Justify {
+    if may_stand(category) { Justify::Centre } else { Justify::Top }
+}
+
 /// Why `g`, a run of `category`, isn't one the model takes, if it isn't.
 pub fn check(who: &str, category: &str, g: &Geom) -> Result<(), String> {
     if g.length() <= TOL {
@@ -77,7 +103,7 @@ impl Geom {
     }
 
     /// Half the section's depth, taken straight up: more than half of it, square to the line, where the line slopes.
-    fn half(&self) -> f64 {
+    pub fn half(&self) -> f64 {
         let plan = self.plan_length();
         if plan > TOL { self.depth / 2.0 * self.length() / plan } else { 0.0 }
     }

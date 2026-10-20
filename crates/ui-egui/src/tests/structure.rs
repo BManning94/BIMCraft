@@ -388,7 +388,8 @@ fn a_duplicated_beam_type_keeps_its_shape_and_its_material() {
     press(&mut h, "Duplicate…");
     type_into(&mut h, "New type", "Steel Tube 200");
     press(&mut h, "Create");
-    type_into(&mut h, "Width", "200");
+    // A round type has a diameter, not a width and a depth.
+    type_into(&mut h, "Diameter", "200");
     press(&mut h, "OK");
     let made = h.state().session.model.types.runs["beam"]["Steel Tube 200"].clone();
     assert_eq!((made.width, made.depth, made.round, made.material.as_str()), (200.0, 200.0, true, "Metal"));

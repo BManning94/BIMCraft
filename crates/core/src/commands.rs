@@ -207,6 +207,17 @@ pub static ALL: &[Command] = &[
         strip_footing,
     ),
     edit(
+        "pipe",
+        "Pipe",
+        &["PI"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} a pipe for each \
+         segment of the points: its section the type's (category pipe: round, `width` the outside diameter), its `justify` line \
+         (centre by default) `offset` mm over the level at its start (0: at the level) and `end_offset` at its end (the same: level), \
+         for a single segment, so a drain falls and a riser rises; the same point twice and two heights make one stand upright. \
+         `system` names the system it belongs to (\"Água fria\", \"Esgoto\")",
+        pipe,
+    ),
+    edit(
         "stair",
         "Stair",
         &[],
@@ -1028,7 +1039,7 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             }
         }
         // Its section, how long it runs along its axis, and the heights of its centre line's ends.
-        Element::Beam(_) | Element::StripFooting(_) => {
+        crate::model::run_arm!(_) => {
             if let (Some(t), Some(g)) = (m.run_type(e), m.run_geom(e)) {
                 extra.insert("width".into(), json!(t.width));
                 extra.insert("depth".into(), json!(t.depth));
@@ -2935,6 +2946,10 @@ fn strip_footing(s: &mut Session, p: &Value) -> R {
     chain(s, p, "stripfooting")
 }
 
+fn pipe(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "pipe")
+}
+
 fn chain(s: &mut Session, p: &Value, category: &str) -> R {
     let made = runs_of(&s.model, p, category)?;
     let m = s.model_mut();
@@ -2943,11 +2958,12 @@ fn chain(s: &mut Session, p: &Value, category: &str) -> R {
 }
 
 /// The command that makes elements of `category`.
-fn command_of(category: &str) -> &'static str {
+pub fn command_of(category: &str) -> &'static str {
     match category {
         "structuralcolumn" => "structural_column",
         "stripfooting" => "strip_footing",
         "beam" => "beam",
+        "pipe" => "pipe",
         "footing" => "footing",
         _ => "column",
     }
@@ -2974,7 +2990,7 @@ pub fn runs_of(m: &Model, p: &Value, category: &str) -> Result<Vec<Element>, Str
         return Err(bad(c, "`end_offset` is the height of one run's end: give 2 points"));
     }
     let justify = match string(c, p, "justify")? {
-        None => crate::model::Justify::Top,
+        None => crate::runs::default_justify(category),
         Some(n) => serde_json::from_value(Value::String(n.to_lowercase()))
             .map_err(|_| bad(c, format!("`justify` is top, centre or bottom, not `{n}`")))?,
     };
@@ -4464,7 +4480,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         Element::Viewport(v) => v.at = f(v.at),
         Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
         // A run keeps its heights at its ends; its section is the same either way round.
-        Element::Beam(r) | Element::StripFooting(r) => (r.start, r.end) = (f(r.start), f(r.end)),
+        crate::model::run_arm!(r) => (r.start, r.end) = (f(r.start), f(r.end)),
         // A mirror image is the family's, flipped.
         Element::Component(cp) => {
             (cp.at, cp.angle) = turned(f, cp.at, cp.angle);

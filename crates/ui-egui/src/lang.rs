@@ -83,6 +83,7 @@ pub fn category(category: &str, several: bool) -> String {
         "stripfooting" => {
             (["Strip Footing", "Sapata corrida", "Zapata corrida"], ["Strip Footings", "Sapatas corridas", "Zapatas corridas"])
         }
+        "pipe" => (["Pipe", "Tubulação", "Tubería"], ["Pipes", "Tubulações", "Tuberías"]),
         "text" => (["Text Note", "Nota de texto", "Nota de texto"], ["Text Notes", "Notas de texto", "Notas de texto"]),
         "spot" => (["Spot Elevation", "Elevação de ponto", "Cota de nivel"], ["Spot Elevations", "Elevações de ponto", "Cotas de nivel"]),
         "schedule" => (["Schedule", "Tabela", "Tabla"], ["Schedules", "Tabelas", "Tablas"]),
@@ -930,6 +931,38 @@ const WORDS: &[[&str; 3]] = &[
     ["Place Wall Footing", "Inserir sapata corrida", "Colocar zapata corrida"],
     ["Place Structural Column", "Inserir pilar estrutural", "Colocar columna estructural"],
     ["Place Isolated Footing", "Inserir sapata isolada", "Colocar zapata aislada"],
+    // The Plumbing tab (NBR 5626 for cold water, NBR 8160 for drains).
+    ["Plumbing & Piping", "Tubulação e peças", "Fontanería y tuberías"],
+    ["Pipe", "Tubulação", "Tubería"],
+    ["Plumbing Fixture", "Peça sanitária", "Aparato sanitario"],
+    ["Pipe Fitting", "Conexão de tubulação", "Conexión de tubería"],
+    ["Pipe Accessory", "Acessório de tubulação", "Accesorio de tubería"],
+    ["Place Pipe", "Inserir tubulação", "Colocar tubería"],
+    ["Place Plumbing Fixture", "Inserir peça sanitária", "Colocar aparato sanitario"],
+    ["Place Pipe Fitting", "Inserir conexão", "Colocar conexión de tubería"],
+    ["Place Pipe Accessory", "Inserir acessório", "Colocar accesorio de tubería"],
+    [
+        "Pipe (PI): click its start and its end; a chain of clicks makes a pipe for each step",
+        "Tubulação (PI): clique no início e no fim; uma sequência de cliques faz uma tubulação para cada trecho",
+        "Tubería (PI): haz clic en el inicio y el final; una cadena de clics hace una tubería por tramo",
+    ],
+    [
+        "Plumbing Fixture (PX): a basin, a WC, a sink, a shower or a drain, where you click; Space turns it",
+        "Peça sanitária (PX): lavatório, vaso, pia, chuveiro ou ralo, onde você clicar; Espaço gira",
+        "Aparato sanitario (PX): lavabo, inodoro, fregadero, ducha o sumidero, donde hagas clic; Espacio lo gira",
+    ],
+    [
+        "Pipe Fitting (PF): an elbow or a tee, where you click on a pipe's height; Space turns it",
+        "Conexão de tubulação (PF): joelho ou tê, onde você clicar, na altura da tubulação; Espaço gira",
+        "Conexión de tubería (PF): codo o te, donde hagas clic, a la altura de la tubería; Espacio la gira",
+    ],
+    [
+        "Pipe Accessory (PA): a valve, where you click on a pipe's height; Space turns it",
+        "Acessório de tubulação (PA): um registro, onde você clicar, na altura da tubulação; Espaço gira",
+        "Accesorio de tubería (PA): una válvula, donde hagas clic, a la altura de la tubería; Espacio lo gira",
+    ],
+    ["Round", "Redonda", "Redonda"],
+    ["Diameter", "Diâmetro", "Diámetro"],
     ["Justification:", "Alinhamento:", "Alineación:"],
     ["Top Offset:", "Deslocamento do topo:", "Desfase superior:"],
     ["Thickness:", "Espessura:", "Espesor:"],
@@ -1717,7 +1750,8 @@ const WORDS: &[[&str; 3]] = &[
     ["Symbols", "Símbolos", "Símbolos"],
     ["Furniture", "Mobiliário", "Mobiliario"],
     ["Casework", "Marcenaria", "Carpintería"],
-    ["Plumbing", "Hidrossanitário", "Sanitarios"],
+    ["Plumbing", "Hidrossanitário", "Fontanería"],
+    ["Plumbing Fixtures", "Peças sanitárias", "Sanitarios"],
     ["Lighting", "Iluminação", "Iluminación"],
     ["Generic", "Genérico", "Genérico"],
     ["Parameter Name", "Nome do parâmetro", "Nombre del parámetro"],
