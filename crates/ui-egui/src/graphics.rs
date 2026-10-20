@@ -202,7 +202,7 @@ impl BimApp {
     }
 
     /// The selected elements views draw.
-    fn drawn_selection(&self, m: &Model) -> Vec<Id> {
+    pub(crate) fn drawn_selection(&self, m: &Model) -> Vec<Id> {
         self.selection
             .iter()
             .copied()

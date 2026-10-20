@@ -61,7 +61,8 @@ cargo test --workspace
 - 3D: `bimcraft-cli run --sample --cmd 'render {"view": "{3D}", "path": "/tmp/3d.png"}'` (`azimuth` and `elevation`
   turn it). After touching `view3d.rs`, look at it. Sections and elevations render by name the same way: `"view": "Section 1"`.
 - Scale, detail level and style: `bimcraft-cli run --sample --cmd 'scale {"view": "Level 1", "scale": 100}' --cmd 'render {"view": "Level 1",
-  "path": "/tmp/plan.png"}'` (annotation follows the scale at that picture's zoom, so the one that fits is not the one a sheet prints),
+  "path": "/tmp/plan.png"}'` (annotation follows the scale at that picture's zoom, so the one that fits is not the one a sheet prints; a fit leaves room for it, `fit_by`,
+  which finds the largest scale whose view and annotation both fit: render at 1 : 20 and 1 : 500 and look for what's cut at the edge),
   `detail {"view": "Level 1", "detail": "coarse"}`, and `visual_style {"style": "wireframe"}` then `render {"view": "{3D}", ...}`. After
   touching `Drawing::grow`, a layer or opening symbol's detail, or `Scene::wireframe`, look at them. In the desktop, the bar's menus in both themes.
 - Schedules: `bimcraft-cli run --sample --cmd 'schedule {"category": "rooms"}'` returns its columns, rows and totals (and
@@ -141,7 +142,10 @@ A selected column or component, and the Column and Component tools' sketches, sh
 line or grid east, north, west and south (`Model::clearances`, which finds them in the core; `standing_dimensions` draws them); a typed one runs
 `move` by the difference along that way.
 A view's scale, detail level and visual style are in its `Graphics` (`scale`, `detail`, `style`; the `scale`, `detail` and `visual_style`
-commands, which the view control bar's menus and WF, HL and SD run), not in a view template. A scale is the n of 1 : n (`graphics::SCALES`);
+commands, which the view control bar's menus, Properties' View Scale, Scale Value 1:, Detail Level and Visual Style, and WF, HL and SD run). A
+view template controls them as groups of their own (`Group::Scale`, `Detail`, `Style`, in `Graphics::resolved`, `check_followed` and the three
+commands, which refuse what a template controls); `render::scale_of`, `detail_of` and `Look::with` read the value in force, never the view's own, and
+the bar and Properties show it greyed out, the template named on hover (`controlled_note`). A scale is the n of 1 : n (`graphics::SCALES`);
 `render::annotation` turns it and the zoom into `Drawing::k`, the factor annotation is drawn at (`Drawing::px`, `Drawing::grow`: annotation is
 laid out one pixel to the pixel and grown about its anchor), 1 for a view with no scale, which keeps annotation the size it has on screen,
 and 1 on a sheet (`draw_at`, `section_at`), where the viewport's scale already sets paper size. A viewport placed with no scale takes the
@@ -197,8 +201,8 @@ sections, `cut_outlines`, `seen_below`, `view3d::Scene::picture`) and `look.dres
 by `Part` (`Drawing::part` marks what is drawn as projection, cut, lettering or hatching (and the lines between layers), so a
 new drawing of what a view cuts sets `Part::Cut`; a hidden door's opening is drawn owned by none, the wall's; the cut walls' union fill has no owner and takes its colour at the draw site, `cut_unions`). A view template
 (`Model::view_templates`) controls groups of the views that follow it (categories, filters, a plan's view range through
-`Model::view_range_of`, a phase with its phase filter, design options), and they can't change those (`graphics` and `modify`
-refuse). Snaps, Tag All, the desktop's Select All
+`Model::view_range_of`, a phase with its phase filter, design options, scale, detail level, visual style), and they can't change those
+(`graphics`, `scale`, `detail`, `visual_style` and `modify` refuse). Snaps, Tag All, the desktop's Select All
 Instances and the framing of sections and 3D views take what `Look` shows too. A level's ceiling plan is its plan's view;
 transparency shows in 3D only.
 Phases (`Model::phases`, in order) and design options (`Model::option_sets`, `phasing.rs`) are values an element holds among its

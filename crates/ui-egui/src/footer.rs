@@ -98,9 +98,12 @@ fn shadowed(base: &Arc<Model>, sheet: Sheet, temp: &Temp) -> Result<Arc<Model>, 
     let drawn = |id: &Id| base.elements.get(id).is_some_and(|e| graphics::drawn(e.category()));
     let mut p = json!({
         "view": view,
-        "hide": temp.categories,
         "hide_elements": temp.elements.iter().copied().filter(drawn).collect::<Vec<_>>(),
     });
+    // An empty list is still asking for categories, which a view template that controls them refuses.
+    if !temp.categories.is_empty() {
+        p["hide"] = json!(temp.categories);
+    }
     if temp.reveal
         && let Some(own) = id.and_then(|id| graphics::graphics_of(base, id))
     {
@@ -110,7 +113,9 @@ fn shadowed(base: &Arc<Model>, sheet: Sheet, temp: &Temp) -> Result<Arc<Model>, 
         // Each of them, and each element of a category hidden, in magenta.
         let paint = json!({"projection": {"color": REVEALED}, "cut": {"color": REVEALED}});
         let by_category = base.elements.iter().filter(|(_, e)| cats.contains(&e.category())).map(|(i, _)| *i);
-        p["show"] = json!(cats);
+        if !cats.is_empty() {
+            p["show"] = json!(cats);
+        }
         p["show_elements"] = json!(els);
         p["elements"] =
             els.iter().copied().chain(by_category).map(|i| (i.to_string(), paint.clone())).collect::<serde_json::Map<_, _>>().into();
@@ -214,7 +219,10 @@ impl BimApp {
     /// Apply Hide/Isolate to View: what the view hides for now, hidden in it for good.
     fn temp_apply(&mut self) {
         let (Some(view), Some(t)) = (self.graphic_view(), self.temporary().cloned()) else { return };
-        let p: Value = json!({"view": view, "hide": t.categories, "hide_elements": t.elements.iter().copied().collect::<Vec<_>>()});
+        let mut p: Value = json!({"view": view, "hide_elements": t.elements.iter().copied().collect::<Vec<_>>()});
+        if !t.categories.is_empty() {
+            p["hide"] = json!(t.categories);
+        }
         if self.run("graphics", p).is_some() {
             self.temporary.remove(&self.sheet);
         }
@@ -310,6 +318,8 @@ impl BimApp {
                 }
                 let tip = "Temporary Hide/Isolate: hide or isolate what is selected, or its categories, in this view until you reset it";
                 let r = small_button(ui, Icon::TempHide, "Temporary Hide/Isolate", temp.hides(), tip);
+                // Revit greys out what needs a selection until there is one.
+                let picked = !self.drawn_selection(&self.session.model).is_empty();
                 Popup::menu(&r).show(|ui| {
                     for (label, hide, category) in [
                         ("Hide Element (HH)", true, false),
@@ -317,7 +327,7 @@ impl BimApp {
                         ("Isolate Element (HI)", false, false),
                         ("Isolate Category (IC)", false, true),
                     ] {
-                        if ui.button(t(label)).clicked() {
+                        if ui.add_enabled(picked, egui::Button::new(t(label))).clicked() {
                             match hide {
                                 true => self.temp_hide(category),
                                 false => self.temp_isolate(category),
