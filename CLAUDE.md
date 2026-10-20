@@ -248,8 +248,9 @@ both ask) refuses a top outline that doesn't pair up, runs the other way round, 
 the way up. A plan dashes the outline at its cut height where the plane passes through it (`Model::mass_cut_by`); a section outlines
 where its line cuts it and never fills it in poché (`section` leaves masses out of `cuts`; a straight one's stretches come from
 `view3d::crossings`, a lofted one's lines from `massing::section_lines`, the cut of its skin of triangles, joined end to end); 3D draws
-a straight one as a slab and a lofted one as `massing::tris`, a closed skin turned out (two triangles on each side, flat when its twin
-edges are parallel, cut along one diagonal when they twist, so a twisted loft's volume in 3D and IFC is a little off the exact one),
+a straight one as a slab and a lofted one as `massing::tris`, a closed skin turned out (two triangles on a side whose twin
+edges are parallel, which makes it flat; a side that twists is cut into `massing::STRIPS` strips up its height, so a twisted loft's volume
+in 3D and IFC is a percent or two under the exact one, while the areas and volumes the model reports are exact),
 see-through by `graphics::MASS_TRANSPARENCY` unless the view's graphics say otherwise (`Look::with` starts a mass's override there, so a
 project with masses never takes its plain shortcut). Show Mass (`show_mass`, MH) is `graphics {hide|show: [mass]}` on one view.
 `Model::mass_slices` is the levels it crosses, from its base up to, not including, its top, each with how far the mass goes up from

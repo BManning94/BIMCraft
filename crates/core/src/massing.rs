@@ -141,9 +141,14 @@ pub fn plumb(bottom: &[P2], top: &[P2], f: usize) -> bool {
     [f, (f + 1) % n].iter().all(|i| matches!((bottom.get(*i), top.get(*i)), (Some(a), Some(b)) if a.dist(*b) <= 1e-6))
 }
 
+/// How many strips up its height a side that isn't flat is cut into. A side is flat when its twin edges are parallel (a sheared
+/// or a tapered mass), and two triangles are it; one that twists is a curved patch, and each strip of two triangles lies a little
+/// inside it. shortcut: the error shrinks as 1/strips (under 2% of the volume for a 45° turn); raise it if a loft needs finer.
+const STRIPS: usize = 16;
+
 /// The skin of a lofted mass as triangles turned out: `bottom` at height `z.0`, `top` at `z.1` (both counter-clockwise, twin
-/// for twin), two triangles between each pair of twin edges and the two caps. A side is flat when its twin edges are parallel
-/// (a sheared or a tapered mass); a twisted one is cut along one diagonal.
+/// for twin), a flat side as two triangles, a twisted one as [`STRIPS`] strips of them (fewer when the outline has very many
+/// points), and the two caps.
 pub fn tris(bottom: &[P2], top: &[P2], z: (f64, f64)) -> Vec<[P3; 3]> {
     let at = |p: P2, z: f64| [p.0, p.1, z];
     let pt = |ring: &[P2], i: usize, z: f64| at(ring.get(i % ring.len().max(1)).copied().unwrap_or_default(), z);
@@ -154,10 +159,19 @@ pub fn tris(bottom: &[P2], top: &[P2], z: (f64, f64)) -> Vec<[P3; 3]> {
     for [a, b, c] in geom::triangulate(bottom) {
         out.push([pt(bottom, a, z.0), pt(bottom, c, z.0), pt(bottom, b, z.0)]);
     }
-    for i in 0..bottom.len().min(top.len()) {
-        let (a0, b0, a1, b1) = (pt(bottom, i, z.0), pt(bottom, i + 1, z.0), pt(top, i, z.1), pt(top, i + 1, z.1));
-        out.push([a0, b0, b1]);
-        out.push([a0, b1, a1]);
+    let n = bottom.len().min(top.len());
+    let strips = (20_000 / n.max(1)).clamp(1, STRIPS);
+    for i in 0..n {
+        let ((b0, b1), (t0, t1)) = ((bottom[i], bottom[(i + 1) % n]), (top[i], top[(i + 1) % n]));
+        let flat = (b1 - b0).cross(t1 - t0).abs() <= 1e-9 * (b1 - b0).length() * (t1 - t0).length() + 1e-9;
+        let k = if flat { 1 } else { strips };
+        // The side's corners a fraction `f` of the way up.
+        let at = |f: f64| ((b0 + (t0 - b0) * f, b1 + (t1 - b1) * f), z.0 + (z.1 - z.0) * f);
+        for j in 0..k {
+            let (((l0, l1), zl), ((h0, h1), zh)) = (at(j as f64 / k as f64), at((j + 1) as f64 / k as f64));
+            out.push([[l0.0, l0.1, zl], [l1.0, l1.1, zl], [h1.0, h1.1, zh]]);
+            out.push([[l0.0, l0.1, zl], [h1.0, h1.1, zh], [h0.0, h0.1, zh]]);
+        }
     }
     out
 }
