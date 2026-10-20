@@ -13,6 +13,7 @@ pub mod graphics;
 pub mod ifc;
 pub mod import;
 pub mod language;
+pub mod massing;
 pub mod model;
 pub mod paint;
 pub mod pdf;

@@ -13,6 +13,7 @@ use crate::favorites::{self, FamilyEntry, Favorites, MaterialEntry};
 use crate::geom::{self, P2};
 use crate::graphics::{self, Graphics, Group, Look, Override, ViewTemplate};
 use crate::language::Language;
+use crate::massing;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
     Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass, Model,
@@ -132,9 +133,12 @@ pub static ALL: &[Command] = &[
         "mass_floors",
         "Mass Floors",
         &["MF"],
-        "{mass?, type?} a floor of the footprint at each level the mass crosses, from the one at its base up to, not \
-         including, the one at its top; every mass when no `mass`. `schedule {category: massfloors}` lists each mass's floor \
-         area and volume on each level",
+        "{mass?, type?, prune?} a floor of the footprint at each level the mass crosses, from the one at its base up to, not \
+         including, the one at its top; every mass when no `mass`. The floors it makes hold their mass and level (`Mass Floor`), \
+         so a second run makes no second floor: it gives the ones there the mass's footprint now (and the `type` if given), \
+         and lists in `stale` those on a level the mass no longer crosses, which `prune` deletes. The reply has `ids` (every \
+         floor of the mass), `made`, `updated`, `stale` and `removed`. `schedule {category: massfloors}` lists each mass's \
+         floor area and volume on each level",
         mass_floors,
     ),
     edit(
@@ -1208,10 +1212,11 @@ fn open(s: &mut Session, p: &Value) -> R {
     m.adopt_materials();
     // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
     let mut renamed = BTreeMap::new();
-    if m.parameters.keys().any(|n| phasing::reserved(n) || paint::reserved(n)) {
+    if m.parameters.keys().any(|n| phasing::reserved(n) || paint::reserved(n) || massing::reserved(n)) {
         let mut t = Session::new();
         t.model = Arc::new(m);
-        let olds: Vec<String> = t.model.parameters.keys().filter(|n| phasing::reserved(n) || paint::reserved(n)).cloned().collect();
+        let olds: Vec<String> =
+            t.model.parameters.keys().filter(|n| phasing::reserved(n) || paint::reserved(n) || massing::reserved(n)).cloned().collect();
         for old in olds {
             let new = (1..)
                 .map(|i| if i == 1 { format!("{old} Parameter") } else { format!("{old} Parameter {i}") })
@@ -2616,21 +2621,49 @@ fn passing(p: &Value, keys: &[&str], mut to: Value) -> Value {
 fn mass_floors(s: &mut Session, p: &Value) -> R {
     let c = "mass_floors";
     let m = &s.model;
-    let masses: Vec<Mass> = match id_opt(c, p, "mass")? {
-        Some(_) => vec![mass_of(c, m, p)?.1],
-        None => m.elements.values().filter_map(|e| if let Element::Mass(ms) = e { Some(ms.clone()) } else { None }).collect(),
+    let masses: Vec<(Id, Mass)> = match id_opt(c, p, "mass")? {
+        Some(_) => vec![mass_of(c, m, p)?],
+        None => m.elements.iter().filter_map(|(id, e)| if let Element::Mass(ms) = e { Some((*id, ms.clone())) } else { None }).collect(),
     };
     if masses.is_empty() {
         return Err(bad(c, "no mass; make one with `mass`"));
     }
-    let mut ids = Vec::new();
-    for ms in &masses {
-        for (level, _, _) in s.model.mass_slices(ms) {
-            let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?;
-            ids.push(made["id"].clone());
+    let prune = flag(c, p, "prune")?;
+    let kind = string(c, p, "type")?;
+    let (mut ids, mut made, mut updated, mut stale, mut removed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (mass, ms) in &masses {
+        let held = massing::floors_of(&s.model, *mass);
+        let levels: Vec<Id> = s.model.mass_slices(ms).into_iter().map(|(level, _, _)| level).collect();
+        for &level in &levels {
+            let Some(&(f, _)) = held.iter().find(|(_, l)| *l == level) else {
+                let id = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?["id"].as_u64();
+                if let Some((id, Some(Element::Floor(fl)))) = id.map(|id| (id, s.model_mut().elements.get_mut(&id))) {
+                    fl.params.insert(massing::FLOOR.into(), json!({"mass": mass, "level": level}));
+                    made.push(id);
+                    ids.push(id);
+                }
+                continue;
+            };
+            ids.push(f);
+            // A floor that already has the footprint (and the type) is left alone, so a second run is no undo step.
+            let ring = ms.footprint();
+            if let Some(Element::Floor(fl)) = s.model.elements.get(&f)
+                && (fl.boundary != ring || kind.as_ref().is_some_and(|k| *k != fl.type_name))
+                && let Some(Element::Floor(fl)) = s.model_mut().elements.get_mut(&f)
+            {
+                fl.boundary = ring;
+                fl.type_name = kind.clone().unwrap_or_else(|| fl.type_name.clone());
+                updated.push(f);
+            }
+        }
+        for (f, _) in held.into_iter().filter(|(_, l)| !levels.contains(l)) {
+            if prune { removed.push(f) } else { stale.push(f) }
         }
     }
-    Ok(json!({"ids": ids}))
+    if !removed.is_empty() {
+        delete_elements(s, &removed)?;
+    }
+    Ok(json!({"ids": ids, "made": made, "updated": updated, "stale": stale, "removed": removed}))
 }
 
 fn wall_by_face(s: &mut Session, p: &Value) -> R {
@@ -3985,6 +4018,9 @@ fn family(s: &mut Session, p: &Value) -> R {
         if let Some(q) = f.parameters.iter().find(|q| paint::reserved(&q.name)) {
             return Err(bad(c, format!("parameter `{}`: an element holds its paint under that name; name it otherwise", q.name)));
         }
+        if let Some(q) = f.parameters.iter().find(|q| massing::reserved(&q.name)) {
+            return Err(bad(c, format!("parameter `{}`: a component holds nothing of a mass under that name; name it otherwise", q.name)));
+        }
         if let Some(q) = f.parameters.iter().find(|q| phasing::reserved(&q.name)) {
             return Err(bad(
                 c,
@@ -4763,6 +4799,10 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
             }
             _ => {}
         }
+        // A copy is no mass's floor or face.
+        if let Some(params) = e.params_mut() {
+            massing::detach(params);
+        }
         let id = m.insert(e);
         hosts.insert(from, id);
         made.push(id);
@@ -4932,6 +4972,9 @@ fn split(s: &mut Session, p: &Value) -> R {
     }
     let (mut first, mut second) = (w.clone(), w);
     (first.end, second.start) = (cut, cut);
+    // Neither piece is the mass's face now.
+    massing::detach(&mut first.params);
+    massing::detach(&mut second.params);
     // An arc's turn shared out as its length is.
     first.arc = degrees(first.arc * along / len);
     second.arc = degrees(second.arc - first.arc);
@@ -4996,6 +5039,8 @@ fn delete(s: &mut Session, p: &Value) -> R {
     for id in &gone {
         m.elements.remove(id);
     }
+    // What was made from a mass that goes is ordinary from then on.
+    massing::forget(m, &gone);
     // No view keeps an override for what isn't there.
     for g in m.elements.values_mut().filter_map(graphics::graphics_mut) {
         g.elements.retain(|id, _| !gone.contains(id));

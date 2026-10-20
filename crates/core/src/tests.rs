@@ -1503,6 +1503,11 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"mass": 7, "faces": [0, 0, 1], "location": 5}),
         json!({"mass": 7, "type": 5, "slope": 1e300, "overhang": -1e9}),
         json!({"mass": 7, "type": "Nothing"}),
+        json!({"mass": 7, "prune": 5, "type": 5}),
+        json!({"prune": "yes"}),
+        json!({"prune": true}),
+        json!({"id": 3, "params": {"Mass Floor": {"mass": 7, "level": 1}, "Mass Face": 5}}),
+        json!({"id": 3, "params": {"Mass Face": {"mass": 7, "face": "top"}}}),
         json!({"id": 7, "height": 1e300, "top_level": 1}),
         json!({"id": 7, "boundary": [[0, 0], [1e300, 1e300], [0, 1]]}),
         json!({"id": 7, "level": 1e300, "base_offset": f64::MAX}),
@@ -3779,6 +3784,74 @@ fn mass_floors_make_a_floor_for_each_level_the_mass_crosses() {
     assert!(s.execute("mass_floors", &json!({"mass": id, "type": "Nothing"})).unwrap_err().contains("type"));
     assert!(s.execute("mass_floors", &json!({"mass": wall})).unwrap_err().contains("isn't a mass"));
     assert_eq!(*s.model, *before);
+}
+
+fn ids_of(v: &Value) -> Vec<u64> {
+    v.as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect()
+}
+
+#[test]
+fn mass_floors_run_again_update_what_they_made_and_remove_the_stale_ones_only_when_asked() {
+    let mut s = Session::new();
+    let (id, [l1, l2, l3, _]) = tower(&mut s);
+    let first = run(&mut s, "mass_floors", json!({"mass": id}));
+    let floors = ids_of(&first["ids"]);
+    // Each holds its mass and its level, under a reserved name.
+    for (f, level) in floors.iter().zip([l1, l2, l3]) {
+        assert_eq!(element(&mut s, *f)["params"]["Mass Floor"], json!({"mass": id, "level": level}));
+    }
+    assert_eq!((ids_of(&first["made"]), first["updated"].clone()), (floors.clone(), json!([])));
+    // Again: the same floors, and nothing made or changed.
+    let again = run(&mut s, "MF", json!({"mass": id}));
+    assert_eq!((ids_of(&again["ids"]), again["made"].clone(), again["updated"].clone()), (floors.clone(), json!([]), json!([])));
+    assert_eq!(count(&mut s, "floor"), 3);
+    // A floor of the same level nobody made from the mass stays as it is, and so does a mass's floor after `modify`.
+    let own = run(&mut s, "floor", json!({"boundary": [[0, 0], [1000, 0], [0, 1000]]}))["id"].as_u64().unwrap();
+    // The mass grows: its floors take the new outline.
+    run(&mut s, "modify", json!({"id": id, "boundary": [[0, 0], [12000, 0], [12000, 6000], [0, 6000]]}));
+    let again = run(&mut s, "mass_floors", json!({"mass": id}));
+    assert_eq!((ids_of(&again["ids"]), ids_of(&again["updated"]), again["made"].clone()), (floors.clone(), floors.clone(), json!([])));
+    assert_eq!((count(&mut s, "floor"), element(&mut s, floors[1])["area_m2"].as_f64()), (4, Some(72.0)));
+    assert_eq!(element(&mut s, own)["area_m2"].as_f64(), Some(0.5));
+    // `type` changes the floors' type; without it they keep theirs.
+    run(&mut s, "type", json!({"category": "floor", "name": "Thin", "thickness": 100}));
+    let r = run(&mut s, "mass_floors", json!({"mass": id, "type": "Thin"}));
+    assert_eq!(ids_of(&r["updated"]), floors);
+    assert_eq!(element(&mut s, floors[0])["type"], "Thin");
+    assert_eq!(run(&mut s, "mass_floors", json!({"mass": id}))["updated"], json!([]));
+    assert_eq!(element(&mut s, floors[0])["type"], "Thin");
+    // Cut short, the mass no longer crosses Level 3: its floor there is stale, and stays until `prune` asks.
+    run(&mut s, "modify", json!({"id": id, "top_level": l3}));
+    let r = run(&mut s, "mass_floors", json!({"mass": id}));
+    assert_eq!((ids_of(&r["ids"]), ids_of(&r["stale"]), r["removed"].clone()), (floors[..2].to_vec(), floors[2..].to_vec(), json!([])));
+    assert_eq!(count(&mut s, "floor"), 4);
+    let r = run(&mut s, "mass_floors", json!({"mass": id, "prune": true}));
+    assert_eq!((ids_of(&r["removed"]), r["stale"].clone()), (floors[2..].to_vec(), json!([])));
+    assert_eq!(count(&mut s, "floor"), 3);
+    // Pruning with no `mass` prunes every mass; it never touches a floor that holds no mark.
+    assert_eq!(run(&mut s, "mass_floors", json!({"prune": true}))["removed"], json!([]));
+    assert!(s.model.elements.contains_key(&own));
+    // The reserved name is no parameter's, and a floor holds only a real mass and level under it.
+    let e = s.execute("parameter", &json!({"name": "Mass Floor", "kind": "text", "categories": ["floor"]})).unwrap_err();
+    assert!(e.contains("Mass Floor"), "{e}");
+    for (value, says) in [
+        (json!({"mass": 1, "level": l1}), "isn't a mass"),
+        (json!({"mass": id, "level": id}), "isn't a level"),
+        // Merged into the mark there, one more name is one too many.
+        (json!({"face": 1}), "{mass, level}"),
+        (json!("x"), "{mass, level}"),
+    ] {
+        let e = s.execute("modify", &json!({"id": floors[0], "params": {"Mass Floor": value}})).unwrap_err();
+        assert!(e.contains(says), "{value}: {e}");
+    }
+    let wall = run(&mut s, "wall", json!({"points": [[0, 0], [1000, 0]]}))["ids"][0].as_u64().unwrap();
+    assert!(s.execute("modify", &json!({"id": wall, "params": {"Mass Floor": {"mass": id, "level": l1}}})).is_err());
+    // A copy is an ordinary floor; and with the mass gone, the floors it made are too.
+    let copy = run(&mut s, "copy", json!({"ids": [floors[0]], "by": [20000, 0]}))["ids"][0].as_u64().unwrap();
+    assert!(element(&mut s, copy)["params"].get("Mass Floor").is_none());
+    run(&mut s, "delete", json!({"ids": [id]}));
+    assert!(element(&mut s, floors[0])["params"].get("Mass Floor").is_none());
+    assert!(s.execute("mass_floors", &json!({"prune": true})).unwrap_err().contains("no mass"));
 }
 
 fn block_ccw() -> Value {

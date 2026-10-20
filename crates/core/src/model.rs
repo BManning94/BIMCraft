@@ -2584,9 +2584,9 @@ impl Model {
             if !crate::family::nameable(n) {
                 return Err(format!("{who}: a name starts with a letter and holds letters, digits, `_` and spaces, up to {MAX_TEXT}"));
             }
-            if crate::paint::reserved(n) || phasing::reserved(n) {
+            if crate::paint::reserved(n) || phasing::reserved(n) || crate::massing::reserved(n) {
                 return Err(format!(
-                    "{who}: elements hold their phase, their design option and their paint under that name; name it otherwise"
+                    "{who}: elements hold their phase, their design option, their paint and their mass under that name; name it otherwise"
                 ));
             }
             if p.categories.is_empty() {
@@ -2698,6 +2698,10 @@ impl Model {
                     continue;
                 }
                 if let Some(checked) = crate::paint::check_value(self, &who, k, v, e) {
+                    checked?;
+                    continue;
+                }
+                if let Some(checked) = crate::massing::check_value(self, &who, k, v, e) {
                     checked?;
                     continue;
                 }
