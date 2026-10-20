@@ -3331,6 +3331,81 @@ fn view_templates_are_made_from_a_view_and_followed_from_properties() {
     press(&mut h, "Close");
 }
 
+/// Whether the widget of `role` named `label` is greyed out.
+fn is_disabled(h: &Harness<BimApp>, role: Role, label: &str) -> bool {
+    use egui_kittest::kittest::NodeT;
+    h.get_by_role_and_label(role, label).accesskit_node().is_disabled()
+}
+
+#[test]
+fn view_templates_hold_show_and_hand_on_a_scale_detail_level_and_visual_style() {
+    use bimcraft_core::graphics::{Detail, Group, VisualStyle};
+    let mut h = app(BOX);
+    let run = |h: &mut Harness<BimApp>, id: &str, p: serde_json::Value| h.state_mut().session.execute(id, &p).unwrap();
+    run(&mut h, "scale", json!({"view": 1, "scale": 50}));
+    run(&mut h, "detail", json!({"view": 1, "detail": "coarse"}));
+    let template = |h: &Harness<BimApp>| h.state().session.model.view_templates["Plans"].clone();
+    // Made from a view, a template holds what the view has, and says so.
+    shortcut(&mut h, "VT");
+    type_into(&mut h, "New template:", "Plans");
+    press(&mut h, "Create from This View");
+    assert_eq!((template(&h).graphics.scale, template(&h).graphics.detail), (Some(50.0), Detail::Coarse));
+    assert_eq!(
+        (combo_value(&h, "View Scale:"), combo_value(&h, "Detail Level:"), combo_value(&h, "Visual Style:")),
+        ("1 : 50".into(), "Coarse".into(), "Shaded".into())
+    );
+    use egui_kittest::kittest::NodeT;
+    for group in ["View Scale", "Detail Level", "Visual Style"] {
+        let on = h.get_by_role_and_label(Role::CheckBox, group).accesskit_node().toggled();
+        assert_eq!(on, Some(egui::accesskit::Toggled::True), "{group}: it controls them all to start with");
+    }
+    // Set in the dialog, each is one command on the template.
+    let steps = h.state().session.history().len();
+    choose(&mut h, "View Scale:", "1 : 20");
+    choose(&mut h, "Detail Level:", "Medium");
+    choose(&mut h, "Visual Style:", "Wireframe");
+    let t = template(&h);
+    assert_eq!((t.graphics.scale, t.graphics.detail, t.graphics.style), (Some(20.0), Detail::Medium, VisualStyle::Wireframe));
+    assert_eq!(h.state().session.history().len(), steps + 3);
+    choose(&mut h, "View Scale:", "Auto");
+    assert_eq!(template(&h).graphics.scale, None);
+    choose(&mut h, "View Scale:", "1 : 20");
+    // What it controls, one at a time.
+    pick(&mut h, Role::CheckBox, "Visual Style");
+    assert!(!template(&h).controls.contains(&Group::Style) && template(&h).controls.contains(&Group::Scale));
+    pick(&mut h, Role::CheckBox, "Visual Style");
+    assert!(template(&h).controls.contains(&Group::Style));
+    press(&mut h, "Close");
+    // Level 2 follows it: the bar and Properties show the template's, greyed, and say whose they are.
+    topmost(&mut h, "Level 2");
+    assert_eq!(h.state().sheet, Sheet::Plan(2));
+    assert_eq!(combo_value(&h, "View Scale"), "Auto");
+    shortcut(&mut h, "VT");
+    press(&mut h, "Follow in This View");
+    press(&mut h, "Close");
+    assert_eq!(plan_graphics(&h, 2).template.as_deref(), Some("Plans"));
+    assert_eq!((combo_value(&h, "View Scale"), combo_value(&h, "Detail Level")), ("1 : 20".into(), "Medium".into()));
+    assert!(is_disabled(&h, Role::ComboBox, "View Scale") && is_disabled(&h, Role::ComboBox, "Detail Level"));
+    assert!(is_disabled(&h, Role::TextInput, "Scale Value 1:"));
+    let shown = painted_text(&h);
+    assert!(shown.contains(&"1 : 20".to_string()) && shown.contains(&"Medium".to_string()), "{shown:?}");
+    assert!(is_disabled(&h, Role::Button, "Scale") && is_disabled(&h, Role::Button, "Detail Level"));
+    // Level 1 follows nothing, and keeps its own.
+    topmost(&mut h, "Level 1");
+    assert!(!is_disabled(&h, Role::Button, "Scale"));
+    assert_eq!(combo_value(&h, "View Scale"), "1 : 50");
+    // A template that leaves the scale be leaves it to the view.
+    run(&mut h, "template", json!({"name": "Plans", "controls": ["detail"]}));
+    topmost(&mut h, "Level 2");
+    assert!(!is_disabled(&h, Role::ComboBox, "View Scale") && is_disabled(&h, Role::ComboBox, "Detail Level"));
+    // Stop following: its own again.
+    shortcut(&mut h, "VT");
+    press(&mut h, "Stop Following in This View");
+    press(&mut h, "Close");
+    assert!(!is_disabled(&h, Role::ComboBox, "Detail Level"));
+    assert_eq!(combo_value(&h, "Detail Level"), "Fine");
+}
+
 #[test]
 fn a_templates_controls_are_ticked_and_unticked_one_at_a_time() {
     use bimcraft_core::graphics::Group;

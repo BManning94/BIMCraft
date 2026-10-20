@@ -108,7 +108,42 @@ fn group_name(g: Group) -> &'static str {
         Group::Range => "View Range",
         Group::Phase => "Phase and Phase Filter",
         Group::Options => "Design Options",
+        Group::Scale => "View Scale",
+        Group::Detail => "Detail Level",
+        Group::Style => "Visual Style",
     }
+}
+
+/// The scales a drop-down offers, each as the interface names it: none first, then 1 : n.
+fn scale_choices() -> Vec<(String, Option<u32>)> {
+    std::iter::once(None).chain(SCALES.map(Some)).map(|n| (t(&scale_label(n.map(f64::from))).to_string(), n)).collect()
+}
+
+/// A drop-down for a scale, named by `label`: the scale picked, `Some(None)` being Auto.
+fn scale_combo(ui: &mut Ui, salt: &'static str, label: UiId, now: Option<f64>) -> Option<Option<u32>> {
+    let choices = scale_choices();
+    let options: Vec<String> = choices.iter().map(|c| c.0.clone()).collect();
+    let picked = crate::properties::combo(ui, (0, salt), label, t(&scale_label(now)), &options)?;
+    choices.into_iter().find(|c| c.0 == picked).map(|c| c.1)
+}
+
+/// A drop-down for a detail level, named by `label`: the level picked.
+fn detail_combo(ui: &mut Ui, salt: &'static str, label: UiId, now: Detail) -> Option<Detail> {
+    let options: Vec<String> = Detail::ALL.iter().map(|d| t(d.name()).to_string()).collect();
+    let picked = crate::properties::combo(ui, (0, salt), label, t(now.name()), &options)?;
+    Detail::ALL.into_iter().find(|d| t(d.name()) == picked)
+}
+
+/// A drop-down for a visual style, named by `label`: the style picked.
+fn style_combo(ui: &mut Ui, salt: &'static str, label: UiId, now: VisualStyle) -> Option<VisualStyle> {
+    let options: Vec<String> = VisualStyle::ALL.iter().map(|v| t(v.name()).to_string()).collect();
+    let picked = crate::properties::combo(ui, (0, salt), label, t(now.name()), &options)?;
+    VisualStyle::ALL.into_iter().find(|v| t(v.name()) == picked)
+}
+
+/// Why a setting a view template controls can't be changed in the view following it, for a tooltip.
+pub(crate) fn controlled_note(template: &str) -> String {
+    tf("Set by view template {}: change the template, or stop following it.", &[template])
 }
 
 impl BimApp {
@@ -132,6 +167,16 @@ impl BimApp {
             _ => None,
         };
         id.and_then(|id| bimcraft_core::graphics::graphics_of(m, id)).cloned().unwrap_or_default()
+    }
+
+    /// What the active view's graphics come to: its own, but for what its view template controls.
+    pub(crate) fn graphics_shown(&self) -> Graphics {
+        self.graphics_now().resolved(&self.session.model).into_owned()
+    }
+
+    /// The view template that sets `group` of the active view, if it follows one that does.
+    pub(crate) fn controlled_by(&self, group: Group) -> Option<String> {
+        self.graphics_now().controlled_by(&self.session.model, group).map(String::from)
     }
 
     /// Visibility/Graphics for the active view, on a tab.
@@ -199,8 +244,11 @@ impl BimApp {
             ui.set_min_height(500.0);
             ui.label(RichText::new(tf("Visibility/Graphics Overrides for {}", &[&d.title])).heading());
             if let Some(name) = &d.draft.template {
-                let what: Vec<&str> =
-                    followed.iter().filter(|g| !matches!(g, Group::Range | Group::Phase)).map(|g| t(group_name(*g))).collect();
+                let what: Vec<&str> = followed
+                    .iter()
+                    .filter(|g| !matches!(g, Group::Range | Group::Phase | Group::Scale | Group::Detail | Group::Style))
+                    .map(|g| t(group_name(*g)))
+                    .collect();
                 if !what.is_empty() {
                     ui.label(
                         RichText::new(tf("{} follow view template {}: change them there.", &[&what.join(", "), name])).color(pal().muted),
@@ -385,6 +433,25 @@ impl BimApp {
                         run = Some(json!({"name": d.picked, "controls": list}));
                     }
                 }
+                // What it holds of scale, detail level and visual style, to set.
+                ui.add_space(4.0);
+                Grid::new("template-settings").num_columns(2).show(ui, |ui| {
+                    let l = ui.label(t("View Scale:"));
+                    if let Some(n) = scale_combo(ui, "template-scale", l.id, tpl.graphics.scale) {
+                        run = Some(json!({"name": d.picked, "scale": n}));
+                    }
+                    ui.end_row();
+                    let l = ui.label(t("Detail Level:"));
+                    if let Some(level) = detail_combo(ui, "template-detail", l.id, tpl.graphics.detail) {
+                        run = Some(json!({"name": d.picked, "detail": level.name()}));
+                    }
+                    ui.end_row();
+                    let l = ui.label(t("Visual Style:"));
+                    if let Some(v) = style_combo(ui, "template-style", l.id, tpl.graphics.style) {
+                        run = Some(json!({"name": d.picked, "visual_style": v.name()}));
+                    }
+                    ui.end_row();
+                });
                 if let Some(view) = &view {
                     let now = own.template.as_ref() == Some(&d.picked);
                     ui.add_space(4.0);
@@ -439,6 +506,7 @@ impl BimApp {
         let Some(view) = self.graphic_view() else { return };
         let model = Arc::clone(&self.session.model);
         let own = self.graphics_now();
+        let shown = self.graphics_shown();
         let group = "Graphics";
         let open = !self.collapsed.contains(group);
         if crate::properties::group_header(ui, t(group), open) && !self.collapsed.remove(group) {
@@ -456,43 +524,48 @@ impl BimApp {
         egui::Frame::new().inner_margin(egui::Margin { left: 8, right: 0, top: 2, bottom: 6 }).show(ui, |ui| {
             let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             Grid::new("graphics-properties").num_columns(2).striped(true).min_col_width(half).max_col_width(half).show(ui, |ui| {
+                let controlled = |g: Group| own.controlled_by(&model, g).map(controlled_note);
                 if let Some(id) = own_id {
+                    let note = controlled(Group::Scale);
                     let label = ui.label(t("View Scale"));
-                    let choices: Vec<(String, Option<u32>)> =
-                        std::iter::once(None).chain(SCALES.map(Some)).map(|n| (t(&scale_label(n.map(f64::from))).to_string(), n)).collect();
-                    let options: Vec<String> = choices.iter().map(|c| c.0.clone()).collect();
-                    if let Some(picked) = crate::properties::combo(ui, (0, "view-scale"), label.id, t(&scale_label(own.scale)), &options)
-                        && let Some((_, n)) = choices.iter().find(|c| c.0 == picked)
-                    {
-                        set = Some(("scale", json!({"view": view, "scale": n})));
-                    }
+                    let label = if let Some(n) = &note { label.on_hover_text(n) } else { label };
+                    ui.add_enabled_ui(note.is_none(), |ui| {
+                        if let Some(n) = scale_combo(ui, "view-scale", label.id, shown.scale) {
+                            set = Some(("scale", json!({"view": view, "scale": n})));
+                        }
+                    });
                     ui.end_row();
                     let label = ui.label(t("Scale Value 1:"));
-                    let shown = own.scale.map_or_else(String::new, |n| n.to_string());
-                    if let Some(typed) = self.field(ui, id, "scale", shown, label.id, t("Auto")) {
-                        match (typed.trim().is_empty(), number(&typed)) {
-                            (true, _) => set = Some(("scale", json!({"view": view, "scale": null}))),
-                            (_, Some(n)) => set = Some(("scale", json!({"view": view, "scale": n}))),
-                            _ => self.status = Status { text: tf("`{}` is not a scale", &[typed.trim()]), error: true },
+                    let label = if let Some(n) = &note { label.on_hover_text(n) } else { label };
+                    ui.add_enabled_ui(note.is_none(), |ui| {
+                        let text = shown.scale.map_or_else(String::new, |n| n.to_string());
+                        if let Some(typed) = self.field(ui, id, "scale", text, label.id, t("Auto")) {
+                            match (typed.trim().is_empty(), number(&typed)) {
+                                (true, _) => set = Some(("scale", json!({"view": view, "scale": null}))),
+                                (_, Some(n)) => set = Some(("scale", json!({"view": view, "scale": n}))),
+                                _ => self.status = Status { text: tf("`{}` is not a scale", &[typed.trim()]), error: true },
+                            }
                         }
-                    }
+                    });
                     ui.end_row();
+                    let note = controlled(Group::Detail);
                     let label = ui.label(t("Detail Level"));
-                    let options: Vec<String> = Detail::ALL.iter().map(|d| t(d.name()).to_string()).collect();
-                    if let Some(picked) = crate::properties::combo(ui, (0, "detail-level"), label.id, t(own.detail.name()), &options)
-                        && let Some(d) = Detail::ALL.into_iter().find(|d| t(d.name()) == picked)
-                    {
-                        set = Some(("detail", json!({"view": view, "detail": d.name()})));
-                    }
+                    let label = if let Some(n) = &note { label.on_hover_text(n) } else { label };
+                    ui.add_enabled_ui(note.is_none(), |ui| {
+                        if let Some(level) = detail_combo(ui, "detail-level", label.id, shown.detail) {
+                            set = Some(("detail", json!({"view": view, "detail": level.name()})));
+                        }
+                    });
                     ui.end_row();
                 } else if self.sheet == Sheet::View3D {
+                    let note = controlled(Group::Style);
                     let label = ui.label(t("Visual Style"));
-                    let options: Vec<String> = VisualStyle::ALL.iter().map(|v| t(v.name()).to_string()).collect();
-                    if let Some(picked) = crate::properties::combo(ui, (0, "visual-style"), label.id, t(own.style.name()), &options)
-                        && let Some(v) = VisualStyle::ALL.into_iter().find(|v| t(v.name()) == picked)
-                    {
-                        set = Some(("visual_style", json!({"style": v.name()})));
-                    }
+                    let label = if let Some(n) = &note { label.on_hover_text(n) } else { label };
+                    ui.add_enabled_ui(note.is_none(), |ui| {
+                        if let Some(v) = style_combo(ui, "visual-style", label.id, shown.style) {
+                            set = Some(("visual_style", json!({"style": v.name()})));
+                        }
+                    });
                     ui.end_row();
                 }
                 let label = ui.label(t("View Template"));

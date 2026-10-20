@@ -377,7 +377,22 @@ impl Graphics {
         if t.controls.contains(&Group::Options) {
             g.options = t.graphics.options.clone();
         }
+        if t.controls.contains(&Group::Scale) {
+            g.scale = t.graphics.scale;
+        }
+        if t.controls.contains(&Group::Detail) {
+            g.detail = t.graphics.detail;
+        }
+        if t.controls.contains(&Group::Style) {
+            g.style = t.graphics.style;
+        }
         std::borrow::Cow::Owned(g)
+    }
+
+    /// The view template it follows, when that controls `group`: the group's settings aren't the view's own to change.
+    pub fn controlled_by(&self, m: &Model, group: Group) -> Option<&str> {
+        let name = self.template.as_deref()?;
+        m.view_templates.get(name)?.controls.contains(&group).then_some(name)
     }
 
     /// Whether it hides and overrides nothing: its scale and detail level change what the drawing code draws, not what a
@@ -518,10 +533,17 @@ pub enum Group {
     Phase,
     /// The design options it shows.
     Options,
+    /// A plan's, section's or elevation's scale.
+    Scale,
+    /// A plan's, section's or elevation's detail level.
+    Detail,
+    /// A 3D view's visual style.
+    Style,
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [Group::Categories, Group::Filters, Group::Range, Group::Phase, Group::Options];
+    pub const ALL: [Group; 8] =
+        [Group::Categories, Group::Filters, Group::Range, Group::Phase, Group::Options, Group::Scale, Group::Detail, Group::Style];
 }
 
 /// A view template: settings under a name for views to follow, the groups in `controls`.
@@ -576,7 +598,8 @@ pub(crate) fn check_project(m: &Model) -> Result<(), String> {
 }
 
 /// Whether changing view `old` into `new` leaves be what the view template `new` follows controls:
-/// its categories, its filters, a plan's view range. (Unfollowing and changing in one go is fine.)
+/// its categories, its filters, phase, design options, scale, detail level, visual style, a plan's view range.
+/// (Unfollowing and changing in one go is fine.)
 pub fn check_followed(m: &Model, old: &Element, new: &Element) -> Result<(), String> {
     let (Some(a), Some(b)) = (graphics_of_element(old), graphics_of_element(new)) else { return Ok(()) };
     let Some((name, t)) = b.template.as_ref().and_then(|n| Some((n, m.view_templates.get(n)?))) else { return Ok(()) };
@@ -590,6 +613,9 @@ pub fn check_followed(m: &Model, old: &Element, new: &Element) -> Result<(), Str
     follows(Group::Filters, a.filters == b.filters, "filters")?;
     follows(Group::Phase, (&a.phase, &a.phase_filter) == (&b.phase, &b.phase_filter), "phase and phase filter")?;
     follows(Group::Options, a.options == b.options, "design options")?;
+    follows(Group::Scale, a.scale == b.scale, "scale")?;
+    follows(Group::Detail, a.detail == b.detail, "detail level")?;
+    follows(Group::Style, a.style == b.style, "visual style")?;
     if let (Element::Level(x), Element::Level(y)) = (old, new) {
         follows(Group::Range, x.view_range == y.view_range, "view range")?;
     }
@@ -651,12 +677,12 @@ impl Look {
     /// ponytail: worked out on every draw; cache it per model and view if a filter on a slow field
     /// (a room's area) makes redraws slow.
     pub fn with(m: &Model, own: &Graphics) -> Look {
-        let mut look = Look { style: own.style, ..Look::default() };
+        let g = own.resolved(m);
+        let mut look = Look { style: g.style, ..Look::default() };
         // Nothing to look for: no graphics of its own, and nothing in the project phased or in an option.
         if own.draws_as_is() && !crate::phasing::any(m) && !m.elements.values().any(|e| matches!(e, Element::Mass(_))) {
             return look;
         }
-        let g = own.resolved(m);
         // The phase it shows, as where it stands in the project's order, and how its phase filter shows each status.
         let at = g.phase.as_deref().and_then(|n| crate::phasing::index(m, n)).unwrap_or(m.phases.len().saturating_sub(1));
         let filter = g.phase_filter.as_deref().and_then(|n| m.phase_filters.get(n));
@@ -1652,7 +1678,7 @@ mod tests {
         let grid = run(&mut s, "grid", json!({"start": [-1000, 3000], "end": [9000, 3000]}))["id"].as_u64().unwrap();
         run(&mut s, "graphics", json!({"view": 1, "hide": ["grids"], "categories": {"walls": {"cut": {"color": [200, 0, 0]}}}}));
         let r = run(&mut s, "template", json!({"name": "Presentation", "from": "Level 1"}));
-        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options"]));
+        assert_eq!(r["controls"], json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style"]));
         assert_eq!((r["hidden"].clone(), r["categories"]["wall"]["cut"]["color"].clone()), (json!(["grid"]), json!([200, 0, 0])));
         assert!(!owned(&plan(&s, 2), grid).is_empty() && lines(&plan(&s, 2), up).iter().all(|l| l.1 != RED));
         run(&mut s, "graphics", json!({"view": "Level 2", "template": "Presentation"}));
@@ -1662,7 +1688,11 @@ mod tests {
         let r = run(&mut s, "graphics", json!({"view": "Level 2"}));
         assert_eq!(
             (r["template"].clone(), r["hidden"].clone(), r["controlled"].clone()),
-            (json!("Presentation"), json!(["grid"]), json!(["categories", "filters", "range", "phase", "options"]))
+            (
+                json!("Presentation"),
+                json!(["grid"]),
+                json!(["categories", "filters", "range", "phase", "options", "scale", "detail", "style"])
+            )
         );
         // Change the template, and its views follow; the view it came from doesn't.
         run(&mut s, "template", json!({"name": "Presentation", "categories": {"walls": {"cut": {"color": [0, 0, 200]}}}}));
@@ -1708,6 +1738,89 @@ mod tests {
     }
 
     #[test]
+    fn a_template_controls_the_scale_detail_level_and_visual_style_of_the_views_that_follow_it() {
+        use crate::graphics::{Detail, VisualStyle};
+        use crate::render::View;
+        let mut s = Session::new();
+        run(&mut s, "wall", json!({"points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "closed": true, "type": "Exterior - 300mm"}));
+        // Level 2 is held at 1 : 100, coarse; a template made from it says so, and controls every group.
+        run(&mut s, "scale", json!({"view": 2, "scale": 100}));
+        run(&mut s, "detail", json!({"view": 2, "detail": "coarse"}));
+        let r = run(&mut s, "template", json!({"name": "Plans", "from": 2}));
+        assert_eq!((r["scale"].clone(), r["detail"].clone(), r["visual_style"].clone()), (json!(100.0), json!("coarse"), json!("shaded")));
+        for group in ["scale", "detail", "style"] {
+            assert!(r["controls"].as_array().unwrap().contains(&json!(group)), "{group}: {r}");
+        }
+        // Level 1 follows it: its annotation and its detail are the template's, its own settings stay as they were.
+        let view = View { scale: 0.1, cx: 4000.0, cy: 3000.0, width: 1000, height: 800 };
+        let k = |s: &Session| render::annotation(&s.model, 1, view);
+        let layered = |s: &Session| render::draw(&s.model, 1, view).prims.len();
+        let (alone, fine) = (k(&s), layered(&s));
+        run(&mut s, "graphics", json!({"view": 1, "template": "Plans"}));
+        assert_eq!((alone, k(&s)), (1.0, 2.0), "1 : 100 at a tenth of a pixel to the mm is twice what is on screen");
+        assert!(layered(&s) < fine, "coarse draws less");
+        let own = run(&mut s, "scale", json!({"view": 1}));
+        assert_eq!(own["scale"], 100.0, "it says what is in force");
+        assert!(matches!(&s.model.elements[&1], Element::Level(l) if l.graphics.scale.is_none() && l.graphics.detail == Detail::Fine));
+        // It can't set what the template controls, and says so as the other groups do; nothing changes.
+        let before = s.model.clone();
+        for (id, p, says) in [
+            ("scale", json!({"view": 1, "scale": 20}), "scale"),
+            ("scale", json!({"view": 1, "scale": null}), "scale"),
+            ("detail", json!({"view": 1, "detail": "medium"}), "detail level"),
+            ("modify", json!({"id": 1, "graphics": {"scale": 20}}), "scale"),
+            ("modify", json!({"id": 1, "graphics": {"detail": "medium"}}), "detail level"),
+            ("modify", json!({"id": 1, "graphics": {"style": "wireframe"}}), "visual style"),
+        ] {
+            let e = s.execute(id, &p).unwrap_err();
+            assert!(e.contains("`Plans`") && e.contains(says) && e.contains("template: null"), "{p}: {e}");
+        }
+        assert_eq!(*s.model, *before);
+        // Asking is fine, and so is what it leaves be: a template that controls only the scale leaves the detail level.
+        run(&mut s, "template", json!({"name": "Plans", "controls": ["scale"]}));
+        run(&mut s, "detail", json!({"view": 1, "detail": "medium"}));
+        assert_eq!(k(&s), 2.0);
+        assert!(s.execute("scale", &json!({"view": 1, "scale": 20})).is_err());
+        // The template's own are set on it, and the views that follow it take the change at once.
+        run(&mut s, "template", json!({"name": "Plans", "scale": 200, "detail": "fine", "visual_style": "wireframe"}));
+        assert_eq!(k(&s), 4.0);
+        let r = run(&mut s, "template", json!({"name": "Plans", "scale": null}));
+        assert_eq!((r["scale"].clone(), k(&s)), (Value::Null, 1.0));
+        for mut p in [
+            json!({"scale": 0}),
+            json!({"scale": 1e9}),
+            json!({"scale": "1:50"}),
+            json!({"detail": "huge"}),
+            json!({"visual_style": "pretty"}),
+        ] {
+            p["name"] = json!("Plans");
+            assert!(s.execute("template", &p).is_err(), "{p}");
+        }
+        // Followed, it can't be set; unfollowed, it can, and its own settings are what count.
+        run(&mut s, "template", json!({"name": "Plans", "scale": 100, "controls": ["scale", "detail"]}));
+        let e = s.execute("scale", &json!({"view": 1, "scale": 50})).unwrap_err();
+        assert!(e.contains("`Plans`"), "{e}");
+        run(&mut s, "graphics", json!({"view": 1, "template": null}));
+        run(&mut s, "scale", json!({"view": 1, "scale": 50}));
+        assert_eq!(k(&s), 1.0, "1 : 50 at a tenth of a pixel to the mm is what is on screen");
+        // A 3D view follows the visual style: wireframe in force while its own is shaded.
+        run(&mut s, "visual_style", json!({"style": "wireframe"}));
+        run(&mut s, "template", json!({"name": "Wire", "from": "{3D}"}));
+        run(&mut s, "graphics", json!({"view": "{3D}", "reset": true, "template": "Wire"}));
+        assert_eq!(Look::of_3d(&s.model).style(), VisualStyle::Wireframe);
+        assert!(matches!(&s.model.elements[&s.model.default_3d().unwrap()], Element::View3D(v) if v.graphics.style == VisualStyle::Shaded));
+        let e = s.execute("visual_style", &json!({"style": "hidden_line"})).unwrap_err();
+        assert!(e.contains("`Wire`") && e.contains("visual style"), "{e}");
+        run(&mut s, "template", json!({"name": "Wire", "visual_style": "hidden_line"}));
+        assert_eq!(Look::of_3d(&s.model).style(), VisualStyle::HiddenLine);
+        // A template that doesn't control a group lets the view keep its own.
+        run(&mut s, "template", json!({"name": "Wire", "controls": ["categories"]}));
+        assert_eq!(Look::of_3d(&s.model).style(), VisualStyle::Shaded);
+        run(&mut s, "visual_style", json!({"style": "hidden_line"}));
+        assert_eq!(Look::of_3d(&s.model).style(), VisualStyle::HiddenLine);
+    }
+
+    #[test]
     fn templates_must_make_sense_and_when_one_goes_its_views_keep_their_own_settings() {
         let mut s = Session::new();
         house(&mut s);
@@ -1719,7 +1832,7 @@ mod tests {
         bad(json!({"from": "Level 1"}), "name");
         bad(json!({"name": "T", "from": "nowhere"}), "nowhere");
         bad(json!({"name": "T", "from": 7}), "sheet");
-        bad(json!({"name": "T", "controls": ["scale"]}), "scale");
+        bad(json!({"name": "T", "controls": ["layout"]}), "layout");
         bad(json!({"name": "T", "controls": "all"}), "controls");
         bad(json!({"name": "T", "view_range": {"cut": -5, "bottom": 10}}), "view range");
         bad(json!({"name": "T", "view_range": [1]}), "view_range");

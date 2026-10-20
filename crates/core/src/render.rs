@@ -887,14 +887,14 @@ fn annotation_of(n: Option<f64>, scale: f64) -> f32 {
     n.map_or(1.0, |n| (n * scale / sheet::DENSITY).clamp(0.1, 10.0) as f32)
 }
 
-/// The scale, 1 : n, view `id` is held at.
+/// The scale, 1 : n, view `id` is held at: its own, or its template's where that controls it.
 fn scale_of(m: &Model, id: Id) -> Option<f64> {
-    crate::graphics::graphics_of(m, id).and_then(|g| g.scale)
+    crate::graphics::graphics_of(m, id).and_then(|g| g.resolved(m).scale)
 }
 
-/// The level of detail view `id` draws at.
+/// The level of detail view `id` draws at: its own, or its template's where that controls it.
 fn detail_of(m: &Model, id: Id) -> Detail {
-    crate::graphics::graphics_of(m, id).map_or_else(Detail::default, |g| g.detail)
+    crate::graphics::graphics_of(m, id).map_or_else(Detail::default, |g| g.resolved(m).detail)
 }
 
 /// Plan `level` as `draw` draws it, its annotation `k` times the size it is laid out at: a sheet's, at paper size.
