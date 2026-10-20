@@ -26,7 +26,7 @@ use crate::model::{
 use crate::units::Units;
 use crate::view3d::{self, Camera, Clip, Image, Scene};
 use crate::walls::{self, Axis};
-use crate::{font, sheet, stairs};
+use crate::{font, massing, sheet, stairs};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -470,7 +470,7 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
                 extent.extend(boundary)
             }
             Element::Room(r) if r.level == level => extent.push(r.point),
-            Element::Mass(ms) if m.mass_cut_by(ms, r.cut) => extent.extend(&ms.boundary),
+            Element::Mass(ms) if m.mass_cut_by(ms, r.cut) => extent.extend(m.mass_outline(ms, r.cut)),
             Element::Component(c) if c.level == level => extent.extend(m.component_pieces(c).into_iter().flat_map(|p| p.outline)),
             Element::Grid(g) => extent.extend([g.start, g.end]),
             Element::Dimension(dm) if dm.level == level => extent.push(dm.at),
@@ -786,6 +786,13 @@ pub fn section_at(m: &Model, id: Id, view: View, k: f32) -> Drawing {
         let Element::Mass(ms) = e else { continue };
         let (z0, z1) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
         d.owner = Some(mid);
+        // Lofted, where the line cuts its skin.
+        if ms.lofted() {
+            for line in massing::section_lines(&massing::tris(&ms.footprint(), &ms.top_ring(), (z0, z1)), v.start, u, len) {
+                d.dashed(&line, 1.0, MASS, false);
+            }
+            continue;
+        }
         for (s0, s1) in view3d::crossings(&ms.boundary, v.start, u) {
             let (a, b) = (s0.max(0.0), s1.min(len));
             if b - a > 1e-6 {
@@ -1067,7 +1074,7 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool, k: f32) -> Drawing {
             }
             _ if up => {}
             // A mass the plane passes through: its outline, dashed.
-            Element::Mass(ms) if m.mass_cut_by(ms, range.cut) => d.dashed(&ms.boundary, 1.0, MASS, true),
+            Element::Mass(ms) if m.mass_cut_by(ms, range.cut) => d.dashed(&m.mass_outline(ms, range.cut), 1.0, MASS, true),
             Element::Stair(st) => stair(&mut d, m, st, level),
             Element::Ramp(r) => ramp(&mut d, m, r, level),
             Element::Railing(rl) if m.level_of(e) == Some(level) => railing(&mut d, m, rl, range.cut),

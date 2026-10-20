@@ -4467,6 +4467,92 @@ fn the_massing_tab_makes_floors_walls_a_floor_and_a_roof_from_the_selected_mass(
 }
 
 mod mep;
+
+#[test]
+fn a_mass_edits_its_levels_and_its_top_outline_in_its_properties_which_lofts_it() {
+    let mut h =
+        app("level {\"elevation\": 6000}\nmass {\"boundary\": [[0, 0], [10000, 0], [10000, 6000], [0, 6000]], \"top_level\": \"Level 3\"}");
+    click(&mut h, P2(5000.0, 0.0));
+    let mass = h.state().selection[0];
+    assert!(h.query_by_label("Base Constraint").is_some() && h.query_by_label("Top Constraint").is_some());
+    assert!(h.query_by_label("Top Outline").is_some());
+    assert_eq!(field(&h, mass, "volume_m3"), json!(360.0));
+    // Typed corner by corner as the footprint's are, twin for twin: 6 x 2 m in the middle.
+    type_into(&mut h, "Top Outline", "2000, 2000; 8000, 2000; 8000, 4000; 2000, 4000");
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, mass, "top"), json!([[2000.0, 2000.0], [8000.0, 2000.0], [8000.0, 4000.0], [2000.0, 4000.0]]));
+    assert_eq!(field(&h, mass, "volume_m3"), json!(200.0));
+    // The wrong number of corners is refused, and the mass is as it was.
+    type_into(&mut h, "Top Outline", "2000, 2000; 8000, 2000; 8000, 4000");
+    key(&mut h, Key::Enter);
+    assert!(h.state().status.error, "{}", h.state().status.text);
+    assert_eq!(field(&h, mass, "volume_m3"), json!(200.0));
+    // Blank takes the loft away.
+    h.get_by_label("Top Outline").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    key(&mut h, Key::Backspace);
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, mass, "volume_m3"), json!(360.0));
+    assert!(field(&h, mass, "top").is_null());
+}
+
+#[test]
+fn update_to_face_makes_what_was_made_by_face_follow_the_selected_mass_again() {
+    let mut h = app(&format!("{BOX}\nmass {{\"boundary\": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], \"height\": 3000}}"));
+    let mass = ids(&h, "mass");
+    click(&mut h, P2(4000.0, 1500.0));
+    assert_eq!(h.state().selection, mass);
+    massing(&mut h, "Floor by Face");
+    let floor = *ids(&h, "floor").last().unwrap();
+    // The mass grows; nothing follows it until Update to Face.
+    h.state_mut().session.execute("modify", &json!({"id": mass[0], "boundary": [[0, 0], [5000, 0], [5000, 3000], [0, 3000]]})).unwrap();
+    let area_of = |h: &mut Harness<BimApp>| {
+        h.state_mut().session.execute("elements", &json!({"category": "floor"})).unwrap()["elements"]
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["id"] == floor).and_then(|e| e["area_m2"].as_f64()))
+    };
+    assert_eq!(area_of(&mut h), Some(12.0));
+    massing(&mut h, "Update to Face");
+    assert_eq!(area_of(&mut h), Some(15.0));
+    // Its shortcut; and with nothing selected it says to select a mass.
+    h.state_mut().session.execute("modify", &json!({"id": mass[0], "boundary": [[0, 0], [6000, 0], [6000, 3000], [0, 3000]]})).unwrap();
+    shortcut(&mut h, "UF");
+    assert_eq!(area_of(&mut h), Some(18.0));
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "UF");
+    assert!(h.state().status.error, "{}", h.state().status.text);
+}
+
+#[test]
+fn show_mass_hides_and_shows_the_masses_in_the_view_on_screen() {
+    let mut h = app(&format!("{BOX}\nmass {{\"boundary\": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], \"height\": 3000}}"));
+    let hidden = |h: &Harness<BimApp>, view| {
+        bimcraft_core::graphics::graphics_of(&h.state().session.model, view)
+            .is_some_and(|g| g.categories.get("mass").is_some_and(|o| o.hidden))
+    };
+    assert!(!hidden(&h, 1));
+    massing(&mut h, "Show Mass");
+    assert!(hidden(&h, 1) && !hidden(&h, 2), "Level 1's plan alone");
+    // Its shortcut turns them back on; a click on the mass picks nothing while it is hidden.
+    shortcut(&mut h, "MH");
+    assert!(!hidden(&h, 1));
+    click(&mut h, P2(4000.0, 1500.0));
+    assert_eq!(h.state().selection, ids(&h, "mass"));
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "MH");
+    click(&mut h, P2(4000.0, 1500.0));
+    assert!(h.state().selection.is_empty(), "a hidden mass can't be picked");
+    // The 3D view is a view of its own; a sheet has no graphics.
+    browse(&mut h, "{3D}");
+    massing(&mut h, "Show Mass");
+    assert!(hidden(&h, h.state().session.model.default_3d().unwrap_or_default()));
+    let mut h = app(&format!("{BOX}\nsheet {{\"name\": \"Plans\"}}"));
+    browse(&mut h, "A101 - Plans");
+    massing(&mut h, "Show Mass");
+    assert!(h.state().status.error, "{}", h.state().status.text);
+}
+
 mod structure;
 
 mod updates {

@@ -481,6 +481,11 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                     }
                 }
             }
+            // Lofted, a skin of triangles from the footprint to the top outline.
+            Element::Mass(ms) if ms.lofted() => {
+                let tris = crate::massing::tris(&ms.footprint(), &ms.top_ring(), m.span(ms.level, ms.base_offset, ms.top_level, ms.height));
+                out.push(Solid::Mesh { owner: id, color: MASS, tex: 0, tris, caps: 0, round: false, cut: false });
+            }
             Element::Mass(ms) => out.push(slab(id, MASS, &ms.footprint(), m.span(ms.level, ms.base_offset, ms.top_level, ms.height))),
             // Each form in its material's colour; a curved one's facets one surface, as a curved wall's are.
             Element::Component(c) => {
@@ -2003,5 +2008,55 @@ mod tests {
         let along = tube(true).cuts(P2(0.0, 0.0), P2(1.0, 0.0), 4000.0);
         let (w, h, ..) = extent(&along);
         assert!((w - 4000.0).abs() < 1e-6 && (h - 200.0).abs() < 1e-6, "{w} {h}");
+    }
+
+    #[test]
+    fn a_lofted_mass_is_a_closed_skin_of_triangles_turned_out_that_encloses_its_exact_volume() {
+        use serde_json::json;
+        let mut s = crate::engine::Session::new();
+        s.execute("level", &json!({"elevation": 6000, "name": "Level 3"})).unwrap();
+        let (base, crown) =
+            (json!([[0, 0], [10000, 0], [10000, 6000], [0, 6000]]), json!([[2000, 2000], [8000, 2000], [8000, 4000], [2000, 4000]]));
+        let r = s.execute("mass", &json!({"boundary": base, "height": 6000, "top": crown})).unwrap();
+        let id = r["id"].as_u64().unwrap_or_default();
+        let mut tris = Vec::new();
+        let solids = solids(&s.model);
+        assert!(solids.iter().filter(|x| x.owner() == id).all(|x| matches!(x, Solid::Mesh { .. })));
+        solids.iter().filter(|x| x.owner() == id).for_each(|x| x.tris(&mut tris));
+        // Turned out, the sum of the tetrahedra to the origin is the volume: 6 m x (60 + 4 x 32 + 12) / 6 m².
+        let volume: f64 = tris.iter().map(|t| dot(t.p[0], cross(t.p[1], t.p[2])) / 6.0).sum();
+        assert!((volume - 200e9).abs() < 1.0, "{volume}");
+        // Closed: each edge is walked once one way and once the other.
+        let key = |p: P3| p.map(|x| (x * 1e3).round() as i64);
+        let mut walked: HashMap<([i64; 3], [i64; 3]), usize> = HashMap::new();
+        for t in &tris {
+            for k in 0..3 {
+                *walked.entry((key(t.p[k]), key(t.p[(k + 1) % 3]))).or_default() += 1;
+            }
+        }
+        assert!(walked.iter().all(|((a, b), n)| *n == 1 && walked.get(&(*b, *a)) == Some(&1)), "an open or doubled edge");
+        // Over its middle it stands 6 m; over a corner of its footprint, past the top outline, it is lower.
+        assert_eq!(tops_at(&s.model, P2(5000.0, 3000.0)).get(&id), Some(&6000.0));
+        let corner = tops_at(&s.model, P2(500.0, 500.0)).get(&id).copied().unwrap_or(f64::MAX);
+        assert!(corner > 0.0 && corner < 6000.0, "{corner}");
+        // A flat-sided loft is twelve triangles: two to each of four sides, and two to each cap.
+        assert_eq!(tris.len(), 12);
+    }
+
+    #[test]
+    fn a_twisted_loft_is_cut_into_strips_that_keep_its_volume_within_two_percent() {
+        use serde_json::json;
+        let mut s = crate::engine::Session::new();
+        // 4 x 4 m at the base, turned 45° over 3 m: the exact volume is 3 m x (16 + 4 x 13.657 + 16) / 6 = 43.31 m³.
+        let top = json!([[2000.0, -828.427], [4828.427, 2000.0], [2000.0, 4828.427], [-828.427, 2000.0]]);
+        let r = s.execute("mass", &json!({"boundary": [[0, 0], [4000, 0], [4000, 4000], [0, 4000]], "height": 3000, "top": top})).unwrap();
+        let id = r["id"].as_u64().unwrap_or_default();
+        let mut tris = Vec::new();
+        solids(&s.model).iter().filter(|x| x.owner() == id).for_each(|x| x.tris(&mut tris));
+        let volume: f64 = tris.iter().map(|t| dot(t.p[0], cross(t.p[1], t.p[2])) / 6.0).sum();
+        let exact = r["volume_m3"].as_f64().unwrap_or_default() * 1e9;
+        assert!((exact - 43.31e9).abs() < 0.01e9, "{exact}");
+        assert!(volume < exact && volume > exact * 0.98, "{volume} of {exact}");
+        assert!(tris.len() > 12 * 4, "its sides are strips: {}", tris.len());
     }
 }

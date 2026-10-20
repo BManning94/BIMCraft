@@ -2357,6 +2357,7 @@ impl BimApp {
                 name: String::new(),
                 level,
                 boundary: ring.clone(),
+                top: None,
                 top_level: None,
                 height: 1.0,
                 base_offset: 0.0,

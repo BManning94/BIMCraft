@@ -1209,6 +1209,13 @@ const WORDS: &[[&str; 3]] = &[
     ["Massing", "Volumetria", "Volumetría"],
     ["Conceptual Mass", "Massa conceitual", "Masa conceptual"],
     ["Model by Face", "Modelo por face", "Modelo por cara"],
+    ["Top Outline", "Contorno superior", "Contorno superior"],
+    ["Show Mass", "Mostrar massa", "Mostrar masa"],
+    [
+        "Show Mass (MH): hides the masses in this view, or shows them again",
+        "Mostrar massa (MH): oculta as massas nesta vista, ou as mostra de novo",
+        "Mostrar masa (MH): oculta las masas en esta vista, o las muestra otra vez",
+    ],
     ["Create Mass", "Criar massa", "Crear masa"],
     [
         "Mass (MS): click the corners of the footprint; Enter, or the first corner again, finishes; Esc cancels",
@@ -1238,6 +1245,12 @@ const WORDS: &[[&str; 3]] = &[
         "Roof by Face (RB): a roof on the selected masses' top faces",
         "Telhado por face (RB): um telhado na face superior das massas selecionadas",
         "Cubierta por cara (RB): una cubierta en la cara superior de las masas seleccionadas",
+    ],
+    ["Update to Face", "Atualizar para a face", "Actualizar a la cara"],
+    [
+        "Update to Face (UF): the walls, floors and roofs made by face from the selected masses follow them again",
+        "Atualizar para a face (UF): as paredes, pisos e telhados feitos por face a partir das massas selecionadas voltam a segui-las",
+        "Actualizar a la cara (UF): los muros, pisos y cubiertas hechos por cara a partir de las masas seleccionadas vuelven a seguirlas",
     ],
     ["Select a mass first.", "Selecione uma massa primeiro.", "Selecciona una masa primero."],
     ["mass: {}", "massa: {}", "masa: {}"],

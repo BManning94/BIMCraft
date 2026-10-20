@@ -52,12 +52,18 @@ const COMMON: u64 = 43;
 const COMMON_DEFINES: u64 = 44;
 const SYSTEMS: u64 = 45;
 const SYSTEM_MEMBERS: u64 = 46;
+const LOFTED: u64 = 47;
+const LOFTED_DEFINES: u64 = 48;
 
 /// The property set an element's values of the project's parameters go in.
 pub const PARAMETERS: &str = "Project Parameters";
 
 /// The property set a run's justification and category go in (its system is an IfcSystem it is assigned to).
 pub const RUN: &str = "BIMCraft_Run";
+
+/// The property set a lofted mass records how its footprint and its top outline pair up in, corner for corner (the body is
+/// a closed face set that doesn't say): `Loft`, JSON `{bottom, top}`.
+pub const LOFT: &str = "BIMCraft_Mass";
 
 /// The property set an element's phase and design option go in; on the project, its phases and design option sets.
 pub const PHASING: &str = "BIMCraft_Phasing";
@@ -235,6 +241,12 @@ impl Step {
         let coords: Vec<String> = pts.iter().map(|p| format!("({},{},{})", real(p[0]), real(p[1]), real(p[2]))).collect();
         let list = self.add(format!("IFCCARTESIANPOINTLIST3D(({}))", coords.join(",")));
         self.add(format!("IFCTRIANGULATEDFACESET(#{list},$,.T.,({}),$)", faces.join(",")))
+    }
+
+    /// A body of tessellated `items`, the closed face sets.
+    fn tessellated(&mut self, items: &[u64]) -> u64 {
+        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", self.body, refs(items)));
+        self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"))
     }
 
     fn point(&mut self, p: P2) -> u64 {
@@ -569,18 +581,30 @@ pub fn export(m: &Model) -> String {
                 spaces.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
             }
-            // A mass: a proxy of object type `Mass`, as Revit writes them, its footprint swept up from its base to its top.
+            // A mass: a proxy of object type `Mass`, as Revit writes them, its footprint swept up from its base to its top; lofted,
+            // a closed face set, with a property set to say which corner pairs with which.
             Element::Mass(ms) => {
                 let Some(&(_, storey)) = storeys.get(&ms.level) else { continue };
                 let (bottom, top) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
                 let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
-                let profile = w.profile(&ms.footprint(), &[]);
-                let shape = w.body(profile, ms.base_offset, top - bottom, &[]);
+                let shape = if ms.lofted() {
+                    let skin = crate::massing::tris(&ms.footprint(), &ms.top_ring(), (ms.base_offset, ms.base_offset + top - bottom));
+                    let set = w.faceset(&skin);
+                    w.tessellated(&[set])
+                } else {
+                    let profile = w.profile(&ms.footprint(), &[]);
+                    w.body(profile, ms.base_offset, top - bottom, &[])
+                };
                 let ent = w.add(format!(
                     "IFCBUILDINGELEMENTPROXY({},$,{},$,'Mass',#{at},#{shape},'{id}',.USERDEFINED.)",
                     w.guid(ELEMENT, id),
                     s(&ms.name)
                 ));
+                if ms.lofted() {
+                    let loft = serde_json::json!({"bottom": ms.footprint(), "top": ms.top_ring()}).to_string();
+                    let prop = w.text_property("Loft", None, &loft);
+                    w.define(ent, LOFT, &[prop], (LOFTED, LOFTED_DEFINES), id);
+                }
                 contained.entry(ms.level).or_default().push(ent);
                 products.insert(id, ent);
             }
@@ -682,8 +706,7 @@ pub fn export(m: &Model) -> String {
                     }
                     items.push(set);
                 }
-                let rep = w.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','Tessellation',({}))", w.body, refs(&items)));
-                let shape = w.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"));
+                let shape = w.tessellated(&items);
                 // A door's or a window's family is placed in a wall, never as a component.
                 let (entity, kind, object_type) = f.category.ifc();
                 let name = s(&format!("{}:{}", cp.family, cp.type_name));

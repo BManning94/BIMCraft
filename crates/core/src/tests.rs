@@ -1499,7 +1499,7 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"view": "{3D}", "style": "wireframe"}),
         json!({"id": 3, "params": {"Phase Created": 5, "Phase Demolished": [], "Design Option": {}}}),
         json!({"id": 3, "params": {"Phase Created": "New Construction", "Phase Demolished": "Existing"}}),
-        // The mass the sweep starts with is 7.
+        // The masses the sweep starts with are 7 and, lofted, 8.
         json!({"boundary": [[0, 0], [1e300, 0], [0, 1e300]], "height": 1e300}),
         json!({"boundary": [[0, 0], [1, 0], [0, 1]], "top_level": 99, "name": 5}),
         json!({"mass": u64::MAX}),
@@ -1510,6 +1510,36 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"mass": 7, "faces": [0, 0, 1], "location": 5}),
         json!({"mass": 7, "type": 5, "slope": 1e300, "overhang": -1e9}),
         json!({"mass": 7, "type": "Nothing"}),
+        json!({"mass": 7, "prune": 5, "type": 5}),
+        json!({"prune": "yes"}),
+        json!({"prune": true}),
+        json!({"boundary": [[0, 0], [1, 0], [0, 1]], "top": [[0, 0], [1, 0]], "height": 5}),
+        json!({"boundary": [[0, 0], [1000, 0], [0, 1000]], "top": [[0, 0], [1e300, 0], [0, 1]], "height": 5, "lean": [1, 1]}),
+        json!({"boundary": [[0, 0], [1000, 0], [0, 1000]], "top": [[5, 5], [5, 5], [5, 5]], "height": 5}),
+        json!({"boundary": [[0, 0], [1000, 0], [0, 1000]], "lean": [1e300, f64::MAX], "height": 5}),
+        json!({"boundary": [[0, 0], [1000, 0], [0, 1000]], "lean": "x", "height": 5}),
+        json!({"boundary": [[0, 0], [1000, 0], [0, 1000]], "lean": [3000, -2000], "top_level": 2}),
+        json!({"id": 7, "top": [[0, 0], [1, 0], [0, 1]]}),
+        json!({"id": 7, "top": "x"}),
+        json!({"id": 7, "top": [[0, 0], [1e300, 0], [0, 1e300], [1, 1]]}),
+        json!({"id": 7, "top": [[10000, 6000], [0, 6000], [0, 0], [10000, 0]]}),
+        json!({"id": 7, "top": [[0, 0], [10000, 0], [10000, 6000], [0, 6000]], "height": 1e-9}),
+        json!({"mass": 8, "faces": [0, 1, 2, 3], "type": "Generic - 200mm"}),
+        json!({"mass": 8, "prune": true}),
+        json!({"mass": 8}),
+        json!({"id": 8, "top": null}),
+        json!({"id": 8, "boundary": [[0, 0], [1, 0], [0, 1]]}),
+        json!({"id": 8, "top": [[0, 0], [1, 0], [0, 1]], "boundary": [[0, 0], [1, 0], [0, 1]]}),
+        json!({"id": 8, "height": 1e-9, "top_level": 1}),
+        json!({"mass": 7, "ids": [1]}),
+        json!({"ids": [u64::MAX, -1]}),
+        json!({"mass": "x"}),
+        json!({"mass": 7}),
+        json!({"view": 1, "show": "x"}),
+        json!({"view": "{3D}", "show": 5}),
+        json!({"view": 1e300, "show": true}),
+        json!({"id": 3, "params": {"Mass Floor": {"mass": 7, "level": 1}, "Mass Face": 5}}),
+        json!({"id": 3, "params": {"Mass Face": {"mass": 7, "face": "top"}}}),
         json!({"id": 7, "height": 1e300, "top_level": 1}),
         json!({"id": 7, "boundary": [[0, 0], [1e300, 1e300], [0, 1]]}),
         json!({"id": 7, "level": 1e300, "base_offset": f64::MAX}),
@@ -1520,6 +1550,8 @@ fn hostile_params_never_panic_or_break_the_model() {
             let mut s = Session::new();
             house(&mut s);
             let _ = s.execute("mass", &json!({"boundary": block(), "height": 9000}));
+            // Another, lofted, which is 8.
+            let _ = s.execute("mass", &json!({"boundary": block(), "height": 9000, "lean": [1500, 500]}));
             let _ = s.execute(cmd.id, p);
             assert_eq!(s.model.check(), Ok(()), "{} {p} left a broken model", cmd.id);
         }
@@ -1964,7 +1996,9 @@ fn describe(m: &Model, id: u64) -> String {
         Some("floor") => &["level", "area_m2", "slope", "top", "openings"],
         Some("ceiling") => &["level", "offset", "thickness", "area_m2", "openings"],
         Some("shaft") => &["level", "base_offset", "top_level", "height", "boundary"],
-        Some("mass") => &["name", "level", "base_offset", "top_level", "height", "boundary", "area_m2", "volume_m3"],
+        Some("mass") => {
+            &["name", "level", "base_offset", "top_level", "height", "boundary", "top", "area_m2", "volume_m3", "gross_floor_area_m2"]
+        }
         Some("room") => &["level", "name", "number", "area_m2"],
         Some("column") => &["level", "at", "width", "depth", "round", "height", "base_offset"],
         Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length", "landings"],
@@ -2092,6 +2126,18 @@ fn ifc_files_open_as_the_building_they_describe() {
         "mass",
         json!({"level": "Level 2", "boundary": [[80000, 10000], [86000, 10000], [86000, 14000]], "height": 4200, "name": "Wing"}),
     );
+    // A lofted one, 10 x 6 m on Level 1 narrowing to 6 x 2 m 5 m up, and one leaning, both with their corners pairing up as they were made.
+    let taper = json!([[102000, 2000], [108000, 2000], [108000, 4000], [102000, 4000]]);
+    run(
+        &mut s,
+        "mass",
+        json!({"boundary": [[100000, 0], [110000, 0], [110000, 6000], [100000, 6000]], "name": "Taper", "height": 5000, "top": taper}),
+    );
+    run(
+        &mut s,
+        "mass",
+        json!({"boundary": [[120000, 0], [124000, 0], [124000, 4000]], "name": "Lean", "height": 3500, "lean": [1500, -500]}),
+    );
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -2118,6 +2164,40 @@ fn ifc_files_open_as_the_building_they_describe() {
     let project = temp("imported.bimcraft");
     run(&mut t, "save", json!({"path": project}));
     let _ = std::fs::remove_file(project);
+}
+
+#[test]
+fn a_lofted_mass_goes_to_ifc_as_a_face_set_and_comes_back_only_where_its_corners_pair_up() {
+    let mut s = Session::new();
+    let (id, _) = frustum(&mut s);
+    run(&mut s, "mass", json!({"boundary": block(), "height": 3000, "name": "Plain"}));
+    let file = crate::ifc::export(&s.model);
+    // One closed face set and one property set for the lofted mass; the plain one is swept up as ever.
+    assert_eq!((file.matches("IFCTRIANGULATEDFACESET").count(), file.matches("'BIMCraft_Mass'").count()), (1, 1));
+    assert_eq!(file.matches("IFCEXTRUDEDAREASOLID").count(), 1);
+    // Read back, the loft is as it was: the same corners, twin for twin, and the same volume.
+    let back = crate::import::ifc(file.as_bytes(), "t").unwrap();
+    assert!(back.skipped.is_empty(), "{:?}", back.skipped);
+    let mut t = Session::new();
+    t.reset(back.model, None);
+    let lofted = t
+        .model
+        .elements
+        .values()
+        .find_map(|e| if let crate::model::Element::Mass(ms) = e { ms.lofted().then(|| ms.clone()) } else { None });
+    let Some(ms) = lofted else { panic!("no lofted mass came back") };
+    let Some(crate::model::Element::Mass(was)) = s.model.elements.get(&id) else { panic!("the frustum is a mass") };
+    assert_eq!((ms.boundary.clone(), ms.top.clone()), (was.boundary.clone(), was.top.clone()));
+    let (bottom, top) = t.model.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+    assert!((t.model.mass_volume(&ms, bottom, top) - 200e9).abs() < 1e3);
+    // Without its property set, or with one that no longer fits the body, the corners can't be paired and it is left out, listed.
+    for broken in [file.replace("'BIMCraft_Mass'", "'Other'"), file.replace("[2000.0,2000.0]", "[2100.0,2000.0]")] {
+        assert_ne!(broken, file);
+        let back = crate::import::ifc(broken.as_bytes(), "t").unwrap();
+        let masses: Vec<_> = back.model.elements.values().filter(|e| e.category() == "mass").collect();
+        assert_eq!(masses.len(), 1, "only the plain one: {:?}", back.skipped);
+        assert!(back.skipped.iter().any(|why| why.contains("BIMCraft_Mass")), "{:?}", back.skipped);
+    }
 }
 
 /// A small IFC2x3 file in metres, written the way other BIM tools write them: a storey 3 m up; a
@@ -3788,6 +3868,74 @@ fn mass_floors_make_a_floor_for_each_level_the_mass_crosses() {
     assert_eq!(*s.model, *before);
 }
 
+fn ids_of(v: &Value) -> Vec<u64> {
+    v.as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect()
+}
+
+#[test]
+fn mass_floors_run_again_update_what_they_made_and_remove_the_stale_ones_only_when_asked() {
+    let mut s = Session::new();
+    let (id, [l1, l2, l3, _]) = tower(&mut s);
+    let first = run(&mut s, "mass_floors", json!({"mass": id}));
+    let floors = ids_of(&first["ids"]);
+    // Each holds its mass and its level, under a reserved name.
+    for (f, level) in floors.iter().zip([l1, l2, l3]) {
+        assert_eq!(element(&mut s, *f)["params"]["Mass Floor"], json!({"mass": id, "level": level}));
+    }
+    assert_eq!((ids_of(&first["made"]), first["updated"].clone()), (floors.clone(), json!([])));
+    // Again: the same floors, and nothing made or changed.
+    let again = run(&mut s, "MF", json!({"mass": id}));
+    assert_eq!((ids_of(&again["ids"]), again["made"].clone(), again["updated"].clone()), (floors.clone(), json!([]), json!([])));
+    assert_eq!(count(&mut s, "floor"), 3);
+    // A floor of the same level nobody made from the mass stays as it is, and so does a mass's floor after `modify`.
+    let own = run(&mut s, "floor", json!({"boundary": [[0, 0], [1000, 0], [0, 1000]]}))["id"].as_u64().unwrap();
+    // The mass grows: its floors take the new outline.
+    run(&mut s, "modify", json!({"id": id, "boundary": [[0, 0], [12000, 0], [12000, 6000], [0, 6000]]}));
+    let again = run(&mut s, "mass_floors", json!({"mass": id}));
+    assert_eq!((ids_of(&again["ids"]), ids_of(&again["updated"]), again["made"].clone()), (floors.clone(), floors.clone(), json!([])));
+    assert_eq!((count(&mut s, "floor"), element(&mut s, floors[1])["area_m2"].as_f64()), (4, Some(72.0)));
+    assert_eq!(element(&mut s, own)["area_m2"].as_f64(), Some(0.5));
+    // `type` changes the floors' type; without it they keep theirs.
+    run(&mut s, "type", json!({"category": "floor", "name": "Thin", "thickness": 100}));
+    let r = run(&mut s, "mass_floors", json!({"mass": id, "type": "Thin"}));
+    assert_eq!(ids_of(&r["updated"]), floors);
+    assert_eq!(element(&mut s, floors[0])["type"], "Thin");
+    assert_eq!(run(&mut s, "mass_floors", json!({"mass": id}))["updated"], json!([]));
+    assert_eq!(element(&mut s, floors[0])["type"], "Thin");
+    // Cut short, the mass no longer crosses Level 3: its floor there is stale, and stays until `prune` asks.
+    run(&mut s, "modify", json!({"id": id, "top_level": l3}));
+    let r = run(&mut s, "mass_floors", json!({"mass": id}));
+    assert_eq!((ids_of(&r["ids"]), ids_of(&r["stale"]), r["removed"].clone()), (floors[..2].to_vec(), floors[2..].to_vec(), json!([])));
+    assert_eq!(count(&mut s, "floor"), 4);
+    let r = run(&mut s, "mass_floors", json!({"mass": id, "prune": true}));
+    assert_eq!((ids_of(&r["removed"]), r["stale"].clone()), (floors[2..].to_vec(), json!([])));
+    assert_eq!(count(&mut s, "floor"), 3);
+    // Pruning with no `mass` prunes every mass; it never touches a floor that holds no mark.
+    assert_eq!(run(&mut s, "mass_floors", json!({"prune": true}))["removed"], json!([]));
+    assert!(s.model.elements.contains_key(&own));
+    // The reserved name is no parameter's, and a floor holds only a real mass and level under it.
+    let e = s.execute("parameter", &json!({"name": "Mass Floor", "kind": "text", "categories": ["floor"]})).unwrap_err();
+    assert!(e.contains("Mass Floor"), "{e}");
+    for (value, says) in [
+        (json!({"mass": 1, "level": l1}), "isn't a mass"),
+        (json!({"mass": id, "level": id}), "isn't a level"),
+        // Merged into the mark there, one more name is one too many.
+        (json!({"face": 1}), "{mass, level}"),
+        (json!("x"), "{mass, level}"),
+    ] {
+        let e = s.execute("modify", &json!({"id": floors[0], "params": {"Mass Floor": value}})).unwrap_err();
+        assert!(e.contains(says), "{value}: {e}");
+    }
+    let wall = run(&mut s, "wall", json!({"points": [[0, 0], [1000, 0]]}))["ids"][0].as_u64().unwrap();
+    assert!(s.execute("modify", &json!({"id": wall, "params": {"Mass Floor": {"mass": id, "level": l1}}})).is_err());
+    // A copy is an ordinary floor; and with the mass gone, the floors it made are too.
+    let copy = run(&mut s, "copy", json!({"ids": [floors[0]], "by": [20000, 0]}))["ids"][0].as_u64().unwrap();
+    assert!(element(&mut s, copy)["params"].get("Mass Floor").is_none());
+    run(&mut s, "delete", json!({"ids": [id]}));
+    assert!(element(&mut s, floors[0])["params"].get("Mass Floor").is_none());
+    assert!(s.execute("mass_floors", &json!({"prune": true})).unwrap_err().contains("no mass"));
+}
+
 fn block_ccw() -> Value {
     json!([[0.0, 0.0], [10000.0, 0.0], [10000.0, 6000.0], [0.0, 6000.0]])
 }
@@ -3925,4 +4073,330 @@ fn masses_show_in_plans_sections_and_the_3d_view_and_a_category_hides_them() {
     run(&mut s, "graphics", json!({"view": section, "hide": ["mass"]}));
     assert_eq!((dashed(&render::plan(&s.model, 1, 800, 600)), dashed(&render::section(&s.model, section, view))), (0, 0));
     assert!(dashed(&render::plan(&s.model, 2, 800, 600)) > 0, "Level 2's plan still shows it");
+}
+
+#[test]
+fn update_by_face_rebuilds_what_was_made_by_face_from_the_mass_as_it_is_now() {
+    let mut s = Session::new();
+    let (id, [_, _, l3, l4]) = tower(&mut s);
+    let walls = ids_of(&run(&mut s, "WB", json!({"mass": id}))["ids"]);
+    let floor = run(&mut s, "FB", json!({"mass": id}))["id"].as_u64().unwrap();
+    let roof = run(&mut s, "RB", json!({"mass": id}))["id"].as_u64().unwrap();
+    // Each holds its mass and its face: an edge number for a wall, "top" for a floor or a roof.
+    for (i, w) in walls.iter().enumerate() {
+        assert_eq!(element(&mut s, *w)["params"]["Mass Face"], json!({"mass": id, "face": i}));
+    }
+    for e in [floor, roof] {
+        assert_eq!(element(&mut s, e)["params"]["Mass Face"], json!({"mass": id, "face": "top"}));
+    }
+    // Chosen faces keep their own numbers.
+    let two = ids_of(&run(&mut s, "wall_by_face", json!({"mass": id, "faces": [1, 3]}))["ids"]);
+    assert_eq!(element(&mut s, two[1])["params"]["Mass Face"], json!({"mass": id, "face": 3}));
+    run(&mut s, "delete", json!({"ids": two}));
+    // Nothing follows the mass by itself.
+    run(&mut s, "modify", json!({"id": id, "boundary": [[0, 0], [12000, 0], [12000, 6000], [0, 6000]], "top_level": l3}));
+    assert_eq!(element(&mut s, walls[0])["start"], json!([10000.0, 0.0]));
+    // Update to face: the walls stand on the edges as they are, as tall as the mass, the floor and the roof on its top.
+    run(&mut s, "wall", json!({"points": [[0, 0], [100, 0]]}));
+    let done = run(&mut s, "UF", json!({"mass": id}));
+    let mut every: Vec<u64> = walls.iter().copied().chain([floor, roof]).collect();
+    assert_eq!(ids_of(&done["updated"]), every);
+    let w = element(&mut s, walls[0]);
+    assert_eq!((w["start"].clone(), w["end"].clone(), w["top_level"].as_u64()), (json!([12000.0, 0.0]), json!([0.0, 0.0]), Some(l3)));
+    assert_eq!(element(&mut s, walls[1])["start"], json!([12000.0, 6000.0]));
+    for e in [floor, roof] {
+        let e = element(&mut s, e);
+        assert_eq!((e["level"].as_u64(), e["area_m2"].as_f64()), (Some(l3), Some(72.0)));
+    }
+    // Again: nothing to do, so no undo step.
+    let steps = s.history().len();
+    let done = run(&mut s, "update_by_face", json!({}));
+    assert_eq!((done["updated"].clone(), ids_of(&done["unchanged"])), (json!([]), every.clone()));
+    assert_eq!(s.history().len(), steps);
+    // What was done to them since stays: their type, a roof's slope.
+    run(&mut s, "modify", json!({"id": roof, "slope": 25}));
+    run(&mut s, "modify", json!({"id": id, "top_level": l4}));
+    run(&mut s, "update_by_face", json!({"ids": [roof, walls[2]]}));
+    let r = element(&mut s, roof);
+    assert_eq!((r["level"].as_u64(), r["slope"].as_f64()), (Some(l4), Some(25.0)));
+    assert_eq!((element(&mut s, walls[2])["top_level"].as_u64(), element(&mut s, walls[3])["top_level"].as_u64()), (Some(l4), Some(l3)));
+    // A wall split in two is two ordinary walls: neither is the mass's face now.
+    let halves = ids_of(&run(&mut s, "split", json!({"id": walls[2], "at": [6000, 6000]}))["ids"]);
+    assert_eq!(halves.len(), 2);
+    for half in halves {
+        assert!(element(&mut s, half)["params"].get("Mass Face").is_none());
+    }
+    // A mass with a height: the floor goes up with it.
+    let low = run(&mut s, "mass", json!({"boundary": block(), "height": 4000, "base_offset": 200}))["id"].as_u64().unwrap();
+    let f = run(&mut s, "floor_by_face", json!({"mass": low}))["id"].as_u64().unwrap();
+    let w = ids_of(&run(&mut s, "wall_by_face", json!({"mass": low, "faces": [0]}))["ids"])[0];
+    run(&mut s, "modify", json!({"id": low, "height": 5000}));
+    run(&mut s, "update_by_face", json!({"mass": low}));
+    assert_eq!((element(&mut s, f)["offset"].as_f64(), element(&mut s, w)["height"].as_f64()), (Some(5200.0), Some(5000.0)));
+    // A mass mirrored in place runs round the other way: its walls are numbered again, so each follows its own edge.
+    let flip = run(&mut s, "mass", json!({"boundary": block(), "height": 3000, "name": "Flip"}))["id"].as_u64().unwrap();
+    let flipped = ids_of(&run(&mut s, "wall_by_face", json!({"mass": flip, "faces": [0, 1]}))["ids"]);
+    run(&mut s, "mirror", json!({"ids": [flip], "axis": [[-1000, 0], [-1000, 1000]]}));
+    assert_eq!(element(&mut s, flipped[0])["params"]["Mass Face"], json!({"mass": flip, "face": 2}));
+    assert_eq!(element(&mut s, flipped[1])["params"]["Mass Face"], json!({"mass": flip, "face": 1}));
+    run(&mut s, "update_by_face", json!({"mass": flip}));
+    let w = element(&mut s, flipped[0]);
+    assert_eq!((w["start"].clone(), w["end"].clone()), (json!([-2000.0, 0.0]), json!([-12000.0, 0.0])));
+    run(&mut s, "delete", json!({"ids": [flip]}));
+    // A face that's gone refuses the lot, and says which: the model is as it was.
+    run(&mut s, "modify", json!({"id": id, "boundary": [[0, 0], [12000, 0], [0, 6000]]}));
+    let before = s.model.clone();
+    let e = s.execute("update_by_face", &json!({"mass": id})).unwrap_err();
+    assert!(e.contains(&format!("wall {}", walls[3])) && e.contains("face 3") && e.contains("3 faces"), "{e}");
+    assert_eq!(*s.model, *before);
+    // The ones whose faces are there can be asked for by name.
+    run(&mut s, "update_by_face", json!({"ids": [walls[0], walls[1], floor]}));
+    assert_eq!(element(&mut s, floor)["area_m2"].as_f64(), Some(36.0));
+    // Not made by face, or made from no mass any more.
+    let plain = run(&mut s, "wall", json!({"points": [[0, 0], [100, 0]]}))["ids"][0].as_u64().unwrap();
+    for (p, says) in [
+        (json!({"ids": [plain]}), "isn't made by face"),
+        (json!({"mass": plain}), "isn't a mass"),
+        (json!({"mass": id, "ids": [walls[0]]}), "ids"),
+        (json!({"ids": [9999]}), "9999"),
+        (json!({"ids": "x"}), "ids"),
+    ] {
+        let e = s.execute("update_by_face", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    every.push(plain);
+    run(&mut s, "delete", json!({"ids": [id, low]}));
+    assert!(element(&mut s, walls[0])["params"].get("Mass Face").is_none());
+    assert!(s.execute("update_by_face", &json!({})).unwrap_err().contains("by face"));
+    // The mark is a mass and its face, of the right kind for the element.
+    let m2 = run(&mut s, "mass", json!({"boundary": block(), "height": 3000}))["id"].as_u64().unwrap();
+    for (e, mark) in [
+        (walls[0], json!({"mass": m2, "face": "top"})),
+        (floor, json!({"mass": m2, "face": 0})),
+        (walls[0], json!({"mass": plain, "face": 0})),
+        (walls[0], json!({"mass": m2})),
+        (plain, json!({"mass": m2, "face": -1})),
+    ] {
+        assert!(s.execute("modify", &json!({"id": e, "params": {"Mass Face": mark}})).is_err(), "{e} {mark}");
+    }
+    run(&mut s, "modify", json!({"id": plain, "params": {"Mass Face": {"mass": m2, "face": 7}}}));
+    assert!(s.execute("update_by_face", &json!({})).unwrap_err().contains("face 7"), "a mark beyond the footprint is a face that's gone");
+}
+
+/// A mass 10 x 6 m at its base on Level 1 and 6 x 2 m at Level 3, 6 m up, the top outline centred: a prismatoid of rectangles.
+fn frustum(s: &mut Session) -> (u64, [u64; 3]) {
+    let l3 = run(s, "level", json!({"elevation": 6000, "name": "Level 3"}))["id"].as_u64().unwrap();
+    let top = json!([[2000, 2000], [8000, 2000], [8000, 4000], [2000, 4000]]);
+    let id = run(s, "mass", json!({"boundary": block(), "top_level": l3, "top": top, "name": "Frustum"}))["id"].as_u64().unwrap();
+    (id, [1, 2, l3])
+}
+
+#[test]
+fn a_mass_with_a_top_outline_is_lofted_straight_between_it_and_its_footprint() {
+    let mut s = Session::new();
+    let l3 = run(&mut s, "level", json!({"elevation": 6000, "name": "Level 3"}))["id"].as_u64().unwrap();
+    let top = json!([[2000, 2000], [8000, 2000], [8000, 4000], [2000, 4000]]);
+    let r = run(&mut s, "mass", json!({"boundary": block(), "top_level": l3, "top": top, "name": "Frustum"}));
+    let id = r["id"].as_u64().unwrap();
+    // 60 m² at its base, and 6 m x (60 + 4 x 32 + 12) / 6 = 200 m³, the 32 being the 8 x 4 m halfway up.
+    assert_eq!((r["area_m2"].as_f64(), r["height"].as_f64(), r["volume_m3"].as_f64()), (Some(60.0), Some(6000.0), Some(200.0)));
+    let e = element(&mut s, id);
+    assert_eq!(e["top"], json!([[2000.0, 2000.0], [8000.0, 2000.0], [8000.0, 4000.0], [2000.0, 4000.0]]));
+    assert_eq!((e["volume_m3"].as_f64(), e["gross_floor_area_m2"].as_f64()), (Some(200.0), Some(92.0)));
+    // A floor at each level it crosses is the outline between the two there: Level 2 is halfway up.
+    let floors = ids_of(&run(&mut s, "MF", json!({"mass": id}))["ids"]);
+    assert_eq!(floors.len(), 2);
+    let f = element(&mut s, floors[1]);
+    assert_eq!(f["boundary"], json!([[1000.0, 1000.0], [9000.0, 1000.0], [9000.0, 5000.0], [1000.0, 5000.0]]));
+    assert_eq!(f["area_m2"].as_f64(), Some(32.0));
+    assert_eq!(element(&mut s, floors[0])["boundary"], block_ccw());
+    // Run again after the top outline moves: its floors follow, the Level 1 one unchanged.
+    run(&mut s, "modify", json!({"id": id, "top": [[0, 0], [10000, 0], [10000, 6000], [0, 6000]]}));
+    let r = run(&mut s, "mass_floors", json!({"mass": id}));
+    assert_eq!(ids_of(&r["updated"]), floors[1..].to_vec());
+    // Its schedules: area, perimeter and the volume from each level to the next, from the cross section exactly.
+    run(&mut s, "modify", json!({"id": id, "top": top}));
+    run(&mut s, "mass_floors", json!({"mass": id}));
+    let r = run(&mut s, "schedule", json!({"category": "massfloors", "sort": ["Level"]}));
+    assert_eq!(r["rows"], json!([["Frustum", "Level 1", 60.0, 32000.0, 136.0], ["Frustum", "Level 2", 32.0, 24000.0, 64.0]]));
+    // A top outline is a floor and a roof on its top face, at its own place, not the footprint's.
+    let f = run(&mut s, "floor_by_face", json!({"mass": id}))["id"].as_u64().unwrap();
+    assert_eq!((element(&mut s, f)["boundary"].clone(), element(&mut s, f)["level"].as_u64()), (json!(top_ccw()), Some(l3)));
+    let r = run(&mut s, "roof_by_face", json!({"mass": id}))["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, r)["boundary"], json!(top_ccw()));
+    // No wall stands plumb on a face that leans; every face of this one does.
+    let e = s.execute("wall_by_face", &json!({"mass": id})).unwrap_err();
+    assert!(e.contains("plumb") && e.contains("lean"), "{e}");
+    let e = s.execute("wall_by_face", &json!({"mass": id, "faces": [1]})).unwrap_err();
+    assert!(e.contains("face 1") && e.contains("plumb"), "{e}");
+    // It follows when its top outline moves: update_by_face gives the floor the new one.
+    run(&mut s, "modify", json!({"id": id, "top": [[0, 0], [10000, 0], [10000, 3000], [0, 3000]]}));
+    run(&mut s, "update_by_face", json!({"mass": id}));
+    assert_eq!(element(&mut s, f)["area_m2"].as_f64(), Some(30.0));
+    // A sloped mass is the special case of a top outline moved sideways: `lean` makes one, and the volume is its base times its height.
+    let lean = run(&mut s, "mass", json!({"boundary": block(), "top_level": l3, "lean": [3000, 0], "name": "Lean"}));
+    let lean_id = lean["id"].as_u64().unwrap();
+    assert_eq!((lean["volume_m3"].as_f64(), element(&mut s, lean_id)["top"][0].clone()), (Some(360.0), json!([3000.0, 0.0])));
+    let floors = ids_of(&run(&mut s, "mass_floors", json!({"mass": lean_id}))["ids"]);
+    assert_eq!(element(&mut s, floors[1])["boundary"][0], json!([1500.0, 0.0]));
+    // A lean leaves no face plumb. Where only some corners move, the faces between those that don't are.
+    assert!(s.execute("wall_by_face", &json!({"mass": lean_id})).unwrap_err().contains("leans"));
+    let part = json!([[0, 0], [10000, 0], [8000, 6000], [0, 6000]]);
+    let part = run(&mut s, "mass", json!({"boundary": block(), "height": 3000, "top": part}))["id"].as_u64().unwrap();
+    let walls = ids_of(&run(&mut s, "wall_by_face", json!({"mass": part}))["ids"]);
+    let faces: Vec<Value> = walls.iter().map(|w| s.model.elements[w].params().unwrap()["Mass Face"]["face"].clone()).collect();
+    assert_eq!(faces, [json!(0), json!(3)]);
+    run(&mut s, "modify", json!({"id": part, "top": [[0, 0], [10000, 0], [10000, 5000], [0, 5000]]}));
+    let e = s.execute("update_by_face", &json!({"ids": walls})).unwrap_err();
+    assert!(e.contains("leans now"), "{e}");
+    // It moves, copies, rotates and mirrors with its top outline.
+    let copy = ids_of(&run(&mut s, "copy", json!({"ids": [id], "by": [20000, 0]}))["ids"])[0];
+    assert_eq!(element(&mut s, copy)["top"][0], json!([20000.0, 0.0]));
+    run(&mut s, "mirror", json!({"ids": [id], "axis": [[-1000, 0], [-1000, 1000]]}));
+    let e = element(&mut s, id);
+    // 6 m x (60 + 4 x 45 + 30) / 6 = 270 m³ now; 60 + 45 m² of floor.
+    assert_eq!((e["volume_m3"].as_f64(), e["gross_floor_area_m2"].as_f64()), (Some(270.0), Some(105.0)), "{e}");
+    run(&mut s, "rotate", json!({"ids": [id], "about": [0, 0], "angle": 90}));
+    assert_eq!(element(&mut s, id)["volume_m3"].as_f64(), Some(270.0));
+    // `top: null` takes the loft away: a straight mass again.
+    run(&mut s, "modify", json!({"id": id, "top": null}));
+    let e = element(&mut s, id);
+    assert!(e.get("top").is_none_or(Value::is_null));
+    assert_eq!(e["volume_m3"].as_f64(), Some(360.0));
+}
+
+fn top_ccw() -> Value {
+    json!([[2000.0, 2000.0], [8000.0, 2000.0], [8000.0, 4000.0], [2000.0, 4000.0]])
+}
+
+#[test]
+fn a_top_outline_pairs_up_with_the_footprint_point_for_point_and_never_collapses_the_mass() {
+    let mut s = Session::new();
+    let before = s.model.clone();
+    let l2 = 2;
+    for (p, says) in [
+        (json!({"boundary": block(), "height": 3000, "top": [[0, 0], [1, 0], [1, 1]]}), "points"),
+        (json!({"boundary": block(), "height": 3000, "top": "x"}), "top"),
+        (json!({"boundary": block(), "height": 3000, "top": [[0, 0], [1e300, 0], [1, 1], [0, 1]]}), "top"),
+        // Clockwise where the footprint runs counter-clockwise, or collapsing halfway up: each corner meets the opposite one.
+        (json!({"boundary": block(), "height": 3000, "top": [[0, 6000], [10000, 6000], [10000, 0], [0, 0]]}), "other way"),
+        (json!({"boundary": block(), "height": 3000, "top": [[10000, 6000], [0, 6000], [0, 0], [10000, 0]]}), "collapses"),
+        (json!({"boundary": block(), "height": 3000, "top": block(), "lean": [1, 1]}), "lean"),
+        (json!({"boundary": block(), "height": 3000, "lean": 5}), "lean"),
+        (json!({"boundary": block(), "top_level": l2, "lean": [1e300, 0]}), "lean"),
+    ] {
+        let e = s.execute("mass", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    assert_eq!(*s.model, *before);
+    // Given the way round that runs clockwise, the footprint is turned counter-clockwise and its top outline with it, still twin for twin.
+    let cw = json!([[0, 0], [0, 6000], [10000, 6000], [10000, 0]]);
+    let top = json!([[2000, 2000], [2000, 4000], [8000, 4000], [8000, 2000]]);
+    let id = run(&mut s, "mass", json!({"boundary": cw, "height": 6000, "top": top}))["id"].as_u64().unwrap();
+    let e = element(&mut s, id);
+    assert_eq!(e["volume_m3"].as_f64(), Some(200.0));
+    assert_eq!((e["boundary"][1].clone(), e["top"][1].clone()), (json!([10000.0, 6000.0]), json!([8000.0, 4000.0])));
+    // A change to the footprint's corners alone leaves the top outline short.
+    let e = s.execute("modify", &json!({"id": id, "boundary": [[0, 0], [100, 0], [0, 100]]})).unwrap_err();
+    assert!(e.contains("points"), "{e}");
+    // The same top outline as its footprint is no loft.
+    let flat = run(&mut s, "mass", json!({"boundary": block(), "height": 3000, "top": block()}))["id"].as_u64().unwrap();
+    assert!(element(&mut s, flat).get("top").is_none_or(Value::is_null));
+}
+
+#[test]
+fn a_lofted_mass_is_drawn_in_plans_and_sections_where_the_view_cuts_it() {
+    use crate::render::{self, Prim};
+    let mut s = Session::new();
+    let (id, _) = frustum(&mut s);
+    let dashed = |d: &render::Drawing| -> Vec<Vec<(f32, f32)>> {
+        d.prims
+            .iter()
+            .zip(&d.owners)
+            .filter_map(|(p, o)| match p {
+                Prim::Line { pts, dash: Some(_), .. } if *o == Some(id) => Some(pts.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let has = |lines: &[Vec<(f32, f32)>], want: (f32, f32)| {
+        lines.iter().flatten().any(|p| (p.0 - want.0).abs() < 0.05 && (p.1 - want.1).abs() < 0.05)
+    };
+    // Level 1's plan cuts 1200 mm up, a fifth of the way: each corner that far along its way to its twin.
+    let d = render::plan(&s.model, 1, 800, 600);
+    let lines = dashed(&d);
+    assert_eq!(lines.len(), 1);
+    for p in [P2(400.0, 400.0), P2(9600.0, 400.0), P2(9600.0, 5600.0), P2(400.0, 5600.0)] {
+        assert!(has(&lines, d.view.px(p)), "{p:?} in {lines:?}");
+    }
+    // Level 2's, at 4200: seven tenths.
+    let d = render::plan(&s.model, 2, 800, 600);
+    for p in [P2(1400.0, 1400.0), P2(8600.0, 1400.0), P2(8600.0, 4600.0), P2(1400.0, 4600.0)] {
+        assert!(has(&dashed(&d), d.view.px(p)), "{p:?}");
+    }
+    // A section across it, along x = 5000 from y = -4000: the outline slants in from each side, to 2000 mm in at the top.
+    let section = run(&mut s, "section", json!({"start": [5000, -4000], "end": [5000, 10000]}))["id"].as_u64().unwrap();
+    let view = render::section_fit(&s.model, section, 800, 600);
+    let d = render::section(&s.model, section, view);
+    let lines = dashed(&d);
+    for p in [P2(4000.0, 0.0), P2(10000.0, 0.0), P2(6000.0, 6000.0), P2(8000.0, 6000.0)] {
+        assert!(has(&lines, d.view.px(p)), "{p:?} in {lines:?}");
+    }
+    assert!(d.prims.iter().zip(&d.owners).all(|(p, o)| *o != Some(id) || !matches!(p, Prim::Fill { .. })), "outlined, not filled in poché");
+    // Every dashed point lies on the cut: left of the centre by 4000 + z/3 at most.
+    let inside = |p: &(f32, f32)| {
+        let z = ((f64::from(d.view.px(P2(0.0, 0.0)).1) - f64::from(p.1)) / d.view.scale).clamp(0.0, 6000.0);
+        let s = (f64::from(p.0) - f64::from(d.view.px(P2(0.0, 0.0)).0)) / d.view.scale;
+        s >= 4000.0 + z / 3.0 - 0.5 && s <= 10000.0 - z / 3.0 + 0.5
+    };
+    assert!(lines.iter().flatten().all(inside));
+    // A view that hides masses draws none of it.
+    run(&mut s, "graphics", json!({"view": section, "hide": ["mass"]}));
+    assert!(dashed(&render::section(&s.model, section, view)).is_empty());
+    // A plan that cuts it at the top, or above, shows nothing.
+    run(&mut s, "modify", json!({"id": 1, "view_range": {"cut": 6500}}));
+    assert!(dashed(&render::plan(&s.model, 1, 800, 600)).is_empty());
+}
+
+#[test]
+fn show_mass_toggles_the_mass_category_in_one_view_in_one_step() {
+    use crate::render::{self, Prim};
+    let mut s = Session::new();
+    let (id, _) = tower(&mut s);
+    let dashed = |m: &crate::model::Model, view: u64| {
+        let d = render::plan(m, view, 800, 600);
+        d.prims.iter().zip(&d.owners).filter(|(p, o)| **o == Some(id) && matches!(p, Prim::Line { dash: Some(_), .. })).count()
+    };
+    assert!(dashed(&s.model, 1) > 0 && dashed(&s.model, 2) > 0);
+    // With no say, it flips what the view does now: masses shown, so hidden, and shown again.
+    let r = run(&mut s, "MH", json!({"view": 1}));
+    assert_eq!((r["shown"].clone(), r["hidden"].clone()), (json!(false), json!(["mass"])));
+    assert_eq!((dashed(&s.model, 1), dashed(&s.model, 2) > 0), (0, true), "only the view it was asked for");
+    let r = run(&mut s, "show_mass", json!({"view": 1}));
+    assert_eq!((r["shown"].clone(), r["hidden"].clone()), (json!(true), json!([])));
+    assert!(dashed(&s.model, 1) > 0);
+    // `show` says which, whatever the view does now; one undo step each.
+    run(&mut s, "show_mass", json!({"view": "Level 1", "show": false}));
+    run(&mut s, "show_mass", json!({"view": "Level 1", "show": false}));
+    assert_eq!(dashed(&s.model, 1), 0);
+    run(&mut s, "show_mass", json!({"view": 1, "show": true}));
+    assert!(dashed(&s.model, 1) > 0);
+    run(&mut s, "undo", json!({}));
+    assert_eq!(dashed(&s.model, 1), 0);
+    // The 3D view makes its own on the first change, a section and an elevation are views too.
+    let r = run(&mut s, "show_mass", json!({"view": "{3D}", "show": false}));
+    assert_eq!(r["hidden"], json!(["mass"]));
+    let section = run(&mut s, "section", json!({"start": [5000, -4000], "end": [5000, 10000]}))["id"].as_u64().unwrap();
+    assert_eq!(run(&mut s, "show_mass", json!({"view": section}))["shown"], json!(false));
+    // A view that follows a template with categories takes no change of its own, and `show` is a yes or no.
+    run(&mut s, "template", json!({"name": "T", "controls": ["categories"]}));
+    run(&mut s, "graphics", json!({"view": 2, "template": "T"}));
+    let e = s.execute("show_mass", &json!({"view": 2})).unwrap_err();
+    assert!(e.contains("template"), "{e}");
+    for (p, says) in
+        [(json!({"view": 1, "show": "yes"}), "show"), (json!({"view": "nowhere"}), "view"), (json!({"view": 1, "show": 5}), "show")]
+    {
+        let e = s.execute("show_mass", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
 }

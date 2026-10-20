@@ -13,6 +13,7 @@ use crate::favorites::{self, FamilyEntry, Favorites, MaterialEntry};
 use crate::geom::{self, P2};
 use crate::graphics::{self, Graphics, Group, Look, Override, ViewTemplate};
 use crate::language::Language;
+use crate::massing;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
     Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass, Model,
@@ -121,9 +122,13 @@ pub static ALL: &[Command] = &[
         "mass",
         "Mass",
         &["MS"],
-        "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?, name?} a mass, Revit's conceptual volume: the \
-         footprint extruded from `base_offset` above the level up to the next level, or `height` mm, or up to `top_level`. \
-         Drawn dashed in plans and sections, a see-through solid in 3D; its own category, `mass`, which views may hide. Make \
+        "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?, top?: [[x,y],…], lean?: [dx,dy], name?} a mass, Revit's \
+         conceptual volume: the footprint extruded from `base_offset` above the level up to the next level, or `height` mm, or up \
+         to `top_level`. With `top`, an outline of as many points as the footprint (twin for twin, running the same way round), \
+         it is lofted straight from the footprint to it; `lean` makes one by moving the footprint sideways by [dx, dy] for its \
+         top, a sloped mass. Drawn dashed in plans and sections (the outline at the height they cut it, between the two when \
+         lofted), a see-through solid in 3D; its own category, `mass`, which views may hide. Its areas and volumes, per level \
+         too, are those of the cross sections between its outlines, exactly. Make \
          floors from it with `mass_floors`, walls, a floor and a roof from its faces with `wall_by_face`, `floor_by_face` \
          and `roof_by_face`",
         mass,
@@ -132,9 +137,12 @@ pub static ALL: &[Command] = &[
         "mass_floors",
         "Mass Floors",
         &["MF"],
-        "{mass?, type?} a floor of the footprint at each level the mass crosses, from the one at its base up to, not \
-         including, the one at its top; every mass when no `mass`. `schedule {category: massfloors}` lists each mass's floor \
-         area and volume on each level",
+        "{mass?, type?, prune?} a floor of the footprint at each level the mass crosses, from the one at its base up to, not \
+         including, the one at its top; every mass when no `mass`. The floors it makes hold their mass and level (`Mass Floor`), \
+         so a second run makes no second floor: it gives the ones there the mass's footprint now (and the `type` if given), \
+         and lists in `stale` those on a level the mass no longer crosses, which `prune` deletes. The reply has `ids` (every \
+         floor of the mass), `made`, `updated`, `stale` and `removed`. `schedule {category: massfloors}` lists each mass's \
+         floor area and volume on each level",
         mass_floors,
     ),
     edit(
@@ -161,6 +169,26 @@ pub static ALL: &[Command] = &[
         "{mass, type?, slope?, overhang?} a roof on the mass's top face, flat unless it has a `slope` (degrees), over the mass's \
          top level or `height` over its base. An ordinary roof from then on",
         roof_by_face,
+    ),
+    edit(
+        "update_by_face",
+        "Update to Face",
+        &["UF"],
+        "{mass?, ids?} rebuilds what `wall_by_face`, `floor_by_face` and `roof_by_face` made from the mass as it is now (Revit's \
+         Update to Face): the walls on its edges, as tall as it is, a floor and a roof on its top face. The ones of `mass`, or the \
+         `ids` given, or every one in the project; what was done to them since (their type, a roof's slope) stays. A face that \
+         is gone (a footprint with fewer corners) refuses the lot and says which; a deleted mass's are ordinary elements. Revit \
+         has no default shortcut for it: UF is BIMCraft's. The reply has `updated` and `unchanged`",
+        update_by_face,
+    ),
+    edit(
+        "show_mass",
+        "Show Mass",
+        &["MH"],
+        "{view?, show?} hides the masses in a view if it shows them, shows them if it hides them (or as `show`, a yes or no, \
+         says): the `mass` category of `graphics {hide|show}`, in one step. The reply has `shown` and `hidden`, the categories \
+         the view hides. Revit's Show Mass has no default shortcut; MH is BIMCraft's",
+        show_mass,
     ),
     edit("room", "Room", &["RM"], "{point: [x,y], level?, name?, number?} bounded by the walls around the point", room),
     edit(
@@ -1187,7 +1215,8 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("area_m2".into(), json!(area));
             extra.insert("height".into(), json!(height));
             extra.insert("volume_m3".into(), json!(volume));
-            extra.insert("gross_floor_area_m2".into(), json!(m2(m.mass_slices(ms).len() as f64 * geom::area(&ms.boundary).abs())));
+            let gross: f64 = m.mass_slices(ms).iter().map(|(_, z, _)| geom::area(&m.mass_outline(ms, *z)).abs()).sum();
+            extra.insert("gross_floor_area_m2".into(), json!(m2(gross)));
             extra.insert("levels".into(), json!(m.mass_slices(ms).iter().map(|(l, _, _)| *l).collect::<Vec<Id>>()));
         }
         Element::Room(r) => {
@@ -1274,10 +1303,11 @@ fn open(s: &mut Session, p: &Value) -> R {
     m.adopt_materials();
     // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
     let mut renamed = BTreeMap::new();
-    if m.parameters.keys().any(|n| phasing::reserved(n) || paint::reserved(n)) {
+    if m.parameters.keys().any(|n| phasing::reserved(n) || paint::reserved(n) || massing::reserved(n)) {
         let mut t = Session::new();
         t.model = Arc::new(m);
-        let olds: Vec<String> = t.model.parameters.keys().filter(|n| phasing::reserved(n) || paint::reserved(n)).cloned().collect();
+        let olds: Vec<String> =
+            t.model.parameters.keys().filter(|n| phasing::reserved(n) || paint::reserved(n) || massing::reserved(n)).cloned().collect();
         for old in olds {
             let new = (1..)
                 .map(|i| if i == 1 { format!("{old} Parameter") } else { format!("{old} Parameter {i}") })
@@ -2641,8 +2671,7 @@ fn shaft(s: &mut Session, p: &Value) -> R {
 /// A mass's footprint area (m²), height (mm) and volume (m³).
 fn mass_size(m: &Model, ms: &Mass) -> (f64, f64, f64) {
     let (bottom, top) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
-    let a = geom::area(&ms.boundary).abs();
-    (m2(a), top - bottom, (a * (top - bottom) / 1e7).round() / 100.0)
+    (m2(geom::area(&ms.boundary).abs()), top - bottom, (m.mass_volume(ms, bottom, top) / 1e7).round() / 100.0)
 }
 
 fn mass(s: &mut Session, p: &Value) -> R {
@@ -2650,14 +2679,28 @@ fn mass(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let level = level_param(c, m, p, "level")?;
     let mut boundary = points(c, p, "boundary")?;
+    let mut top = match (absent(p.get("top")), absent(p.get("lean"))) {
+        (false, false) => return Err(bad(c, "give `top`, an outline, or `lean`, how far the top moves sideways, not both")),
+        (false, true) => Some(points(c, p, "top")?),
+        (true, false) => {
+            let by = point_req(c, p, "lean")?;
+            Some(boundary.iter().map(|q| *q + by).collect::<Vec<P2>>())
+        }
+        (true, true) => None,
+    };
+    // Counter-clockwise, and its top outline the same way round, twin for twin.
     if geom::area(&boundary) < 0.0 {
         boundary.reverse();
+        if let Some(t) = top.as_mut() {
+            t.reverse();
+        }
     }
     let (top_level, height) = top_param(c, m, p, level)?;
     let name = string(c, p, "name")?.unwrap_or_else(|| m.language.word("Mass").into());
     let ms = Mass {
         name,
         level,
+        top: top.filter(|t| *t != boundary),
         boundary,
         top_level,
         height,
@@ -2678,9 +2721,16 @@ fn mass_of(c: &str, m: &Model, p: &Value) -> Result<(Id, Mass), String> {
     }
 }
 
-/// Where a mass's top face is: a level, and how far over it.
-fn mass_top(ms: &Mass) -> (Id, f64) {
-    ms.top_level.map_or((ms.level, ms.base_offset + ms.height), |t| (t, 0.0))
+/// The elements `made` (an id, or a list of them) holding `value` under `key`: their ids.
+fn mark(s: &mut Session, made: &Value, key: &str, value: Value) -> Vec<Id> {
+    let ids: Vec<Id> =
+        made.as_array().map_or_else(|| made.as_u64().into_iter().collect(), |a| a.iter().filter_map(Value::as_u64).collect());
+    for id in &ids {
+        if let Some(params) = s.model_mut().elements.get_mut(id).and_then(Element::params_mut) {
+            params.insert(key.into(), value.clone());
+        }
+    }
+    ids
 }
 
 /// `p` with the parameters of `from` that `keys` name, for the command that makes the element.
@@ -2694,36 +2744,94 @@ fn passing(p: &Value, keys: &[&str], mut to: Value) -> Value {
 fn mass_floors(s: &mut Session, p: &Value) -> R {
     let c = "mass_floors";
     let m = &s.model;
-    let masses: Vec<Mass> = match id_opt(c, p, "mass")? {
-        Some(_) => vec![mass_of(c, m, p)?.1],
-        None => m.elements.values().filter_map(|e| if let Element::Mass(ms) = e { Some(ms.clone()) } else { None }).collect(),
+    let masses: Vec<(Id, Mass)> = match id_opt(c, p, "mass")? {
+        Some(_) => vec![mass_of(c, m, p)?],
+        None => m.elements.iter().filter_map(|(id, e)| if let Element::Mass(ms) = e { Some((*id, ms.clone())) } else { None }).collect(),
     };
     if masses.is_empty() {
         return Err(bad(c, "no mass; make one with `mass`"));
     }
-    let mut ids = Vec::new();
-    for ms in &masses {
-        for (level, _, _) in s.model.mass_slices(ms) {
-            let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?;
-            ids.push(made["id"].clone());
+    let prune = flag(c, p, "prune")?;
+    let kind = string(c, p, "type")?;
+    let (mut ids, mut made, mut updated, mut stale, mut removed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (mass, ms) in &masses {
+        let held = massing::floors_of(&s.model, *mass);
+        let slices = s.model.mass_slices(ms);
+        let levels: Vec<Id> = slices.iter().map(|(level, _, _)| *level).collect();
+        for &(level, z, _) in &slices {
+            // The outline of the mass at the level: its footprint, or between that and its top outline if it's lofted.
+            let ring = s.model.mass_outline(ms, z);
+            let Some(&(f, _)) = held.iter().find(|(_, l)| *l == level) else {
+                let made_one = floor(s, &passing(p, &["type"], json!({"boundary": ring, "level": level})))?;
+                for id in mark(s, &made_one["id"], massing::FLOOR, json!({"mass": mass, "level": level})) {
+                    made.push(id);
+                    ids.push(id);
+                }
+                continue;
+            };
+            ids.push(f);
+            // A floor that already has the outline (and the type) is left alone, so a second run is no undo step.
+            if let Some(Element::Floor(fl)) = s.model.elements.get(&f)
+                && (fl.boundary != ring || kind.as_ref().is_some_and(|k| *k != fl.type_name))
+                && let Some(Element::Floor(fl)) = s.model_mut().elements.get_mut(&f)
+            {
+                fl.boundary = ring;
+                fl.type_name = kind.clone().unwrap_or_else(|| fl.type_name.clone());
+                updated.push(f);
+            }
+        }
+        for (f, _) in held.into_iter().filter(|(_, l)| !levels.contains(l)) {
+            if prune { removed.push(f) } else { stale.push(f) }
         }
     }
-    Ok(json!({"ids": ids}))
+    if !removed.is_empty() {
+        delete_elements(s, &removed)?;
+    }
+    Ok(json!({"ids": ids, "made": made, "updated": updated, "stale": stale, "removed": removed}))
+}
+
+fn show_mass(s: &mut Session, p: &Value) -> R {
+    let c = "show_mass";
+    let want = match p.get("show") {
+        v if absent(v) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(v) => return Err(bad(c, format!("`show` must be true or false, got {v}"))),
+        None => None,
+    };
+    let view = passing(p, &["view"], json!({}));
+    let hidden = |r: &Value| r["hidden"].as_array().is_some_and(|h| h.iter().any(|n| n == "mass"));
+    let show = want.unwrap_or_else(|| view_graphics(s, &view).is_ok_and(|r| hidden(&r)));
+    let mut q = view;
+    q[if show { "show" } else { "hide" }] = json!(["mass"]);
+    let r = view_graphics(s, &q).map_err(|e| e.replacen("graphics", c, 1))?;
+    Ok(json!({"shown": !hidden(&r), "hidden": r["hidden"], "view": r["view"], "name": r["name"]}))
 }
 
 fn wall_by_face(s: &mut Session, p: &Value) -> R {
     let c = "wall_by_face";
-    let (_, ms) = mass_of(c, &s.model, p)?;
-    let ring = ms.footprint();
+    let (mass, ms) = mass_of(c, &s.model, p)?;
+    let (ring, crown) = (ms.footprint(), ms.top_ring());
     let n = ring.len();
+    // A wall stands plumb, so only on a face whose top edge is right over its bottom edge.
     let faces: BTreeSet<usize> = match p.get("faces") {
-        v if absent(v) => (0..n).collect(),
+        v if absent(v) => {
+            let faces: BTreeSet<usize> = (0..n).filter(|f| massing::plumb(&ring, &crown, *f)).collect();
+            if faces.is_empty() {
+                return Err(bad(c, "every face of the mass leans, and a wall stands plumb; none can stand on one"));
+            }
+            faces
+        }
         Some(Value::Array(a)) if a.len() <= MAX_POINTS => a
             .iter()
             .map(|v| {
-                v.as_u64().and_then(|f| usize::try_from(f).ok()).filter(|f| *f < n).ok_or_else(|| {
+                let face = v.as_u64().and_then(|f| usize::try_from(f).ok()).filter(|f| *f < n).ok_or_else(|| {
                     bad(c, format!("face {v} isn't an edge of the footprint: 0 to {}, from its first point", n.saturating_sub(1)))
-                })
+                })?;
+                if massing::plumb(&ring, &crown, face) {
+                    Ok(face)
+                } else {
+                    Err(bad(c, format!("face {face} leans, and a wall stands plumb")))
+                }
             })
             .collect::<Result<_, _>>()?,
         Some(v) => return Err(bad(c, format!("`faces` must be a list of edge numbers, got {v}"))),
@@ -2737,22 +2845,74 @@ fn wall_by_face(s: &mut Session, p: &Value) -> R {
         let mut q = json!({"points": [b, a], "level": ms.level, "base_offset": ms.base_offset, "location": "exterior-finish"});
         q.as_object_mut().into_iter().for_each(|o| o.extend(top.as_object().cloned().unwrap_or_default()));
         let made = wall(s, &passing(p, &["type", "location"], q))?;
-        ids.extend(made["ids"].as_array().cloned().unwrap_or_default());
+        ids.extend(mark(s, &made["ids"], massing::FACE, json!({"mass": mass, "face": f})).into_iter().map(Value::from));
     }
     Ok(json!({"ids": ids}))
 }
 
 fn floor_by_face(s: &mut Session, p: &Value) -> R {
-    let (_, ms) = mass_of("floor_by_face", &s.model, p)?;
-    let (level, offset) = mass_top(&ms);
-    floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level, "offset": offset})))
+    let (mass, ms) = mass_of("floor_by_face", &s.model, p)?;
+    let (level, offset) = ms.top_face();
+    let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.top_ring(), "level": level, "offset": offset})))?;
+    mark(s, &made["id"], massing::FACE, json!({"mass": mass, "face": "top"}));
+    Ok(made)
 }
 
 fn roof_by_face(s: &mut Session, p: &Value) -> R {
-    let (_, ms) = mass_of("roof_by_face", &s.model, p)?;
-    let (level, offset) = mass_top(&ms);
-    let q = json!({"boundary": ms.footprint(), "level": level, "offset": offset, "slope": 0, "overhang": 0});
-    roof(s, &passing(p, &["type", "slope", "overhang"], q))
+    let (mass, ms) = mass_of("roof_by_face", &s.model, p)?;
+    let (level, offset) = ms.top_face();
+    let q = json!({"boundary": ms.top_ring(), "level": level, "offset": offset, "slope": 0, "overhang": 0});
+    let made = roof(s, &passing(p, &["type", "slope", "overhang"], q))?;
+    mark(s, &made["id"], massing::FACE, json!({"mass": mass, "face": "top"}));
+    Ok(made)
+}
+
+fn update_by_face(s: &mut Session, p: &Value) -> R {
+    let c = "update_by_face";
+    let m = &s.model;
+    let made_by_face = || m.elements.iter().filter_map(|(id, e)| Some((*id, massing::face_of(e)?)));
+    let ids: Vec<Id> = match (absent(p.get("ids")) && absent(p.get("id")), id_opt(c, p, "mass")?) {
+        (false, Some(_)) => return Err(bad(c, "give `ids` or `mass`, not both")),
+        (true, Some(mass)) => {
+            mass_of(c, m, p)?;
+            made_by_face().filter(|(_, (of, _))| *of == mass).map(|(id, _)| id).collect()
+        }
+        (false, None) => {
+            let ids = ids_param(c, m, p)?;
+            if let Some(id) = ids.iter().find(|id| m.elements.get(id).and_then(massing::face_of).is_none()) {
+                return Err(bad(c, format!("{id} isn't made by face; `wall_by_face`, `floor_by_face` and `roof_by_face` make them")));
+            }
+            ids
+        }
+        (true, None) => made_by_face().map(|(id, _)| id).collect(),
+    };
+    if ids.is_empty() {
+        return Err(bad(
+            c,
+            "nothing is made by face: `wall_by_face`, `floor_by_face` and `roof_by_face` make walls, floors and roofs that follow a mass",
+        ));
+    }
+    let (mut changed, mut same, mut gone) = (Vec::new(), Vec::new(), Vec::new());
+    for id in ids {
+        let Some((e, (mass, face))) = m.elements.get(&id).and_then(|e| Some((e, massing::face_of(e)?))) else { continue };
+        let mut now = e.clone();
+        match m.elements.get(&mass) {
+            Some(Element::Mass(ms)) => match massing::follow(&mut now, ms, mass, face) {
+                Ok(()) if now == *e => same.push(id),
+                Ok(()) => changed.push((id, now)),
+                Err(why) => gone.push(format!("{} {id} {why}", e.category())),
+            },
+            _ => gone.push(format!("{} {id} was made from mass {mass}, which isn't there", e.category())),
+        }
+    }
+    if !gone.is_empty() {
+        return Err(bad(c, gone.join("; ")));
+    }
+    let updated: Vec<Id> = changed.iter().map(|(id, _)| *id).collect();
+    for (id, e) in changed {
+        s.model_mut().elements.insert(id, e);
+    }
+    Ok(json!({"updated": updated, "unchanged": same}))
 }
 
 fn room(s: &mut Session, p: &Value) -> R {
@@ -4134,6 +4294,9 @@ fn family(s: &mut Session, p: &Value) -> R {
         if let Some(q) = f.parameters.iter().find(|q| paint::reserved(&q.name)) {
             return Err(bad(c, format!("parameter `{}`: an element holds its paint under that name; name it otherwise", q.name)));
         }
+        if let Some(q) = f.parameters.iter().find(|q| massing::reserved(&q.name)) {
+            return Err(bad(c, format!("parameter `{}`: a component holds nothing of a mass under that name; name it otherwise", q.name)));
+        }
         if let Some(q) = f.parameters.iter().find(|q| phasing::reserved(&q.name)) {
             return Err(bad(
                 c,
@@ -4663,10 +4826,19 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
                 cl.boundary.reverse();
             }
         }
-        Element::Shaft(Shaft { boundary, .. }) | Element::Mass(Mass { boundary, .. }) => {
+        Element::Shaft(Shaft { boundary, .. }) => {
             boundary.iter_mut().for_each(|q| *q = f(*q));
             if mo.mirror {
                 boundary.reverse();
+            }
+        }
+        // Its top outline goes the same way, twin for twin.
+        Element::Mass(Mass { boundary, top, .. }) => {
+            for ring in std::iter::once(boundary).chain(top.as_mut()) {
+                ring.iter_mut().for_each(|q| *q = f(*q));
+                if mo.mirror {
+                    ring.reverse();
+                }
             }
         }
         Element::Room(r) => r.point = f(r.point),
@@ -4815,11 +4987,18 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
         others.push((id, if matches!(e, Element::Door(_)) { Element::Door(o) } else { Element::Window(o) }));
     }
     let m = s.model_mut();
+    let mut flipped = Vec::new();
     for (id, w) in walls {
         m.elements.insert(id, Element::Wall(w));
     }
     for (id, e) in others {
+        if mo.mirror && matches!(e, Element::Mass(_)) {
+            flipped.push(id);
+        }
         m.elements.insert(id, e);
+    }
+    for id in flipped {
+        massing::mirrored(m, id);
     }
     // Dimensions keep to the same lines of mirrored walls, which run the other way: their starts
     // and ends swap, and their doors' and windows' jambs.
@@ -4911,6 +5090,10 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
                 }));
             }
             _ => {}
+        }
+        // A copy is no mass's floor or face.
+        if let Some(params) = e.params_mut() {
+            massing::detach(params);
         }
         let id = m.insert(e);
         hosts.insert(from, id);
@@ -5081,6 +5264,9 @@ fn split(s: &mut Session, p: &Value) -> R {
     }
     let (mut first, mut second) = (w.clone(), w);
     (first.end, second.start) = (cut, cut);
+    // Neither piece is the mass's face now.
+    massing::detach(&mut first.params);
+    massing::detach(&mut second.params);
     // An arc's turn shared out as its length is.
     first.arc = degrees(first.arc * along / len);
     second.arc = degrees(second.arc - first.arc);
@@ -5145,6 +5331,8 @@ fn delete(s: &mut Session, p: &Value) -> R {
     for id in &gone {
         m.elements.remove(id);
     }
+    // What was made from a mass that goes is ordinary from then on.
+    massing::forget(m, &gone);
     // No view keeps an override for what isn't there.
     for g in m.elements.values_mut().filter_map(graphics::graphics_mut) {
         g.elements.retain(|id, _| !gone.contains(id));
