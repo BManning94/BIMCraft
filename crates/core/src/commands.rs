@@ -167,6 +167,17 @@ pub static ALL: &[Command] = &[
         roof_by_face,
     ),
     edit(
+        "update_by_face",
+        "Update to Face",
+        &["UF"],
+        "{mass?, ids?} rebuilds what `wall_by_face`, `floor_by_face` and `roof_by_face` made from the mass as it is now (Revit's \
+         Update to Face): the walls on its edges, as tall as it is, a floor and a roof on its top face. The ones of `mass`, or the \
+         `ids` given, or every one in the project; what was done to them since (their type, a roof's slope) stays. A face that \
+         is gone (a footprint with fewer corners) refuses the lot and says which; a deleted mass's are ordinary elements. Revit \
+         has no default shortcut for it: UF is BIMCraft's. The reply has `updated` and `unchanged`",
+        update_by_face,
+    ),
+    edit(
         "show_mass",
         "Show Mass",
         &["MH"],
@@ -2614,9 +2625,16 @@ fn mass_of(c: &str, m: &Model, p: &Value) -> Result<(Id, Mass), String> {
     }
 }
 
-/// Where a mass's top face is: a level, and how far over it.
-fn mass_top(ms: &Mass) -> (Id, f64) {
-    ms.top_level.map_or((ms.level, ms.base_offset + ms.height), |t| (t, 0.0))
+/// The elements `made` (an id, or a list of them) holding `value` under `key`: their ids.
+fn mark(s: &mut Session, made: &Value, key: &str, value: Value) -> Vec<Id> {
+    let ids: Vec<Id> =
+        made.as_array().map_or_else(|| made.as_u64().into_iter().collect(), |a| a.iter().filter_map(Value::as_u64).collect());
+    for id in &ids {
+        if let Some(params) = s.model_mut().elements.get_mut(id).and_then(Element::params_mut) {
+            params.insert(key.into(), value.clone());
+        }
+    }
+    ids
 }
 
 /// `p` with the parameters of `from` that `keys` name, for the command that makes the element.
@@ -2645,9 +2663,8 @@ fn mass_floors(s: &mut Session, p: &Value) -> R {
         let levels: Vec<Id> = s.model.mass_slices(ms).into_iter().map(|(level, _, _)| level).collect();
         for &level in &levels {
             let Some(&(f, _)) = held.iter().find(|(_, l)| *l == level) else {
-                let id = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?["id"].as_u64();
-                if let Some((id, Some(Element::Floor(fl)))) = id.map(|id| (id, s.model_mut().elements.get_mut(&id))) {
-                    fl.params.insert(massing::FLOOR.into(), json!({"mass": mass, "level": level}));
+                let made_one = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?;
+                for id in mark(s, &made_one["id"], massing::FLOOR, json!({"mass": mass, "level": level})) {
                     made.push(id);
                     ids.push(id);
                 }
@@ -2694,7 +2711,7 @@ fn show_mass(s: &mut Session, p: &Value) -> R {
 
 fn wall_by_face(s: &mut Session, p: &Value) -> R {
     let c = "wall_by_face";
-    let (_, ms) = mass_of(c, &s.model, p)?;
+    let (mass, ms) = mass_of(c, &s.model, p)?;
     let ring = ms.footprint();
     let n = ring.len();
     let faces: BTreeSet<usize> = match p.get("faces") {
@@ -2718,22 +2735,74 @@ fn wall_by_face(s: &mut Session, p: &Value) -> R {
         let mut q = json!({"points": [b, a], "level": ms.level, "base_offset": ms.base_offset, "location": "exterior-finish"});
         q.as_object_mut().into_iter().for_each(|o| o.extend(top.as_object().cloned().unwrap_or_default()));
         let made = wall(s, &passing(p, &["type", "location"], q))?;
-        ids.extend(made["ids"].as_array().cloned().unwrap_or_default());
+        ids.extend(mark(s, &made["ids"], massing::FACE, json!({"mass": mass, "face": f})).into_iter().map(Value::from));
     }
     Ok(json!({"ids": ids}))
 }
 
 fn floor_by_face(s: &mut Session, p: &Value) -> R {
-    let (_, ms) = mass_of("floor_by_face", &s.model, p)?;
-    let (level, offset) = mass_top(&ms);
-    floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level, "offset": offset})))
+    let (mass, ms) = mass_of("floor_by_face", &s.model, p)?;
+    let (level, offset) = ms.top_face();
+    let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level, "offset": offset})))?;
+    mark(s, &made["id"], massing::FACE, json!({"mass": mass, "face": "top"}));
+    Ok(made)
 }
 
 fn roof_by_face(s: &mut Session, p: &Value) -> R {
-    let (_, ms) = mass_of("roof_by_face", &s.model, p)?;
-    let (level, offset) = mass_top(&ms);
+    let (mass, ms) = mass_of("roof_by_face", &s.model, p)?;
+    let (level, offset) = ms.top_face();
     let q = json!({"boundary": ms.footprint(), "level": level, "offset": offset, "slope": 0, "overhang": 0});
-    roof(s, &passing(p, &["type", "slope", "overhang"], q))
+    let made = roof(s, &passing(p, &["type", "slope", "overhang"], q))?;
+    mark(s, &made["id"], massing::FACE, json!({"mass": mass, "face": "top"}));
+    Ok(made)
+}
+
+fn update_by_face(s: &mut Session, p: &Value) -> R {
+    let c = "update_by_face";
+    let m = &s.model;
+    let made_by_face = || m.elements.iter().filter_map(|(id, e)| Some((*id, massing::face_of(e)?)));
+    let ids: Vec<Id> = match (absent(p.get("ids")) && absent(p.get("id")), id_opt(c, p, "mass")?) {
+        (false, Some(_)) => return Err(bad(c, "give `ids` or `mass`, not both")),
+        (true, Some(mass)) => {
+            mass_of(c, m, p)?;
+            made_by_face().filter(|(_, (of, _))| *of == mass).map(|(id, _)| id).collect()
+        }
+        (false, None) => {
+            let ids = ids_param(c, m, p)?;
+            if let Some(id) = ids.iter().find(|id| m.elements.get(id).and_then(massing::face_of).is_none()) {
+                return Err(bad(c, format!("{id} isn't made by face; `wall_by_face`, `floor_by_face` and `roof_by_face` make them")));
+            }
+            ids
+        }
+        (true, None) => made_by_face().map(|(id, _)| id).collect(),
+    };
+    if ids.is_empty() {
+        return Err(bad(
+            c,
+            "nothing is made by face: `wall_by_face`, `floor_by_face` and `roof_by_face` make walls, floors and roofs that follow a mass",
+        ));
+    }
+    let (mut changed, mut same, mut gone) = (Vec::new(), Vec::new(), Vec::new());
+    for id in ids {
+        let Some((e, (mass, face))) = m.elements.get(&id).and_then(|e| Some((e, massing::face_of(e)?))) else { continue };
+        let mut now = e.clone();
+        match m.elements.get(&mass) {
+            Some(Element::Mass(ms)) => match massing::follow(&mut now, ms, mass, face) {
+                Ok(()) if now == *e => same.push(id),
+                Ok(()) => changed.push((id, now)),
+                Err(why) => gone.push(format!("{} {id} {why}", e.category())),
+            },
+            _ => gone.push(format!("{} {id} was made from mass {mass}, which isn't there", e.category())),
+        }
+    }
+    if !gone.is_empty() {
+        return Err(bad(c, gone.join("; ")));
+    }
+    let updated: Vec<Id> = changed.iter().map(|(id, _)| *id).collect();
+    for (id, e) in changed {
+        s.model_mut().elements.insert(id, e);
+    }
+    Ok(json!({"updated": updated, "unchanged": same}))
 }
 
 fn room(s: &mut Session, p: &Value) -> R {
@@ -4728,11 +4797,18 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
         others.push((id, if matches!(e, Element::Door(_)) { Element::Door(o) } else { Element::Window(o) }));
     }
     let m = s.model_mut();
+    let mut flipped = Vec::new();
     for (id, w) in walls {
         m.elements.insert(id, Element::Wall(w));
     }
     for (id, e) in others {
+        if mo.mirror && matches!(e, Element::Mass(_)) {
+            flipped.push(id);
+        }
         m.elements.insert(id, e);
+    }
+    for id in flipped {
+        massing::mirrored(m, id);
     }
     // Dimensions keep to the same lines of mirrored walls, which run the other way: their starts
     // and ends swap, and their doors' and windows' jambs.

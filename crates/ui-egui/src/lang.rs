@@ -1067,6 +1067,12 @@ const WORDS: &[[&str; 3]] = &[
         "Telhado por face (RB): um telhado na face superior das massas selecionadas",
         "Cubierta por cara (RB): una cubierta en la cara superior de las masas seleccionadas",
     ],
+    ["Update to Face", "Atualizar para a face", "Actualizar a la cara"],
+    [
+        "Update to Face (UF): the walls, floors and roofs made by face from the selected masses follow them again",
+        "Atualizar para a face (UF): as paredes, pisos e telhados feitos por face a partir das massas selecionadas voltam a segui-las",
+        "Actualizar a la cara (UF): los muros, pisos y cubiertas hechos por cara a partir de las masas seleccionadas vuelven a seguirlas",
+    ],
     ["Select a mass first.", "Selecione uma massa primeiro.", "Selecciona una masa primero."],
     ["mass: {}", "massa: {}", "masa: {}"],
     ["Volume (m³)", "Volume (m³)", "Volumen (m³)"],

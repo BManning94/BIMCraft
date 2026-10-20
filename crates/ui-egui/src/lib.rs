@@ -1217,7 +1217,7 @@ impl BimApp {
                     self.show_mass();
                     return true;
                 }
-                Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face")) => {
+                Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face" | "update_by_face")) => {
                     self.by_mass(c);
                     return true;
                 }
@@ -1947,6 +1947,12 @@ impl BimApp {
                     ),
                     (Icon::Floor, "Floor by Face", "Floor by Face (FB): a floor on the selected masses' top faces", "floor_by_face"),
                     (Icon::Roof, "Roof by Face", "Roof by Face (RB): a roof on the selected masses' top faces", "roof_by_face"),
+                    (
+                        Icon::Align,
+                        "Update to Face",
+                        "Update to Face (UF): the walls, floors and roofs made by face from the selected masses follow them again",
+                        "update_by_face",
+                    ),
                 ] {
                     if big_button(ui, icon, label, false, tip).clicked() {
                         self.by_mass(command);

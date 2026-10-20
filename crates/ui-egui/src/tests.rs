@@ -4050,6 +4050,33 @@ fn the_massing_tab_makes_floors_walls_a_floor_and_a_roof_from_the_selected_mass(
 }
 
 #[test]
+fn update_to_face_makes_what_was_made_by_face_follow_the_selected_mass_again() {
+    let mut h = app(&format!("{BOX}\nmass {{\"boundary\": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], \"height\": 3000}}"));
+    let mass = ids(&h, "mass");
+    click(&mut h, P2(4000.0, 1500.0));
+    assert_eq!(h.state().selection, mass);
+    massing(&mut h, "Floor by Face");
+    let floor = *ids(&h, "floor").last().unwrap();
+    // The mass grows; nothing follows it until Update to Face.
+    h.state_mut().session.execute("modify", &json!({"id": mass[0], "boundary": [[0, 0], [5000, 0], [5000, 3000], [0, 3000]]})).unwrap();
+    let area_of = |h: &mut Harness<BimApp>| {
+        h.state_mut().session.execute("elements", &json!({"category": "floor"})).unwrap()["elements"]
+            .as_array()
+            .and_then(|a| a.iter().find(|e| e["id"] == floor).and_then(|e| e["area_m2"].as_f64()))
+    };
+    assert_eq!(area_of(&mut h), Some(12.0));
+    massing(&mut h, "Update to Face");
+    assert_eq!(area_of(&mut h), Some(15.0));
+    // Its shortcut; and with nothing selected it says to select a mass.
+    h.state_mut().session.execute("modify", &json!({"id": mass[0], "boundary": [[0, 0], [6000, 0], [6000, 3000], [0, 3000]]})).unwrap();
+    shortcut(&mut h, "UF");
+    assert_eq!(area_of(&mut h), Some(18.0));
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "UF");
+    assert!(h.state().status.error, "{}", h.state().status.text);
+}
+
+#[test]
 fn show_mass_hides_and_shows_the_masses_in_the_view_on_screen() {
     let mut h = app(&format!("{BOX}\nmass {{\"boundary\": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], \"height\": 3000}}"));
     let hidden = |h: &Harness<BimApp>, view| {

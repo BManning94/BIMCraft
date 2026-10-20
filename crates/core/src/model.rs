@@ -378,6 +378,11 @@ pub struct Mass {
 }
 
 impl Mass {
+    /// Where its top face is: a level, and how far over it.
+    pub fn top_face(&self) -> (Id, f64) {
+        self.top_level.map_or((self.level, self.base_offset + self.height), |t| (t, 0.0))
+    }
+
     /// Its footprint, counter-clockwise whichever way round `boundary` was given.
     pub fn footprint(&self) -> Vec<P2> {
         let mut ring = self.boundary.clone();

@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::Value;
 
-use crate::model::{Element, Id, Model};
+use crate::model::{Element, Id, Mass, Model};
 
 pub const FLOOR: &str = "Mass Floor";
 pub const FACE: &str = "Mass Face";
@@ -74,6 +74,52 @@ pub fn forget(m: &mut Model, gone: &BTreeSet<Id>) {
             if params.get(key).and_then(|v| v.get("mass")).and_then(Value::as_u64).is_some_and(|mass| gone.contains(&mass)) {
                 params.remove(key);
             }
+        }
+    }
+}
+
+/// Element `e`, made on `face` of `ms` (an edge number for a wall, none for the top), rebuilt from the mass as it is now:
+/// a wall stands on the edge as tall as the mass, a floor or a roof lies on its top face. What was done to it since
+/// (its type, a roof's slope) stays. The reason, when the face is gone.
+pub fn follow(e: &mut Element, ms: &Mass, mass: Id, face: Option<usize>) -> Result<(), String> {
+    let ring = ms.footprint();
+    match (e, face) {
+        (Element::Wall(w), Some(f)) => {
+            let n = ring.len();
+            let (Some(&a), Some(&b)) = (ring.get(f), ring.get((f + 1) % n)) else {
+                return Err(format!("was made on face {f} of mass {mass}, which has {n} faces now (0 to {})", n.saturating_sub(1)));
+            };
+            // Counter-clockwise, the mass is to the left of its edge; a wall faces out to its left, so it runs the other way.
+            (w.start, w.end, w.level, w.base_offset) = (b, a, ms.level, ms.base_offset);
+            w.top_level = ms.top_level;
+            if ms.top_level.is_none() {
+                w.height = ms.height;
+            }
+            Ok(())
+        }
+        (Element::Floor(fl), None) => {
+            (fl.boundary, (fl.level, fl.offset)) = (ring, ms.top_face());
+            Ok(())
+        }
+        (Element::Roof(r), None) => {
+            (r.boundary, (r.level, r.offset)) = (ring, ms.top_face());
+            Ok(())
+        }
+        (e, _) => Err(format!("is a {}, which holds no such face of mass {mass}", e.category())),
+    }
+}
+
+/// A mass mirrored in place runs its outline round the other way, so its edge `f` of `n` is edge `n - 2 - f` (mod `n`) now:
+/// the faces its walls were made on, numbered again, so they follow the same edges.
+pub fn mirrored(m: &mut Model, mass: Id) {
+    let Some(Element::Mass(ms)) = m.elements.get(&mass) else { return };
+    let n = ms.boundary.len();
+    for params in m.elements.values_mut().filter_map(Element::params_mut) {
+        if let Some(o) = params.get_mut(FACE).and_then(Value::as_object_mut)
+            && o.get("mass").and_then(Value::as_u64) == Some(mass)
+            && let Some(f) = o.get("face").and_then(Value::as_u64).and_then(|f| usize::try_from(f).ok()).filter(|f| *f < n)
+        {
+            o.insert("face".into(), Value::from((2 * n - 2 - f) % n));
         }
     }
 }
