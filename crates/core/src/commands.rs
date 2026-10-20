@@ -669,7 +669,7 @@ pub static ALL: &[Command] = &[
         "Schedule",
         &[],
         "{name?, category?, fields?, filters?, sort?, grouped?, path?} a schedule view, as Revit's View > Schedules makes one, \
-         and its table: columns, rows and totals (and a .csv file with a path). A new one needs `name` and `category`: rooms, \
+         and its table: columns, rows, the `elements` each row lists, and totals (and a .csv file with a path). A new one needs `name` and `category`: rooms, \
          doors, windows, walls, floors, ceilings, roofs, columns, structural columns, footings, beams, strip footings, components, \
          stairs, ramps, railings or levels; `category` \
          alone reads its own (Room Schedule, Door Schedule, Window Schedule, Wall Schedule, Floor Schedule, Level Schedule, \
@@ -1545,8 +1545,7 @@ fn schedule(s: &mut Session, p: &Value) -> R {
     }
     let columns: Vec<String> = t.columns.iter().map(|col| crate::schedule::heading(Units::Millimetres, col)).collect();
     let available: Vec<String> = crate::schedule::fields(m, &category(&sc.of)).into_iter().map(|(n, _)| n).collect();
-    let mut out =
-        json!({"id": id, "name": sc.name, "category": category(&sc.of), "columns": columns, "rows": t.rows, "available": available});
+    let mut out = json!({"id": id, "name": sc.name, "category": category(&sc.of), "columns": columns, "rows": t.rows, "elements": t.ids, "available": available});
     if let Some(totals) = t.totals {
         out["totals"] = json!(totals);
     }
