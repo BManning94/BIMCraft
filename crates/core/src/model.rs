@@ -658,7 +658,7 @@ impl Justify {
 /// height of its `justify` line at the start, and `end_offset` at the end (level when none): a sloped run has both, a
 /// vertical one the same `start` and `end` and two heights. Its section is square to its axis. `system` names the system it
 /// belongs to; schedules group by it. Under several categories, as an opening is a door or a window: `Element::Beam`,
-/// `Element::StripFooting`, and a tab adds its own.
+/// `Element::Pipe` and the others `run_arm!` names.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Run {

@@ -129,7 +129,7 @@ pub enum Tool {
     Elevation,
     /// A column where clicked.
     Column,
-    /// A beam or a wall footing (by category, as `beam` and `stripfooting` name them): its first point, once clicked.
+    /// A run (a beam, a pipe, a conduit…, by category, as `beam` and `pipe` name them): its first point, once clicked.
     Run(&'static str, Option<P2>),
     /// A structural column or an isolated footing (`structuralcolumn`, `footing`) where clicked.
     Stand(&'static str),

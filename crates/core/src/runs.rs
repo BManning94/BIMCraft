@@ -1,6 +1,7 @@
-//! Runs: the geometry of a straight element between two points, whatever it carries (a beam, a strip footing, and a pipe,
-//! a conduit or a cable tray when their tabs come): the ends of its centre line, its footprint in plan, the prism or the
-//! tube it makes in 3D. It knows no category; the plan, the section, the 3D view, the snaps and IFC ask it.
+//! Runs: the geometry of a straight element between two points, whatever it carries (a beam, a strip footing, a pipe, a
+//! conduit, a cable tray, a wire, a conductor, a cable): the ends of its centre line, its footprint in plan, the prism or the
+//! tube it makes in 3D. It knows no category but for the table that gives its IFC class and the defaults it takes (may it stand,
+//! where its heights are); the plan, the section, the 3D view, the snaps and IFC ask it.
 
 use crate::geom::P2;
 use crate::model::{Justify, MAX_SLOPE, Model, Run, RunType, TOL, heading};

@@ -822,6 +822,16 @@ fn fixtures_are_ifc_products_of_their_class_and_come_back_in_a_family_of_their_c
         assert_eq!(family.category, f.category, "{}", f.family);
     }
     assert_eq!(t.model.elements.values().filter(|e| e.category() == "component").count(), FIXTURES.len());
+    // Each in the family it was of: the library's of the same name would stand in for one the import named wrongly.
+    let named: std::collections::BTreeSet<String> = t
+        .model
+        .elements
+        .iter()
+        .filter(|(_, e)| e.category() == "component")
+        .filter_map(|(id, _)| element_json(&t.model, *id)["family"].as_str().map(String::from))
+        .collect();
+    let wanted: std::collections::BTreeSet<String> = FIXTURES.iter().map(|f| f.family.to_string()).collect();
+    assert_eq!(named, wanted);
 }
 
 #[test]

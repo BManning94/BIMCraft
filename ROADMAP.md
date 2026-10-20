@@ -119,7 +119,7 @@ and the content.
 | Nested and shared families; type catalogs (CSV) | M |
 | Visibility per view direction and detail level for a family's forms and symbols | M |
 | Sections that cut family forms (they show them beyond the cut today) | S |
-| A starter content library: original, openly licensed (CC0 or CC-BY) doors, windows, furniture, casework, fixtures and profiles (four door and window families ship today) | L (ongoing) |
+| A starter content library: original, openly licensed (CC0 or CC-BY) doors, windows, furniture, casework, fixtures and profiles (32 families ship today: furniture, casework, doors, windows, and the Plumbing, Electrical, SPDA and Data tabs' fixtures) | L (ongoing) |
 | A fill-pattern editor of the user's own, and material roughness for the 3D view (textures are done) | M |
 
 **Exit criteria**: a user draws a parametric window in the family editor, places it, flexes its types, and it schedules
@@ -208,7 +208,7 @@ incremental validation (0.5), and links (0.9).
 | **Structure** | First slice done: beams, structural columns, isolated and wall footings, structural floors, with types, schedules, IFC and the Structure tab ([design](docs/disciplines.md)). Left: braces (a sloped run, `IfcMember`), joins and framing types, slab foundations, beam systems, an analytical model exported to open formats | L |
 | **Site** | Toposolids from points or contours (and imported DXF or LandXML), pads, property lines with bearings, cut and fill quantities | L |
 | **Massing** | Extruded masses, mass floors and gross floor area, and walls, floors and roofs by face are in. Left: blends, lofts and sloped or tapering masses, curtain systems by face, and elements by face that follow the mass when it changes | M |
-| **MEP** | The Plumbing, Electrical, SPDA (lightning protection) and Data tabs, designed with Structure's in [docs/disciplines.md](docs/disciplines.md): each adds `Element` variants over the run (pipes, conduits, cable trays, down conductors, cabling), family categories for its fixtures and devices, and a ribbon tab, with no new engine code. Then fittings and connectors, auto-routing, sizing, circuits and panel schedules | XL+ |
+| **MEP** | First slice done: the Plumbing, Electrical, SPDA (lightning protection) and Data tabs, designed with Structure's in [docs/disciplines.md](docs/disciplines.md): pipes, conduits, cable trays, wires, conductors and cabling as runs in systems (`IfcSystem`), fixtures, fittings, boards, devices, terminals, outlets and racks as family categories with starter families of their own drawing, schedules, IFC out and back. Left: fittings and connectors (a pipe network that knows where it ends), auto-routing, sizing, circuits and panel schedules, a family kind for IFC predefined types (a basin from a WC), Visibility/Graphics by fixture category | XL+ |
 
 Structure and site come before MEP: they are smaller, they reuse the existing solids and hosting, and architects need
 them sooner.

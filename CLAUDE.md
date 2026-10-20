@@ -75,6 +75,13 @@ cargo test --workspace
   footing, columns and a structural floor, validate with IfcOpenShell (`express_rules=True`), and compare each product's volume and bounding box
   with a hand calculation (a round section is a polygon in IfcOpenShell's tessellation: a fraction of a percent short). Look at the plan, a
   section across a beam, and the 3D view in both themes.
+- Discipline tabs (Plumbing, Electrical, SPDA, Data): after touching `fixtures.rs`, `runs::IFC`, `Category::ifc` or the run arm of `ifc.rs`, script
+  one of every run category (sloped, upright, each justification, in a system) and one of every starter family, `--save` the IFC, validate it with
+  IfcOpenShell (`express_rules=True`: 0 statements), build every product's shape and compare the runs' volumes and boxes with a hand calculation,
+  check the `IfcSystem`s with the runs assigned to each and the proxies' object types, then read it back (`run x.ifc --cmd 'elements {"category": "pipe"}'`)
+  as written, with its bodies turned into triangle meshes by IfcOpenShell, and with BIMCraft's `BIMCraft_Run` property sets taken out. Look at each
+  tab, a run tool's preview, a fixture tool with its Type Selector open, Edit Type, a section across a pipe and a tray, and the 3D view with the
+  walls hidden (`graphics {"view": "{3D}", "hide": ["wall"]}`), in both themes.
 - IFC import: after touching `import.rs` or `step.rs`, open the sample's IFC (`run house.ifc --cmd 'elements {}'`) and
   compare it with the sample, then the same file with its bodies turned into triangle meshes by IfcOpenShell, and a
   building written with IfcOpenShell's API. Render what came in and look at it. After touching how phases and design options

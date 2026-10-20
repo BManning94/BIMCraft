@@ -446,10 +446,11 @@ pub static ALL: &[Command] = &[
         "type",
         "Edit Type",
         &[],
-        "{category: wall|floor|ceiling|door|window|column|structuralcolumn|footing|beam|stripfooting|roof|railing, name, \
-         thickness? | width?, height?, sill? | width?, depth?, round?, material? | height?, spacing?} creates the type, or \
-         changes it everywhere it's used. A column's, a structural column's or a footing's type is a `width` by `depth`, or \
-         `round` (`width` across); a beam's or a strip footing's too, made of a `material` of the library. A wall type may have `layers` [{function?: structure|\
+        "{category: wall|floor|ceiling|door|window|column|structuralcolumn|footing|roof|railing|beam|stripfooting|pipe|conduit|\
+         cabletray|wire|downconductor|groundconductor|cable, name, thickness? | width?, height?, sill? | width?, depth?, round?, \
+         material? | height?, spacing?} creates the type, or changes it everywhere it's used. A column's, a structural column's or \
+         a footing's type is a `width` by `depth`, or `round` (`width` across); a run's (a beam's, a pipe's, a cable tray's…) too, \
+         made of a `material` of the library. A wall type may have `layers` [{function?: structure|\
          substrate|thermal|membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, \
          its core from its first structure layer to its last, and a new `thickness` goes to its structure. A ceiling type may \
          have `grid`: its square tiles' width, mm, which reflected ceiling plans draw (0, none); a railing type, `height` (its \
@@ -4386,7 +4387,7 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
                 c,
                 format!(
                     "`{other}` has no types; use wall, floor, ceiling, door, window, column, structural column, footing, beam, \
-                     strip footing, roof or railing"
+                     strip footing, pipe, conduit, cable tray, wire, down conductor, earthing conductor, cable, roof or railing"
                 ),
             ));
         }

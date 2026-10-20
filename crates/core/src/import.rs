@@ -324,9 +324,10 @@ fn run_in(pts: &[P3]) -> Option<Found> {
         }
         d = unit(next);
     }
-    // Toward the east, else the north, else up, so a run reads the same whichever end the file starts at.
+    // Toward the east, else the north, so a run reads the same whichever end the file starts at; an upright one points up, as the
+    // iteration's first direction (z positive) leaves it.
     let upright = d[0].hypot(d[1]) < 1e-6;
-    if d[0] < -1e-9 || (d[0].abs() <= 1e-9 && d[1] < -1e-9) || (upright && d[2] < 0.0) {
+    if d[0] < -1e-9 || (d[0].abs() <= 1e-9 && d[1] < -1e-9) {
         d = mul(d, -1.0);
     }
     // Upright, its width is along east, as a run stood up draws it.

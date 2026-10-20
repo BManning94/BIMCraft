@@ -163,15 +163,25 @@ the four took a few lines in each of these places, and the tests are rows in two
    and a row in `RUN_TOOLS` and `FIXTURE_TOOLS` of `tests/mep.rs`, which drive each tool, its options, its previews, its shortcut,
    its palette and Edit Type, its languages. The tab itself is a row in the tab and language tables there.
 
-## Honest limits of the foundation
+## Honest limits
 
 - Runs that meet butt against each other: no mitre, elbow or tee, and no connectors, so a pipe network cannot yet be
-  checked for continuity or sized. A fitting or a valve is a component of a family, placed by hand on a pipe's height.
+  checked for continuity or sized. A fitting or a valve is a component of a family, placed by hand on a pipe's height; nothing
+  says a pipe ends on it.
 - A run's `system` is a name and an `IfcSystem`, with no rules: nothing checks that a pipe of "Esgoto" meets only pipes of it.
+- A fixture or a device is a `component` to Visibility/Graphics and to schedules (the Component schedule has `Family` to group by),
+  so a project cannot hide "Plumbing Fixtures" alone. Its family category is there for it; `Element` has no variant for each.
+- A family has one category and no kind, so every sanitary terminal is `.NOTDEFINED.`: a basin, a WC, a sink and a shower are alike
+  to an IFC reader.
+- A conductor or a conduit under its level (an earthing ring, usually) shows in a plan whose view range reaches it (its View Depth).
+- An inspection box is a proxy, so a filter on the other lightning kinds finds it; `IfcDistributionChamberElement`
+  `.INSPECTIONCHAMBER.` is the real class. A patch panel is placed on the wall, not in a rack.
+- A section cuts a tube by the plane through its line, which is exact for a convex mesh only; a component's forms are not, and are
+  never cut.
 - Braces are beams that slope; they will want their own type and `IfcMember`.
 - Import finds a run's section as the box round its body in the frame the axis gives it, so a member rolled about its axis
   reads as the box. An upright run comes back running up with its width along east, whichever end it was drawn from.
-- A fixture's `IfcSanitaryTerminal` has no predefined type (a basin, a WC, a sink and a shower are one category).
+- The Portuguese and Spanish words are the standards' as the author knows them; no native speaker has read them.
 
-What the first four of these were, and is fixed: a section cutting a round run; the `IfcSystem`; a run's justification surviving
+What the foundation's limits were, and is fixed: a section cutting a round run; the `IfcSystem`; a run's justification surviving
 an import; Edit Type setting a run type's roundness and material.

@@ -1977,6 +1977,28 @@ mod tests {
         assert!(tube(true).cuts(P2(2000.0, -1000.0), P2(0.0, 1.0), 500.0).is_empty());
         assert!(tube(true).cuts(P2(5000.0, -1000.0), P2(0.0, 1.0), 2000.0).is_empty());
         assert!(tube(false).cuts(P2(2000.0, -1000.0), P2(0.0, 1.0), 2000.0).is_empty());
+        // A plane that lies in a face of a convex mesh (vertices exactly in it, no edge crossing it) gives that face.
+        let corner = |x: f64, y: f64, z: f64| [x, y, z];
+        let (a, b, c, d) = (corner(0.0, -100.0, 0.0), corner(200.0, -100.0, 0.0), corner(200.0, 100.0, 0.0), corner(0.0, 100.0, 0.0));
+        let (e, f, g, h) =
+            (corner(0.0, -100.0, 200.0), corner(200.0, -100.0, 200.0), corner(200.0, 100.0, 200.0), corner(0.0, 100.0, 200.0));
+        let tris = vec![
+            [a, c, b],
+            [a, d, c],
+            [e, f, g],
+            [e, g, h],
+            [a, b, f],
+            [a, f, e],
+            [b, c, g],
+            [b, g, f],
+            [c, d, h],
+            [c, h, g],
+            [d, a, e],
+            [d, e, h],
+        ];
+        let cube = Solid::Mesh { owner: 1, color: EDGE, tex: 0, tris, caps: 0, round: false, cut: true };
+        let (w, h, ..) = extent(&cube.cuts(P2(0.0, 100.0), P2(1.0, 0.0), 1000.0));
+        assert!((w - 200.0).abs() < 1e-6 && (h - 200.0).abs() < 1e-6, "{w} {h}");
         // A section along the pipe cuts it lengthwise: a strip as long as the pipe is and as high as it is round.
         let along = tube(true).cuts(P2(0.0, 0.0), P2(1.0, 0.0), 4000.0);
         let (w, h, ..) = extent(&along);
