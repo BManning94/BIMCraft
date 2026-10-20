@@ -1213,6 +1213,10 @@ impl BimApp {
                 Some("footing") => Tool::Stand("footing"),
                 Some("strip_footing") => Tool::Run("stripfooting", None),
                 Some("mass") => Tool::Mass(Vec::new()),
+                Some("show_mass") => {
+                    self.show_mass();
+                    return true;
+                }
                 Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face")) => {
                     self.by_mass(c);
                     return true;
@@ -1920,7 +1924,16 @@ impl BimApp {
 
     fn massing_tab(&mut self, ui: &mut Ui) {
         let tip = "Mass (MS): click the corners of the footprint; Enter, or the first corner again, finishes; Esc cancels";
-        self.tools(ui, "Conceptual Mass", &[(Icon::Mass, "Mass", tip, Tool::Mass(Vec::new()))]);
+        let shown = !self.graphics_now().resolved(&self.session.model).categories.get("mass").is_some_and(|o| o.hidden);
+        panel(ui, "Conceptual Mass", |ui| {
+            if big_button(ui, Icon::Mass, "Mass", structure::same_tool(&self.tool, &Tool::Mass(Vec::new())), tip).clicked() {
+                self.set_tool(Tool::Mass(Vec::new()));
+            }
+            let tip = "Show Mass (MH): hides the masses in this view, or shows them again";
+            if big_button(ui, Icon::Visibility, "Show Mass", shown, tip).clicked() {
+                self.show_mass();
+            }
+        });
         let selected = !self.selected_masses().is_empty();
         panel(ui, "Model by Face", |ui| {
             ui.add_enabled_ui(selected, |ui| {
@@ -1941,6 +1954,16 @@ impl BimApp {
                 }
             });
         });
+    }
+
+    /// Show Mass (MH): the masses in the view on screen, hidden if they show and shown if they're hidden.
+    fn show_mass(&mut self) {
+        match self.graphic_view() {
+            Some(view) => {
+                self.run("show_mass", json!({"view": view}));
+            }
+            None => self.status = Status { text: t("This view has no graphics to override.").to_string(), error: true },
+        }
     }
 
     /// The masses selected.

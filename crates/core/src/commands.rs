@@ -166,6 +166,15 @@ pub static ALL: &[Command] = &[
          top level or `height` over its base. An ordinary roof from then on",
         roof_by_face,
     ),
+    edit(
+        "show_mass",
+        "Show Mass",
+        &["MH"],
+        "{view?, show?} hides the masses in a view if it shows them, shows them if it hides them (or as `show`, a yes or no, \
+         says): the `mass` category of `graphics {hide|show}`, in one step. The reply has `shown` and `hidden`, the categories \
+         the view hides. Revit's Show Mass has no default shortcut; MH is BIMCraft's",
+        show_mass,
+    ),
     edit("room", "Room", &["RM"], "{point: [x,y], level?, name?, number?} bounded by the walls around the point", room),
     edit(
         "column",
@@ -2664,6 +2673,23 @@ fn mass_floors(s: &mut Session, p: &Value) -> R {
         delete_elements(s, &removed)?;
     }
     Ok(json!({"ids": ids, "made": made, "updated": updated, "stale": stale, "removed": removed}))
+}
+
+fn show_mass(s: &mut Session, p: &Value) -> R {
+    let c = "show_mass";
+    let want = match p.get("show") {
+        v if absent(v) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(v) => return Err(bad(c, format!("`show` must be true or false, got {v}"))),
+        None => None,
+    };
+    let view = passing(p, &["view"], json!({}));
+    let hidden = |r: &Value| r["hidden"].as_array().is_some_and(|h| h.iter().any(|n| n == "mass"));
+    let show = want.unwrap_or_else(|| view_graphics(s, &view).is_ok_and(|r| hidden(&r)));
+    let mut q = view;
+    q[if show { "show" } else { "hide" }] = json!(["mass"]);
+    let r = view_graphics(s, &q).map_err(|e| e.replacen("graphics", c, 1))?;
+    Ok(json!({"shown": !hidden(&r), "hidden": r["hidden"], "view": r["view"], "name": r["name"]}))
 }
 
 fn wall_by_face(s: &mut Session, p: &Value) -> R {

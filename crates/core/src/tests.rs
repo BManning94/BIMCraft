@@ -1506,6 +1506,9 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"mass": 7, "prune": 5, "type": 5}),
         json!({"prune": "yes"}),
         json!({"prune": true}),
+        json!({"view": 1, "show": "x"}),
+        json!({"view": "{3D}", "show": 5}),
+        json!({"view": 1e300, "show": true}),
         json!({"id": 3, "params": {"Mass Floor": {"mass": 7, "level": 1}, "Mass Face": 5}}),
         json!({"id": 3, "params": {"Mass Face": {"mass": 7, "face": "top"}}}),
         json!({"id": 7, "height": 1e300, "top_level": 1}),
@@ -3991,4 +3994,47 @@ fn masses_show_in_plans_sections_and_the_3d_view_and_a_category_hides_them() {
     run(&mut s, "graphics", json!({"view": section, "hide": ["mass"]}));
     assert_eq!((dashed(&render::plan(&s.model, 1, 800, 600)), dashed(&render::section(&s.model, section, view))), (0, 0));
     assert!(dashed(&render::plan(&s.model, 2, 800, 600)) > 0, "Level 2's plan still shows it");
+}
+
+#[test]
+fn show_mass_toggles_the_mass_category_in_one_view_in_one_step() {
+    use crate::render::{self, Prim};
+    let mut s = Session::new();
+    let (id, _) = tower(&mut s);
+    let dashed = |m: &crate::model::Model, view: u64| {
+        let d = render::plan(m, view, 800, 600);
+        d.prims.iter().zip(&d.owners).filter(|(p, o)| **o == Some(id) && matches!(p, Prim::Line { dash: Some(_), .. })).count()
+    };
+    assert!(dashed(&s.model, 1) > 0 && dashed(&s.model, 2) > 0);
+    // With no say, it flips what the view does now: masses shown, so hidden, and shown again.
+    let r = run(&mut s, "MH", json!({"view": 1}));
+    assert_eq!((r["shown"].clone(), r["hidden"].clone()), (json!(false), json!(["mass"])));
+    assert_eq!((dashed(&s.model, 1), dashed(&s.model, 2) > 0), (0, true), "only the view it was asked for");
+    let r = run(&mut s, "show_mass", json!({"view": 1}));
+    assert_eq!((r["shown"].clone(), r["hidden"].clone()), (json!(true), json!([])));
+    assert!(dashed(&s.model, 1) > 0);
+    // `show` says which, whatever the view does now; one undo step each.
+    run(&mut s, "show_mass", json!({"view": "Level 1", "show": false}));
+    run(&mut s, "show_mass", json!({"view": "Level 1", "show": false}));
+    assert_eq!(dashed(&s.model, 1), 0);
+    run(&mut s, "show_mass", json!({"view": 1, "show": true}));
+    assert!(dashed(&s.model, 1) > 0);
+    run(&mut s, "undo", json!({}));
+    assert_eq!(dashed(&s.model, 1), 0);
+    // The 3D view makes its own on the first change, a section and an elevation are views too.
+    let r = run(&mut s, "show_mass", json!({"view": "{3D}", "show": false}));
+    assert_eq!(r["hidden"], json!(["mass"]));
+    let section = run(&mut s, "section", json!({"start": [5000, -4000], "end": [5000, 10000]}))["id"].as_u64().unwrap();
+    assert_eq!(run(&mut s, "show_mass", json!({"view": section}))["shown"], json!(false));
+    // A view that follows a template with categories takes no change of its own, and `show` is a yes or no.
+    run(&mut s, "template", json!({"name": "T", "controls": ["categories"]}));
+    run(&mut s, "graphics", json!({"view": 2, "template": "T"}));
+    let e = s.execute("show_mass", &json!({"view": 2})).unwrap_err();
+    assert!(e.contains("template"), "{e}");
+    for (p, says) in
+        [(json!({"view": 1, "show": "yes"}), "show"), (json!({"view": "nowhere"}), "view"), (json!({"view": 1, "show": 5}), "show")]
+    {
+        let e = s.execute("show_mass", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
 }

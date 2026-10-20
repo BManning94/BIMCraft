@@ -1031,6 +1031,12 @@ const WORDS: &[[&str; 3]] = &[
     ["Massing", "Volumetria", "Volumetría"],
     ["Conceptual Mass", "Massa conceitual", "Masa conceptual"],
     ["Model by Face", "Modelo por face", "Modelo por cara"],
+    ["Show Mass", "Mostrar massa", "Mostrar masa"],
+    [
+        "Show Mass (MH): hides the masses in this view, or shows them again",
+        "Mostrar massa (MH): oculta as massas nesta vista, ou as mostra de novo",
+        "Mostrar masa (MH): oculta las masas en esta vista, o las muestra otra vez",
+    ],
     ["Create Mass", "Criar massa", "Crear masa"],
     [
         "Mass (MS): click the corners of the footprint; Enter, or the first corner again, finishes; Esc cancels",

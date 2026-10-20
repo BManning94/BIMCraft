@@ -4049,6 +4049,35 @@ fn the_massing_tab_makes_floors_walls_a_floor_and_a_roof_from_the_selected_mass(
     assert_eq!(h.state().tool, Tool::Mass(Vec::new()));
 }
 
+#[test]
+fn show_mass_hides_and_shows_the_masses_in_the_view_on_screen() {
+    let mut h = app(&format!("{BOX}\nmass {{\"boundary\": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], \"height\": 3000}}"));
+    let hidden = |h: &Harness<BimApp>, view| {
+        bimcraft_core::graphics::graphics_of(&h.state().session.model, view)
+            .is_some_and(|g| g.categories.get("mass").is_some_and(|o| o.hidden))
+    };
+    assert!(!hidden(&h, 1));
+    massing(&mut h, "Show Mass");
+    assert!(hidden(&h, 1) && !hidden(&h, 2), "Level 1's plan alone");
+    // Its shortcut turns them back on; a click on the mass picks nothing while it is hidden.
+    shortcut(&mut h, "MH");
+    assert!(!hidden(&h, 1));
+    click(&mut h, P2(4000.0, 1500.0));
+    assert_eq!(h.state().selection, ids(&h, "mass"));
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "MH");
+    click(&mut h, P2(4000.0, 1500.0));
+    assert!(h.state().selection.is_empty(), "a hidden mass can't be picked");
+    // The 3D view is a view of its own; a sheet has no graphics.
+    browse(&mut h, "{3D}");
+    massing(&mut h, "Show Mass");
+    assert!(hidden(&h, h.state().session.model.default_3d().unwrap_or_default()));
+    let mut h = app(&format!("{BOX}\nsheet {{\"name\": \"Plans\"}}"));
+    browse(&mut h, "A101 - Plans");
+    massing(&mut h, "Show Mass");
+    assert!(h.state().status.error, "{}", h.state().status.text);
+}
+
 mod structure;
 
 mod updates {
