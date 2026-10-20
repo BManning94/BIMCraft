@@ -112,9 +112,12 @@ The selection is the model's, not a view's: opening any view (a plan, a section,
 highlight what's selected and pick what they list.
 Every view has the right-click menu of `context.rs`: an item is an `Action`, offered by `context_items` and done by
 `act`.
+Levels have elevations, and each is a plane over its `extent` (`Model::level_extent`; without one, `Model::model_extent`):
+sections and elevations draw a level over as much of its extent as they see, and the 3D view outlines it, depth-tested and
+picked as the level.
 A section or an elevation cropped shows its line's length and its crop's heights; uncropped, everything along its line
 (`render::crop_region` is none, and there are no grips).
-Levels have elevations, and a level is its plan: its view range (`Model::plan_range`)
+A level is also its plan: its view range (`Model::plan_range`)
 cuts 1200 mm above it unless set, and its crop region bounds what the plan shows. Rooms find their walls at 1200 mm whatever
 a plan cuts (`Model::bounding`). In a section or an elevation, points run along its line from its start, and up; on a sheet,
 they're paper mm from its bottom left corner; notes and spot elevations live in those terms in their view.
