@@ -2,8 +2,8 @@
 
 A client asked for the complementary-project tabs Revit users know: structure (estrutural), plumbing and drainage
 (hidrossanitário), electrical (elétrico), lightning protection (SPDA) and data and voice (lógica, dados e voz). This note
-is how BIMCraft builds all five with as little new machinery as possible. Structure, Plumbing and Electrical are built; the other two are
-follow-ups that add data to what is described here, not new engine code. The rules in [CLAUDE.md](../CLAUDE.md) apply
+is how BIMCraft builds all five with as little new machinery as possible. Structure, Plumbing, Electrical and Lightning Protection are built; Data is the
+follow-up that add data to what is described here, not new engine code. The rules in [CLAUDE.md](../CLAUDE.md) apply
 to all of it (everything is a command, `Model::check` validates, the core has no UI, clean-room).
 
 ## What the five have in common
@@ -48,7 +48,7 @@ section, and the 3D view draws it as a sloped prism, or a round one as a tube.
 
 A run is one Rust type serialized under several categories, as `Door` and `Window` share `Opening`. The category is the
 `Element` variant, so Visibility/Graphics, schedules, project parameters, phases, view filters and the IFC class all
-work per category without a line of per-category machinery. Today: `beam`, `stripfooting`, `pipe`, `conduit`, `cabletray` and `wire`. A tab adds a variant, a name
+work per category without a line of per-category machinery. Today: `beam`, `stripfooting`, `pipe`, `conduit`, `cabletray`, `wire`, `downconductor` and `groundconductor`. A tab adds a variant, a name
 in `model::run_arm!` and a row to each table below:
 
 | Category | Tab | Revit's name |
@@ -107,8 +107,8 @@ IFC4 (ISO 16739-1:2018). Class names are checked against the IFC4 and IFC4X3_ADD
 | luminaires | `IfcLightFixture` | yes |
 | outlets, switches | `IfcOutlet` (`.POWEROUTLET.`, `.DATAOUTLET.`, `.TELEPHONEOUTLET.`), `IfcSwitchingDevice` (`.TOGGLESWITCH.`) | power outlets and switches |
 | data equipment | `IfcCommunicationsAppliance` (`.NETWORKAPPLIANCE.`, `.ROUTER.`…). A rack has no class: `IfcElectricDistributionBoard` or a proxy | |
-| `downconductor` | `IfcCableSegment` `.CONDUCTORSEGMENT.` | |
-| air terminals, earthing rods | **no IFC class.** IFC4 and IFC4X3 have none for lightning protection. `IfcBuildingElementProxy` with `ObjectType` `LightningTerminal` or `EarthingRod`, so a reader can filter on it. Surge protection has `IfcProtectiveDevice` `.VARISTOR.` | |
+| `downconductor`, `groundconductor` | `IfcCableSegment` `.CONDUCTORSEGMENT.`, which BIMCraft's `Category` tells apart | yes |
+| air terminals, earthing rods, inspection boxes | **no IFC class.** IFC4 and IFC4X3 have none for lightning protection. `IfcBuildingElementProxy` (`.USERDEFINED.`) with `ObjectType` `LightningTerminal`, `EarthingRod` or `InspectionBox`, so a reader can filter on it, and the family and type in its name. Surge protection has `IfcProtectiveDevice` `.VARISTOR.`; an `IfcDistributionChamberElement` `.INSPECTIONCHAMBER.` exists for the box but would hide it from a filter on the others | yes |
 
 A run is written as an extrusion along its own axis (`IfcExtrudedAreaSolid`), so a reader gets the profile and the
 length and not a mesh. Its system is an `IfcSystem`, named for it, that an `IfcRelAssignsToGroup` assigns the runs in it to;
@@ -128,7 +128,7 @@ and says so.
 | **Structure** / Estrutura / Estructura | Column CL, Beam BM, Floor (Structural) SB; Foundation: Isolated FI, Wall FW (Revit's FT is Filters here) | pilar, viga, laje, sapata, sapata corrida, baldrame |
 | **Plumbing** / Hidrossanitário / Fontanería | Pipe PI, Plumbing Fixture PX, Pipe Fitting PF, Pipe Accessory PA (built) | tubulação, peça sanitária, ramal, prumada, água fria (NBR 5626), esgoto (NBR 8160) |
 | **Electrical** / Elétrico / Eléctrico | Conduit CN, Cable Tray CT, Wire EW, Electrical Equipment EE, Lighting Fixture LF, Device DV (built) | eletroduto, eletrocalha, quadro de distribuição, luminária, tomada, circuito (NBR 5410) |
-| **Lightning Protection (SPDA)** / SPDA / SPDA | Air Terminal, Down Conductor, Earthing Electrode, Inspection Box | captor, condutor de descida, haste de aterramento, caixa de inspeção, malha (NBR 5419) |
+| **Lightning Protection (SPDA)** / SPDA / SPDA | Air Terminal AT, Down Conductor DC, Earthing Electrode EG, Inspection Box IB, Earthing Conductor GC (built) | captor, condutor de descida, haste de aterramento, caixa de inspeção, malha (NBR 5419) |
 | **Data** / Lógica, Dados e Voz / Datos y Voz | Data Outlet, Voice Outlet, Rack, Cable Tray CT, Cabling | ponto de dados, ponto de voz, rack, patch panel, cabeamento estruturado (NBR 14565) |
 
 The English stays Revit's words; the Portuguese uses the terms the standards use. Revit has no SPDA, so its tools have

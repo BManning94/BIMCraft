@@ -72,6 +72,28 @@ const CASES: &[Case] = &[
         class: "IFCCABLESEGMENT",
         predefined: ".CABLESEGMENT.",
     },
+    Case {
+        category: "downconductor",
+        command: "down_conductor",
+        alias: "DC",
+        default_type: "Steel 8",
+        round: true,
+        columns: &["System", "Length", "Width", "Depth"],
+        alone: true,
+        class: "IFCCABLESEGMENT",
+        predefined: ".CONDUCTORSEGMENT.",
+    },
+    Case {
+        category: "groundconductor",
+        command: "ground_conductor",
+        alias: "GC",
+        default_type: "Copper 9",
+        round: true,
+        columns: &["System", "Length", "Width", "Depth"],
+        alone: false,
+        class: "IFCCABLESEGMENT",
+        predefined: ".CONDUCTORSEGMENT.",
+    },
 ];
 
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
@@ -647,6 +669,33 @@ const FIXTURES: &[Fixture] = &[
         base: (200.0, 1200.0),
         top: (300.0, 1300.0),
     },
+    Fixture {
+        family: "Air Terminal",
+        category: Category::AirTerminal,
+        class: "IFCBUILDINGELEMENTPROXY",
+        predefined: ".USERDEFINED.",
+        object_type: Some("LightningTerminal"),
+        base: (-1.0, 1.0),
+        top: (400.0, 2100.0),
+    },
+    Fixture {
+        family: "Earthing Electrode",
+        category: Category::Earthing,
+        class: "IFCBUILDINGELEMENTPROXY",
+        predefined: ".USERDEFINED.",
+        object_type: Some("EarthingRod"),
+        base: (-3100.0, -2300.0),
+        top: (0.0, 0.0),
+    },
+    Fixture {
+        family: "Inspection Box",
+        category: Category::InspectionBox,
+        class: "IFCBUILDINGELEMENTPROXY",
+        predefined: ".USERDEFINED.",
+        object_type: Some("InspectionBox"),
+        base: (-350.0, -200.0),
+        top: (0.0, 0.0),
+    },
 ];
 
 #[test]
@@ -705,6 +754,9 @@ fn fixtures_are_ifc_products_of_their_class_and_come_back_in_a_family_of_their_c
         let written: Vec<&str> = entities(&file, f.class).into_iter().filter(|l| l.contains(&format!("'{}:", f.family))).collect();
         assert_eq!(written.len(), 1, "{}: {file}", f.family);
         assert!(written[0].ends_with(&format!("{});", f.predefined)), "{}: {}", f.family, written[0]);
+        if let Some(object) = f.object_type {
+            assert!(written[0].contains(&format!(",'{object}',")), "{}: its object type says what it is: {}", f.family, written[0]);
+        }
     }
     let path = std::env::temp_dir().join(format!("bimcraft-test-{}-fixtures.ifc", std::process::id()));
     run(&mut s, "save", json!({"path": path}));

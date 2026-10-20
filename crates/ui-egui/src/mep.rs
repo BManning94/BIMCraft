@@ -83,6 +83,33 @@ pub(crate) const FIXTURES: &[FixtureTool] = &[
         tip: "Lighting Fixture (LF): a luminaire, where you click, hung from the slab; Space turns it",
         icon: Icon::Luminaire,
     },
+    FixtureTool {
+        key: "airterminal",
+        kinds: &[Category::AirTerminal],
+        letters: "AT",
+        label: "Air Terminal",
+        title: "Place Air Terminal",
+        tip: "Air Terminal (AT): a captor, where you click on the roof; Space turns it",
+        icon: Icon::AirTerminal,
+    },
+    FixtureTool {
+        key: "earthing",
+        kinds: &[Category::Earthing],
+        letters: "EG",
+        label: "Earthing Electrode",
+        title: "Place Earthing Electrode",
+        tip: "Earthing Electrode (EG): a rod driven down from the level, where you click; Space turns it",
+        icon: Icon::Electrode,
+    },
+    FixtureTool {
+        key: "inspection",
+        kinds: &[Category::InspectionBox],
+        letters: "IB",
+        label: "Inspection Box",
+        title: "Place Inspection Box",
+        tip: "Inspection Box (IB): over an electrode, flush with the level, where you click; Space turns it",
+        icon: Icon::InspectionBox,
+    },
 ];
 
 pub(crate) fn fixture(key: &str) -> Option<&'static FixtureTool> {
@@ -141,6 +168,30 @@ impl BimApp {
                 Tool::Run("wire", None),
             );
             self.buttons(ui, &[conduit, tray, wire]);
+        });
+    }
+
+    /// The Lightning Protection tab (SPDA, NBR 5419): what captures, what carries the current down, and what earths it. Revit
+    /// has none, so these are BIMCraft's own, on the same runs and fixtures.
+    pub(crate) fn lightning_tab(&mut self, ui: &mut Ui) {
+        self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
+        panel(ui, "Capture & Descent", |ui| {
+            let down = (
+                Icon::DownConductor,
+                "Down Conductor",
+                "Down Conductor (DC): click its start and its end; the same point twice and two heights stand it up a wall",
+                Tool::Run("downconductor", None),
+            );
+            self.buttons(ui, &[Self::fixture_button("airterminal"), down]);
+        });
+        panel(ui, "Earthing", |ui| {
+            let ground = (
+                Icon::GroundConductor,
+                "Earthing Conductor",
+                "Earthing Conductor (GC): click its start and its end; a chain of clicks makes the ring or the mesh, under the level",
+                Tool::Run("groundconductor", None),
+            );
+            self.buttons(ui, &[Self::fixture_button("earthing"), Self::fixture_button("inspection"), ground]);
         });
     }
 

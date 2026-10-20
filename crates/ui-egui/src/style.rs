@@ -191,6 +191,11 @@ pub enum Icon {
     Equipment,
     Device,
     Luminaire,
+    AirTerminal,
+    DownConductor,
+    Electrode,
+    InspectionBox,
+    GroundConductor,
     Stair,
     Roof,
     Theme,
@@ -475,6 +480,39 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
         ],
         // A wire, running in a gentle wave.
         Icon::Wire => vec![line(&[(2.0, 14.0), (6.0, 8.0), (10.0, 14.0), (14.0, 8.0), (18.0, 14.0), (22.0, 8.0)])],
+        // An air terminal: a rod with a pointed tip, on its base.
+        Icon::AirTerminal => vec![
+            line(&[(12.0, 6.0), (12.0, 17.0)]),
+            ring(&[(10.5, 6.0), (12.0, 2.0), (13.5, 6.0)]),
+            ring(&[(8.0, 17.0), (16.0, 17.0), (19.0, 21.0), (5.0, 21.0)]),
+        ],
+        // A down conductor: a wire down a wall, held by its clips.
+        Icon::DownConductor => vec![
+            line(&[(12.0, 2.0), (12.0, 22.0)]),
+            line(&[(9.0, 6.0), (15.0, 6.0)]),
+            line(&[(9.0, 12.0), (15.0, 12.0)]),
+            line(&[(9.0, 18.0), (15.0, 18.0)]),
+        ],
+        // The earth symbol, for an electrode: a lead and three bars, each shorter than the last.
+        Icon::Electrode => vec![
+            line(&[(12.0, 3.0), (12.0, 10.0)]),
+            line(&[(6.0, 10.0), (18.0, 10.0)]),
+            line(&[(8.5, 14.0), (15.5, 14.0)]),
+            line(&[(11.0, 18.0), (13.0, 18.0)]),
+        ],
+        // An inspection box in the ground: its rim at the surface, its chamber below.
+        Icon::InspectionBox => vec![
+            ring(&[(5.0, 8.0), (19.0, 8.0), (19.0, 21.0), (5.0, 21.0)]),
+            line(&[(2.0, 8.0), (22.0, 8.0)]),
+            ring(&[(9.0, 12.0), (15.0, 12.0), (15.0, 17.0), (9.0, 17.0)]),
+        ],
+        // An earthing mesh: conductors crossing.
+        Icon::GroundConductor => vec![
+            line(&[(3.0, 8.0), (21.0, 8.0)]),
+            line(&[(3.0, 16.0), (21.0, 16.0)]),
+            line(&[(8.0, 3.0), (8.0, 21.0)]),
+            line(&[(16.0, 3.0), (16.0, 21.0)]),
+        ],
         // A distribution board: a box, its door and its breakers in rows.
         Icon::Equipment => vec![
             ring(&[(5.0, 3.0), (19.0, 3.0), (19.0, 21.0), (5.0, 21.0)]),

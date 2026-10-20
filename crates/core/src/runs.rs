@@ -27,6 +27,10 @@ pub const IFC: &[(&str, &str, &str)] = &[
     // A ladder is a tray to BIMCraft, written as a tray: only a file of another tool's says it.
     ("cabletray", "IFCCABLECARRIERSEGMENT", ".CABLELADDERSEGMENT."),
     ("wire", "IFCCABLESEGMENT", ".CABLESEGMENT."),
+    // IFC has no lightning protection: a down conductor is a conductor segment, as is an earthing conductor (BIMCraft's own
+    // `Category` tells them apart).
+    ("downconductor", "IFCCABLESEGMENT", ".CONDUCTORSEGMENT."),
+    ("groundconductor", "IFCCABLESEGMENT", ".CONDUCTORSEGMENT."),
 ];
 
 /// The IFC class and predefined type a run of `category` is written as.

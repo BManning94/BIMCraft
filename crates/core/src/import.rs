@@ -1954,7 +1954,10 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             }
             let forms: Vec<Form> =
                 groups.into_iter().map(|(material, mesh)| Form { mesh: Arc::new(mesh), material, ..Form::default() }).collect();
-            let name = label(id).or_else(|| text(x.args.get(2)).map(String::from)).unwrap_or_else(|| x.name.clone());
+            // A product whose object type marks what it is (a lightning terminal) has its family and type in its name.
+            let marked = category.ifc().2.is_some();
+            let name =
+                if marked { None } else { label(id) }.or_else(|| text(x.args.get(2)).map(String::from)).unwrap_or_else(|| x.name.clone());
             let mut parts = name.splitn(3, ':').map(str::trim);
             let family = clip(parts.next().unwrap_or_default());
             let base = clip(parts.next().unwrap_or(&family));

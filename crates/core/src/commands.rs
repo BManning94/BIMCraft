@@ -242,6 +242,24 @@ pub static ALL: &[Command] = &[
         wire,
     ),
     edit(
+        "down_conductor",
+        "Down Conductor",
+        &["DC"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} a down conductor \
+         (condutor de descida, NBR 5419) for each segment of the points, as `pipe` lays them: round, or a flat strip; the same point \
+         twice and two heights make one stand upright down a wall; `system` names the protection system it belongs to",
+        down_conductor,
+    ),
+    edit(
+        "ground_conductor",
+        "Earthing Conductor",
+        &["GC"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} an earthing conductor \
+         (condutor de aterramento, the ring or mesh of NBR 5419) for each segment of the points, as `pipe` lays them, usually under \
+         the level (a negative `offset`)",
+        ground_conductor,
+    ),
+    edit(
         "stair",
         "Stair",
         &[],
@@ -2986,6 +3004,14 @@ fn wire(s: &mut Session, p: &Value) -> R {
     chain(s, p, "wire")
 }
 
+fn down_conductor(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "downconductor")
+}
+
+fn ground_conductor(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "groundconductor")
+}
+
 fn chain(s: &mut Session, p: &Value, category: &str) -> R {
     let made = runs_of(&s.model, p, category)?;
     let m = s.model_mut();
@@ -3008,6 +3034,8 @@ pub fn command_of(category: &str) -> &'static str {
         "conduit" => "conduit",
         "cabletray" => "cable_tray",
         "wire" => "wire",
+        "downconductor" => "down_conductor",
+        "groundconductor" => "ground_conductor",
         "footing" => "footing",
         _ => "column",
     }

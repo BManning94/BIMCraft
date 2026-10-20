@@ -80,10 +80,34 @@ const RUN_TOOLS: &[RunTool] = &[
         other: "Wire 4",
         round: true,
     },
+    RunTool {
+        tab: "Lightning Protection",
+        button: "Down Conductor",
+        category: "downconductor",
+        command: "down_conductor",
+        context: "Modify | Place Down Conductor",
+        letters: "DC",
+        default_type: "Steel 8",
+        width: 8.0,
+        other: "Copper 8",
+        round: true,
+    },
+    RunTool {
+        tab: "Lightning Protection",
+        button: "Earthing Conductor",
+        category: "groundconductor",
+        command: "ground_conductor",
+        context: "Modify | Place Earthing Conductor",
+        letters: "GC",
+        default_type: "Copper 9",
+        width: 9.0,
+        other: "Steel 8",
+        round: true,
+    },
 ];
 
 /// What Visibility/Graphics lists the categories of these tabs as.
-const CATEGORY_NAMES: &[&str] = &["Pipes", "Conduits", "Cable Trays", "Wires"];
+const CATEGORY_NAMES: &[&str] = &["Pipes", "Conduits", "Cable Trays", "Wires", "Down Conductors", "Earthing Conductors"];
 
 /// A fixture tab's tool: the tab, the button, its contextual tab, the shortcut, the families it places and one it doesn't.
 struct FixtureTool {
@@ -160,13 +184,44 @@ const FIXTURE_TOOLS: &[FixtureTool] = &[
         not_listed: "Switch: Medium 1100",
         first: "Ceiling Luminaire",
     },
+    FixtureTool {
+        tab: "Lightning Protection",
+        button: "Air Terminal",
+        key: "airterminal",
+        context: "Modify | Place Air Terminal",
+        letters: "AT",
+        listed: "Air Terminal: 1000",
+        not_listed: "Distribution Board: 24 circuits",
+        first: "Air Terminal",
+    },
+    FixtureTool {
+        tab: "Lightning Protection",
+        button: "Earthing Electrode",
+        key: "earthing",
+        context: "Modify | Place Earthing Electrode",
+        letters: "EG",
+        listed: "Earthing Electrode: 3000",
+        not_listed: "Air Terminal: 500",
+        first: "Earthing Electrode",
+    },
+    FixtureTool {
+        tab: "Lightning Protection",
+        button: "Inspection Box",
+        key: "inspection",
+        context: "Modify | Place Inspection Box",
+        letters: "IB",
+        listed: "Inspection Box: 300",
+        not_listed: "Earthing Electrode: 3000",
+        first: "Inspection Box",
+    },
 ];
 
 #[test]
 fn each_discipline_tab_has_its_tools_and_none_of_the_architecture_tabs() {
-    let tabs: [(&str, &[&str]); 2] = [
+    let tabs: [(&str, &[&str]); 3] = [
         ("Plumbing", &["Pipe", "Plumbing Fixture", "Pipe Fitting", "Pipe Accessory"]),
         ("Electrical", &["Electrical Equipment", "Device", "Lighting Fixture", "Conduit", "Cable Tray", "Wire"]),
+        ("Lightning Protection", &["Air Terminal", "Down Conductor", "Earthing Electrode", "Inspection Box", "Earthing Conductor"]),
     ];
     for (tab, labels) in tabs {
         let mut h = app(BOX);
@@ -449,7 +504,9 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
     let script = format!(
         "{BOX}\npipe {{\"points\": [[1000, 1000], [5000, 1000]], \"offset\": 2400}}\nconduit {{\"points\": [[1000, 2000], [5000, 2000]], \"offset\": 2400}}\n\
          cable_tray {{\"points\": [[1000, 3000], [5000, 3000]], \"offset\": 2600}}\nwire {{\"points\": [[1000, 4000], [5000, 4000]], \"offset\": 2400}}\n\
-         component {{\"family\": \"WC\", \"at\": [7000, 1000]}}\ncomponent {{\"family\": \"Outlet\", \"type\": \"Low 300\", \"at\": [7000, 3000]}}"
+         component {{\"family\": \"WC\", \"at\": [7000, 1000]}}\ncomponent {{\"family\": \"Outlet\", \"type\": \"Low 300\", \"at\": [7000, 3000]}}\n\
+         down_conductor {{\"points\": [[6000, 5000], [6000, 5000]], \"offset\": 0, \"end_offset\": 3000}}\n\
+         component {{\"family\": \"Air Terminal\", \"type\": \"1000\", \"at\": [7000, 5000]}}"
     );
     let mut h = app(&script);
     assert!(english(&h, Language::Spanish).contains(&"Plumbing".to_string()), "the probe finds what it looks for");
@@ -459,6 +516,7 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
             [
                 ("Hidrossanitário", vec!["Tubulação", "Peça sanitária", "Conexão de tubulação", "Acessório de tubulação"]),
                 ("Elétrico", vec!["Equipamento elétrico", "Dispositivo", "Luminária", "Eletroduto", "Eletrocalha", "Fio"]),
+                ("SPDA", vec!["Captor", "Condutor de descida", "Haste de aterramento", "Caixa de inspeção", "Condutor de aterramento"]),
             ],
         ),
         (
@@ -466,6 +524,16 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
             [
                 ("Fontanería", vec!["Tubería", "Aparato sanitario", "Conexión de tubería", "Accesorio de tubería"]),
                 ("Eléctrico", vec!["Equipo eléctrico", "Dispositivo", "Luminaria", "Tubo conduit", "Bandeja portacables", "Cable"]),
+                (
+                    "SPDA",
+                    vec![
+                        "Terminal aéreo",
+                        "Conductor de bajada",
+                        "Electrodo de puesta a tierra",
+                        "Caja de inspección",
+                        "Conductor de puesta a tierra",
+                    ],
+                ),
             ],
         ),
     ];
@@ -487,9 +555,16 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
             }
         }
         // What they made, selected: the palette and the contextual tab; and a pipe's type dialog.
-        for point in
-            [P2(3000.0, 1000.0), P2(3000.0, 2000.0), P2(3000.0, 3000.0), P2(3000.0, 4000.0), P2(7000.0, 3000.0), P2(7000.0, 1000.0)]
-        {
+        for point in [
+            P2(3000.0, 1000.0),
+            P2(3000.0, 2000.0),
+            P2(3000.0, 3000.0),
+            P2(3000.0, 4000.0),
+            P2(7000.0, 3000.0),
+            P2(7000.0, 1000.0),
+            P2(6000.0, 5000.0),
+            P2(7000.0, 5000.0),
+        ] {
             click(&mut h, point);
             missed.extend(english(&h, l));
             key(&mut h, Key::Escape);

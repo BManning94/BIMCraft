@@ -12,6 +12,7 @@ pub fn library(language: Language) -> Vec<(String, Value)> {
     let mut out = plumbing(language);
     out.extend(pipework(language));
     out.extend(electrical(language));
+    out.extend(lightning(language));
     out
 }
 
@@ -309,4 +310,54 @@ fn electrical(language: Language) -> Vec<(String, Value)> {
         }),
     ));
     out
+}
+
+/// Lightning protection (NBR 5419): an air terminal, an earthing electrode and an inspection box. A terminal stands on its base; a
+/// rod and an inspection box go down from the level they are placed on, which is where the ground is.
+fn lightning(language: Language) -> Vec<(String, Value)> {
+    let w = |s: &str| language.word(s).to_string();
+    let (height, diameter, mat, metal, concrete) = (w("Height"), w("Diameter"), w("Material"), w("Metal"), w("Concrete"));
+    let n = |x: f64| json!(x);
+    // Types named by one size each, that parameter set to it.
+    let sizes = |name: &str, items: &[(&str, f64)]| -> Value {
+        items.iter().map(|(k, v)| (k.to_string(), json!({name: v}))).collect::<serde_json::Map<String, Value>>().into()
+    };
+    vec![
+        // A Franklin air terminal: a rod on a round base, as tall as `Height`.
+        (
+            w("Air Terminal"),
+            json!({
+                "category": "airterminal",
+                "parameters": [size(&height, 500.0), size(&diameter, 10.0), material(&mat, &metal)],
+                "types": sizes(&height, &[("500", 500.0), ("1000", 1000.0), ("2000", 2000.0)]),
+                "forms": [
+                    post(n(0.0), n(0.0), n(60.0), n(0.0), n(15.0), &mat),
+                    post(n(0.0), n(0.0), f(format!("{diameter} / 2")), n(15.0), f(height.clone()), &mat)
+                ]
+            }),
+        ),
+        // An earthing electrode: a rod driven into the ground, its head at the level.
+        (
+            w("Earthing Electrode"),
+            json!({
+                "category": "earthing",
+                "parameters": [size(&height, 2400.0), size(&diameter, 16.0), material(&mat, &metal)],
+                "types": sizes(&height, &[("2400", 2400.0), ("3000", 3000.0)]),
+                "forms": [post(n(0.0), n(0.0), f(format!("{diameter} / 2")), f(format!("-({height})")), n(0.0), &mat)]
+            }),
+        ),
+        // An inspection box: a round box in the ground, open at the top, its rim flush with the level.
+        (
+            w("Inspection Box"),
+            json!({
+                "category": "inspectionbox",
+                "parameters": [size(&diameter, 300.0), size(&height, 300.0), material(&mat, &concrete)],
+                "types": sizes(&diameter, &[("300", 300.0), ("250", 250.0)]),
+                "forms": [
+                    post(n(0.0), n(0.0), f(format!("{diameter} / 2")), f(format!("-({height})")), n(0.0), &mat),
+                    void(post(n(0.0), n(0.0), f(format!("{diameter} / 2 - 20")), f(format!("-({height}) + 20")), n(0.0), ""))
+                ]
+            }),
+        ),
+    ]
 }

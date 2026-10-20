@@ -36,6 +36,12 @@ pub enum Category {
     Outlet,
     /// A light switch (interruptor).
     Switch,
+    /// A lightning air terminal (captor).
+    AirTerminal,
+    /// An earthing electrode (haste de aterramento).
+    Earthing,
+    /// An earthing inspection box (caixa de inspeção).
+    InspectionBox,
     Lighting,
     Generic,
     Door,
@@ -45,7 +51,7 @@ pub enum Category {
 impl Category {
     /// The categories a component may be of (a door's or a window's family is placed in a wall), in the order an import reads
     /// them.
-    pub const PLACED: [Category; 10] = [
+    pub const PLACED: [Category; 13] = [
         Category::Furniture,
         Category::Plumbing,
         Category::Drain,
@@ -54,6 +60,9 @@ impl Category {
         Category::Equipment,
         Category::Outlet,
         Category::Switch,
+        Category::AirTerminal,
+        Category::Earthing,
+        Category::InspectionBox,
         Category::Lighting,
         Category::Generic,
     ];
@@ -71,6 +80,10 @@ impl Category {
             Category::Equipment => ("IFCELECTRICDISTRIBUTIONBOARD", ".DISTRIBUTIONBOARD.", None),
             Category::Outlet => ("IFCOUTLET", ".POWEROUTLET.", None),
             Category::Switch => ("IFCSWITCHINGDEVICE", ".TOGGLESWITCH.", None),
+            // IFC4 and IFC4X3 have no class for lightning protection: a proxy of an object type a reader can filter on.
+            Category::AirTerminal => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("LightningTerminal")),
+            Category::Earthing => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("EarthingRod")),
+            Category::InspectionBox => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("InspectionBox")),
             Category::Lighting => ("IFCLIGHTFIXTURE", OPEN, None),
             Category::Generic | Category::Door | Category::Window => ("IFCBUILDINGELEMENTPROXY", OPEN, None),
         }
@@ -98,10 +111,13 @@ impl Category {
                 let (own, _, object) = c.ifc();
                 (own == class || c.classes().contains(&class)) && (object.is_none() || object == object_type)
             })
-            .max_by_key(|c| {
+            .fold(None, |best: Option<(Category, u8)>, c| {
                 let (_, predefined, object) = c.ifc();
-                2 * u8::from(object.is_some()) + u8::from(Some(predefined.trim_matches('.')) == kind)
+                let score = 2 * u8::from(object.is_some()) + u8::from(Some(predefined.trim_matches('.')) == kind);
+                // Strictly better, so a tie goes to the first.
+                if best.is_none_or(|(_, s)| score > s) { Some((c, score)) } else { best }
             })
+            .map(|(c, _)| c)
     }
 
     /// Whether a family of it stands in a wall: a door's or a window's, drawn in the opening's own axes (x along

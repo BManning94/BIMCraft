@@ -965,6 +965,8 @@ macro_rules! run_arm {
             | Element::Conduit($r)
             | Element::CableTray($r)
             | Element::Wire($r)
+            | Element::DownConductor($r)
+            | Element::GroundConductor($r)
     };
 }
 pub(crate) use run_arm;
@@ -999,6 +1001,8 @@ pub enum Element {
     Conduit(Run),
     CableTray(Run),
     Wire(Run),
+    DownConductor(Run),
+    GroundConductor(Run),
     Component(Component),
     Stair(Stair),
     Ramp(Ramp),
@@ -1083,6 +1087,8 @@ impl Element {
             "conduit" => Some(Element::Conduit(r)),
             "cabletray" => Some(Element::CableTray(r)),
             "wire" => Some(Element::Wire(r)),
+            "downconductor" => Some(Element::DownConductor(r)),
+            "groundconductor" => Some(Element::GroundConductor(r)),
             _ => None,
         }
     }
@@ -1160,6 +1166,8 @@ impl Element {
             Element::Conduit(_) => "conduit",
             Element::CableTray(_) => "cabletray",
             Element::Wire(_) => "wire",
+            Element::DownConductor(_) => "downconductor",
+            Element::GroundConductor(_) => "groundconductor",
             Element::Component(_) => "component",
             Element::Stair(_) => "stair",
             Element::Ramp(_) => "ramp",
@@ -1234,7 +1242,7 @@ pub struct RunType {
 }
 
 /// The categories whose elements are runs, as `Element::run` returns them.
-pub const RUN_CATEGORIES: [&str; 6] = ["beam", "stripfooting", "pipe", "conduit", "cabletray", "wire"];
+pub const RUN_CATEGORIES: [&str; 8] = ["beam", "stripfooting", "pipe", "conduit", "cabletray", "wire", "downconductor", "groundconductor"];
 
 /// A roof type: how thick its roofs are across their slope and, a compound one, its layers from
 /// the top down.
@@ -1305,7 +1313,7 @@ pub struct ProjectParameter {
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
 /// The categories project parameters are for.
-pub const PARAMETER_CATEGORIES: [&str; 21] = [
+pub const PARAMETER_CATEGORIES: [&str; 23] = [
     "wall",
     "floor",
     "ceiling",
@@ -1327,6 +1335,8 @@ pub const PARAMETER_CATEGORIES: [&str; 21] = [
     "conduit",
     "cabletray",
     "wire",
+    "downconductor",
+    "groundconductor",
 ];
 
 impl ProjectParameter {
@@ -1506,6 +1516,15 @@ impl Model {
             ("Wire 4", run(5.0, 5.0, true, "Copper")),
             ("Wire 6", run(6.5, 6.5, true, "Copper")),
         ];
+        // Lightning protection (NBR 5419): down conductors in steel, copper or flat steel strip, earthing conductors in bare copper.
+        let down = [
+            ("Steel 8", run(8.0, 8.0, true, "Metal")),
+            ("Copper 8", run(8.0, 8.0, true, "Copper")),
+            ("Flat 25 x 3", run(25.0, 3.0, false, "Metal")),
+        ];
+        m.types.runs.insert("downconductor".into(), down.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        let ground = [("Copper 9", run(9.0, 9.0, true, "Copper")), ("Steel 8", run(8.0, 8.0, true, "Metal"))];
+        m.types.runs.insert("groundconductor".into(), ground.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         m.types.runs.insert("wire".into(), wires.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         // The electrical's: PVC and steel conduits (eletrodutos), perforated trays (eletrocalhas) and wires, by their outside size.
         let conduits = [
@@ -1831,6 +1850,8 @@ impl Model {
             "conduit" => "PVC 25",
             "cabletray" => "Perforated 100 x 50",
             "wire" => "Wire 2.5",
+            "downconductor" => "Steel 8",
+            "groundconductor" => "Copper 9",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);

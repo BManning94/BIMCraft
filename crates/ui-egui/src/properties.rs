@@ -336,6 +336,8 @@ fn icon(category: &str) -> Icon {
         "conduit" => Icon::Conduit,
         "cabletray" => Icon::CableTray,
         "wire" => Icon::Wire,
+        "downconductor" => Icon::DownConductor,
+        "groundconductor" => Icon::GroundConductor,
         "component" => Icon::Component,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,
