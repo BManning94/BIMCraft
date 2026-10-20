@@ -236,13 +236,13 @@ pub fn draw(m: &Model, id: Id) -> Option<Drawing> {
         let (w, h) = (view.width as f32, view.height as f32);
         d.push(Prim::Fill { rings: vec![vec![(ox, oy), (ox + w, oy), (ox + w, oy + h), (ox, oy + h)]], color: PAPER });
         let inner = match m.elements.get(&vp.view) {
-            Some(Element::Level(_)) => render::draw(m, vp.view, view),
+            Some(Element::Level(_)) => render::draw_at(m, vp.view, view, 1.0),
             Some(Element::Section(_) | Element::Elevation(_)) => {
                 let scene = scene.get_or_insert_with(|| view3d::Scene::new(m));
                 if let Some(img) = render::section_image(m, scene, vp.view, view, &[]) {
                     d.push(Prim::Image { at: (ox, oy), width: img.width, height: img.height, rgba: img.rgba });
                 }
-                render::section(m, vp.view, view)
+                render::section_at(m, vp.view, view, 1.0)
             }
             // Its title is its first row; it has no view title under it.
             Some(Element::Schedule(sc)) => {
@@ -390,5 +390,31 @@ mod tests {
         // The note, on the paper.
         let at = d.view.px(P2(30.0, 40.0));
         assert_eq!(d.pick((at.0 + 1.0, at.1 + 6.0), 2.0), Some(13));
+    }
+
+    #[test]
+    fn a_3d_view_on_a_sheet_is_drawn_in_its_visual_style() {
+        let mut s = Session::new();
+        s.script(
+            r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true}
+               sheet {"name": "Views"}
+               place {"sheet": "A101", "view": "{3D}", "at": [300, 150], "scale": 200}"#,
+        )
+        .unwrap();
+        // Walls 3 to 6, the sheet 7, the 3D view 8 and its viewport 9.
+        let inked = |s: &Session| {
+            let d = draw(&s.model, 7).unwrap();
+            let (picture, (x, y)) = frame(&s.model, 9).unwrap();
+            let pm = tiny_skia::Pixmap::decode_png(&png(&d).unwrap()).unwrap();
+            (0..picture.width)
+                .flat_map(|px| (0..picture.height).map(move |py| (px, py)))
+                .filter_map(|(px, py)| pm.pixel(x as u32 + px, y as u32 + py))
+                .filter(|c| (c.red(), c.green(), c.blue()) != (255, 255, 255))
+                .count()
+        };
+        let shaded = inked(&s);
+        s.execute("visual_style", &serde_json::json!({"view": 8, "style": "wireframe"})).unwrap();
+        let wire = inked(&s);
+        assert!(wire > 50 && wire < shaded / 4, "{wire} of {shaded}");
     }
 }

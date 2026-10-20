@@ -153,6 +153,7 @@ impl Scene {
     fn of(m: &Model, level: Id, p: P2, window: f64, look: &Look) -> Scene {
         let mut s = Scene { points: Vec::new(), lines: Vec::new(), walls: Vec::new() };
         let above = m.level_above(level);
+        let cut = m.plan_range(level).cut;
         // Whether the box round `pts` lies within `window` of `p`.
         let near = |pts: &[P2]| {
             let (lo, hi) = pts.iter().fold((P2(f64::INFINITY, f64::INFINITY), P2(f64::NEG_INFINITY, f64::NEG_INFINITY)), |(lo, hi), q| {
@@ -184,7 +185,17 @@ impl Scene {
                     s.points.extend([(g.start, Kind::Endpoint), (g.end, Kind::Endpoint)]);
                     s.lines.push((g.start, g.end));
                 }
-                Element::Column(c) if c.level == level && near(&[c.at]) => s.points.push((c.at, Kind::Centre)),
+                Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) if c.level == level && near(&[c.at]) => {
+                    s.points.push((c.at, Kind::Centre))
+                }
+                Element::Beam(r) | Element::StripFooting(r) if r.level == level && near(&[r.start, r.end]) => {
+                    s.points.extend([
+                        (r.start, Kind::Endpoint),
+                        (r.end, Kind::Endpoint),
+                        (r.start + (r.end - r.start) * 0.5, Kind::Midpoint),
+                    ]);
+                    s.lines.push((r.start, r.end));
+                }
                 Element::Component(c) if c.level == level && near(&[c.at]) => s.points.push((c.at, Kind::Centre)),
                 Element::Floor(f) if f.level == level => {
                     s.points.extend(ring(&f.boundary));
@@ -199,6 +210,7 @@ impl Scene {
                     r.courtyards.iter().chain(&r.openings).for_each(|o| s.points.extend(ring(o)));
                 }
                 Element::Shaft(sh) if sh.level == level => s.points.extend(ring(&sh.boundary)),
+                Element::Mass(ms) if m.mass_cut_by(ms, cut) => s.points.extend(ring(&ms.boundary)),
                 Element::Stair(st) if st.level == level && near(&[st.start]) => s.points.push((st.start, Kind::Endpoint)),
                 Element::Ramp(r) if r.level == level && near(&[r.start]) => s.points.push((r.start, Kind::Endpoint)),
                 Element::Railing(r) if r.level == level => s.points.extend(ring(&r.path)),
@@ -439,6 +451,17 @@ mod tests {
 
     fn degrees(from: P2, to: P2) -> f64 {
         (to.1 - from.1).atan2(to.0 - from.0).to_degrees()
+    }
+
+    #[test]
+    fn points_snap_to_the_corners_of_a_mass_where_the_plan_cuts_it() {
+        let m = model(r#"mass {"boundary": [[1000,1000],[5000,1000],[5000,4000],[1000,4000]], "height": 2000}"#);
+        let o = Snaps::default();
+        let f = at(&m, P2(5030.0, 4020.0), &[], &o);
+        assert_eq!((f.at, f.kind), (P2(5000.0, 4000.0), Kind::Endpoint));
+        // Level 2's plan cuts at 4200 mm, over its top at 2000: nothing there to snap to.
+        let f = snap(&m, 2, P2(5030.0, 4020.0), REACH, &[], false, &o);
+        assert_eq!((f.at, f.kind), (P2(5030.0, 4020.0), Kind::Free));
     }
 
     #[test]

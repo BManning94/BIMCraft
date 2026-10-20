@@ -18,7 +18,7 @@ use std::fmt::Write;
 use tiny_skia::{Color, FillRule, IntSize, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, Stroke, StrokeDash, Transform};
 
 use crate::geom::{self, P2};
-use crate::graphics::Look;
+use crate::graphics::{Detail, Look};
 use crate::model::{
     CEILING_CUT, Ceiling, DimKind, Dimension, Element, Floor, Function, Id, Layer, Model, Note, Opening, Pattern, PlanRange, Railing, Ramp,
     Roof, Section, Shaft, Stair, TOL, Tag, Wall,
@@ -39,6 +39,8 @@ pub const LIGHT_POCHE: Rgb = Rgb(212, 212, 212);
 const INK: Rgb = Rgb(25, 25, 25);
 const FAINT: Rgb = Rgb(120, 120, 120);
 const GRID: Rgb = Rgb(60, 100, 150);
+/// A mass's outline, dashed.
+const MASS: Rgb = Rgb(88, 112, 168);
 /// Room for grid bubbles and the view title around the drawing, px.
 const MARGIN: f64 = 70.0;
 const BUBBLE: f32 = 11.0;
@@ -180,12 +182,25 @@ pub struct Drawing {
     /// The element being drawn now, and the part of it.
     owner: Option<Id>,
     part: Part,
+    /// How big annotation is drawn, times the pixels it is drawn in: see [`annotation`].
+    k: f32,
+    /// How much of what the view cuts it draws.
+    detail: Detail,
 }
 
 impl Drawing {
     /// Nothing yet, through `view`.
     pub fn new(view: View) -> Drawing {
-        Drawing { view, prims: Vec::new(), owners: Vec::new(), parts: Vec::new(), owner: None, part: Part::Projection }
+        Drawing {
+            view,
+            prims: Vec::new(),
+            owners: Vec::new(),
+            parts: Vec::new(),
+            owner: None,
+            part: Part::Projection,
+            k: 1.0,
+            detail: Detail::Fine,
+        }
     }
     /// What the primitives pushed next draw.
     pub(crate) fn own(&mut self, owner: Option<Id>) {
@@ -219,6 +234,30 @@ impl Drawing {
         let pts = pts.iter().map(|p| self.view.px(*p)).collect();
         self.push(Prim::Line { pts, width, color, dash: None, closed });
     }
+    /// [`Drawing::line`], dashed.
+    pub(crate) fn dashed(&mut self, pts: &[P2], width: f32, color: Rgb, closed: bool) {
+        let pts = pts.iter().map(|p| self.view.px(*p)).collect();
+        self.push(Prim::Line { pts, width, color, dash: Some([10.0, 5.0]), closed });
+    }
+    /// `px` pixels of annotation, as big as the view's scale makes them.
+    fn px(&self, px: f32) -> f32 {
+        px * self.k
+    }
+
+    /// The primitives pushed since `from`, grown `k` times about pixel `about`: annotation is laid out one pixel to the
+    /// pixel and made as big as its view's scale says.
+    fn grow(&mut self, from: usize, about: (f32, f32)) {
+        let k = self.k;
+        let at = |p: &mut (f32, f32)| *p = (about.0 + (p.0 - about.0) * k, about.1 + (p.1 - about.1) * k);
+        for prim in self.prims.iter_mut().skip(from).filter(|_| k != 1.0) {
+            match prim {
+                Prim::Fill { rings, .. } => rings.iter_mut().flatten().for_each(at),
+                Prim::Line { pts, .. } => pts.iter_mut().for_each(at),
+                Prim::Image { .. } => {}
+            }
+        }
+    }
+
     /// `text` centred on `at` px, capitals `height` px tall.
     pub(crate) fn text(&mut self, text: &str, at: (f32, f32), height: f32, color: Rgb) {
         self.text_turned(text, at, height, 0.0, color);
@@ -342,13 +381,21 @@ fn cut_outlines(m: &Model, z: f64, look: &Look) -> Vec<(Id, Vec<P2>)> {
         .filter(|(id, _)| look.shows(**id))
         .filter_map(|(&id, e)| match e {
             Element::Wall(w) if m.spans(w, z) => Some((id, walls::outline(m, id))),
-            Element::Column(col) => {
-                let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
-                (bottom <= z && z < top).then(|| (id, m.column_outline(col)))
-            }
-            _ => None,
+            _ => stands(m, e).filter(|(_, bottom, top)| *bottom <= z && z < *top).map(|(outline, ..)| (id, outline)),
         })
         .collect()
+}
+
+/// What a column (a structural one, a footing) or a run (a beam, a strip footing) takes in plan, and the heights it reaches:
+/// its outline, its bottom and its top.
+fn stands(m: &Model, e: &Element) -> Option<(Vec<P2>, f64, f64)> {
+    if let Some(col) = e.column() {
+        let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
+        return Some((m.column_outline(e), bottom, top));
+    }
+    let g = m.run_geom(e)?;
+    let (bottom, top) = g.z_span();
+    Some((g.footprint(), bottom, top))
 }
 
 /// The walls and columns a plan sees below its cut plane, down to its view depth: their outlines,
@@ -360,10 +407,14 @@ fn seen_below(m: &Model, r: &PlanRange, look: &Look) -> Vec<(Id, Vec<P2>, f64)> 
         .filter_map(|(&id, e)| {
             let (outline, top) = match e {
                 Element::Wall(w) => (walls::outline(m, id), m.top_z(w)),
-                Element::Column(col) => (m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height).1),
-                _ => return None,
+                _ => {
+                    let (outline, _, top) = stands(m, e)?;
+                    (outline, top)
+                }
             };
-            (r.depth < top && top <= r.cut).then_some((id, outline, top))
+            // A footing or a run hangs under the level it is drawn on, its top flush with the view's bottom: that is seen.
+            let flush = if matches!(e, Element::Footing(_) | Element::Beam(_) | Element::StripFooting(_)) { TOL } else { 0.0 };
+            (r.depth - flush < top && top <= r.cut).then_some((id, outline, top))
         })
         .collect()
 }
@@ -419,6 +470,7 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
                 extent.extend(boundary)
             }
             Element::Room(r) if r.level == level => extent.push(r.point),
+            Element::Mass(ms) if m.mass_cut_by(ms, r.cut) => extent.extend(&ms.boundary),
             Element::Component(c) if c.level == level => extent.extend(m.component_pieces(c).into_iter().flat_map(|p| p.outline)),
             Element::Grid(g) => extent.extend([g.start, g.end]),
             Element::Dimension(dm) if dm.level == level => extent.push(dm.at),
@@ -432,6 +484,9 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
                 }
             }
             Element::Railing(rl) if m.level_of(e) == Some(level) => extent.extend(stairs::railing(m, rl).into_iter().map(|(p, _)| p)),
+            Element::Beam(_) | Element::StripFooting(_) if m.level_of(e) == Some(level) => {
+                extent.extend(m.run_geom(e).map(|g| g.footprint()).unwrap_or_default())
+            }
             Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(m.roof_outline(r)),
             Element::Text(n) if n.view == level => extent.extend([Some(n.at), n.leader].into_iter().flatten()),
             Element::Spot(sp) if sp.view == level => extent.push(sp.at),
@@ -442,10 +497,19 @@ pub(crate) fn plan_shows(m: &Model, level: Id) -> Vec<P2> {
 }
 
 /// An element that isn't in the model yet, drawn as a plan would draw it, its primitives owned
-/// by `id`: what a tool previews. Annotation, columns, stairs and roofs only.
+/// by `id`: what a tool previews. Annotation, doors, windows, columns, components, stairs, ramps, railings, roofs and masses only.
 pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
     let mut d = Drawing::new(view);
     d.owner = Some(id);
+    // Annotation as big as the view it will be in draws it.
+    let on = match e {
+        Element::Dimension(dm) => Some(dm.level),
+        Element::Text(n) => Some(n.view),
+        Element::Spot(sp) => Some(sp.view),
+        Element::Tag(_) => m.level_of(e),
+        _ => None,
+    };
+    d.k = on.map_or(1.0, |v| annotation(m, v, view));
     match e {
         Element::Dimension(dm) => dimension(&mut d, m, dm),
         Element::Tag(t) => tag(&mut d, m, t),
@@ -453,12 +517,24 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
         Element::Spot(sp) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp), m.units),
         Element::Section(v) => section_mark(&mut d, v),
         Element::Elevation(v) => elevation_mark(&mut d, v),
-        Element::Column(col) => d.line(&m.column_outline(col), 2.0, INK, true),
+        Element::Column(_) | Element::StructuralColumn(_) | Element::Footing(_) => d.line(&m.column_outline(e), 2.0, INK, true),
+        Element::Beam(_) | Element::StripFooting(_) => {
+            if let Some(g) = m.run_geom(e) {
+                d.line(&g.footprint(), 2.0, INK, true)
+            }
+        }
         Element::Component(c) => component(&mut d, &m.component_pieces(c)),
+        // Drawn at its sill, where the cut plane would pass through it whatever the plan's cut is.
+        Element::Door(o) | Element::Window(o) => {
+            if let Some(w) = m.wall(o.host) {
+                opening(&mut d, m, e, o, w, m.own_base(w) + o.sill, true);
+            }
+        }
         Element::Stair(st) => stair(&mut d, m, st, st.level),
         Element::Ramp(r) => ramp(&mut d, m, r, r.level),
         Element::Railing(rl) => d.line(&stairs::railing(m, rl).into_iter().map(|(p, _)| p).collect::<Vec<_>>(), 1.5, INK, false),
         Element::Roof(r) => roof(&mut d, m, r),
+        Element::Mass(ms) => d.dashed(&ms.boundary, 1.5, MASS, true),
         _ => {}
     }
     d
@@ -554,7 +630,13 @@ pub fn section_image(m: &Model, scene: &Scene, id: Id, view: View, tints: &[(Id,
 /// the solids, in poché; its levels, named past its end; the grids it crosses; its notes and spot
 /// elevations; and its name. Cropped, only what lies between its crop's heights.
 pub fn section(m: &Model, id: Id, view: View) -> Drawing {
+    section_at(m, id, view, annotation(m, id, view))
+}
+
+/// Section or elevation `id` as `section` draws it, its annotation `k` times the size it is laid out at.
+pub fn section_at(m: &Model, id: Id, view: View, k: f32) -> Drawing {
     let mut d = Drawing::new(view);
+    (d.k, d.detail) = (k, detail_of(m, id));
     let Some(v) = m.section(id) else { return d };
     let look = Look::of(m, id);
     let (len, u) = (v.start.dist(v.end), (v.end - v.start).unit());
@@ -563,7 +645,8 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     let mut cuts: std::collections::BTreeMap<Id, Vec<Vec<P2>>> = std::collections::BTreeMap::new();
     let solids: Vec<_> = view3d::solids(m).into_iter().filter(|s| look.shows(s.owner())).collect();
     d.part(Part::Cut);
-    for s in &solids {
+    // A mass is outlined where the line cuts it, below, not filled.
+    for s in solids.iter().filter(|s| !matches!(m.elements.get(&s.owner()), Some(Element::Mass(_)))) {
         for (a, b) in s.across(v.start, u) {
             let (a, b) = (a.max(0.0), b.min(len));
             if b - a > 1e-6 {
@@ -603,7 +686,7 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     for (&wall, e) in &m.elements {
         let Element::Wall(w) = e else { continue };
         let layers = m.type_layers("wall", &w.type_name);
-        if layers.is_empty() || !look.shows(wall) {
+        if layers.is_empty() || !look.shows(wall) || d.detail == Detail::Coarse {
             continue;
         }
         d.owner = Some(wall);
@@ -663,7 +746,8 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     }
     // Each layer of a compound floor, roof or ceiling it cuts: its material's cut pattern, a thin
     // line between each two, parallel to its faces.
-    for (&owner, rings) in &cuts {
+    let coarse = d.detail == Detail::Coarse;
+    for (&owner, rings) in cuts.iter().filter(|_| !coarse) {
         let layers = match m.elements.get(&owner) {
             Some(Element::Floor(f)) => m.type_layers("floor", &f.type_name),
             Some(Element::Roof(r)) => m.type_layers("roof", &r.type_name),
@@ -693,6 +777,18 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
             }
         }
     }
+    for (&mid, e) in m.elements.iter().filter(|(id, _)| look.shows(**id)) {
+        let Element::Mass(ms) = e else { continue };
+        let (z0, z1) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+        d.owner = Some(mid);
+        for (s0, s1) in view3d::crossings(&ms.boundary, v.start, u) {
+            let (a, b) = (s0.max(0.0), s1.min(len));
+            if b - a > 1e-6 {
+                d.dashed(&[P2(a, z0), P2(b, z0), P2(b, z1), P2(a, z1)], 1.0, MASS, true);
+            }
+        }
+    }
+    d.owner = None;
     d.part(Part::Projection);
     let (lo, hi) = shown_heights(m, v, &look);
     if v.crop.is_some() {
@@ -704,7 +800,8 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
         let (a, b) = (d.view.px(P2(0.0, l.elevation)), d.view.px(P2(len, l.elevation)));
         d.push(Prim::Line { pts: vec![a, b], width: 1.0, color: INK, dash: Some([12.0, 4.0]), closed: false });
         for (text, dy) in [(l.name.clone(), -8.0), (m.units.length(l.elevation), 8.0)] {
-            d.text(&text, (b.0 + 8.0 + font::width(&text, 10.0) / 2.0, b.1 + dy), 10.0, INK);
+            let h = d.px(10.0);
+            d.text(&text, (b.0 + d.px(8.0) + font::width(&text, h) / 2.0, b.1 + d.px(dy)), h, INK);
         }
     }
     // Grids running into what it sees: across its line, reaching past it (within its depth).
@@ -735,7 +832,7 @@ pub fn section(m: &Model, id: Id, view: View) -> Drawing {
     d.owner = None;
     look.dress(&mut d);
     let at = (24.0 + font::width(&v.name, 16.0) / 2.0, view.height as f32 - 26.0);
-    d.text(&v.name, at, 16.0, INK);
+    d.text_turned(&v.name, at, 16.0, 0.0, INK);
     d
 }
 
@@ -750,7 +847,7 @@ pub fn section_png(m: &Model, id: Id, view: View) -> Result<Vec<u8>, String> {
 
 /// The plan of `level` as `view` shows it: what a canvas that pans and zooms draws.
 pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
-    draw_plan(m, level, view, false)
+    draw_plan(m, level, view, false, annotation(m, level, view))
 }
 
 /// The reflected ceiling plan of `level` fitted into `width` x `height` px.
@@ -762,12 +859,33 @@ pub fn ceiling_plan(m: &Model, level: Id, width: u32, height: u32) -> Drawing {
 /// (over the doors) and looking up, at the ceilings up to the level above, as a floor plan lies
 /// (not mirrored). Its grids and its sections' marks; no annotation of the floor plan's.
 pub fn draw_ceiling(m: &Model, level: Id, view: View) -> Drawing {
-    draw_plan(m, level, view, true)
+    draw_plan(m, level, view, true, annotation(m, level, view))
+}
+
+/// How big the annotation of view `id` is drawn through `view`, times the size it is laid out at. A view with a scale
+/// holds it as paper at that scale would: its lettering and marks a fixed size on paper, which `scale` mm of the model per
+/// mm of paper and `view` showing `view.scale` pixels to the mm make of it ([`sheet::DENSITY`] pixels to a mm of paper); on
+/// a sheet, where the viewport sets the scale, it is 1. A view with none keeps annotation the size it has on screen.
+/// shortcut: clamped to a tenth and ten times, so a hostile scale or zoom can't draw lettering a screen tall; widen it
+/// if a plan at 1 : 10000 on screen wants more.
+pub fn annotation(m: &Model, id: Id, view: View) -> f32 {
+    crate::graphics::graphics_of(m, id).and_then(|g| g.scale).map_or(1.0, |n| (n * view.scale / sheet::DENSITY).clamp(0.1, 10.0) as f32)
+}
+
+/// The level of detail view `id` draws at.
+fn detail_of(m: &Model, id: Id) -> Detail {
+    crate::graphics::graphics_of(m, id).map_or_else(Detail::default, |g| g.detail)
+}
+
+/// Plan `level` as `draw` draws it, its annotation `k` times the size it is laid out at: a sheet's, at paper size.
+pub fn draw_at(m: &Model, level: Id, view: View, k: f32) -> Drawing {
+    draw_plan(m, level, view, false, k)
 }
 
 /// A floor plan of `level`, or `up`, its reflected ceiling plan.
-fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
+fn draw_plan(m: &Model, level: Id, view: View, up: bool, k: f32) -> Drawing {
     let mut d = Drawing::new(view);
+    (d.k, d.detail) = (k, detail_of(m, level));
     let look = Look::of(m, level);
     let shown = |id: Id| look.shows(id);
     let mut range = m.plan_range(level);
@@ -789,8 +907,14 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
             d.line(ring, 1.0, FAINT, true);
         }
         holes(&mut d, m, &m.floor_slabs(f));
-        // Its top layer's surface pattern, faint.
-        if let Some(pattern) = m.type_layers("floor", &f.type_name).first().and_then(|l| m.materials.get(&l.material)).map(|x| x.surface) {
+        // Its top layer's surface pattern, faint, in a fine view.
+        if let Some(pattern) = m
+            .type_layers("floor", &f.type_name)
+            .first()
+            .and_then(|l| m.materials.get(&l.material))
+            .map(|x| x.surface)
+            .filter(|_| d.detail == Detail::Fine)
+        {
             for (face, rise) in m.floor_slabs(f) {
                 for piece in m.less_shafts(&face, rise).0 {
                     surface(&mut d, &piece, pattern, FAINT);
@@ -815,7 +939,19 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
     // Walls and columns below the cut plane, as seen from it; past the bottom, faint.
     for (id, o, top) in seen_below(m, &range, &look).into_iter().filter(|_| !up) {
         d.owner = Some(id);
-        d.line(&o, 1.0, if top > range.bottom { INK } else { FAINT }, true);
+        d.line(&o, 1.0, if top > range.bottom - TOL { INK } else { FAINT }, true);
+    }
+    // A run's centre line, faint and dashed, where it is seen but not cut: Revit's mark of a beam, and where to pick it.
+    for (&id, e) in m.elements.iter().filter(|_| !up).filter(|(id, _)| shown(**id)) {
+        let Some(g) = m.run_geom(e).filter(|g| !g.vertical()) else { continue };
+        let (lo, hi) = g.z_span();
+        let seen = range.depth - TOL < hi && hi <= range.cut;
+        let over = range.cut < lo && lo <= range.top;
+        if seen || over {
+            d.owner = Some(id);
+            let pts = [P2(g.a[0], g.a[1]), P2(g.b[0], g.b[1])].iter().map(|p| d.view.px(*p)).collect();
+            d.push(Prim::Line { pts, width: 1.0, color: FAINT, dash: Some([14.0, 5.0]), closed: false });
+        }
     }
     d.part(Part::Cut);
     let outlines = cut_outlines(m, range.cut, &look);
@@ -841,7 +977,7 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
     for (&id, e) in &m.elements {
         let Element::Wall(w) = e else { continue };
         let layers = m.type_layers("wall", &w.type_name);
-        if layers.is_empty() || !m.spans(w, range.cut) || !shown(id) {
+        if layers.is_empty() || !m.spans(w, range.cut) || !shown(id) || d.detail == Detail::Coarse {
             continue;
         }
         d.owner = Some(id);
@@ -894,9 +1030,11 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
                     },
                 );
                 let (x, y) = d.view.px(r.point);
+                let from = d.prims.len();
                 d.text(&r.name, (x, y - 16.0), 13.0, INK);
                 d.text(&r.number, (x, y), 10.0, INK);
                 d.text(&area, (x, y + 14.0), 10.0, INK);
+                d.grow(from, (x, y));
             }
             // A shaft the plane cuts: its outline, and a cross.
             Element::Shaft(sh) => {
@@ -913,6 +1051,8 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
                 }
             }
             _ if up => {}
+            // A mass the plane passes through: its outline, dashed.
+            Element::Mass(ms) if m.mass_cut_by(ms, range.cut) => d.dashed(&ms.boundary, 1.0, MASS, true),
             Element::Stair(st) => stair(&mut d, m, st, level),
             Element::Ramp(r) => ramp(&mut d, m, r, level),
             Element::Railing(rl) if m.level_of(e) == Some(level) => railing(&mut d, m, rl, range.cut),
@@ -931,6 +1071,13 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
                         let pts = ring.iter().map(|p| d.view.px(*p)).collect();
                         d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
                     }
+                }
+            }
+            // Overhead too: a run over the cut plane and under the view range's top, dashed.
+            Element::Beam(_) | Element::StripFooting(_) => {
+                if let Some(g) = m.run_geom(e).filter(|g| range.cut < g.z_span().0 && g.z_span().0 <= range.top) {
+                    let pts = g.footprint().iter().map(|p| d.view.px(*p)).collect();
+                    d.push(Prim::Line { pts, width: 1.0, color: INK, dash: Some([10.0, 5.0]), closed: true });
                 }
             }
             _ => {}
@@ -979,7 +1126,7 @@ fn draw_plan(m: &Model, level: Id, view: View, up: bool) -> Drawing {
         title = format!("{title} ({})", m.language.word("Ceiling Plan"));
     }
     let at = (24.0 + font::width(&title, 16.0) / 2.0, view.height as f32 - 26.0);
-    d.text(&title, at, 16.0, INK);
+    d.text_turned(&title, at, 16.0, 0.0, INK);
     d
 }
 
@@ -1033,8 +1180,8 @@ fn slope_arrow(d: &mut Drawing, tail: P2, head: P2, slope: f64) {
     let (x, y) = arrow(d, a, b);
     let text = format!("{}°", figure(slope));
     // Beside it, to its left on screen.
-    let clear = font::width(&text, 10.0) / 2.0 * y.abs() + 6.0 * x.abs() + 4.0;
-    d.text(&text, ((a.0 + b.0) / 2.0 + y * clear, (a.1 + b.1) / 2.0 - x * clear), 10.0, INK);
+    let clear = font::width(&text, d.px(10.0)) / 2.0 * y.abs() + d.px(6.0) * x.abs() + d.px(4.0);
+    d.text(&text, ((a.0 + b.0) / 2.0 + y * clear, (a.1 + b.1) / 2.0 - x * clear), d.px(10.0), INK);
 }
 
 /// A shaft cut in plan: its outline, and the diagonals of its box across it.
@@ -1063,7 +1210,7 @@ const PATTERN_ROOM: f64 = 10.0;
 /// (which stays poché), lighter.
 fn cut_layer(d: &mut Drawing, m: &Model, layer: &Layer, ring: &[P2], u: P2, room: f64) {
     let pattern = m.materials.get(&layer.material).map_or(Pattern::None, |x| x.cut);
-    if pattern != Pattern::None && room >= PATTERN_ROOM {
+    if pattern != Pattern::None && room >= PATTERN_ROOM && d.detail == Detail::Fine {
         d.fill(&[ring.to_vec()], PAPER);
         let gap = GAP / d.view.scale;
         hatch(d, ring, pattern, u, INK, gap);
@@ -1336,7 +1483,7 @@ fn opening(d: &mut Drawing, m: &Model, e: &Element, o: &Opening, w: &Wall, cut: 
         d.line(&[axis.at(s, int), axis.at(s, ext)], 2.0, INK, false);
     }
     d.own(owner);
-    if !shown {
+    if !shown || d.detail == Detail::Coarse {
         return;
     }
     // Of a family: the forms the cut plane passes through, outlined, and the lines of its symbols (a door's swing).
@@ -1476,15 +1623,16 @@ fn walk(d: &mut Drawing, m: &Model, line: &[(P2, f64)], up: bool) {
     let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-3);
     let (x, y) = ((b.0 - a.0) / len, (b.1 - a.1) / len);
     // Before the walk line's start, clear of it however long the word is.
-    let back = font::width(label, 9.0) / 2.0 * x.abs() + 5.0 * y.abs() + 8.0;
-    d.text(label, (a.0 - x * back, a.1 - y * back), 9.0, INK);
+    let back = font::width(label, d.px(9.0)) / 2.0 * x.abs() + d.px(5.0) * y.abs() + d.px(8.0);
+    d.text(label, (a.0 - x * back, a.1 - y * back), d.px(9.0), INK);
 }
 
 /// An arrowhead at pixel `b`, pointing from `a`; the way it points, on screen.
 fn arrow(d: &mut Drawing, a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-3);
     let (x, y) = ((b.0 - a.0) / len, (b.1 - a.1) / len);
-    let head = vec![b, (b.0 - x * 10.0 - y * 4.0, b.1 - y * 10.0 + x * 4.0), (b.0 - x * 10.0 + y * 4.0, b.1 - y * 10.0 - x * 4.0)];
+    let (long, wide) = (d.px(10.0), d.px(4.0));
+    let head = vec![b, (b.0 - x * long - y * wide, b.1 - y * long + x * wide), (b.0 - x * long + y * wide, b.1 - y * long - x * wide)];
     d.push(Prim::Fill { rings: vec![head], color: INK });
     (x, y)
 }
@@ -1539,7 +1687,8 @@ fn angular(d: &mut Drawing, m: &Model, dim: &Dimension) {
     if r <= 0.0 {
         return;
     }
-    let px = 1.0 / d.view.scale;
+    // Millimetres to a pixel of annotation.
+    let px = f64::from(d.k) / d.view.scale;
     let ray = |t: f64| P2(t.cos(), t.sin());
     let arc: Vec<P2> = (0..=48).map(|i| o + ray(from + sweep * f64::from(i) / 48.0) * r).collect();
     d.line(&arc, 1.0, INK, false);
@@ -1561,7 +1710,7 @@ fn angular(d: &mut Drawing, m: &Model, dim: &Dimension) {
     // Outside the arc's middle, clear of it however the text sits across the ray.
     let (text, mid) = (format!("{}°", figure(sweep.to_degrees())), ray(from + sweep / 2.0));
     let clear = f64::from(font::width(&text, 10.0) / 2.0) * mid.0.abs() + 5.0 * mid.1.abs() + 4.0;
-    d.text(&text, d.view.px(o + mid * (r + clear * px)), 10.0, INK);
+    d.text(&text, d.view.px(o + mid * (r + clear * px)), d.px(10.0), INK);
 }
 
 /// A radial dimension: a line from a round element's centre (marked with a cross) toward `at`,
@@ -1573,24 +1722,24 @@ fn radial(d: &mut Drawing, m: &Model, dim: &Dimension) {
     d.line(&[c, end], 1.0, INK, false);
     let (a, b) = (d.view.px(c), d.view.px(edge));
     // Inside a circle too small for it, the arrow comes in from outside.
-    if r * d.view.scale > 14.0 || end == edge {
+    if r * d.view.scale > f64::from(d.px(14.0)) || end == edge {
         arrow(d, a, b);
     } else {
         arrow(d, d.view.px(end), b);
     }
-    for (dx, dy) in [(4.0, 0.0), (0.0, 4.0)] {
+    for (dx, dy) in [(d.px(4.0), 0.0), (0.0, d.px(4.0))] {
         d.push(Prim::Line { pts: vec![(a.0 - dx, a.1 - dy), (a.0 + dx, a.1 + dy)], width: 1.0, color: INK, dash: None, closed: false });
     }
     let text = format!("R {}", m.units.length(r));
     let (x, y) = d.view.px(end);
-    let w = font::width(&text, 10.0) / 2.0 + 6.0;
-    d.text(&text, (x + u.0 as f32 * w, y - u.1 as f32 * w), 10.0, INK);
+    let w = font::width(&text, d.px(10.0)) / 2.0 + d.px(6.0);
+    d.text(&text, (x + u.0 as f32 * w, y - u.1 as f32 * w), d.px(10.0), INK);
 }
 
 /// A text note: its lines down from its top left corner, turned as it is, and its leader with an
 /// arrow at its end.
 pub(crate) fn note(d: &mut Drawing, n: &Note) {
-    let h = (n.size * sheet::DENSITY) as f32;
+    let h = d.px((n.size * sheet::DENSITY) as f32);
     // Counter-clockwise in the view, clockwise on screen.
     let a = -(n.angle.to_radians() as f32);
     let (sin, cos) = a.sin_cos();
@@ -1610,11 +1759,13 @@ pub(crate) fn note(d: &mut Drawing, n: &Note) {
 /// A spot elevation's mark at pixel `at`: a triangle standing on the point, and the height it
 /// reads over a line beside it, in `units`.
 fn spot_mark(d: &mut Drawing, (x, y): (f32, f32), z: Option<f64>, units: Units) {
+    let from = d.prims.len();
     d.push(Prim::Fill { rings: vec![vec![(x, y), (x + 5.0, y - 8.0), (x - 5.0, y - 8.0)]], color: INK });
     let text = z.map_or_else(|| "?".into(), |z| height(units, z));
     let w = font::width(&text, 10.0);
     d.push(Prim::Line { pts: vec![(x - 5.0, y - 8.0), (x + 9.0 + w, y - 8.0)], width: 1.0, color: INK, dash: None, closed: false });
     d.text(&text, (x + 7.0 + w / 2.0, y - 16.0), 10.0, INK);
+    d.grow(from, (x, y));
 }
 
 /// A height as a spot elevation reads it, signed: ±0, +3000, -600, +9'-10 1/8".
@@ -1635,7 +1786,7 @@ fn aligned(d: &mut Drawing, m: &Model, dim: &Dimension) {
     let (Some(&(lo, _)), Some(&(hi, _))) = (cross.first(), cross.last()) else { return };
     // Along the dimension line, and along the references; `px` mm make a pixel.
     let u = n.perp();
-    let px = 1.0 / d.view.scale;
+    let px = f64::from(d.k) / d.view.scale;
     let on = |s: f64| dim.at + n * s;
     d.line(&[on(lo - 4.0 * px), on(hi + 4.0 * px)], 1.0, INK, false);
     for &(s, (a, b)) in &cross {
@@ -1659,7 +1810,7 @@ fn aligned(d: &mut Drawing, m: &Model, dim: &Dimension) {
     for pair in cross.windows(2) {
         let [(s0, _), (s1, _)] = pair else { continue };
         let (x, y) = d.view.px(on((s0 + s1) / 2.0));
-        d.text_turned(&m.units.length(s1 - s0), (x + up.0 * 9.0, y + up.1 * 9.0), 10.0, angle as f32, INK);
+        d.text_turned(&m.units.length(s1 - s0), (x + up.0 * d.px(9.0), y + up.1 * d.px(9.0)), d.px(10.0), angle as f32, INK);
     }
 }
 
@@ -1673,6 +1824,7 @@ fn tag(d: &mut Drawing, m: &Model, t: &Tag) {
     }
     let text = m.tag_text(t);
     let (x, y) = d.view.px(head);
+    let from = d.prims.len();
     let (w, h) = ((font::width(&text, 10.0) / 2.0 + 5.0).max(8.0), 8.0);
     let ring = if matches!(m.elements.get(&t.host), Some(Element::Window(_))) {
         vec![(x - w - 4.0, y), (x - w, y - h), (x + w, y - h), (x + w + 4.0, y), (x + w, y + h), (x - w, y + h)]
@@ -1682,6 +1834,7 @@ fn tag(d: &mut Drawing, m: &Model, t: &Tag) {
     d.push(Prim::Fill { rings: vec![ring.clone()], color: PAPER });
     d.push(Prim::Line { pts: ring, width: 1.0, color: INK, dash: None, closed: true });
     d.text(&text, (x, y), 10.0, INK);
+    d.grow(from, (x, y));
 }
 
 /// The way a section or elevation looks, on screen (y down).
@@ -1698,10 +1851,14 @@ fn section_mark(d: &mut Drawing, v: &Section) {
     let (lx, ly) = looking_px(v);
     let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-3);
     let (ux, uy) = ((b.0 - a.0) / len, (b.1 - a.1) / len);
+    let from = d.prims.len();
     d.push(Prim::Fill { rings: vec![vec![a, (a.0 + ux * 12.0, a.1 + uy * 12.0), (a.0 + lx * 12.0, a.1 + ly * 12.0)]], color: INK });
-    d.push(Prim::Line { pts: vec![b, (b.0 + lx * 9.0, b.1 + ly * 9.0)], width: 1.5, color: INK, dash: None, closed: false });
     let back = font::width(&v.name, 10.0) / 2.0 + 8.0;
     d.text(&v.name, (a.0 - ux * back, a.1 - uy * back), 10.0, INK);
+    d.grow(from, a);
+    let from = d.prims.len();
+    d.push(Prim::Line { pts: vec![b, (b.0 + lx * 9.0, b.1 + ly * 9.0)], width: 1.5, color: INK, dash: None, closed: false });
+    d.grow(from, b);
 }
 
 /// An elevation's marker in plan, at its line's middle: a circle with a flag pointing the way it
@@ -1709,6 +1866,7 @@ fn section_mark(d: &mut Drawing, v: &Section) {
 fn elevation_mark(d: &mut Drawing, v: &Section) {
     const R: f32 = 9.0;
     let c = d.view.px(v.start + (v.end - v.start) * 0.5);
+    let from = d.prims.len();
     let ring: Vec<(f32, f32)> = (0..32)
         .map(|i| {
             let t = f64::from(i) * PI / 16.0;
@@ -1723,6 +1881,7 @@ fn elevation_mark(d: &mut Drawing, v: &Section) {
     d.push(Prim::Fill { rings: vec![flag], color: INK });
     let back = R + 6.0 + font::width(&v.name, 10.0) / 2.0 * lx.abs() + 6.0 * ly.abs();
     d.text(&v.name, (c.0 - lx * back, c.1 - ly * back), 10.0, INK);
+    d.grow(from, c);
 }
 
 /// A grid line, dashed, with a bubble holding its name beyond each end.
@@ -1732,6 +1891,7 @@ fn grid(d: &mut Drawing, start: P2, end: P2, name: &str) {
     let len = (b.0 - a.0).hypot(b.1 - a.1).max(1e-3);
     let dir = ((b.0 - a.0) / len, (b.1 - a.1) / len);
     for ((x, y), k) in [(a, -BUBBLE), (b, BUBBLE)] {
+        let from = d.prims.len();
         let c = (x + dir.0 * k, y + dir.1 * k);
         let ring = (0..32).map(|i| {
             let t = f64::from(i) * PI / 16.0;
@@ -1739,6 +1899,7 @@ fn grid(d: &mut Drawing, start: P2, end: P2, name: &str) {
         });
         d.push(Prim::Line { pts: ring.collect(), width: 1.2, color: GRID, dash: None, closed: true });
         d.text(name, c, 10.0, GRID);
+        d.grow(from, (x, y));
     }
 }
 
@@ -2280,5 +2441,180 @@ mod tests {
         assert_eq!(svg.matches("<path").count(), d.prims.len());
         let pm = tiny_skia::Pixmap::decode_png(&png(&d).unwrap()).unwrap();
         assert_eq!((pm.width(), pm.height()), (640, 480));
+    }
+
+    /// How tall the lettering element `id` draws is, px: its tallest stroke.
+    fn lettering(d: &Drawing, id: Id) -> f32 {
+        (d.prims.iter().zip(&d.owners).zip(&d.parts))
+            .filter(|((_, o), p)| **o == Some(id) && **p == Part::Text)
+            .filter_map(|((prim, _), _)| match prim {
+                Prim::Line { pts, .. } => {
+                    Some(pts.iter().map(|p| p.1).fold(f32::MIN, f32::max) - pts.iter().map(|p| p.1).fold(f32::MAX, f32::min))
+                }
+                _ => None,
+            })
+            .fold(0.0, f32::max)
+    }
+
+    /// Eight by six metres of walls built of layers, with a door (7) and a window (8).
+    fn layered_house() -> Session {
+        let mut s = Session::new();
+        s.script(
+            r#"wall {"points": [[0,0],[8000,0],[8000,6000],[0,6000]], "closed": true, "type": "Exterior - 300mm"}
+               door {"at": [2000, 0]}
+               window {"at": [8000, 3000]}"#,
+        )
+        .unwrap();
+        s
+    }
+
+    /// How wide the bubble element `id` draws is (its widest closed line), px.
+    fn bubble(d: &Drawing, id: Id) -> f32 {
+        (d.prims.iter().zip(&d.owners))
+            .filter(|(_, o)| **o == Some(id))
+            .filter_map(|(prim, _)| match prim {
+                Prim::Line { pts, closed: true, .. } => {
+                    Some(pts.iter().map(|p| p.0).fold(f32::MIN, f32::max) - pts.iter().map(|p| p.0).fold(f32::MAX, f32::min))
+                }
+                _ => None,
+            })
+            .fold(0.0, f32::max)
+    }
+
+    /// How far, px, the middle of the bubble element `id` draws is from the nearer of the line's `ends`.
+    fn bubble_gap(d: &Drawing, id: Id, ends: [(f32, f32); 2]) -> f32 {
+        (d.prims.iter().zip(&d.owners))
+            .filter(|(_, o)| **o == Some(id))
+            .filter_map(|(prim, _)| match prim {
+                Prim::Line { pts, closed: true, .. } => {
+                    let n = pts.len() as f32;
+                    Some((pts.iter().map(|p| p.0).sum::<f32>() / n, pts.iter().map(|p| p.1).sum::<f32>() / n))
+                }
+                _ => None,
+            })
+            .flat_map(|c| ends.map(|e| (c.0 - e.0).hypot(c.1 - e.1)))
+            .fold(f32::MAX, f32::min)
+    }
+
+    #[test]
+    fn a_views_scale_sizes_its_annotation_where_none_keeps_it_the_size_it_is_on_screen() {
+        let mut s = house();
+        // A tenth of a pixel to the mm: at 1 : 50, annotation is the size it has been all along (10 px lettering is
+        // 2 mm of paper, DENSITY px to the mm).
+        let view = View { scale: 0.1, cx: 4000.0, cy: 3000.0, width: 1000, height: 800 };
+        let grid = |s: &Session, view: View| {
+            let d = draw(&s.model, 1, view);
+            (lettering(&d, 10), bubble(&d, 10))
+        };
+        let (text, ring) = grid(&s, view);
+        assert!((text - 10.0).abs() < 1.0 && (ring - 22.0).abs() < 1.0, "{text} {ring}");
+        // The bubble stands where it did, its middle a bubble's radius, times k, past the grid's end.
+        let ends = [view.px(P2(0.0, -2000.0)), view.px(P2(0.0, 8000.0))];
+        assert!((bubble_gap(&draw(&s.model, 1, view), 10, ends) - 11.0).abs() < 0.5);
+        for (n, k) in [(50, 1.0), (100, 2.0), (200, 4.0), (25, 0.5)] {
+            s.execute("scale", &serde_json::json!({"view": 1, "scale": n})).unwrap();
+            let (t, r) = grid(&s, view);
+            assert!((t - text * k).abs() < 1.0 && (r - ring * k).abs() < 1.0, "1 : {n}: {t} {r}");
+            let gap = bubble_gap(&draw(&s.model, 1, view), 10, ends);
+            assert!((gap - 11.0 * k).abs() < 0.5, "1 : {n}: the bubble grows about the grid's end: {gap}");
+        }
+        // Zoomed in twice, the same view's annotation is twice the size: a screen showing 1 mm as 0.2 px, at 1 : 100.
+        s.execute("scale", &serde_json::json!({"view": 1, "scale": 100})).unwrap();
+        let (t, _) = grid(&s, View { scale: 0.2, ..view });
+        assert!((t - text * 4.0).abs() < 2.0, "{t}");
+        // Cleared, it is what it was.
+        s.execute("scale", &serde_json::json!({"view": 1, "scale": null})).unwrap();
+        assert_eq!(grid(&s, view), (text, ring));
+    }
+
+    #[test]
+    fn a_sections_scale_sizes_its_annotation_and_a_sheet_keeps_paper_size() {
+        let mut s = house();
+        s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}").unwrap();
+        // The section's own line, from its start, and up.
+        let view = View { scale: 0.1, cx: 5000.0, cy: 1500.0, width: 1200, height: 800 };
+        let none = lettering(&section(&s.model, 11, view), 10);
+        assert!((none - 10.0).abs() < 1.0, "{none}");
+        s.execute("scale", &serde_json::json!({"view": 11, "scale": 100})).unwrap();
+        let hundred = lettering(&section(&s.model, 11, view), 10);
+        assert!((hundred - 2.0 * none).abs() < 1.0, "{hundred}");
+        // On paper, at the viewport's scale, annotation is paper size whatever the view's own says.
+        s.script("sheet {\"name\": \"Plans\"}\nplace {\"sheet\": \"A101\", \"view\": 1, \"scale\": 100}").unwrap();
+        // The sheet is 12, its viewport 13.
+        let before = png(&crate::sheet::draw(&s.model, 12).unwrap()).unwrap();
+        s.execute("scale", &serde_json::json!({"view": 1, "scale": 20})).unwrap();
+        assert_eq!(png(&crate::sheet::draw(&s.model, 12).unwrap()).unwrap(), before);
+    }
+
+    /// How many of the hatching lines (thin), then of the lines between layers, element `id` draws.
+    fn layer_detail(d: &Drawing, id: Id) -> (usize, usize) {
+        let lines = |wide: bool| {
+            (d.prims.iter().zip(&d.owners).zip(&d.parts))
+                .filter(|((prim, o), p)| {
+                    **o == Some(id) && **p == Part::Pattern && matches!(prim, Prim::Line { width, .. } if (*width >= 1.0) == wide)
+                })
+                .count()
+        };
+        (lines(false), lines(true))
+    }
+
+    /// How many primitives element `id` draws.
+    fn drawn_by(d: &Drawing, id: Id) -> usize {
+        d.owners.iter().filter(|o| **o == Some(id)).count()
+    }
+
+    #[test]
+    fn a_plans_detail_level_takes_patterns_then_layers_then_symbols_away() {
+        let mut s = layered_house();
+        s.script(
+            r#"type {"category": "floor", "name": "Tiled", "layers": [{"material": "Ceramic tile", "thickness": 20}, {"material": "Concrete", "thickness": 180}]}
+               floor {"type": "Tiled"}"#,
+        )
+        .unwrap();
+        // Walls 3 to 6, the door 7, the window 8, the floor 9; layers 100 mm wide are 20 px, wide enough for their patterns.
+        let view = View { scale: 0.2, cx: 4000.0, cy: 3000.0, width: 2000, height: 1400 };
+        let all = |s: &Session| {
+            let d = draw(&s.model, 1, view);
+            (layer_detail(&d, 3), drawn_by(&d, 7), drawn_by(&d, 8), layer_detail(&d, 9).0)
+        };
+        let (fine, fine_door, fine_window, fine_floor) = all(&s);
+        assert!(fine.0 > 0 && fine.1 > 0 && fine_floor > 0, "{fine:?} {fine_floor}: its patterns, and the lines between layers");
+        s.execute("detail", &serde_json::json!({"view": 1, "detail": "medium"})).unwrap();
+        // The layers stay, the patterns go.
+        assert_eq!(all(&s), ((0, fine.1), fine_door, fine_window, 0));
+        s.execute("detail", &serde_json::json!({"view": 1, "detail": "coarse"})).unwrap();
+        let (coarse, door, window, floor) = all(&s);
+        assert_eq!((coarse, floor), ((0, 0), 0), "one poché");
+        assert!(door < fine_door && window < fine_window, "an opening is its gap and jambs: {door} {window}");
+        assert!(door >= 3 && window >= 3, "which are still there");
+        // The ceiling plan is the same level's.
+        assert!(drawn_by(&ceiling_plan(&s.model, 1, 800, 600), 3) > 0);
+    }
+
+    #[test]
+    fn a_tools_sketch_of_annotation_is_the_size_its_view_would_draw_it() {
+        let mut s = house();
+        let view = View { scale: 0.1, cx: 4000.0, cy: 3000.0, width: 1000, height: 800 };
+        let spot = Element::Spot(crate::model::Spot { view: 1, at: P2(4000.0, 3000.0), host: None });
+        let text = |s: &Session| lettering(&sketch(&s.model, view, 99, &spot), 99);
+        let none = text(&s);
+        s.execute("scale", &serde_json::json!({"view": 1, "scale": 100})).unwrap();
+        assert!((text(&s) - 2.0 * none).abs() < 1.0, "{none} {}", text(&s));
+    }
+
+    #[test]
+    fn a_sections_detail_level_takes_the_same_away_of_what_it_cuts() {
+        let mut s = layered_house();
+        s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}").unwrap();
+        // The section is 9.
+        let view = section_fit(&s.model, 9, 1600, 1000);
+        // Walls 6 and 4 are cut, west and east.
+        let all = |s: &Session| layer_detail(&section(&s.model, 9, view), 6);
+        let fine = all(&s);
+        assert!(fine.0 > 0 && fine.1 > 0, "{fine:?}");
+        s.execute("detail", &serde_json::json!({"view": "Section 1", "detail": "medium"})).unwrap();
+        assert_eq!(all(&s), (0, fine.1));
+        s.execute("detail", &serde_json::json!({"view": 9, "detail": "coarse"})).unwrap();
+        assert_eq!(all(&s), (0, 0));
     }
 }

@@ -7,13 +7,13 @@
 //! line and in hidden line, and cut the same solids.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::geom::{self, P2};
-use crate::graphics::Look;
+use crate::graphics::{Look, VisualStyle};
 use crate::model::{Element, Id, Layer, Model};
 use crate::paint;
-use crate::render::{PAPER, Rgb};
+use crate::render::{PAPER, Rgb, clip};
 use crate::stairs;
 use crate::texture::Sampler;
 use crate::walls::{self, Axis, Plane};
@@ -34,7 +34,10 @@ const DOOR: Rgb = Rgb(198, 168, 128);
 const GLASS: Rgb = Rgb(166, 200, 228);
 const ROOF: Rgb = Rgb(176, 118, 96);
 const CEILING: Rgb = Rgb(244, 242, 236);
+const MASS: Rgb = Rgb(158, 190, 224);
 const RAIL: Rgb = Rgb(120, 122, 128);
+/// A beam, a footing, a structural column made of nothing the library has.
+const STRUCTURE: Rgb = Rgb(182, 184, 190);
 /// A component's form made of nothing the library has.
 const COMPONENT: Rgb = Rgb(214, 204, 188);
 /// Room around a fitted model, px.
@@ -427,8 +430,26 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 }
             }
             Element::Column(col) => {
-                out.push(slab(id, WALL, &m.column_outline(col), m.span(col.level, col.base_offset, col.top_level, col.height)))
+                out.push(slab(id, WALL, &m.column_outline(e), m.span(col.level, col.base_offset, col.top_level, col.height)))
             }
+            Element::StructuralColumn(col) | Element::Footing(col) => {
+                out.push(slab(id, STRUCTURE, &m.column_outline(e), m.span(col.level, col.base_offset, col.top_level, col.height)))
+            }
+            // A rectangular run is a sloped prism, which a section cuts; a round one a tube, shown beyond its line.
+            Element::Beam(_) | Element::StripFooting(_) => {
+                if let (Some(t), Some(g)) = (m.run_type(e), m.run_geom(e)) {
+                    let color = m.materials.get(&t.material).map_or(STRUCTURE, |x| Rgb(x.color[0], x.color[1], x.color[2]));
+                    let tex = skin(m, &t.material);
+                    if g.round {
+                        let (tris, caps) = g.tube();
+                        out.push(Solid::Mesh { owner: id, color, tex, tris, caps, round: true });
+                    } else {
+                        let (ring, bottom, top) = g.prism();
+                        out.push(Solid::Prism { owner: id, color, tex, ring, bottom, top, curve: None });
+                    }
+                }
+            }
+            Element::Mass(ms) => out.push(slab(id, MASS, &ms.footprint(), m.span(ms.level, ms.base_offset, ms.top_level, ms.height))),
             // Each form in its material's colour; a curved one's facets one surface, as a curved wall's are.
             Element::Component(c) => {
                 for piece in m.component_pieces(c) {
@@ -695,6 +716,10 @@ pub struct Scene {
     /// Each texture the scene uses, by id; and each textured triangle's way across and up its plane.
     skins: Vec<Option<Sampler>>,
     bases: Vec<Option<[P3; 2]>>,
+    /// The edges a wireframe draws, found when one is first asked for.
+    edges: OnceLock<Vec<(usize, [P3; 2])>>,
+    /// The masses, which a section's picture leaves out: it outlines where its line cuts them.
+    masses: BTreeSet<Id>,
 }
 
 /// How an element's triangles name their faces.
@@ -768,7 +793,8 @@ impl Scene {
         }
         let bases = tris.iter().map(|t| skins.get(t.tex as usize).is_some_and(Option::is_some).then(|| basis(t))).collect();
         let (planes, smooth) = (planes(&tris), corner_normals(&tris));
-        Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases }
+        let masses = m.elements.iter().filter(|(_, e)| matches!(e, Element::Mass(_))).map(|(id, _)| *id).collect();
+        Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases, masses, edges: OnceLock::new() }
     }
 
     /// A view of the whole model from `azimuth` and `elevation` (degrees), fitted into the picture.
@@ -873,7 +899,94 @@ impl Scene {
         }
     }
 
+    /// The edges of the model's surfaces: where two meet at an angle (not in one plane, nor one curve) and where one ends,
+    /// each as the triangle it is an edge of and its ends, in the order of their triangles.
+    fn edges(&self) -> &[(usize, [P3; 2])] {
+        self.edges.get_or_init(|| {
+            // Each edge by its corners to a micron, as `facets` names them: the triangles on it, and where on each.
+            let corner = |t: &Tri, k: usize| t.p.get(k % 3).copied().unwrap_or_default();
+            let q = |p: P3| p.map(|x| (x * 1e3).round() as i64);
+            type Corner = [i64; 3];
+            let mut on: HashMap<(Corner, Corner), Vec<(usize, usize)>> = HashMap::new();
+            for (i, t) in self.tris.iter().enumerate() {
+                for k in 0..3 {
+                    let (qa, qb) = (q(corner(t, k)), q(corner(t, k + 1)));
+                    if qa != qb {
+                        on.entry((qa.min(qb), qa.max(qb))).or_default().push((i, k));
+                    }
+                }
+            }
+            let plane = |i: usize| self.planes.get(i).copied();
+            let mut edges: Vec<(usize, [P3; 2])> = on
+                .into_values()
+                .filter(|on| !matches!(on.as_slice(), [(x, _), (y, _)] if plane(*x) == plane(*y)))
+                .filter_map(|on| {
+                    let &(i, k) = on.first()?;
+                    let t = self.tris.get(i)?;
+                    Some((i, [corner(t, k), corner(t, k + 1)]))
+                })
+                .collect();
+            edges.sort_by(|x, y| x.0.cmp(&y.0).then(x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal)));
+            edges
+        })
+    }
+
+    /// The picture `cam` takes in wireframe: paper, and every edge of what `look` shows, in the colour it gives them (a
+    /// tinted element's in its tint, over the rest). A pixel within two of a line picks the element the line is of.
+    fn wireframe(&self, cam: &Camera, tints: &[(Id, Rgb)], look: &Look) -> Image {
+        let (w, h) = (cam.width.clamp(1, MAX_SIDE) as usize, cam.height.clamp(1, MAX_SIDE) as usize);
+        let tints: BTreeMap<Id, Rgb> = tints.iter().copied().collect();
+        let mut rgba = vec![255u8; w * h * 4];
+        let mut hit = vec![u32::MAX; w * h];
+        for tinted in [false, true] {
+            for &(i, [a, b]) in self.edges() {
+                let Some(owner) = self.tris.get(i).map(|t| t.owner).filter(|o| look.shows(*o) && tints.contains_key(o) == tinted) else {
+                    continue;
+                };
+                let Rgb(r, g, bl) = tints.get(&owner).copied().unwrap_or_else(|| look.edge(owner, EDGE));
+                let (pa, pb) = (cam.project(a), cam.project(b));
+                if ![pa.0, pa.1, pb.0, pb.1].iter().all(|x| x.is_finite()) {
+                    continue;
+                }
+                let Some((p, q)) = clip(P2(pa.0, pa.1), P2(pb.0, pb.1), P2(0.0, 0.0), P2(w as f64, h as f64)) else { continue };
+                let steps = (p.dist(q).ceil() as usize).max(1);
+                for k in 0..=steps {
+                    let t = k as f64 / steps as f64;
+                    let (x, y) = ((p.0 + (q.0 - p.0) * t).floor() as i64, (p.1 + (q.1 - p.1) * t).floor() as i64);
+                    for (dx, dy) in (-2..=2).flat_map(|dx| (-2..=2).map(move |dy| (dx, dy))) {
+                        let (px, py) = (x + dx, y + dy);
+                        if (0..w as i64).contains(&px) && (0..h as i64).contains(&py) {
+                            let at = py as usize * w + px as usize;
+                            if let Some(slot) = hit.get_mut(at) {
+                                *slot = i as u32;
+                            }
+                            if (dx, dy) == (0, 0)
+                                && let Some(px) = rgba.get_mut(4 * at..4 * at + 3)
+                            {
+                                px.copy_from_slice(&[r, g, bl]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Image {
+            width: w as u32,
+            height: h as u32,
+            rgba,
+            hit,
+            owners: self.tris.iter().map(|t| t.owner).collect(),
+            faces: Arc::clone(&self.faces),
+        }
+    }
+
     fn picture(&self, cam: &Camera, clip: Option<&Clip>, tints: &[(Id, Rgb)], look: &Look) -> Image {
+        // A section's picture is hidden line, whatever the view says.
+        let style = if clip.is_some() { VisualStyle::HiddenLine } else { look.style() };
+        if style == VisualStyle::Wireframe {
+            return self.wireframe(cam, tints, look);
+        }
+        let flat = style != VisualStyle::Shaded;
         let plain = look.is_plain();
         let (w, h) = (cam.width.clamp(1, MAX_SIDE) as usize, cam.height.clamp(1, MAX_SIDE) as usize);
         let (back, right, up) = cam.axes();
@@ -888,7 +1001,7 @@ impl Scene {
         let colour = |t: &Tri| if plain { t.color } else { look.surface(t.owner, t.color) };
         // A curve's corners are lit by their own normals, and its pixels take the blend of the three;
         // the faces of a section are paper.
-        let smooth: &[Option<Box<[P3; 3]>>] = if clip.is_none() { &self.smooth } else { &[] };
+        let smooth: &[Option<Box<[P3; 3]>>] = if flat { &[] } else { &self.smooth };
         // How lit each corner of a curve is: its normals turned to the viewer as its face is.
         let corner_light = |i: usize| {
             let (t, n) = (self.tris.get(i)?, smooth.get(i)?.as_deref()?);
@@ -897,8 +1010,8 @@ impl Scene {
         };
         // What the view sees through is drawn over what lies behind it, after the opaque surfaces: the
         // nearest of them at each pixel, where nothing opaque is nearer. (Not in a section's hidden line.)
-        let see_through = |t: &Tri| clip.is_none() && !plain && look.transparency(t.owner) > 0;
-        let shown = |t: &Tri| plain || look.shows(t.owner);
+        let see_through = |t: &Tri| !flat && !plain && look.transparency(t.owner) > 0;
+        let shown = |t: &Tri| (plain || look.shows(t.owner)) && !(clip.is_some() && self.masses.contains(&t.owner));
         let mut depth = vec![f32::NEG_INFINITY; w * h];
         let mut hit = vec![u32::MAX; w * h];
         let mut curve_lit = vec![0.0; w * h];
@@ -922,11 +1035,10 @@ impl Scene {
                 lit(if dot(n, back) < 0.0 { mul(n, -1.0) } else { n })
             })
             .collect();
-        let shade: Vec<Rgb> =
-            self.tris.iter().zip(&light).map(|(t, l)| if clip.is_some() { PAPER } else { paint(colour(t), *l) }).collect();
+        let shade: Vec<Rgb> = self.tris.iter().zip(&light).map(|(t, l)| if flat { PAPER } else { paint(colour(t), *l) }).collect();
         // A textured triangle's colour at pixel `k`, where its surface lies `z` toward the camera: the texture at that point of
         // its plane, for a pixel's width of it. None for any other, or where the view colours it its own way, or in a section.
-        let texturing = clip.is_none() && self.skins.iter().any(Option::is_some);
+        let texturing = !flat && self.skins.iter().any(Option::is_some);
         let foot = 1.0 / cam.scale;
         let textured = |t: usize, k: usize, z: f32| -> Option<Rgb> {
             if !texturing {
@@ -1728,5 +1840,69 @@ mod tests {
         let (_, img) = view(&s);
         let pm = tiny_skia::Pixmap::decode_png(&img.png().unwrap()).unwrap();
         assert_eq!((pm.width(), pm.height()), (400, 300));
+    }
+
+    /// The house drawn in `style`, from the default view, through the default 3D view's look.
+    fn styled(s: &mut Session, style: &str) -> (Camera, Image) {
+        s.execute("visual_style", &serde_json::json!({"style": style})).unwrap();
+        let scene = Scene::new(&s.model);
+        let cam = scene.fit(AZIMUTH, ELEVATION, 400, 300);
+        let img = scene.render_in(&cam, &[], &Look::of_3d(&s.model));
+        (cam, img)
+    }
+
+    /// The pixels of `img` that are lines or shading: not paper.
+    fn inked(img: &Image) -> usize {
+        img.rgba.chunks(4).filter(|c| c[..3] != [255, 255, 255]).count()
+    }
+
+    /// Whether a line passes within a pixel of `p`.
+    fn near_a_line(cam: &Camera, img: &Image, p: P3) -> bool {
+        let (x, y) = at(cam, p);
+        (-1..=1).any(|dy| (-1..=1).any(|dx| img.color(x + f64::from(dx), y + f64::from(dy)) != PAPER))
+    }
+
+    #[test]
+    fn hidden_line_draws_faces_as_paper_with_their_edges_and_wireframe_every_edge_through_them() {
+        let mut s = house();
+        let (cam, shaded) = view(&s);
+        let south = at(&cam, [5000.0, -100.0, 1500.0]);
+        assert_ne!(shaded.color(south.0, south.1), PAPER, "shaded: a lit face");
+        // Hidden line: paper faces, and their edges dark, as a section's picture has them.
+        let (_, hidden) = styled(&mut s, "hidden_line");
+        assert_eq!(hidden.color(south.0, south.1), PAPER);
+        assert!(inked(&hidden) > 300 && inked(&hidden) < inked(&shaded) / 4, "{} of {}", inked(&hidden), inked(&shaded));
+        let (x, y) = at(&cam, [5000.0, -100.0, 3000.0]);
+        assert_ne!(hidden.color(x, y), PAPER, "the south wall's top edge");
+        // The outer corner of the north west walls stands at the back, behind the walls: wireframe draws it through them.
+        let hidden_edge = [-100.0, 6100.0, 1500.0];
+        let (_, wire) = styled(&mut s, "wireframe");
+        assert!(near_a_line(&cam, &wire, hidden_edge), "wireframe shows every edge");
+        let through = wire.rgba.chunks(4).zip(hidden.rgba.chunks(4)).filter(|(w, h)| w[..3] != [255; 3] && h[..3] == [255; 3]).count();
+        assert!(through > 50, "lines hidden line keeps hidden: {through}");
+        // Faces stay paper; picking an edge finds its wall, a face nothing.
+        assert_eq!(wire.color(south.0, south.1), PAPER);
+        assert!(inked(&wire) > 300 && inked(&wire) < inked(&hidden) * 2, "{}", inked(&wire));
+        assert_eq!(wire.pick(south.0, south.1), None, "a face isn't there to pick");
+        assert_eq!(wire.pick(x, y), Some(3), "the top edge of the south wall");
+        // Back to shaded, the picture is as it was.
+        let (_, again) = styled(&mut s, "shaded");
+        assert_eq!(again.rgba, shaded.rgba);
+    }
+
+    #[test]
+    fn wireframe_keeps_what_the_view_hides_hidden_and_takes_a_tint_and_an_edge_colour() {
+        let mut s = house();
+        let (cam, all) = styled(&mut s, "wireframe");
+        s.script(r#"graphics {"view": "{3D}", "hide": ["door"]}"#).unwrap();
+        let scene = Scene::new(&s.model);
+        let look = Look::of_3d(&s.model);
+        let plain = scene.render_in(&cam, &[], &look);
+        assert!(inked(&plain) < inked(&all), "the door's edges are gone: {} of {}", inked(&plain), inked(&all));
+        let tinted = scene.render_in(&cam, &[(3, Rgb(255, 0, 0))], &look);
+        let (x, y) = at(&cam, [5000.0, -100.0, 3000.0]);
+        assert_eq!(tinted.color(x, y), Rgb(255, 0, 0), "a selected wall's edges in the selection's colour");
+        let colours = plain.rgba.chunks(4).filter(|c| c[..3] != [255, 255, 255]).map(|c| (c[0], c[1], c[2])).collect::<BTreeSet<_>>();
+        assert_eq!(colours, BTreeSet::from([(EDGE.0, EDGE.1, EDGE.2)]), "lines in the edge colour, nothing else");
     }
 }

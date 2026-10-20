@@ -75,7 +75,6 @@ The goal is the editing tools a working architect reaches for every hour.
 | Pin and unpin; a selection filter; match type properties | S |
 | Locked and equal dimension constraints (a small constraint solver over references) | L |
 | Copy to the clipboard, and paste aligned to the same place, to selected levels or to the current view | M |
-| Temporary hide and isolate in a view; reveal hidden elements | S |
 | Join and cut geometry (wall to floor, column to wall cleanups in plan and section) | M |
 | Wall openings (rectangular cuts) and wall profile editing (an elevation sketch) | M |
 | Wall sweeps and reveals as profiles along a wall | M |
@@ -93,7 +92,6 @@ The goal is a printable, coordinated drawing set.
 
 | Item | Size |
 |---|---|
-| Per-view scale (today only a sheet's viewport has one) and detail level (coarse, medium, fine), with type layers shown at fine | M |
 | Duplicate view (with or without detailing) and dependent views | M |
 | Detail lines, filled regions, masking regions, line styles | M |
 | Drafting views, detail components (2D families), legends | L |
@@ -207,10 +205,10 @@ incremental validation (0.5), and links (0.9).
 
 | Discipline | First slice | Size |
 |---|---|---|
-| **Structure** | Beams (with framing types and joins), braces, structural columns, isolated, strip and slab foundations, structural floors, beam systems; an analytical model exported to open formats | XL |
+| **Structure** | First slice done: beams, structural columns, isolated and wall footings, structural floors, with types, schedules, IFC and the Structure tab ([design](docs/disciplines.md)). Left: braces (a sloped run, `IfcMember`), joins and framing types, slab foundations, beam systems, an analytical model exported to open formats | L |
 | **Site** | Toposolids from points or contours (and imported DXF or LandXML), pads, property lines with bearings, cut and fill quantities | L |
-| **Massing** | Conceptual masses (extrusions, blends, lofts), floors from masses, gross areas, walls, curtain systems and roofs by face | L |
-| **MEP** | Systems (supply, return, domestic water, sanitary), ducts, pipes, fittings, equipment and fixture connectors, auto-routing, sizing; electrical circuits and panel schedules later | XL+ |
+| **Massing** | Extruded masses, mass floors and gross floor area, and walls, floors and roofs by face are in. Left: blends, lofts and sloped or tapering masses, curtain systems by face, and elements by face that follow the mass when it changes | M |
+| **MEP** | The Plumbing, Electrical, SPDA (lightning protection) and Data tabs, designed with Structure's in [docs/disciplines.md](docs/disciplines.md): each adds `Element` variants over the run (pipes, conduits, cable trays, down conductors, cabling), family categories for its fixtures and devices, and a ribbon tab, with no new engine code. Then fittings and connectors, auto-routing, sizing, circuits and panel schedules | XL+ |
 
 Structure and site come before MEP: they are smaller, they reuse the existing solids and hosting, and architects need
 them sooner.

@@ -15,7 +15,7 @@ use crate::graphics::{self, Graphics, Group, Look, Override, ViewTemplate};
 use crate::language::Language;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
-    Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Model,
+    Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass, Model,
     NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, ProjectParameter, RAMP_SLOPE, RAMP_WIDTH, RISER,
     Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL,
     TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
@@ -93,8 +93,8 @@ pub static ALL: &[Command] = &[
         "floor",
         "Floor",
         &[],
-        "{boundary?: [[x,y],…], openings?: [[[x,y],…],…], level?, type?, offset?, slope?, arrow?: [[x,y],[x,y]]} a slab, its \
-         top at the level, or `offset` mm above it, open through `openings` (holes inside it, apart); no boundary = the outline \
+        "{boundary?: [[x,y],…], openings?: [[[x,y],…],…], level?, type?, offset?, slope?, arrow?: [[x,y],[x,y]], structural?} a \
+         slab (a structural one with `structural`, as Revit's Floor: Structural), its top at the level, or `offset` mm above it, open through `openings` (holes inside it, apart); no boundary = the outline \
          of the level's walls along their centre lines, open over each loop of them standing free inside, joined to none of \
          the outer ones and with no room in it (a courtyard). Sloped: its top rises `slope` degrees (negative, falls) along \
          the slope arrow, from its tail, where it's at the offset, toward its head",
@@ -117,6 +117,51 @@ pub static ALL: &[Command] = &[
          passes through, from `base_offset` above the level up to the next level, or `height` mm, or up to `top_level`",
         shaft,
     ),
+    edit(
+        "mass",
+        "Mass",
+        &["MS"],
+        "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?, name?} a mass, Revit's conceptual volume: the \
+         footprint extruded from `base_offset` above the level up to the next level, or `height` mm, or up to `top_level`. \
+         Drawn dashed in plans and sections, a see-through solid in 3D; its own category, `mass`, which views may hide. Make \
+         floors from it with `mass_floors`, walls, a floor and a roof from its faces with `wall_by_face`, `floor_by_face` \
+         and `roof_by_face`",
+        mass,
+    ),
+    edit(
+        "mass_floors",
+        "Mass Floors",
+        &["MF"],
+        "{mass?, type?} a floor of the footprint at each level the mass crosses, from the one at its base up to, not \
+         including, the one at its top; every mass when no `mass`. `schedule {category: massfloors}` lists each mass's floor \
+         area and volume on each level",
+        mass_floors,
+    ),
+    edit(
+        "wall_by_face",
+        "Wall by Face",
+        &["WB"],
+        "{mass, faces?: [edge, …], type?, location?} a wall on each edge of the mass's footprint (numbered from its first \
+         point), or the `faces` given, as tall as the mass; its exterior finish on the edge, facing out (`location` changes \
+         that line). Ordinary walls from then on",
+        wall_by_face,
+    ),
+    edit(
+        "floor_by_face",
+        "Floor by Face",
+        &["FB"],
+        "{mass, type?} a floor on the mass's top face: its top at the mass's top level, or `height` over its base. An ordinary \
+         floor from then on",
+        floor_by_face,
+    ),
+    edit(
+        "roof_by_face",
+        "Roof by Face",
+        &["RB"],
+        "{mass, type?, slope?, overhang?} a roof on the mass's top face, flat unless it has a `slope` (degrees), over the mass's \
+         top level or `height` over its base. An ordinary roof from then on",
+        roof_by_face,
+    ),
     edit("room", "Room", &["RM"], "{point: [x,y], level?, name?, number?} bounded by the walls around the point", room),
     edit(
         "column",
@@ -125,6 +170,41 @@ pub static ALL: &[Command] = &[
         "{at: [x,y], type?, angle?, level?, top_level?, height?, base_offset?} a column, its width along `angle` degrees; up to \
          the next level, or `height` mm tall, or up to `top_level`",
         column,
+    ),
+    edit(
+        "structural_column",
+        "Structural Column",
+        &["CL"],
+        "{at: [x,y], type?, angle?, level?, top_level?, height?, base_offset?} a column of the structure, as `column` makes one but \
+         in its own category with its own types (`type` with category structural column): up to the next level, or `height` mm \
+         tall, or up to `top_level`. CL is `column`'s too; on the desktop's Structure tab it is this one",
+        structural_column,
+    ),
+    edit(
+        "footing",
+        "Isolated Footing",
+        &["FI"],
+        "{at: [x,y], type?, thickness?, offset?, angle?, level?} an isolated (pad) footing, its plan the type's (category \
+         footing), `thickness` mm thick (400) with its top `offset` mm over the level (0: at it), so it hangs below",
+        footing,
+    ),
+    edit(
+        "beam",
+        "Beam",
+        &["BM"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} a beam for each \
+         segment of the points: its section the type's (category beam: `width` across, `depth` deep, or round), its `justify` \
+         line (top by default) `offset` mm over the level at its start (0: at the level, so it hangs below) and `end_offset` at \
+         its end (the same: level), for a single segment; `system` names the system it belongs to. It slopes up to 75°",
+        beam,
+    ),
+    edit(
+        "strip_footing",
+        "Wall Footing",
+        &["FW"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, system?} a continuous footing under a wall for each segment of the \
+         points, its section the type's (category stripfooting), its top `offset` mm over the level (0: at it)",
+        strip_footing,
     ),
     edit(
         "stair",
@@ -254,7 +334,7 @@ pub static ALL: &[Command] = &[
         "Place View",
         &[],
         "{sheet: number or id, view: a level's, section's, elevation's, schedule's or 3D view's name or id, at?: [x, y], \
-         scale?, azimuth?, elevation?} puts the view on the sheet at 1 : `scale` (100 by default; a schedule keeps its size), \
+         scale?, azimuth?, elevation?} puts the view on the sheet at 1 : `scale` (by default the view's own, see `scale`, else 100; a schedule keeps its size), \
          its middle `at` mm from the paper's bottom left corner (by default right of the views there, or in the middle); a \
          view goes on one sheet. A schedule (Room Schedule, Door Schedule…) or the 3D view ({3D}, seen from `azimuth` and \
          `elevation` degrees) comes to be as it's first placed",
@@ -271,11 +351,43 @@ pub static ALL: &[Command] = &[
         crop,
     ),
     edit(
+        "scale",
+        "View Scale",
+        &[],
+        "{view, scale?: 1 | … | 100000 | null} a plan's, section's or elevation's scale, 1 : `scale`, which sizes its annotation \
+         (its lettering, grid bubbles, tags, dimension ticks…) as paper would hold it, 1 mm of paper being `scale` mm of the model; \
+         null leaves it with none, so annotation keeps its size on screen. A view placed on a sheet takes it for the viewport's \
+         scale. Without `scale` it only says what the view has",
+        view_scale,
+    ),
+    edit(
+        "detail",
+        "Detail Level",
+        &[],
+        "{view, detail?: coarse | medium | fine} how much a plan, a section or an elevation draws of what it cuts: coarse, one \
+         poché and openings as their gaps; medium, compound layers with the lines between them and an opening's leaf, swing and \
+         glass; fine (the default), the layers' patterns and a floor's surface pattern too. Without `detail` it only says what \
+         the view has",
+        view_detail,
+    ),
+    edit(
+        "visual_style",
+        "Visual Style",
+        &[],
+        "{view?: \"{3D}\" | a 3D view's name or id, style?: shaded | hidden_line | wireframe} how a 3D view draws its surfaces: \
+         shaded (lit, in their materials' colours and textures, the default); hidden_line (paper-white with their edges, what \
+         a face hides staying hidden); wireframe (every edge, seen through the faces). Without `style` it only says what the \
+         view has; the default 3D view comes to be as it is first changed",
+        visual_style,
+    ),
+    edit(
         "type",
         "Edit Type",
         &[],
-        "{category: wall|floor|ceiling|door|window|column|roof|railing, name, thickness? | width?, height?, sill? | width?, \
-         depth?, round? | height?, spacing?} creates the type, or changes it everywhere it's used. A wall type may have `layers` [{function?: structure|\
+        "{category: wall|floor|ceiling|door|window|column|structuralcolumn|footing|beam|stripfooting|roof|railing, name, \
+         thickness? | width?, height?, sill? | width?, depth?, round?, material? | height?, spacing?} creates the type, or \
+         changes it everywhere it's used. A column's, a structural column's or a footing's type is a `width` by `depth`, or \
+         `round` (`width` across); a beam's or a strip footing's too, made of a `material` of the library. A wall type may have `layers` [{function?: structure|\
          substrate|thermal|membrane|finish, material?, thickness}, …] from its exterior side in: it's as thick as they are, \
          its core from its first structure layer to its last, and a new `thickness` goes to its structure. A ceiling type may \
          have `grid`: its square tiles' width, mm, which reflected ceiling plans draw (0, none); a railing type, `height` (its \
@@ -326,7 +438,7 @@ pub static ALL: &[Command] = &[
         "Project Parameters",
         &[],
         "{name, kind?: text|number|length|yesno, categories?: [wall|floor|ceiling|roof|door|window|room|column|component|stair|\
-         ramp|railing, …], rename?, delete?: true} a project parameter, as Revit's Manage > Project Parameters makes one: a value \
+         ramp|railing|mass, …], rename?, delete?: true} a project parameter, as Revit's Manage > Project Parameters makes one: a value \
          of its kind each element of its categories may have of its own, set with `modify {id, params: {name: value}}` (lengths \
          in mm, yes or no as true or false). Off a category, that category's elements lose their values of it; deleted, every \
          element does; renamed, they follow it. `inspect` lists them",
@@ -467,7 +579,8 @@ pub static ALL: &[Command] = &[
         &[],
         "{name?, category?, fields?, filters?, sort?, grouped?, path?} a schedule view, as Revit's View > Schedules makes one, \
          and its table: columns, rows and totals (and a .csv file with a path). A new one needs `name` and `category`: rooms, \
-         doors, windows, walls, floors, ceilings, roofs, columns, components, stairs, ramps, railings or levels; `category` \
+         doors, windows, walls, floors, ceilings, roofs, columns, structural columns, footings, beams, strip footings, components, \
+         stairs, ramps, railings or levels; `category` \
          alone reads its own (Room Schedule, Door Schedule, Window Schedule, Wall Schedule, Floor Schedule, Level Schedule, \
          each the project's once changed). `fields`: its columns, in order, each a field's name (`available` lists them: its \
          category's own, Count, project parameters, a component's family's parameters) or {name, formula?, kind?: \
@@ -738,7 +851,10 @@ fn type_param(c: &str, p: &Value, m: &Model, category: &str) -> Result<String, S
 
 /// `walls` → `wall`: categories in any case, singular or plural.
 pub(crate) fn category(s: &str) -> String {
-    s.trim().to_ascii_lowercase().trim_end_matches('s').to_string()
+    // `structural column` and `structural_column` are `structuralcolumn`.
+    let s: String = s.to_ascii_lowercase().chars().filter(char::is_ascii_alphanumeric).collect();
+    // `mass` ends in the plural's letter.
+    if s == "mass" || s == "masses" { "mass".into() } else { s.trim_end_matches('s').to_string() }
 }
 
 // ---------- derived values ----------
@@ -902,13 +1018,23 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             let top = m.component_pieces(cp).iter().map(|p| p.top).fold(base, f64::max);
             extra.insert("height".into(), json!(hundredth(top - base)));
         }
-        Element::Column(col) => {
+        Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => {
             let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
             extra.insert("height".into(), json!(top - bottom));
-            if let Some(t) = m.types.column.get(&col.type_name) {
+            if let Some(t) = m.column_type(e) {
                 extra.insert("width".into(), json!(t.width));
                 extra.insert("depth".into(), json!(t.depth));
                 extra.insert("round".into(), json!(t.round));
+            }
+        }
+        // Its section, how long it runs along its axis, and the heights of its centre line's ends.
+        Element::Beam(_) | Element::StripFooting(_) => {
+            if let (Some(t), Some(g)) = (m.run_type(e), m.run_geom(e)) {
+                extra.insert("width".into(), json!(t.width));
+                extra.insert("depth".into(), json!(t.depth));
+                extra.insert("round".into(), json!(t.round));
+                extra.insert("length".into(), json!(hundredth(g.length())));
+                extra.insert("axis".into(), json!([g.a, g.b].map(|p| p.map(hundredth))));
             }
         }
         Element::Stair(st) => {
@@ -989,6 +1115,14 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             let (bottom, top) = m.span(sh.level, sh.base_offset, sh.top_level, sh.height);
             extra.insert("height".into(), json!(top - bottom));
             extra.insert("area_m2".into(), json!(m2(geom::area(&sh.boundary).abs())));
+        }
+        Element::Mass(ms) => {
+            let (area, height, volume) = mass_size(m, ms);
+            extra.insert("area_m2".into(), json!(area));
+            extra.insert("height".into(), json!(height));
+            extra.insert("volume_m3".into(), json!(volume));
+            extra.insert("gross_floor_area_m2".into(), json!(m2(m.mass_slices(ms).len() as f64 * geom::area(&ms.boundary).abs())));
+            extra.insert("levels".into(), json!(m.mass_slices(ms).iter().map(|(l, _, _)| *l).collect::<Vec<Id>>()));
         }
         Element::Room(r) => {
             let region = m.room_region(r);
@@ -2267,8 +2401,20 @@ fn window(s: &mut Session, p: &Value) -> R {
 }
 
 fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
+    let o = build_opening(&s.model, p, is_door)?;
+    let (host, offset, mark) = (o.host, o.offset, o.mark.clone());
+    let id = s.model_mut().insert(if is_door { Element::Door(o) } else { Element::Window(o) });
+    Ok(json!({"id": id, "host": host, "offset": offset, "mark": mark}))
+}
+
+/// The door or window `p` asks for, before it is in the model: what the `door` and `window` commands insert, and what
+/// the desktop sketches under the cursor.
+pub fn opening_of(m: &Model, p: &Value, is_door: bool) -> Result<Element, String> {
+    build_opening(m, p, is_door).map(|o| if is_door { Element::Door(o) } else { Element::Window(o) })
+}
+
+fn build_opening(m: &Model, p: &Value, is_door: bool) -> Result<Opening, String> {
     let c = if is_door { "door" } else { "window" };
-    let m = &s.model;
     let types = if is_door { &m.types.door } else { &m.types.window };
     // Of a family's type, or one of the project's own.
     let family = string(c, p, "family")?;
@@ -2326,12 +2472,11 @@ fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
         host,
         offset,
         sill,
-        mark: mark.clone(),
+        mark,
         flip_facing: flag(c, p, "flip_facing")?,
         flip_hand: flag(c, p, "flip_hand")?,
     };
-    let id = s.model_mut().insert(if is_door { Element::Door(o) } else { Element::Window(o) });
-    Ok(json!({"id": id, "host": host, "offset": offset, "mark": mark}))
+    Ok(o)
 }
 
 fn floor(s: &mut Session, p: &Value) -> R {
@@ -2356,6 +2501,7 @@ fn floor(s: &mut Session, p: &Value) -> R {
         },
     };
     let (offset, slope) = (num(c, p, "offset")?.unwrap_or(0.0), num(c, p, "slope")?.unwrap_or(0.0));
+    let structural = flag(c, p, "structural")?;
     // Its openings lie inside it and apart, or the model refuses it.
     let area = m2(geom::area(&boundary) - openings.iter().map(|o| geom::area(o).abs()).sum::<f64>());
     let id = s.model_mut().insert(Element::Floor(Floor {
@@ -2367,6 +2513,7 @@ fn floor(s: &mut Session, p: &Value) -> R {
         offset,
         slope,
         arrow,
+        structural,
     }));
     Ok(json!({"id": id, "area_m2": area}))
 }
@@ -2411,6 +2558,123 @@ fn shaft(s: &mut Session, p: &Value) -> R {
     let base_offset = num(c, p, "base_offset")?.unwrap_or(0.0);
     let id = s.model_mut().insert(Element::Shaft(Shaft { level, boundary, top_level, height, base_offset }));
     Ok(json!({"id": id}))
+}
+
+/// A mass's footprint area (m²), height (mm) and volume (m³).
+fn mass_size(m: &Model, ms: &Mass) -> (f64, f64, f64) {
+    let (bottom, top) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+    let a = geom::area(&ms.boundary).abs();
+    (m2(a), top - bottom, (a * (top - bottom) / 1e7).round() / 100.0)
+}
+
+fn mass(s: &mut Session, p: &Value) -> R {
+    let c = "mass";
+    let m = &s.model;
+    let level = level_param(c, m, p, "level")?;
+    let mut boundary = points(c, p, "boundary")?;
+    if geom::area(&boundary) < 0.0 {
+        boundary.reverse();
+    }
+    let (top_level, height) = top_param(c, m, p, level)?;
+    let name = string(c, p, "name")?.unwrap_or_else(|| m.language.word("Mass").into());
+    let ms = Mass {
+        name,
+        level,
+        boundary,
+        top_level,
+        height,
+        base_offset: num(c, p, "base_offset")?.unwrap_or(0.0),
+        params: Default::default(),
+    };
+    let (area, height, volume) = mass_size(m, &ms);
+    let id = s.model_mut().insert(Element::Mass(ms));
+    Ok(json!({"id": id, "area_m2": area, "height": height, "volume_m3": volume}))
+}
+
+/// The mass `mass` names.
+fn mass_of(c: &str, m: &Model, p: &Value) -> Result<(Id, Mass), String> {
+    let id = id_opt(c, p, "mass")?.ok_or_else(|| bad(c, "`mass`, the id of a mass, is required"))?;
+    match m.elements.get(&id) {
+        Some(Element::Mass(ms)) => Ok((id, ms.clone())),
+        _ => Err(bad(c, format!("{id} isn't a mass"))),
+    }
+}
+
+/// Where a mass's top face is: a level, and how far over it.
+fn mass_top(ms: &Mass) -> (Id, f64) {
+    ms.top_level.map_or((ms.level, ms.base_offset + ms.height), |t| (t, 0.0))
+}
+
+/// `p` with the parameters of `from` that `keys` name, for the command that makes the element.
+fn passing(p: &Value, keys: &[&str], mut to: Value) -> Value {
+    for k in keys.iter().filter(|k| !absent(p.get(**k))) {
+        to[*k] = p[*k].clone();
+    }
+    to
+}
+
+fn mass_floors(s: &mut Session, p: &Value) -> R {
+    let c = "mass_floors";
+    let m = &s.model;
+    let masses: Vec<Mass> = match id_opt(c, p, "mass")? {
+        Some(_) => vec![mass_of(c, m, p)?.1],
+        None => m.elements.values().filter_map(|e| if let Element::Mass(ms) = e { Some(ms.clone()) } else { None }).collect(),
+    };
+    if masses.is_empty() {
+        return Err(bad(c, "no mass; make one with `mass`"));
+    }
+    let mut ids = Vec::new();
+    for ms in &masses {
+        for (level, _, _) in s.model.mass_slices(ms) {
+            let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?;
+            ids.push(made["id"].clone());
+        }
+    }
+    Ok(json!({"ids": ids}))
+}
+
+fn wall_by_face(s: &mut Session, p: &Value) -> R {
+    let c = "wall_by_face";
+    let (_, ms) = mass_of(c, &s.model, p)?;
+    let ring = ms.footprint();
+    let n = ring.len();
+    let faces: BTreeSet<usize> = match p.get("faces") {
+        v if absent(v) => (0..n).collect(),
+        Some(Value::Array(a)) if a.len() <= MAX_POINTS => a
+            .iter()
+            .map(|v| {
+                v.as_u64().and_then(|f| usize::try_from(f).ok()).filter(|f| *f < n).ok_or_else(|| {
+                    bad(c, format!("face {v} isn't an edge of the footprint: 0 to {}, from its first point", n.saturating_sub(1)))
+                })
+            })
+            .collect::<Result<_, _>>()?,
+        Some(v) => return Err(bad(c, format!("`faces` must be a list of edge numbers, got {v}"))),
+        None => (0..n).collect(),
+    };
+    let top = ms.top_level.map_or_else(|| json!({"height": ms.height}), |t| json!({"top_level": t}));
+    let mut ids = Vec::new();
+    for f in faces {
+        // Counter-clockwise, the mass is to the left of its edge; a wall faces out to its left, so it runs the other way.
+        let (a, b) = (ring[f], ring[(f + 1) % n]);
+        let mut q = json!({"points": [b, a], "level": ms.level, "base_offset": ms.base_offset, "location": "exterior-finish"});
+        q.as_object_mut().into_iter().for_each(|o| o.extend(top.as_object().cloned().unwrap_or_default()));
+        let made = wall(s, &passing(p, &["type", "location"], q))?;
+        ids.extend(made["ids"].as_array().cloned().unwrap_or_default());
+    }
+    Ok(json!({"ids": ids}))
+}
+
+fn floor_by_face(s: &mut Session, p: &Value) -> R {
+    let (_, ms) = mass_of("floor_by_face", &s.model, p)?;
+    let (level, offset) = mass_top(&ms);
+    floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level, "offset": offset})))
+}
+
+fn roof_by_face(s: &mut Session, p: &Value) -> R {
+    let (_, ms) = mass_of("roof_by_face", &s.model, p)?;
+    let (level, offset) = mass_top(&ms);
+    let q = json!({"boundary": ms.footprint(), "level": level, "offset": offset, "slope": 0, "overhang": 0});
+    roof(s, &passing(p, &["type", "slope", "overhang"], q))
 }
 
 fn room(s: &mut Session, p: &Value) -> R {
@@ -2465,7 +2729,7 @@ fn reference_near(m: &Model, level: Id, p: P2, keep: impl Fn(Line) -> bool) -> O
 fn arc_near(m: &Model, level: Id, p: P2) -> Option<Reference> {
     m.elements
         .iter()
-        .filter(|(_, e)| matches!(e, Element::Column(col) if col.level == level))
+        .filter(|(_, e)| e.column().is_some_and(|col| col.level == level))
         .filter_map(|(&id, _)| {
             let r = Reference { id, face: Face::Centre };
             let (c, radius) = m.reference_arc(&r).ok()?;
@@ -2608,24 +2872,133 @@ fn degrees(a: f64) -> f64 {
 }
 
 fn column(s: &mut Session, p: &Value) -> R {
-    let c = "column";
-    let m = &s.model;
+    let e = stood_of(&s.model, p, "column")?;
+    Ok(json!({"id": s.model_mut().insert(e)}))
+}
+
+fn structural_column(s: &mut Session, p: &Value) -> R {
+    let e = stood_of(&s.model, p, "structuralcolumn")?;
+    Ok(json!({"id": s.model_mut().insert(e)}))
+}
+
+fn footing(s: &mut Session, p: &Value) -> R {
+    let e = stood_of(&s.model, p, "footing")?;
+    Ok(json!({"id": s.model_mut().insert(e)}))
+}
+
+/// The column, structural column or footing (`category`) that `p` asks for, as its command makes it, not yet in the model:
+/// a tool previews what a click would make.
+pub fn stood_of(m: &Model, p: &Value, category: &str) -> Result<Element, String> {
+    let c = command_of(category);
     let at = point_req(c, p, "at")?;
     let level = level_param(c, m, p, "level")?;
-    let type_name = type_param(c, p, m, "column")?;
+    let type_name = type_param(c, p, m, category)?;
+    let angle = num(c, p, "angle")?.unwrap_or(0.0);
+    // An isolated footing is a column laid flat: as thick as `thickness`, its top `offset` over the level.
+    if category == "footing" {
+        let thickness = num(c, p, "thickness")?.unwrap_or(400.0);
+        if thickness <= 0.0 {
+            return Err(bad(c, format!("`thickness` must be above zero, got {thickness}")));
+        }
+        let top = num(c, p, "offset")?.unwrap_or(0.0);
+        let col = Column {
+            params: Default::default(),
+            type_name,
+            level,
+            at,
+            angle,
+            top_level: None,
+            height: thickness,
+            base_offset: top - thickness,
+        };
+        return Ok(Element::Footing(col));
+    }
     let (top_level, height) = top_param(c, m, p, level)?;
     let col = Column {
         params: Default::default(),
         type_name,
         level,
         at,
-        angle: num(c, p, "angle")?.unwrap_or(0.0),
+        angle,
         top_level,
         height,
         base_offset: num(c, p, "base_offset")?.unwrap_or(0.0),
     };
-    let id = s.model_mut().insert(Element::Column(col));
-    Ok(json!({"id": id}))
+    Ok(if category == "column" { Element::Column(col) } else { Element::StructuralColumn(col) })
+}
+
+fn beam(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "beam")
+}
+
+fn strip_footing(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "stripfooting")
+}
+
+fn chain(s: &mut Session, p: &Value, category: &str) -> R {
+    let made = runs_of(&s.model, p, category)?;
+    let m = s.model_mut();
+    let ids: Vec<Id> = made.into_iter().map(|e| m.insert(e)).collect();
+    Ok(json!({"ids": ids}))
+}
+
+/// The command that makes elements of `category`.
+fn command_of(category: &str) -> &'static str {
+    match category {
+        "structuralcolumn" => "structural_column",
+        "stripfooting" => "strip_footing",
+        "beam" => "beam",
+        "footing" => "footing",
+        _ => "column",
+    }
+}
+
+/// The runs of `category` (a beam, a strip footing) that `p` asks for, one for each segment of its `points`, as the command
+/// makes them, not yet in the model: a tool previews what a click would make.
+pub fn runs_of(m: &Model, p: &Value, category: &str) -> Result<Vec<Element>, String> {
+    let c = command_of(category);
+    let mut pts = points(c, p, "points")?;
+    if pts.len() < 2 {
+        return Err(bad(c, "`points` needs at least 2 points"));
+    }
+    if flag(c, p, "closed")?
+        && let Some(&first) = pts.first()
+    {
+        pts.push(first);
+    }
+    let level = level_param(c, m, p, "level")?;
+    let type_name = type_param(c, p, m, category)?;
+    let offset = num(c, p, "offset")?.unwrap_or(0.0);
+    let end_offset = num(c, p, "end_offset")?;
+    if end_offset.is_some() && pts.len() != 2 {
+        return Err(bad(c, "`end_offset` is the height of one run's end: give 2 points"));
+    }
+    let justify = match string(c, p, "justify")? {
+        None => crate::model::Justify::Top,
+        Some(n) => serde_json::from_value(Value::String(n.to_lowercase()))
+            .map_err(|_| bad(c, format!("`justify` is top, centre or bottom, not `{n}`")))?,
+    };
+    let system = string(c, p, "system")?.unwrap_or_default();
+    pts.windows(2)
+        .map(|seg| match seg {
+            [a, b] => Element::of_run(
+                category,
+                crate::model::Run {
+                    type_name: type_name.clone(),
+                    level,
+                    start: *a,
+                    end: *b,
+                    offset,
+                    end_offset,
+                    justify,
+                    system: system.clone(),
+                    params: Default::default(),
+                },
+            ),
+            _ => None,
+        })
+        .collect::<Option<Vec<Element>>>()
+        .ok_or_else(|| bad(c, format!("`{category}` has no runs")))
 }
 
 /// The way a stair or a ramp climbs from `start`: toward `end`, else `angle` degrees (east by default).
@@ -3075,6 +3448,104 @@ fn crop(s: &mut Session, p: &Value) -> R {
     }
 }
 
+/// The plan, section or elevation `p` names, the views that have a scale and a detail level.
+fn scaled_view(c: &str, m: &Model, p: &Value) -> Result<Id, String> {
+    let view = view_param(c, m, p, false)?;
+    match m.elements.get(&view) {
+        Some(Element::Level(_) | Element::Section(_) | Element::Elevation(_)) => Ok(view),
+        _ => Err(bad(c, format!("{} isn't a plan, a section or an elevation; only those have one", view_title(m, view)))),
+    }
+}
+
+/// View `view`'s graphics changed by `f`, when it makes a difference: the model stays as it was otherwise, so no undo step.
+fn change_graphics(s: &mut Session, view: Id, f: impl Fn(&mut Graphics)) {
+    let mut g = graphics::graphics_of(&s.model, view).cloned().unwrap_or_default();
+    let was = g.clone();
+    f(&mut g);
+    if g != was {
+        set_graphics(s.model_mut(), view, g);
+    }
+}
+
+fn view_scale(s: &mut Session, p: &Value) -> R {
+    let c = "scale";
+    let view = scaled_view(c, &s.model, p)?;
+    let scale = match p.get("scale") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(v) => match v.as_f64() {
+            Some(n) if graphics::SCALES.contains(&n) => Some(Some(n)),
+            _ => {
+                let (lo, hi) = (graphics::SCALES.start(), graphics::SCALES.end());
+                return Err(bad(c, format!("`scale` is the n of 1 : n, from {lo} to {hi}, or null for none, not {v}")));
+            }
+        },
+    };
+    if let Some(scale) = scale {
+        change_graphics(s, view, |g| g.scale = scale);
+    }
+    let now = graphics::graphics_of(&s.model, view).and_then(|g| g.scale);
+    Ok(json!({"view": view, "name": s.model.view_name(view), "scale": now}))
+}
+
+fn visual_style(s: &mut Session, p: &Value) -> R {
+    let c = "visual_style";
+    let m = &s.model;
+    // The default 3D view, unless another is named; it is made when something first changes in it.
+    let view = match p.get("view") {
+        v if absent(v) => m.default_3d(),
+        Some(Value::String(n)) if n.eq_ignore_ascii_case("{3D}") || n.eq_ignore_ascii_case("3D") => m.default_3d(),
+        Some(_) => Some(view_param(c, m, p, false)?),
+        None => m.default_3d(),
+    };
+    if let Some(v) = view.filter(|v| !matches!(m.elements.get(v), Some(Element::View3D(_)))) {
+        return Err(bad(c, format!("{} isn't a 3D view; only those have a visual style", view_title(m, v))));
+    }
+    let style = match p.get("style") {
+        v if absent(v) => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(graphics::VisualStyle::parse)
+                .ok_or_else(|| bad(c, format!("`style` is shaded, hidden_line or wireframe, not {v}")))?,
+        ),
+        None => None,
+    };
+    let has = |view: Option<Id>, m: &Model| view.and_then(|v| graphics::graphics_of(m, v)).map_or_else(Default::default, |g| g.style);
+    let view = match (style, view) {
+        (Some(style), view) if style != has(view, m) => {
+            let v = view.unwrap_or_else(|| {
+                s.model_mut().insert(Element::View3D(View3D {
+                    name: "{3D}".into(),
+                    azimuth: view3d::AZIMUTH,
+                    elevation: view3d::ELEVATION,
+                    graphics: Graphics::default(),
+                }))
+            });
+            change_graphics(s, v, |g| g.style = style);
+            Some(v)
+        }
+        (_, view) => view,
+    };
+    Ok(json!({"view": view, "style": has(view, &s.model)}))
+}
+
+fn view_detail(s: &mut Session, p: &Value) -> R {
+    let c = "detail";
+    let view = scaled_view(c, &s.model, p)?;
+    let level = match p.get("detail") {
+        v if absent(v) => None,
+        Some(v) => Some(
+            v.as_str().and_then(graphics::Detail::parse).ok_or_else(|| bad(c, format!("`detail` is coarse, medium or fine, not {v}")))?,
+        ),
+        None => None,
+    };
+    if let Some(level) = level {
+        change_graphics(s, view, |g| g.detail = level);
+    }
+    let now = graphics::graphics_of(&s.model, view).map(|g| g.detail).unwrap_or_default();
+    Ok(json!({"view": view, "name": s.model.view_name(view), "detail": now}))
+}
+
 /// What to call element `id` in a message: a view's or a sheet's name, else its category and id.
 fn view_title(m: &Model, id: Id) -> String {
     match (m.view_name(id), m.sheet(id)) {
@@ -3119,7 +3590,7 @@ fn place(s: &mut Session, p: &Value) -> R {
         Some(v) => v.as_u64().filter(|id| m.sheet(*id).is_some()).ok_or_else(|| bad(c, format!("`sheet`: {v} is not a sheet")))?,
         None => return Err(bad(c, "`sheet`, a sheet's number or id, is required")),
     };
-    let scale = num(c, p, "scale")?.unwrap_or(100.0);
+    let scale = num(c, p, "scale")?;
     let at = point_opt(c, p, "at")?;
     let view = match p.get("view") {
         Some(Value::String(n)) => match m.elements.keys().find(|id| m.view_name(**id) == Some(n.as_str())) {
@@ -3150,6 +3621,8 @@ fn place(s: &mut Session, p: &Value) -> R {
             .ok_or_else(|| bad(c, format!("`view`: {v} is not a plan, a section, an elevation, a schedule or a 3D view")))?,
         None => return Err(bad(c, "`view`, a level's, section's, elevation's, schedule's or 3D view's name or id, is required")),
     };
+    // The view's own scale, unless told another; 1 : 100 for a view with none.
+    let scale = scale.or_else(|| graphics::graphics_of(&s.model, view).and_then(|g| g.scale)).unwrap_or(100.0);
     let at = at.unwrap_or_else(|| sheet::spot(&s.model, sheet, view, scale));
     let id = s.model_mut().insert(Element::Viewport(Viewport { sheet, view, at, scale }));
     Ok(json!({"id": id, "at": at}))
@@ -3752,8 +4225,13 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             map.insert(name.clone(), t);
             json!(t)
         }
-        "column" => {
-            let old = m.types.column.get(&name).cloned();
+        "column" | "structuralcolumn" | "footing" => {
+            let types = match cat.as_str() {
+                "structuralcolumn" => &mut m.types.structural_column,
+                "footing" => &mut m.types.footing,
+                _ => &mut m.types.column,
+            };
+            let old = types.get(&name).cloned();
             let width = width.or(old.as_ref().map(|t| t.width)).ok_or_else(|| need("width"))?;
             let round = match p.get("round") {
                 v if absent(v) => old.as_ref().is_some_and(|t| t.round),
@@ -3761,7 +4239,22 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             };
             let depth = if round { width } else { num(c, p, "depth")?.or(old.as_ref().map(|t| t.depth)).unwrap_or(width) };
             let t = ColumnType { width, depth, round };
-            m.types.column.insert(name.clone(), t.clone());
+            types.insert(name.clone(), t.clone());
+            json!(t)
+        }
+        // A beam's or another run's: a section `width` across by `depth` deep, or round; made of a material.
+        run if crate::model::RUN_CATEGORIES.contains(&run) => {
+            let types = m.types.runs.entry(cat.clone()).or_default();
+            let old = types.get(&name).cloned();
+            let width = width.or(old.as_ref().map(|t| t.width)).ok_or_else(|| need("width"))?;
+            let round = match p.get("round") {
+                v if absent(v) => old.as_ref().is_some_and(|t| t.round),
+                _ => flag(c, p, "round")?,
+            };
+            let depth = if round { width } else { num(c, p, "depth")?.or(old.as_ref().map(|t| t.depth)).ok_or_else(|| need("depth"))? };
+            let material = string(c, p, "material")?.or(old.map(|t| t.material)).unwrap_or_default();
+            let t = crate::model::RunType { width, depth, round, material };
+            types.insert(name.clone(), t.clone());
             json!(t)
         }
         "roof" => {
@@ -3786,7 +4279,15 @@ fn edit_type(s: &mut Session, p: &Value) -> R {
             m.types.ceiling.insert(name.clone(), t.clone());
             json!(t)
         }
-        other => return Err(bad(c, format!("`{other}` has no types; use wall, floor, ceiling, door, window, column, roof or railing"))),
+        other => {
+            return Err(bad(
+                c,
+                format!(
+                    "`{other}` has no types; use wall, floor, ceiling, door, window, column, structural column, footing, beam, \
+                     strip footing, roof or railing"
+                ),
+            ));
+        }
     };
     Ok(json!({"category": cat, "name": name, "type": t}))
 }
@@ -3961,7 +4462,9 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         }
         Element::Spot(sp) => sp.at = f(sp.at),
         Element::Viewport(v) => v.at = f(v.at),
-        Element::Column(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
+        Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => (col.at, col.angle) = turned(f, col.at, col.angle),
+        // A run keeps its heights at its ends; its section is the same either way round.
+        Element::Beam(r) | Element::StripFooting(r) => (r.start, r.end) = (f(r.start), f(r.end)),
         // A mirror image is the family's, flipped.
         Element::Component(cp) => {
             (cp.at, cp.angle) = turned(f, cp.at, cp.angle);
@@ -4011,7 +4514,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
                 cl.boundary.reverse();
             }
         }
-        Element::Shaft(Shaft { boundary, .. }) => {
+        Element::Shaft(Shaft { boundary, .. }) | Element::Mass(Mass { boundary, .. }) => {
             boundary.iter_mut().for_each(|q| *q = f(*q));
             if mo.mirror {
                 boundary.reverse();

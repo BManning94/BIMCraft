@@ -18,6 +18,7 @@ pub mod paint;
 pub mod pdf;
 pub mod phasing;
 pub mod render;
+pub mod runs;
 pub mod sample;
 pub mod schedule;
 pub mod sheet;
@@ -30,7 +31,9 @@ pub mod units;
 pub mod view3d;
 pub mod walls;
 
-pub use commands::{element_json, floor_outline, roof_footprint};
+pub use commands::{element_json, floor_outline, opening_of, roof_footprint, runs_of, stood_of};
 
+#[cfg(test)]
+mod structure_tests;
 #[cfg(test)]
 mod tests;

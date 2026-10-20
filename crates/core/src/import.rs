@@ -17,9 +17,10 @@ use crate::commands::{micron, next_number, tidy};
 use crate::family::{Category, Expr, Family, Form, MAX_TRIANGLES, Parameter};
 use crate::geom::{self, P2};
 use crate::model::{
-    Ceiling, CeilingType, Column, ColumnType, Component, Element, Extrusion, Floor, FloorType, Function, Grid, Id, Landing, Layer, Level,
-    MAX_COORD, MAX_LAYERS, MAX_POINTS, MAX_PROJECT_PARAMETERS, MAX_TEXT, Model, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind,
-    ProjectParameter, Railing, RailingType, Ramp, Roof, RoofType, Room, Shaft, Side, Stair, TOL, Wall, WallType, culprit, heading,
+    Ceiling, CeilingType, Column, ColumnType, Component, Element, Extrusion, Floor, FloorType, Function, Grid, Id, Justify, Landing, Layer,
+    Level, MAX_COORD, MAX_LAYERS, MAX_POINTS, MAX_PROJECT_PARAMETERS, MAX_TEXT, Mass, Model, Opening, OpeningType, PARAMETER_CATEGORIES,
+    ParameterKind, ProjectParameter, Railing, RailingType, Ramp, Roof, RoofType, Room, Run, RunType, Shaft, Side, Stair, TOL, Wall,
+    WallType, culprit, heading,
 };
 use crate::phasing;
 use crate::stairs;
@@ -285,6 +286,77 @@ fn span(xs: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
 /// Whether two rings have the same corners, to the millimetre.
 fn same(a: &[P2], b: &[P2]) -> bool {
     a.len() == b.len() && a.iter().all(|p| b.iter().any(|q| q.dist(*p) < 1.0))
+}
+
+/// A run found in a body's points.
+struct Found {
+    start: P3,
+    end: P3,
+    width: f64,
+    depth: f64,
+    round: bool,
+}
+
+/// The run `pts` make: its centre line along the direction they spread furthest in (the covariance's dominant axis, by
+/// power iteration), its section the box round them across it, square to it, with `width` level and `depth` square to that;
+/// round where the section's corners are many and all as far out. None for an axis that stands, or for too few points.
+fn run_in(pts: &[P3]) -> Option<Found> {
+    use crate::view3d::{add, cross, dot, mul, sub, unit};
+    if pts.len() < 4 {
+        return None;
+    }
+    let c = mul(pts.iter().fold([0.0; 3], |a, p| add(a, *p)), 1.0 / pts.len() as f64);
+    let mut cov = [[0.0; 3]; 3];
+    for p in pts {
+        let q = sub(*p, c);
+        for (i, row) in cov.iter_mut().enumerate() {
+            for (j, x) in row.iter_mut().enumerate() {
+                *x += q[i] * q[j];
+            }
+        }
+    }
+    let mut d = unit([1.0, 0.7, 0.3]);
+    for _ in 0..64 {
+        let next = [0, 1, 2].map(|i| (0..3).map(|j| cov[i][j] * d[j]).sum::<f64>());
+        if dot(next, next) < 1e-18 {
+            return None;
+        }
+        d = unit(next);
+    }
+    // Toward the east, else the north, so a run reads the same whichever end the file starts at.
+    if d[0] < -1e-9 || (d[0].abs() <= 1e-9 && d[1] < 0.0) {
+        d = mul(d, -1.0);
+    }
+    let across = unit([-d[1], d[0], 0.0]);
+    if dot(across, across) < 0.5 {
+        return None;
+    }
+    let up = cross(d, across);
+    let ext = |axis: P3| span(pts.iter().map(|p| dot(sub(*p, c), axis)));
+    let ((t0, t1), (u0, u1), (v0, v1)) = (ext(d)?, ext(across)?, ext(up)?);
+    let mid = add(c, add(mul(d, (t0 + t1) / 2.0), add(mul(across, (u0 + u1) / 2.0), mul(up, (v0 + v1) / 2.0))));
+    let half = (t1 - t0) / 2.0;
+    let q = |p: &P3| sub(*p, mid);
+    let radii = span(pts.iter().map(|p| {
+        let r = q(p);
+        let x = sub(r, mul(d, dot(r, d)));
+        dot(x, x).sqrt()
+    }));
+    let corners: HashSet<(i64, i64)> =
+        pts.iter().map(|p| ((dot(q(p), across) * 2.0).round() as i64, (dot(q(p), up) * 2.0).round() as i64)).collect();
+    let round = corners.len() >= 12 && radii.is_some_and(|(lo, hi)| hi > 0.0 && (hi - lo) / hi < 0.03);
+    let size = |x: f64| (x * 100.0).round() / 100.0;
+    let (width, depth) = match radii {
+        Some((_, hi)) if round => (size(2.0 * hi), size(2.0 * hi)),
+        _ => (size(u1 - u0), size(v1 - v0)),
+    };
+    (half > 0.0 && width > 0.0 && depth > 0.0).then(|| Found {
+        start: sub(mid, mul(d, half)),
+        end: add(mid, mul(d, half)),
+        width,
+        depth,
+        round,
+    })
 }
 
 struct Reader<'a> {
@@ -1183,6 +1255,24 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         None
     };
 
+    // What carries load: the elements whose `Pset_*Common` says `LoadBearing` is true.
+    let bearing: HashSet<u64> = named(&["IFCRELDEFINESBYPROPERTIES"])
+        .into_iter()
+        .filter_map(e)
+        .filter_map(|rel| {
+            let set = reference(rel.args.get(5)).and_then(e).filter(|x| {
+                x.name == "IFCPROPERTYSET" && text(x.args.get(2)).is_some_and(|n| n.starts_with("Pset_") && n.ends_with("Common"))
+            })?;
+            let loaded = refs(set.args.get(4)).into_iter().filter_map(e).any(|p| {
+                p.name == "IFCPROPERTYSINGLEVALUE"
+                    && text(p.args.first()) == Some("LoadBearing")
+                    && matches!(p.args.get(2), Some(V::Typed(_, v)) if matches!(&**v, V::Enum(b) if b == "T"))
+            });
+            loaded.then(|| refs(rel.args.get(4)))
+        })
+        .flatten()
+        .collect();
+
     let project = ids.iter().filter_map(|id| e(*id)).find(|x| x.name == "IFCPROJECT");
     let title = project.and_then(|p| text(p.args.get(2)).or_else(|| text(p.args.get(5)))).unwrap_or(name);
     let mut m = Model::new(&clip(title));
@@ -1458,6 +1548,7 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             offset: ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0,
             slope: if arrow.is_some() { (tan.atan().to_degrees() * 1e6).round() / 1e6 } else { 0.0 },
             arrow,
+            structural: bearing.contains(&id),
         };
         let fid = m.insert(Element::Floor(floor));
         from.insert(fid, who(id));
@@ -1596,8 +1687,38 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         elements_from.entry(id).or_default().push(sid);
     }
 
-    // Columns: a section across them, and how high they stand.
-    for id in named(COLUMNS) {
+    // Masses: proxies whose object type says so, each its outline and how high it stands. One outline: a courtyard
+    // in it is more than a mass holds.
+    for id in named(&["IFCBUILDINGELEMENTPROXY"]) {
+        let Some(x) = e(id).filter(|x| text(x.args.get(4)) == Some("Mass")) else { continue };
+        let faces = r.body(x);
+        let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else {
+            leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
+            continue;
+        };
+        let region = outline(&faces, Plane::flat(z1), true).filter(|g| g.holes.is_empty());
+        let Some(geom::Region { outer: ring, .. }) = region else {
+            leave(&mut skipped, &mut seen, id, "its top isn't one level outline");
+            continue;
+        };
+        let level = level_for(id, z0);
+        let (top_level, height) = topped(level, z0, z1);
+        let base_offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
+        let name = text(x.args.get(2)).map(clip).unwrap_or_default();
+        let boundary = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
+        let mass =
+            Mass { name, level, boundary, top_level, height: (height * 1000.0).round() / 1000.0, base_offset, params: Default::default() };
+        let mid = m.insert(Element::Mass(mass));
+        from.insert(mid, who(id));
+        elements_from.entry(id).or_default().push(mid);
+        seen.insert(id);
+    }
+
+    // Columns: a section across them, and how high they stand; one that carries load is a structural column, and a
+    // footing that isn't a strip is an isolated one, a column laid down.
+    let strip = |id: u64| e(id).is_some_and(|x| matches!(enumeration(x.args.get(8)), Some("STRIP_FOOTING" | "FOOTING_BEAM")));
+    let pads: Vec<u64> = named(&["IFCFOOTING"]).into_iter().filter(|id| !strip(*id)).collect();
+    for id in named(COLUMNS).into_iter().chain(pads) {
         let Some(c) = e(id) else { continue };
         let faces = r.body(c);
         let Some((z0, z1)) = span(faces.iter().flatten().map(|p| p[2])) else {
@@ -1637,9 +1758,25 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
         let base = label(id)
             .unwrap_or_else(|| if round { format!("Imported Round {}", num(w)) } else { format!("Imported {} x {}", num(w), num(d)) });
         let same = |k: &ColumnType| k.round == round && (k.width - w).abs() < 0.05 && (k.depth - d).abs() < 0.05;
-        let type_name = kind(&mut m.types.column, &base, same, ColumnType { width: w, depth: d, round });
+        let footing = c.name == "IFCFOOTING";
+        let structural = bearing.contains(&id);
+        let make: fn(Column) -> Element = if footing {
+            Element::Footing
+        } else if structural {
+            Element::StructuralColumn
+        } else {
+            Element::Column
+        };
+        let types = if footing {
+            &mut m.types.footing
+        } else if structural {
+            &mut m.types.structural_column
+        } else {
+            &mut m.types.column
+        };
+        let type_name = kind(types, &base, same, ColumnType { width: w, depth: d, round });
         let level = level_for(id, z0);
-        let (top_level, height) = topped(level, z0, z1);
+        let (top_level, height) = if footing { (None, z1 - z0) } else { topped(level, z0, z1) };
         let angle = if round { 0.0 } else { (u.1.atan2(u.0).to_degrees() * 1e6).round() / 1e6 };
         let column = Column {
             params: Default::default(),
@@ -1651,9 +1788,66 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             height: (height * 1000.0).round() / 1000.0,
             base_offset: ((z0 - elevation(level)) * 1000.0).round() / 1000.0,
         };
-        let cid = m.insert(Element::Column(column));
+        let cid = m.insert(make(column));
         from.insert(cid, who(id));
         elements_from.entry(id).or_default().push(cid);
+        seen.insert(id);
+    }
+
+    // Beams, and strip footings: runs, found in their bodies as the longest direction they run along and the section
+    // square to it. A beam rolled about its axis reads as the box round it.
+    for id in named(&["IFCBEAM", "IFCBEAMSTANDARDCASE", "IFCFOOTING"])
+        .into_iter()
+        .filter(|id| e(*id).is_some_and(|x| x.name != "IFCFOOTING") || strip(*id))
+    {
+        let Some(b) = e(id) else { continue };
+        let (category, make): (&str, fn(Run) -> Element) =
+            if b.name == "IFCFOOTING" { ("stripfooting", Element::StripFooting) } else { ("beam", Element::Beam) };
+        let pts: Vec<P3> = r.body(b).into_iter().flatten().collect();
+        let Some(found) = run_in(&pts) else {
+            leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read, or it stands (a column) or lies flat");
+            continue;
+        };
+        let geom = crate::runs::Geom { a: found.start, b: found.end, width: found.width, depth: found.depth, round: found.round };
+        if let Err(why) = crate::runs::check(&who(id), category, &geom) {
+            leave(&mut skipped, &mut seen, id, why.split_once(": ").map_or(why.as_str(), |(_, w)| w));
+            continue;
+        }
+        let level = level_for(id, found.start[2].min(found.end[2]));
+        let (w, d) = (found.width, found.depth);
+        let base = label(id).unwrap_or_else(|| {
+            if found.round { format!("Imported Round {}", num(w)) } else { format!("Imported {} x {}", num(w), num(d)) }
+        });
+        // Made of a material the library has, by name.
+        let material = l
+            .material
+            .get(&id)
+            .and_then(|x| e(*x))
+            .filter(|x| x.name == "IFCMATERIAL")
+            .and_then(|x| text(x.args.first()))
+            .filter(|n| m.materials.contains_key(*n))
+            .map(String::from)
+            .unwrap_or_default();
+        let same =
+            |k: &RunType| k.round == found.round && (k.width - w).abs() < 0.05 && (k.depth - d).abs() < 0.05 && k.material == material;
+        let types = m.types.runs.entry(category.to_string()).or_default();
+        let type_name = kind(types, &base, same, RunType { width: w, depth: d, round: found.round, material: material.clone() });
+        let height = |z: f64| ((z - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
+        let (z0, z1) = (height(found.start[2]), height(found.end[2]));
+        let run = Run {
+            type_name,
+            level,
+            start: micron(r.flat(found.start)),
+            end: micron(r.flat(found.end)),
+            offset: z0,
+            end_offset: ((z1 - z0).abs() > 1e-6).then_some(z1),
+            justify: Justify::Centre,
+            system: String::new(),
+            params: Default::default(),
+        };
+        let rid = m.insert(make(run));
+        from.insert(rid, who(id));
+        elements_from.entry(id).or_default().push(rid);
         seen.insert(id);
     }
 
@@ -1682,7 +1876,8 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
     ];
     for (names, category) in kinds {
         for id in named(names) {
-            let Some(x) = e(id) else { continue };
+            // A mass is read above.
+            let Some(x) = e(id).filter(|_| !seen.contains(&id)) else { continue };
             let f = r.frame(x);
             let flat = |v: P3| unit([v[0], v[1], 0.0]);
             let along = [flat(f.x), flat(f.y), [1.0, 0.0, 0.0]].into_iter().find(|v| dot(*v, *v) > 0.5).unwrap_or([1.0, 0.0, 0.0]);

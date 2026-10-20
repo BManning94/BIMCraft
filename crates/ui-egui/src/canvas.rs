@@ -8,13 +8,13 @@ use std::collections::BTreeMap;
 
 use bimcraft_core::geom::{self, P2};
 use bimcraft_core::model::{
-    Column, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Model, NOTE_SIZE, Note,
-    RISER, Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag, Wall,
+    Clearance, Column, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face, Id, Landing, Line, MAX_COORD, Mass, Model,
+    NOTE_SIZE, Note, RISER, Ramp, Reference, Roof, Section, Spot, Stair, TOL, TREAD, Tag, Wall,
 };
 use bimcraft_core::render::{self, Drawing, Prim, Rgb, View};
 use bimcraft_core::snap::{self, Found, Kind, Reach};
 use bimcraft_core::walls::{self, Axis};
-use bimcraft_core::{floor_outline, roof_footprint};
+use bimcraft_core::{floor_outline, opening_of, roof_footprint};
 use egui::{
     Align, Align2, Color32, Event, FontId, Key, Layout, Mesh, Modifiers, Painter, PointerButton, Pos2, Rect, Response, Sense, Shape,
     Stroke, StrokeKind, TextEdit, TextureId, Ui, UiBuilder, Vec2, WidgetInfo, WidgetType, pos2, vec2,
@@ -376,6 +376,70 @@ fn tag(p: &Painter, at: Pos2, align: Align2, text: impl Into<String>) {
     p.galley(rect.min, galley, pal().accent);
 }
 
+/// A dimension line between the screen points `a` and `b`, held `off` px out to the side `n` of them, with a tick at each
+/// end as a temporary dimension has; where its number goes.
+fn dimension_line(p: &Painter, a: Pos2, b: Pos2, n: Vec2, off: f32) -> Pos2 {
+    let (along, stroke) = (b - a, Stroke::new(1.0, pal().accent));
+    let u = along / along.length().max(f32::EPSILON);
+    p.line_segment([a + n * off, b + n * off], stroke);
+    for e in [a, b] {
+        p.line_segment([e + n * (off - 10.0).max(2.0), e + n * (off + 4.0)], stroke);
+        p.line_segment([e + n * off - (u + n) * 3.0, e + n * off + (u + n) * 3.0], stroke);
+    }
+    a + along / 2.0 + n * (off + 11.0)
+}
+
+/// An opening's temporary dimensions, drawn on `p` beside its host wall: from the wall's start to the middle of the
+/// opening and from there to the wall's end, each as where its number goes, its text, and its length in mm. None on a
+/// curved wall, and for a span too short to draw.
+/// ponytail: measured along the wall's location line to its ends; Revit stops at the nearest wall crossing it.
+pub(crate) fn opening_dimensions(p: &Painter, m: &Model, v: &View, o: &bimcraft_core::model::Opening) -> Vec<(Pos2, String, f64)> {
+    let Some(w) = m.wall(o.host).filter(|w| w.arc == 0.0) else { return Vec::new() };
+    let (origin, c) = (p.clip_rect().min, Axis::of(w).at(o.offset, 0.0));
+    let screen = |q: P2| pos(origin, v.px(q));
+    let (a, b) = (screen(w.start), screen(w.end));
+    let chord = b - a;
+    if chord.length() < 1.0 {
+        return Vec::new();
+    }
+    // On the side away from the middle of the view, where the door swings or the window faces out.
+    let n = vec2(chord.y, -chord.x).normalized();
+    let mid = a + chord / 2.0;
+    let n = if (mid + n - p.clip_rect().center()).length() < (mid - n - p.clip_rect().center()).length() { -n } else { n };
+    let off = (m.thickness(w) / 2.0 * v.scale) as f32 + 18.0;
+    [(w.start, c), (c, w.end)]
+        .into_iter()
+        .filter(|(s, e)| screen(*s).distance(screen(*e)) >= 24.0)
+        .map(|(s, e)| (dimension_line(p, screen(s), screen(e), n, off), m.units.length(s.dist(e)), s.dist(e)))
+        .collect()
+}
+
+/// A column's or component's temporary dimensions, drawn on `p` beside it: how far it stands from the nearest wall centre
+/// line or grid east, north, west and south (`Model::clearances`), each as which of the four, where its number goes, its
+/// text and the clearance. None for any other element, and for a way with no line or a span too short to draw.
+pub(crate) fn standing_dimensions(p: &Painter, m: &Model, v: &View, e: &Element) -> Vec<(usize, Pos2, String, Clearance)> {
+    let (level, at, reach) = match e {
+        Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) => (c.level, c.at, m.column_outline(e)),
+        Element::Component(c) => (c.level, c.at, m.component_pieces(c).into_iter().flat_map(|piece| piece.outline).collect()),
+        _ => return Vec::new(),
+    };
+    let origin = p.clip_rect().min;
+    let screen = |q: P2| pos(origin, v.px(q));
+    // Clear of the element, out to its farthest corner.
+    let off = (reach.iter().map(|q| q.dist(at)).fold(0.0, f64::max) * v.scale) as f32 + 18.0;
+    m.clearances(level, at)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(n, c)| Some((n, c?)))
+        .filter(|(_, c)| screen(at).distance(screen(at + c.toward * c.distance)) >= 24.0)
+        .map(|(n, c)| {
+            // East and west dimensions lie north of it, north and south ones east of it.
+            let side = if n % 2 == 0 { vec2(0.0, -1.0) } else { vec2(1.0, 0.0) };
+            (n, dimension_line(p, screen(at), screen(at + c.toward * c.distance), side, off), m.units.length(c.distance), c)
+        })
+        .collect()
+}
+
 /// A ruler from `a` to `b`: its line, and its graduations at round lengths at least 10 px apart,
 /// every fifth longer.
 fn ruler_shapes(sc: &Scene, a: P2, b: P2) -> Vec<Shape> {
@@ -511,7 +575,9 @@ fn degrees(a: f64) -> String {
 /// The point a tool picked first, while it has one.
 fn start_of(tool: &Tool) -> &[P2] {
     match tool {
-        Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::Measure(start) => start.as_slice(),
+        Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::Measure(start) | Tool::Run(_, start) => {
+            start.as_slice()
+        }
         _ => &[],
     }
 }
@@ -666,7 +732,7 @@ impl BimApp {
     pub(crate) fn canvas(&mut self, ui: &mut Ui, level: Id) {
         // Clicks and drags; never the keyboard, which the shortcuts need.
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
-        let model = std::sync::Arc::clone(&self.session.model);
+        let model = self.view_model();
         let up = matches!(self.sheet, Sheet::Ceiling(_));
         let fit = |w, h| if up { render::ceiling_plan(&model, level, w, h).view } else { render::plan(&model, level, w, h).view };
         let Some((view, local)) = self.canvas.navigate(ui, &response, rect, level, fit) else { return };
@@ -936,27 +1002,29 @@ impl BimApp {
         }
     }
 
-    fn click(&mut self, m: &Model, level: Id, v: &View, at: (f32, f32), hovered: Option<Id>, mods: Modifiers) {
-        let typed = |app: &BimApp, cat: &'static str, mut p: Value| {
-            if matches!(cat, "door" | "window") {
-                // Of a family, by default the project's usual door or window of one; else one of the project's own types.
-                let (family, ty) = app.opening_pick(cat);
-                if let Some(f) = family {
-                    p["family"] = json!(f);
-                }
-                if let Some(t) = ty {
-                    p["type"] = json!(t);
-                }
-            } else if let Some(t) = app.types.get(cat) {
+    /// The parameters a click puts down for `cat`, with the type (and a door's or window's family) picked for the tool.
+    pub(crate) fn typed(&self, cat: &str, mut p: Value) -> Value {
+        if matches!(cat, "door" | "window") {
+            // Of a family, by default the project's usual door or window of one; else one of the project's own types.
+            let (family, ty) = self.opening_pick(cat);
+            if let Some(f) = family {
+                p["family"] = json!(f);
+            }
+            if let Some(t) = ty {
                 p["type"] = json!(t);
             }
-            p
-        };
+        } else if let Some(t) = self.types.get(cat) {
+            p["type"] = json!(t);
+        }
+        p
+    }
+
+    fn click(&mut self, m: &Model, level: Id, v: &View, at: (f32, f32), hovered: Option<Id>, mods: Modifiers) {
         match &self.tool {
             Tool::Modify => self.pick_up(hovered.into_iter().collect(), mods),
             Tool::Door | Tool::Window => {
                 let cat = if matches!(self.tool, Tool::Door) { "door" } else { "window" };
-                let p = typed(self, cat, json!({"at": point(round(v.mm(at))), "level": level}));
+                let p = self.typed(cat, json!({"at": point(round(v.mm(at))), "level": level}));
                 self.run(cat, p);
             }
             Tool::Room => {
@@ -966,10 +1034,12 @@ impl BimApp {
             Tool::Elevation => {
                 self.run("elevation", json!({"at": point(round(v.mm(at)))}));
             }
-            Tool::Wall(_) | Tool::Grid(_) | Tool::Move(_) | Tool::Copy(_) | Tool::Section(_) => {
+            Tool::Wall(_) | Tool::Grid(_) | Tool::Move(_) | Tool::Copy(_) | Tool::Section(_) | Tool::Run(..) => {
                 let chain: Vec<P2> = match &self.tool {
                     Tool::Wall(chain) => chain.clone(),
-                    Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) => start.iter().copied().collect(),
+                    Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::Run(_, start) => {
+                        start.iter().copied().collect()
+                    }
                     _ => Vec::new(),
                 };
                 // The point an arc passes through follows no guide from the points before it.
@@ -1120,11 +1190,15 @@ impl BimApp {
                     );
                 }
             }
+            &Tool::Stand(category) => {
+                let at = self.snap(m, level, v, at, &[], false).at;
+                self.place_stand(level, at, category);
+            }
             Tool::Column => match top_params(m, level, self.column_top, &self.column_height) {
                 Ok(mut p) => {
                     p["at"] = point(self.snap(m, level, v, at, &[], false).at);
                     p["level"] = json!(level);
-                    let p = typed(self, "column", p);
+                    let p = self.typed("column", p);
                     self.run("column", p);
                 }
                 Err(e) => self.status = Status { text: tf("column: {}", &[&e]), error: true },
@@ -1158,7 +1232,7 @@ impl BimApp {
             // A stair or a ramp picked: one down each side; else the path's next point.
             Tool::Railing(path) => match (path.is_empty(), hovered) {
                 (true, Some(host)) => {
-                    let p = typed(self, "railing", json!({"host": host}));
+                    let p = self.typed("railing", json!({"host": host}));
                     self.run("railing", p);
                 }
                 _ => {
@@ -1170,11 +1244,22 @@ impl BimApp {
                     }
                 }
             },
+            // The footprint's next corner; back on the first, it's done.
+            Tool::Mass(path) => {
+                let p = self.snap(m, level, v, at, path, mods.shift).at;
+                if path.len() >= 3 && path.first().is_some_and(|f| f.dist(p) <= TOL) {
+                    self.finish_mass(level);
+                } else if let Tool::Mass(path) = &mut self.tool
+                    && path.last().is_none_or(|l| l.dist(p) > TOL)
+                {
+                    path.push(p);
+                }
+            }
             // On the level above, over this plan's walls; once made, selected, as a finished sketch is.
             Tool::Roof => match (number(&self.roof_slope), m.units.parse(&self.roof_overhang)) {
                 (Some(slope), Some(overhang)) => {
                     let on = m.level_above(level).unwrap_or(level);
-                    let p = typed(self, "roof", json!({"level": on, "slope": slope, "overhang": overhang, "gable": self.roof_gable}));
+                    let p = self.typed("roof", json!({"level": on, "slope": slope, "overhang": overhang, "gable": self.roof_gable}));
                     if let Some(made) = self.run("roof", p) {
                         self.selection = made["id"].as_u64().into_iter().collect();
                         self.tool = Tool::Modify;
@@ -1199,7 +1284,7 @@ impl BimApp {
                 }
                 match self.extrusion_roof(m, level, &pts) {
                     Ok(r) => {
-                        let p = typed(self, "roof", json!({"level": r.level, "extrusion": r.extrusion}));
+                        let p = self.typed("roof", json!({"level": r.level, "extrusion": r.extrusion}));
                         if let Some(made) = self.run("roof", p) {
                             self.selection = made["id"].as_u64().into_iter().collect();
                             self.tool = Tool::Modify;
@@ -1217,7 +1302,7 @@ impl BimApp {
                     (None, ..) => {}
                     (Some(host), Some(width), Some(height), Some(slope)) => {
                         let at = point(round(v.mm(at)));
-                        let mut p = typed(self, "wall", json!({"host": host, "at": at, "width": width, "height": height, "slope": slope}));
+                        let mut p = self.typed("wall", json!({"host": host, "at": at, "width": width, "height": height, "slope": slope}));
                         // The window type picked last, else the smallest: a dormer's front is short.
                         if self.dormer_window {
                             let smallest =
@@ -1254,7 +1339,7 @@ impl BimApp {
             }
             // Under the walls of this plan's level; once made, selected, as a finished sketch is.
             Tool::Floor => {
-                let p = typed(self, "floor", json!({"level": level}));
+                let p = self.typed("floor", json!({"level": level, "structural": self.floor_structural}));
                 if let Some(made) = self.run("floor", p) {
                     self.selection = made["id"].as_u64().into_iter().collect();
                     self.tool = Tool::Modify;
@@ -1262,7 +1347,7 @@ impl BimApp {
             }
             Tool::Ceiling => match m.units.parse(&self.ceiling_height) {
                 Some(offset) => {
-                    let p = typed(self, "ceiling", json!({"point": point(round(v.mm(at))), "level": level, "offset": offset}));
+                    let p = self.typed("ceiling", json!({"point": point(round(v.mm(at))), "level": level, "offset": offset}));
                     self.run("ceiling", p);
                 }
                 None => self.status = Status { text: tf("ceiling: `{}` is not a height", &[&self.ceiling_height]), error: true },
@@ -1400,6 +1485,24 @@ impl BimApp {
         }
     }
 
+    /// The Mass tool's Enter, or its first corner clicked again: a mass over the footprint clicked, on the plan's level,
+    /// up to the Options Bar's top. Fewer than three corners make none.
+    pub(crate) fn finish_mass(&mut self, level: Id) {
+        let Tool::Mass(path) = &mut self.tool else { return };
+        let path = std::mem::take(path);
+        if path.len() < 3 {
+            return;
+        }
+        match top_params(&self.session.model, level, self.mass_top, &self.mass_height) {
+            Ok(mut q) => {
+                q["boundary"] = json!(path.iter().map(|p| point(*p)).collect::<Vec<_>>());
+                q["level"] = json!(level);
+                self.run("mass", q);
+            }
+            Err(e) => self.status = Status { text: tf("mass: {}", &[&e]), error: true },
+        }
+    }
+
     /// The Text tool's click: a note saying what the Options Bar says, its top left at `at` in
     /// view `view` (a plan's level, a section, an elevation or a sheet).
     pub(crate) fn write_note(&mut self, view: Id, at: P2) {
@@ -1487,6 +1590,9 @@ impl BimApp {
                 _ => chain.push(p),
             }
             return;
+        }
+        if matches!(self.tool, Tool::Run(..)) {
+            return self.place_run(level, p);
         }
         match &mut self.tool {
             Tool::Wall(chain) => match chain.first() {
@@ -1762,16 +1868,57 @@ impl BimApp {
         }
     }
 
-    /// The selected wall's length as a temporary dimension beside it, as Revit shows one. A click
-    /// on the number types a new length, which moves the wall's end (the walls joined there follow).
+    /// A temporary dimension's number at `at`, which a click turns into a field to type a new one: what was typed once
+    /// the field is left (None inside it for Esc). `key` is the element and which of its dimensions.
+    fn dimension_number(&mut self, ui: &mut Ui, at: Rect, key: (Id, usize), text: &str) -> Option<Option<String>> {
+        let font = FontId::proportional(12.0);
+        let field = ui.id().with(("temporary dimension", key));
+        let (mut done, mut start) = (None, false);
+        match &mut self.dim_edit {
+            Some((id, n, typed)) if (*id, *n) == key => {
+                let edit = ui.put(at.expand2(vec2(18.0, 2.0)), TextEdit::singleline(typed).id(field).horizontal_align(Align::Center));
+                if edit.lost_focus() {
+                    done = Some(ui.input(|i| !i.key_pressed(Key::Escape)).then(|| typed.clone()));
+                } else if !edit.has_focus() {
+                    edit.request_focus();
+                }
+            }
+            _ => {
+                let r = ui.interact(at, field.with("number"), Sense::click());
+                r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Temporary dimension {}", &[text])));
+                ui.painter().rect_filled(at, 2.0, pal().surface);
+                ui.painter().text(at.center(), Align2::CENTER_CENTER, text, font, if r.hovered() { pal().hover } else { pal().accent });
+                start = r.clicked();
+            }
+        }
+        if start {
+            self.dim_edit = Some((key.0, key.1, text.to_string()));
+        }
+        if done.is_some() {
+            self.dim_edit = None;
+        }
+        done
+    }
+
+    /// The selected wall's length as a temporary dimension beside it, as Revit shows one; a door's or a window's two,
+    /// to the ends of its wall. A click on a number types a new length: a wall's end moves (the walls joined there
+    /// follow), an opening slides along its wall.
     fn temporary_dimension(&mut self, ui: &mut Ui, m: &Model, v: &View, rect: Rect) {
         let &[id] = self.selection.as_slice() else {
             self.dim_edit = None;
             return;
         };
-        let Some(w) = m.wall(id).filter(|_| self.tool == Tool::Modify && self.canvas.drag.is_none() && self.canvas.grip.is_none()) else {
+        if self.tool != Tool::Modify || self.canvas.drag.is_some() || self.canvas.grip.is_some() {
             return;
-        };
+        }
+        match m.elements.get(&id) {
+            Some(Element::Door(o) | Element::Window(o)) => return self.opening_dimension(ui, m, v, rect, id, o),
+            Some(e @ (Element::Column(_) | Element::StructuralColumn(_) | Element::Footing(_) | Element::Component(_))) => {
+                return self.standing_dimension(ui, m, v, rect, id, e);
+            }
+            _ => {}
+        }
+        let Some(w) = m.wall(id) else { return };
         let (a, b) = (pos(rect.min, v.px(w.start)), pos(rect.min, v.px(w.end)));
         let along = b - a;
         if along.length() < 24.0 {
@@ -1798,47 +1945,60 @@ impl BimApp {
             }
             pos(rect.min, v.px(axis.at(length / 2.0, -side * f64::from(off + 11.0) / v.scale)))
         } else {
-            p.line_segment([a + n * off, b + n * off], stroke);
-            for e in [a, b] {
-                p.line_segment([e + n * (off - 10.0).max(2.0), e + n * (off + 4.0)], stroke);
-                p.line_segment([e + n * off - (u + n) * 3.0, e + n * off + (u + n) * 3.0], stroke);
-            }
-            a + along / 2.0 + n * (off + 11.0)
+            dimension_line(&p, a, b, n, off)
         };
         let text = m.units.length(length);
-        let font = FontId::proportional(12.0);
-        let size = p.layout_no_wrap(text.clone(), font.clone(), pal().accent).size() + vec2(10.0, 4.0);
-        let at = Rect::from_center_size(middle, size);
-        let field = ui.id().with(("temporary dimension", id));
-        let (mut done, mut start) = (None, false);
-        match &mut self.dim_edit {
-            Some((wall, typed)) if *wall == id => {
-                let edit = ui.put(at.expand2(vec2(18.0, 2.0)), TextEdit::singleline(typed).id(field).horizontal_align(Align::Center));
-                if edit.lost_focus() {
-                    done = Some(ui.input(|i| !i.key_pressed(Key::Escape)).then(|| typed.clone()));
-                } else if !edit.has_focus() {
-                    edit.request_focus();
-                }
-            }
-            _ => {
-                let r = ui.interact(at, field.with("number"), Sense::click());
-                r.widget_info(|| WidgetInfo::labeled(WidgetType::Button, true, tf("Temporary dimension {}", &[&text])));
-                p.rect_filled(at, 2.0, pal().surface);
-                p.text(at.center(), Align2::CENTER_CENTER, &text, font, if r.hovered() { pal().hover } else { pal().accent });
-                start = r.clicked();
-            }
-        }
-        if start {
-            self.dim_edit = Some((id, text));
-        }
-        if let Some(typed) = done {
-            self.dim_edit = None;
+        let size = p.layout_no_wrap(text.clone(), FontId::proportional(12.0), pal().accent).size() + vec2(10.0, 4.0);
+        if let Some(typed) = self.dimension_number(ui, Rect::from_center_size(middle, size), (id, 0), &text) {
             match typed.map(|t| (m.units.parse(&t), t)) {
                 // Its end moved along its chord: an arc keeps its turn, its length as typed.
                 Some((Some(len), _)) if len > 0.0 => {
                     let by = (w.end - w.start) * (len / length - 1.0);
                     if by.length() > 1e-6 {
                         self.run("move", json!({"ids": [id], "by": point(by), "end": "end"}));
+                    }
+                }
+                Some((_, typed)) => self.status = Status { text: tf("`{}` is not a length", &[typed.trim()]), error: true },
+                None => {}
+            }
+        }
+    }
+
+    /// A selected door's or window's two temporary dimensions: how far its middle stands from its wall's start, and from
+    /// its end. Typing one moves it along the wall; the other follows.
+    fn opening_dimension(&mut self, ui: &mut Ui, m: &Model, v: &View, rect: Rect, id: Id, o: &bimcraft_core::model::Opening) {
+        let Some(w) = m.wall(o.host) else { return };
+        let length = Axis::of(w).length();
+        let p = ui.painter_at(rect);
+        for (n, (middle, text, _)) in opening_dimensions(&p, m, v, o).into_iter().enumerate() {
+            let size = p.layout_no_wrap(text.clone(), FontId::proportional(12.0), pal().accent).size() + vec2(10.0, 4.0);
+            let Some(typed) = self.dimension_number(ui, Rect::from_center_size(middle, size), (id, n), &text) else { continue };
+            match typed.map(|t| (m.units.parse(&t), t)) {
+                Some((Some(len), _)) if (0.0..=length).contains(&len) => {
+                    let offset = if n == 0 { len } else { length - len };
+                    if (offset - o.offset).abs() > 1e-6 {
+                        self.run("modify", json!({"id": id, "offset": offset}));
+                    }
+                }
+                Some((Some(_), _)) => self.status = Status { text: t("the opening has to stay on its wall").into(), error: true },
+                Some((None, typed)) => self.status = Status { text: tf("`{}` is not a length", &[typed.trim()]), error: true },
+                None => {}
+            }
+        }
+    }
+
+    /// A selected column's or component's temporary dimensions: how far it stands from the nearest wall or grid on each
+    /// side along x and y. Typing one moves it, the others follow.
+    fn standing_dimension(&mut self, ui: &mut Ui, m: &Model, v: &View, rect: Rect, id: Id, e: &Element) {
+        let p = ui.painter_at(rect);
+        for (n, middle, text, c) in standing_dimensions(&p, m, v, e) {
+            let size = p.layout_no_wrap(text.clone(), FontId::proportional(12.0), pal().accent).size() + vec2(10.0, 4.0);
+            let Some(typed) = self.dimension_number(ui, Rect::from_center_size(middle, size), (id, n), &text) else { continue };
+            match typed.map(|t| (m.units.parse(&t), t)) {
+                Some((Some(len), _)) if len >= 0.0 => {
+                    let by = c.toward * (c.distance - len);
+                    if by.length() > 1e-6 {
+                        self.run("move", json!({"ids": [id], "by": point(by)}));
                     }
                 }
                 Some((_, typed)) => self.status = Status { text: tf("`{}` is not a length", &[typed.trim()]), error: true },
@@ -1861,7 +2021,7 @@ impl BimApp {
         let sketched = |e: &Element| ghost(p, origin, &render::sketch(m, *v, m.next_id, e), &[m.next_id], &|pt| pt);
         let ghost = |f: &dyn Fn(Pos2) -> Pos2| ghost(p, origin, sc.d, &self.selection, f);
         let chain = match &self.tool {
-            Tool::Wall(chain) | Tool::Railing(chain) => chain.as_slice(),
+            Tool::Wall(chain) | Tool::Railing(chain) | Tool::Mass(chain) => chain.as_slice(),
             Tool::ExtrusionRoof(pts) if pts.len() < 2 => pts.as_slice(),
             // The roof a click would make, swept across to the cursor.
             Tool::ExtrusionRoof(pts) => {
@@ -1904,6 +2064,7 @@ impl BimApp {
                 return;
             }
             Tool::Grid(_)
+            | Tool::Run(_, None)
             | Tool::Move(_)
             | Tool::Copy(_)
             | Tool::Section(None)
@@ -2041,12 +2202,51 @@ impl BimApp {
                 sketched(&Element::Spot(Spot { view: level, at, host: m.spot_host(level, at) }));
                 return;
             }
+            // The door or window a click would put in the wall, as the command makes it, and how far it stands from
+            // the wall's ends.
+            Tool::Door | Tool::Window => {
+                let door = matches!(self.tool, Tool::Door);
+                let params = self.typed(if door { "door" } else { "window" }, json!({"at": point(round(v.mm(q))), "level": level}));
+                if let Ok(e) = opening_of(m, &params, door) {
+                    sketched(&e);
+                    if let Element::Door(o) | Element::Window(o) = &e {
+                        for (at, text, _) in opening_dimensions(p, m, v, o) {
+                            tag(p, at, Align2::CENTER_CENTER, text);
+                        }
+                    }
+                }
+                return;
+            }
             Tool::Component => {
                 if let Some((family, type_name)) = self.placing() {
                     let at = self.found(sc, q, &[], false);
                     let angle = self.component_angle;
                     let c = Component { family, type_name, level, at, angle, offset: 0.0, mirrored: false, params: Default::default() };
-                    sketched(&Element::Component(c));
+                    let e = Element::Component(c);
+                    sketched(&e);
+                    for (_, at, text, _) in standing_dimensions(p, m, v, &e) {
+                        tag(p, at, Align2::CENTER_CENTER, text);
+                    }
+                }
+                return;
+            }
+            // The beam or wall footing a click would make, and how long it is.
+            &Tool::Run(category, Some(start)) => {
+                let end = self.found(sc, q, &[start], shift);
+                for e in self.run_sketch(m, category, level, start, end) {
+                    sketched(&e);
+                }
+                label(cursor, m.units.length(start.dist(end)));
+                return;
+            }
+            // The structural column or footing a click would put down, and how far it stands from the walls.
+            &Tool::Stand(category) => {
+                let at = self.found(sc, q, &[], false);
+                if let Some(e) = self.stand_sketch(m, category, level, at) {
+                    sketched(&e);
+                    for (_, at, text, _) in standing_dimensions(p, m, v, &e) {
+                        tag(p, at, Align2::CENTER_CENTER, text);
+                    }
                 }
                 return;
             }
@@ -2054,7 +2254,7 @@ impl BimApp {
                 let at = self.found(sc, q, &[], false);
                 let type_name =
                     self.types.get("column").cloned().or_else(|| m.default_type("column").map(String::from)).unwrap_or_default();
-                sketched(&Element::Column(Column {
+                let e = Element::Column(Column {
                     params: Default::default(),
                     type_name,
                     level,
@@ -2063,7 +2263,11 @@ impl BimApp {
                     top_level: None,
                     height: 0.0,
                     base_offset: 0.0,
-                }));
+                });
+                sketched(&e);
+                for (_, at, text, _) in standing_dimensions(p, m, v, &e) {
+                    tag(p, at, Align2::CENTER_CENTER, text);
+                }
                 return;
             }
             // The floor a click would make, under the walls, open over their courtyards.
@@ -2146,6 +2350,22 @@ impl BimApp {
             pts = axis.points(0.0, axis.length(), 0.0).into_iter().map(|pt| sc.screen(pt)).collect();
         }
         p.add(Shape::line(pts, stroke));
+        // The mass a click would close: its outline as the plan draws it, and its area.
+        if let (Tool::Mass(_), true) = (&self.tool, chain.len() >= 2) {
+            let ring: Vec<P2> = chain.iter().copied().chain([next]).collect();
+            sketched(&Element::Mass(Mass {
+                name: String::new(),
+                level,
+                boundary: ring.clone(),
+                top_level: None,
+                height: 1.0,
+                base_offset: 0.0,
+                params: Default::default(),
+            }));
+            let (area, unit) = m.units.area(geom::area(&ring).abs());
+            let middle = ring.iter().fold(P2(0.0, 0.0), |a, q| a + *q * (1.0 / ring.len() as f64));
+            label(sc.screen(middle), format!("{area:.2} {unit}"));
+        }
         // The ruler along the new line, and an arc at the corner it turns from the line before.
         let arc_next = self.wall_arc && matches!(self.tool, Tool::Wall(_));
         if let (Some(&last), false) = (chain.last(), arc_next) {

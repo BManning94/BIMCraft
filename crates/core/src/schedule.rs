@@ -161,6 +161,8 @@ enum From {
     Metres(&'static str),
     PathLength,
     Count,
+    /// A yes or no in the element's JSON under a key (no where it has none).
+    Flag(&'static str),
     /// A value among the element's parameters, under the field's own name (its phases, its design option).
     Param,
 }
@@ -176,6 +178,8 @@ const WIDTH: Own = ("Width", Kind::Length, From::Key("width"));
 const HEIGHT: Own = ("Height", Kind::Length, From::Key("height"));
 const LENGTH: Own = ("Length", Kind::Length, From::Key("length"));
 const THICKNESS: Own = ("Thickness", Kind::Length, From::Key("thickness"));
+const DEPTH: Own = ("Depth", Kind::Length, From::Key("depth"));
+const SYSTEM: Own = ("System", Kind::Text, From::Key("system"));
 const OFFSET: Own = ("Offset", Kind::Length, From::Key("offset"));
 const MARK: Own = ("Mark", Kind::Text, From::Key("mark"));
 const NAME: Own = ("Name", Kind::Text, From::Key("name"));
@@ -184,6 +188,7 @@ const COUNT: Own = ("Count", Kind::Number, From::Count);
 const PHASE_CREATED: Own = ("Phase Created", Kind::Text, From::Param);
 const PHASE_DEMOLISHED: Own = ("Phase Demolished", Kind::Text, From::Param);
 const DESIGN_OPTION: Own = ("Design Option", Kind::Text, From::Param);
+const VOLUME: Own = ("Volume", Kind::Number, From::Key("volume_m3"));
 
 /// Each category's own fields, and how many of them, from the first, its schedule shows unless it
 /// chooses.
@@ -223,7 +228,23 @@ const OWN: &[(&str, usize, &[Own])] = &[
         ],
     ),
     ("wall", 6, &[ID, TYPE, LEVEL, LENGTH, HEIGHT, THICKNESS, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
-    ("floor", 5, &[ID, TYPE, LEVEL, AREA, THICKNESS, OFFSET, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "floor",
+        5,
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            AREA,
+            THICKNESS,
+            OFFSET,
+            COUNT,
+            ("Structural", Kind::YesNo, From::Flag("structural")),
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
     ("ceiling", 5, &[ID, TYPE, LEVEL, OFFSET, AREA, THICKNESS, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "roof",
@@ -257,6 +278,25 @@ const OWN: &[(&str, usize, &[Own])] = &[
             DESIGN_OPTION,
         ],
     ),
+    ("structuralcolumn", 6, &[ID, TYPE, LEVEL, WIDTH, DEPTH, HEIGHT, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    (
+        "footing",
+        6,
+        &[
+            ID,
+            TYPE,
+            LEVEL,
+            WIDTH,
+            DEPTH,
+            ("Thickness", Kind::Length, From::Key("height")),
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
+    ("beam", 6, &[ID, TYPE, LEVEL, LENGTH, WIDTH, DEPTH, SYSTEM, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
+    ("stripfooting", 6, &[ID, TYPE, LEVEL, LENGTH, WIDTH, DEPTH, SYSTEM, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     ("component", 4, &[FAMILY, TYPE, LEVEL, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION]),
     (
         "stair",
@@ -296,6 +336,28 @@ const OWN: &[(&str, usize, &[Own])] = &[
         "railing",
         5,
         &[ID, TYPE, LEVEL, ("Length", Kind::Length, From::PathLength), HEIGHT, COUNT, PHASE_CREATED, PHASE_DEMOLISHED, DESIGN_OPTION],
+    ),
+    (
+        "mass",
+        5,
+        &[
+            NAME,
+            LEVEL,
+            HEIGHT,
+            AREA,
+            VOLUME,
+            ("Gross Floor Area", Kind::Area, From::Key("gross_floor_area_m2")),
+            COUNT,
+            PHASE_CREATED,
+            PHASE_DEMOLISHED,
+            DESIGN_OPTION,
+        ],
+    ),
+    // A row for each level a mass crosses (`sources`): its floor area there, and the volume from there up to the next.
+    (
+        "massfloor",
+        5,
+        &[("Mass", Kind::Text, From::Key("mass")), LEVEL, AREA, ("Perimeter", Kind::Length, From::Metres("perimeter_m")), VOLUME, COUNT],
     ),
     ("level", 2, &[("Elevation", Kind::Length, From::Key("elevation")), NAME, COUNT]),
 ];
@@ -514,7 +576,7 @@ pub fn picks(m: &Model, cats: &[String], rules: &[Filter]) -> BTreeSet<Id> {
     let mut out = BTreeSet::new();
     for (&id, e) in &m.elements {
         let Some(of) = kinds.get(e.category()) else { continue };
-        let mut row = Row { m, e, json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
+        let mut row = Row { m, e, cat: e.category(), json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
         if rules.iter().all(|f| keeps(f, &row.get(&f.field), of.get(&f.field).copied(), m.units)) {
             out.insert(id);
         }
@@ -568,6 +630,8 @@ fn follow<'a>(
 struct Row<'a> {
     m: &'a Model,
     e: &'a Element,
+    /// The category of the schedule it is a row of: `e`'s, but for a mass floor, which is a row of a mass.
+    cat: &'a str,
     json: Value,
     formulas: &'a BTreeMap<&'a str, (&'a str, Kind)>,
     done: BTreeMap<String, Value>,
@@ -609,7 +673,7 @@ impl Row<'_> {
     /// One of its category's fields: its own, a project parameter's, or its family's.
     fn field(&self, name: &str) -> Value {
         let (m, j) = (self.m, &self.json);
-        if let Some((_, kind, from)) = own(self.e.category()).1.iter().find(|(n, _, _)| *n == name) {
+        if let Some((_, kind, from)) = own(self.cat).1.iter().find(|(n, _, _)| *n == name) {
             let number = |v: Option<&Value>| v.and_then(Value::as_f64).unwrap_or(0.0);
             return match *from {
                 From::Key(k) if matches!(kind, Kind::Text) => match j.get(k) {
@@ -627,6 +691,7 @@ impl Row<'_> {
                     serde_json::json!(fine(path.windows(2).map(|w| w[0].dist(w[1])).sum::<f64>()))
                 }
                 From::Count => serde_json::json!(1.0),
+                From::Flag(k) => Value::Bool(j.get(k).and_then(Value::as_bool).unwrap_or(false)),
                 // Its parameter of that name, or its wall's for a door or window with none; a phase it holds none of
                 // is the project's first.
                 From::Param => match phasing::value(m, self.e, name) {
@@ -636,7 +701,7 @@ impl Row<'_> {
                 },
             };
         }
-        let cat = self.e.category();
+        let cat = self.cat;
         if let Some(p) = m.parameters.get(name).filter(|p| p.categories.iter().any(|c| c == cat)) {
             return match self.e.params().and_then(|ps| ps.get(name)) {
                 Some(v) => v.clone(),
@@ -663,6 +728,29 @@ impl Row<'_> {
 fn fine(x: f64) -> f64 {
     let r = (x * 1e6).round() / 1e6 + 0.0;
     if r.is_finite() { r } else { x }
+}
+
+/// What a schedule of category `cat` has a row for, each with its JSON: an element of the category. Of mass floors, a mass
+/// at each level it crosses, with its floor area there, its perimeter and the volume up to the next such level or its top.
+fn sources<'a>(m: &'a Model, cat: &str) -> Vec<(&'a Element, Value)> {
+    if cat != "massfloor" {
+        return m.elements.iter().filter(|(_, e)| e.category() == cat).map(|(id, e)| (e, element_json(m, *id))).collect();
+    }
+    let mut out = Vec::new();
+    for (&id, e) in &m.elements {
+        let Element::Mass(ms) = e else { continue };
+        let (area, perimeter) = (crate::geom::area(&ms.boundary).abs(), crate::geom::perimeter(&ms.boundary));
+        for (level, _, up) in m.mass_slices(ms) {
+            out.push((
+                e,
+                serde_json::json!({
+                    "id": id, "mass": ms.name, "level": level, "area_m2": crate::commands::m2(area),
+                    "perimeter_m": (perimeter / 10.0).round() / 100.0, "volume_m3": (area * up / 1e7).round() / 100.0,
+                }),
+            ));
+        }
+    }
+    out
 }
 
 /// Schedule `sc`'s table: a column for each of its fields, a row for each element its filters keep,
@@ -694,8 +782,8 @@ pub fn table(m: &Model, sc: &Schedule) -> Result<Table, String> {
     };
     // Each element its filters keep: its cells, and its sort fields' values.
     let mut rows: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
-    for (&id, e) in m.elements.iter().filter(|(_, e)| e.category() == cat) {
-        let mut row = Row { m, e, json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
+    for (e, json) in sources(m, &cat) {
+        let mut row = Row { m, e, cat: &cat, json, formulas: &formulas, done: BTreeMap::new() };
         if sc.filters.iter().all(|f| keeps(f, &row.get(&f.field), kind_of(&f.field), m.units)) {
             let cells = fields.iter().map(|f| row.get(&f.name)).collect();
             rows.push((cells, sort.iter().map(|(n, _)| sorts_as(m, &cat, n, row.get(n))).collect()));

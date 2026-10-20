@@ -1,6 +1,8 @@
 //! The engine driven the way every front end drives it: commands with JSON params, and checked
 //! through commands too.
 
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
 use crate::engine::{Session, commands};
@@ -42,6 +44,184 @@ fn doors_and_windows_find_the_wall_under_a_point() {
     assert_eq!(w["host"].as_u64(), Some(ids[1]));
     let e = s.execute("door", &json!({"at": [4000, 3000]})).unwrap_err();
     assert!(e.contains("no wall"), "{e}");
+}
+
+#[test]
+fn a_door_or_window_is_sketched_as_the_command_would_make_it() {
+    let mut s = Session::new();
+    house(&mut s);
+    let view = crate::render::View { scale: 0.1, cx: 4000.0, cy: 3000.0, width: 1000, height: 800 };
+    for (is_door, at) in [(true, [2000, 30]), (false, [5000, 0])] {
+        let p = json!({"at": at, "level": 1});
+        let sketched = crate::opening_of(&s.model, &p, is_door).unwrap();
+        let d = crate::render::sketch(&s.model, view, 999, &sketched);
+        assert!(d.owners.iter().all(|o| *o == Some(999)));
+        assert!(d.prims.iter().any(|p| matches!(p, crate::render::Prim::Fill { .. })), "the gap it leaves in the wall");
+        assert!(d.prims.len() >= 4, "the gap, its jambs and its swing or glass: {}", d.prims.len());
+        let made = run(&mut s, if is_door { "door" } else { "window" }, p);
+        assert_eq!(s.model.elements[&made["id"].as_u64().unwrap()], sketched, "the same element the click makes");
+    }
+    assert!(crate::opening_of(&s.model, &json!({"at": [4000, 3000], "level": 1}), true).unwrap_err().contains("no wall"));
+}
+
+#[test]
+fn a_point_knows_how_far_it_stands_from_the_nearest_wall_centre_line_or_grid_each_way() {
+    let mut s = Session::new();
+    // Walls 3 (south), 4 (east), 5 (north) and 6 (west).
+    house(&mut s);
+    let reach = |s: &Session, at: P2| s.model.clearances(1, at).map(|c| c.map(|c| (c.distance, c.to.id)));
+    // East, north, west, south.
+    assert_eq!(reach(&s, P2(3000.0, 2000.0)), [Some((5000.0, 4)), Some((4000.0, 5)), Some((3000.0, 6)), Some((2000.0, 3))]);
+    // A grid nearer than the wall takes its place; one that doesn't reach the point's row is passed over.
+    let g = run(&mut s, "grid", json!({"start": [1000, -500], "end": [1000, 6500]}))["id"].as_u64().unwrap();
+    run(&mut s, "grid", json!({"start": [2000, 3000], "end": [2000, 4000]}));
+    assert_eq!(reach(&s, P2(3000.0, 2000.0))[2], Some((2000.0, g)));
+    assert_eq!(reach(&s, P2(3000.0, 2000.0))[0], Some((5000.0, 4)));
+    // Standing on a line, it is that line's nearest one on neither side: the next one is.
+    assert_eq!(reach(&s, P2(1000.0, 2000.0))[2], Some((1000.0, 6)));
+    // Outside the box only the way back in finds a wall, and the lines that end short of it find none.
+    assert_eq!(reach(&s, P2(9000.0, 3000.0)), [None, None, Some((1000.0, 4)), None]);
+    // Which way each looks, and that a clearance is the distance along it to its line.
+    let c = s.model.clearances(1, P2(3000.0, 2000.0));
+    assert_eq!(
+        [c[0], c[1], c[2], c[3]].map(|c| c.map(|c| c.toward)),
+        [Some(P2(1.0, 0.0)), Some(P2(0.0, 1.0)), Some(P2(-1.0, 0.0)), Some(P2(0.0, -1.0))]
+    );
+}
+
+#[test]
+fn a_views_scale_and_detail_level_are_its_own_set_by_commands_and_kept_in_the_file() {
+    let mut s = Session::new();
+    house(&mut s);
+    // The section is 7, looking north from the south.
+    run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}));
+    let g = |s: &Session, id| crate::graphics::graphics_of(&s.model, id).cloned().unwrap();
+    // Asking changes nothing, and is no undo step: a view has none until one is set, and draws as fine.
+    let steps = s.history().len();
+    let r = run(&mut s, "scale", json!({"view": "Level 1"}));
+    assert_eq!((r["view"].as_u64(), &r["scale"]), (Some(1), &json!(null)));
+    assert_eq!(run(&mut s, "detail", json!({"view": 1}))["detail"], "fine");
+    assert_eq!(s.history().len(), steps);
+    // Set, on a plan and on a section, each one undo step; what the view hides stays hidden.
+    run(&mut s, "graphics", json!({"view": 1, "hide": ["door"]}));
+    assert_eq!(run(&mut s, "scale", json!({"view": "Level 1", "scale": 50}))["scale"], 50.0);
+    assert_eq!(run(&mut s, "detail", json!({"view": 1, "detail": "coarse"}))["detail"], "coarse");
+    run(&mut s, "scale", json!({"view": 7, "scale": 20.5}));
+    run(&mut s, "detail", json!({"view": "Section 1", "detail": "Medium"}));
+    assert_eq!((g(&s, 1).scale, g(&s, 1).detail, g(&s, 1).hides("door")), (Some(50.0), crate::graphics::Detail::Coarse, true));
+    assert_eq!((g(&s, 7).scale, g(&s, 7).detail), (Some(20.5), crate::graphics::Detail::Medium));
+    assert_eq!(&s.history()[steps + 1..], ["View Scale", "Detail Level", "View Scale", "Detail Level"]);
+    // A view with the scale it already has changes nothing.
+    run(&mut s, "scale", json!({"view": 1, "scale": 50}));
+    assert_eq!(s.history().len(), steps + 5);
+    // Saved and opened again, the same; null takes a scale away.
+    let project = temp("view-settings.bimcraft");
+    run(&mut s, "save", json!({"path": project}));
+    let saved = s.model.clone();
+    run(&mut s, "open", json!({"path": project}));
+    assert_eq!(*s.model, *saved);
+    let _ = std::fs::remove_file(project);
+    run(&mut s, "scale", json!({"view": 1, "scale": null}));
+    assert_eq!(g(&s, 1).scale, None);
+    run(&mut s, "undo", json!({}));
+    assert_eq!(g(&s, 1).scale, Some(50.0));
+    // What isn't a scale or a level of detail, or a view that has one, is refused and changes nothing.
+    let was = s.model.clone();
+    for (cmd, p) in [
+        ("scale", json!({"view": 1, "scale": 0})),
+        ("scale", json!({"view": 1, "scale": -100})),
+        ("scale", json!({"view": 1, "scale": 1e9})),
+        ("scale", json!({"view": 1, "scale": "1:100"})),
+        ("scale", json!({"view": 3, "scale": 100})),
+        ("detail", json!({"view": 1, "detail": "ultra"})),
+        ("detail", json!({"view": 1, "detail": 3})),
+        ("detail", json!({"view": 3, "detail": "fine"})),
+    ] {
+        let e = s.execute(cmd, &p).unwrap_err();
+        assert!(e.contains(cmd), "{cmd} {p}: {e}");
+    }
+    assert!(s.execute("detail", &json!({"view": 1, "detail": "ultra"})).unwrap_err().contains("coarse, medium or fine"));
+    assert!(Arc::ptr_eq(&s.model, &was));
+    // A project that holds a scale it can't (a hand-edited file) is refused whole.
+    let mut m = (*s.model).clone();
+    if let Some(crate::model::Element::Level(l)) = m.elements.get_mut(&1) {
+        l.graphics.scale = Some(0.0);
+    }
+    assert!(m.check().unwrap_err().contains("scale"));
+}
+
+#[test]
+fn a_view_placed_on_a_sheet_takes_the_scale_it_has_unless_it_is_told_another() {
+    let mut s = Session::new();
+    house(&mut s);
+    run(&mut s, "section", json!({"start": [-1000, 3000], "end": [9000, 3000]}));
+    run(&mut s, "scale", json!({"view": 1, "scale": 50}));
+    run(&mut s, "sheet", json!({}));
+    // The plan's viewport takes its 1 : 50, the section's, with none, the usual 1 : 100.
+    let vp = |s: &mut Session, view: u64, scale: Option<u64>| {
+        let mut p = json!({"sheet": "A101", "view": view});
+        if let Some(n) = scale {
+            p["scale"] = json!(n);
+        }
+        let id = run(s, "place", p)["id"].as_u64().unwrap();
+        run(s, "elements", json!({"category": "viewport"}))["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["id"].as_u64() == Some(id))
+            .map(|e| e["scale"].clone())
+            .unwrap()
+    };
+    assert_eq!(vp(&mut s, 1, None), json!(50.0));
+    assert_eq!(vp(&mut s, 7, None), json!(100.0));
+    let other = run(&mut s, "section", json!({"start": [-1000, 2000], "end": [9000, 2000]}))["id"].as_u64().unwrap();
+    run(&mut s, "scale", json!({"view": other, "scale": 20}));
+    assert_eq!(vp(&mut s, other, Some(200)), json!(200.0), "told another, it is that");
+}
+
+#[test]
+fn the_3d_view_has_a_visual_style_that_a_command_sets_and_the_file_keeps() {
+    let mut s = Session::new();
+    house(&mut s);
+    // Asking makes no 3D view, and says it is shaded.
+    assert_eq!(run(&mut s, "visual_style", json!({}))["style"], "shaded");
+    assert!(s.model.default_3d().is_none());
+    let steps = s.history().len();
+    // Setting one makes the default view, with its style in its graphics, as one undo step.
+    assert_eq!(run(&mut s, "visual_style", json!({"style": "wireframe"}))["style"], "wireframe");
+    let view = s.model.default_3d().unwrap();
+    let style = |s: &Session| crate::graphics::graphics_of(&s.model, view).unwrap().style;
+    assert_eq!(style(&s), crate::graphics::VisualStyle::Wireframe);
+    assert_eq!(s.history().len(), steps + 1);
+    assert_eq!(s.history().last(), Some(&"Visual Style"));
+    // Any case, spaces for underscores; the view by name or id; the one it has changes nothing.
+    assert_eq!(run(&mut s, "visual_style", json!({"style": "Hidden Line", "view": "{3D}"}))["style"], "hidden_line");
+    assert_eq!(run(&mut s, "visual_style", json!({"style": "HIDDENLINE", "view": view}))["style"], "hidden_line");
+    assert_eq!(s.history().len(), steps + 2);
+    run(&mut s, "graphics", json!({"view": "{3D}", "hide": ["door"]}));
+    assert!(crate::graphics::graphics_of(&s.model, view).unwrap().hides("door"), "what it hides is kept apart from its style");
+    // Undo takes it back, redo returns it; saved and opened again, the same.
+    run(&mut s, "undo", json!({}));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(style(&s), crate::graphics::VisualStyle::Wireframe);
+    run(&mut s, "redo", json!({}));
+    run(&mut s, "redo", json!({}));
+    assert_eq!(style(&s), crate::graphics::VisualStyle::HiddenLine);
+    let project = temp("visual-style.bimcraft");
+    run(&mut s, "save", json!({"path": project}));
+    let saved = s.model.clone();
+    run(&mut s, "open", json!({"path": project}));
+    assert_eq!(*s.model, *saved);
+    let _ = std::fs::remove_file(project);
+    // Not a style, and not a 3D view: refused, and nothing changes.
+    let was = s.model.clone();
+    for p in [json!({"style": "x-ray"}), json!({"style": 7}), json!({"style": "shaded", "view": 1}), json!({"style": "shaded", "view": 3})]
+    {
+        let e = s.execute("visual_style", &p).unwrap_err();
+        assert!(e.contains("visual_style"), "{p}: {e}");
+    }
+    assert!(s.execute("visual_style", &json!({"style": "x-ray"})).unwrap_err().contains("shaded, hidden_line or wireframe"));
+    assert!(Arc::ptr_eq(&s.model, &was));
 }
 
 #[test]
@@ -1303,13 +1483,36 @@ fn hostile_params_never_panic_or_break_the_model() {
         json!({"view": 1, "options": {"S": 5, "T": null}}),
         json!({"view": 1, "phase": "nowhere", "phase_filter": "nowhere"}),
         json!({"view": 1, "options": {"nowhere": "x"}}),
+        json!({"view": 1, "options": {"nowhere": "x"}}),
+        json!({"view": 1, "scale": "x"}),
+        json!({"view": 1, "scale": -1}),
+        json!({"view": 1, "detail": 5}),
+        json!({"view": 1, "detail": "ultra"}),
+        json!({"view": "{3D}", "style": 7}),
+        json!({"view": "{3D}", "style": "wireframe"}),
         json!({"id": 3, "params": {"Phase Created": 5, "Phase Demolished": [], "Design Option": {}}}),
         json!({"id": 3, "params": {"Phase Created": "New Construction", "Phase Demolished": "Existing"}}),
+        // The mass the sweep starts with is 7.
+        json!({"boundary": [[0, 0], [1e300, 0], [0, 1e300]], "height": 1e300}),
+        json!({"boundary": [[0, 0], [1, 0], [0, 1]], "top_level": 99, "name": 5}),
+        json!({"mass": u64::MAX}),
+        json!({"mass": -1}),
+        json!({"mass": 3}),
+        json!({"mass": 7, "faces": [99, -1, "x", 1e300]}),
+        json!({"mass": 7, "faces": "top"}),
+        json!({"mass": 7, "faces": [0, 0, 1], "location": 5}),
+        json!({"mass": 7, "type": 5, "slope": 1e300, "overhang": -1e9}),
+        json!({"mass": 7, "type": "Nothing"}),
+        json!({"id": 7, "height": 1e300, "top_level": 1}),
+        json!({"id": 7, "boundary": [[0, 0], [1e300, 1e300], [0, 1]]}),
+        json!({"id": 7, "level": 1e300, "base_offset": f64::MAX}),
+        json!({"id": 7, "params": {"Phase Created": "Existing"}}),
     ];
     for cmd in commands().iter().filter(|c| !matches!(c.id, "open" | "save")) {
         for p in &hostile {
             let mut s = Session::new();
             house(&mut s);
+            let _ = s.execute("mass", &json!({"boundary": block(), "height": 9000}));
             let _ = s.execute(cmd.id, p);
             assert_eq!(s.model.check(), Ok(()), "{} {p} left a broken model", cmd.id);
         }
@@ -1754,6 +1957,7 @@ fn describe(m: &Model, id: u64) -> String {
         Some("floor") => &["level", "area_m2", "slope", "top", "openings"],
         Some("ceiling") => &["level", "offset", "thickness", "area_m2", "openings"],
         Some("shaft") => &["level", "base_offset", "top_level", "height", "boundary"],
+        Some("mass") => &["name", "level", "base_offset", "top_level", "height", "boundary", "area_m2", "volume_m3"],
         Some("room") => &["level", "name", "number", "area_m2"],
         Some("column") => &["level", "at", "width", "depth", "round", "height", "base_offset"],
         Some("stair") => &["level", "start", "angle", "width", "risers", "riser_height", "length", "landings"],
@@ -1868,6 +2072,19 @@ fn ifc_files_open_as_the_building_they_describe() {
     let square = json!([[60000, 0], [76000, 0], [76000, 16000], [60000, 16000]]);
     let court = json!([[[66000, 6000], [70000, 6000], [70000, 10000], [66000, 10000]]]);
     run(&mut s, "roof", json!({"level": "Level 2", "boundary": square, "courtyards": court, "gables": [5]}));
+    // Masses: one 500 mm over Level 1 up to Level 2, holding a parameter, and one on Level 2 with no top level.
+    run(&mut s, "parameter", json!({"name": "Use", "kind": "text", "categories": ["mass"]}));
+    let tower = run(
+        &mut s,
+        "mass",
+        json!({"boundary": [[80000, 0], [90000, 0], [90000, 6000], [80000, 6000]], "name": "Tower", "base_offset": 500}),
+    );
+    run(&mut s, "modify", json!({"id": tower["id"], "params": {"Use": "Housing"}}));
+    run(
+        &mut s,
+        "mass",
+        json!({"level": "Level 2", "boundary": [[80000, 10000], [86000, 10000], [86000, 14000]], "height": 4200, "name": "Wing"}),
+    );
     let path = temp("round-trip.ifc");
     run(&mut s, "save", json!({"path": path}));
     let mut t = Session::new();
@@ -1877,11 +2094,19 @@ fn ifc_files_open_as_the_building_they_describe() {
     assert_eq!(t.path, None, "an import is a new project: saving asks where");
     let levels = |m: &Model| m.levels().into_iter().map(|(_, l)| (l.name.clone(), l.elevation)).collect::<Vec<_>>();
     assert_eq!(levels(&t.model), levels(&s.model));
-    for category in ["wall", "door", "window", "floor", "room", "column", "stair", "roof", "ceiling", "shaft", "ramp", "railing"] {
+    for category in ["wall", "door", "window", "floor", "room", "column", "stair", "roof", "ceiling", "shaft", "ramp", "railing", "mass"] {
         let (before, after) = (building(&s.model, category), building(&t.model, category));
         assert!(!before.is_empty(), "{category}");
         assert_eq!(after, before, "{category}");
     }
+    // A mass keeps its parameter's value too.
+    let uses: Vec<Value> = t
+        .model
+        .elements
+        .values()
+        .filter_map(|e| if let crate::model::Element::Mass(ms) = e { ms.params.get("Use").cloned() } else { None })
+        .collect();
+    assert_eq!(uses, [json!("Housing")]);
     // It saves as a project like any other.
     let project = temp("imported.bimcraft");
     run(&mut t, "save", json!({"path": project}));
@@ -3445,4 +3670,252 @@ fn favorites_keep_materials_and_families_for_every_project() {
     for f in [file, picture, bench_file] {
         let _ = std::fs::remove_file(f);
     }
+}
+
+// ---------- massing ----------
+
+fn block() -> Value {
+    json!([[0, 0], [10000, 0], [10000, 6000], [0, 6000]])
+}
+
+/// Levels at 0, 3000, 6000 and 9000 mm, named Level 1 to 4 (1 and 2 are the project's), and a 10 x 6 m mass on the first up to the last.
+fn tower(s: &mut Session) -> (u64, [u64; 4]) {
+    let l3 = run(s, "level", json!({"elevation": 6000, "name": "Level 3"}))["id"].as_u64().unwrap();
+    let l4 = run(s, "level", json!({"elevation": 9000, "name": "Level 4"}))["id"].as_u64().unwrap();
+    let id = run(s, "mass", json!({"boundary": block(), "top_level": l4, "name": "Tower"}))["id"].as_u64().unwrap();
+    (id, [1, 2, l3, l4])
+}
+
+#[test]
+fn a_mass_is_a_footprint_extruded_from_a_level_up_to_a_level_or_a_height() {
+    let mut s = Session::new();
+    // Drawn clockwise it comes back counter-clockwise; with no top it goes up to the next level, as a shaft does.
+    let r = run(&mut s, "mass", json!({"boundary": [[0, 0], [0, 6000], [10000, 6000], [10000, 0]], "name": "Block"}));
+    let id = r["id"].as_u64().unwrap();
+    assert_eq!((r["area_m2"].as_f64(), r["volume_m3"].as_f64(), r["height"].as_f64()), (Some(60.0), Some(180.0), Some(3000.0)));
+    let e = element(&mut s, id);
+    assert_eq!((e["level"].as_u64(), e["top_level"].as_u64(), e["name"].as_str()), (Some(1), Some(2), Some("Block")));
+    assert_eq!(e["boundary"], json!([[10000.0, 0.0], [10000.0, 6000.0], [0.0, 6000.0], [0.0, 0.0]]));
+    // Named in the project's language, 500 mm over its level and `height` tall.
+    let tall = run(&mut s, "MS", json!({"boundary": block(), "height": 9000, "base_offset": 500}));
+    assert_eq!(tall["volume_m3"], 540.0);
+    let tall = tall["id"].as_u64().unwrap();
+    assert_eq!(element(&mut s, tall)["name"], "Mass");
+    assert_eq!(count(&mut s, "masses"), 2);
+    // Changed like any element, and checked like the rest of the model.
+    run(&mut s, "modify", json!({"id": id, "top_level": null, "height": 4500}));
+    // 4.5 m up from Level 1: it crosses Levels 1 and 2, so its gross floor area is two floors of it.
+    let e = element(&mut s, id);
+    let facts = (e["volume_m3"].as_f64(), e["gross_floor_area_m2"].as_f64(), e["levels"].as_array().map(Vec::len));
+    assert_eq!(facts, (Some(270.0), Some(120.0), Some(2)));
+    for (p, says) in [
+        (json!({"id": id, "height": -5}), "height"),
+        (json!({"id": id, "top_level": 1, "height": 0}), "above its base"),
+        (json!({"id": id, "boundary": [[0, 0], [1000, 0]]}), "points"),
+        (json!({"id": id, "level": 99}), "level"),
+        (json!({"id": id, "base_offset": 1e12}), "base_offset"),
+    ] {
+        let e = s.execute("modify", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    assert_eq!(element(&mut s, id)["volume_m3"], 270.0, "refused, it's as it was");
+    // It holds the project's parameters for masses.
+    run(&mut s, "parameter", json!({"name": "Use", "kind": "text", "categories": ["mass"]}));
+    run(&mut s, "modify", json!({"id": id, "params": {"Use": "Housing"}}));
+    assert_eq!(element(&mut s, id)["params"]["Use"], "Housing");
+    // Move, copy, mirror and rotate take its footprint along.
+    run(&mut s, "move", json!({"ids": [id], "by": [1000, 500]}));
+    assert_eq!(element(&mut s, id)["boundary"][0], json!([11000.0, 500.0]));
+    let made = run(&mut s, "copy", json!({"ids": [id], "by": [0, 8000]}))["ids"][0].as_u64().unwrap();
+    assert_eq!(element(&mut s, made)["boundary"][0], json!([11000.0, 8500.0]));
+    assert_eq!(element(&mut s, made)["params"]["Use"], "Housing");
+    let mirrored = run(&mut s, "MM", json!({"ids": [id], "axis": [[0, 0], [0, 1000]], "copy": true}))["ids"][0].as_u64().unwrap();
+    assert_eq!(element(&mut s, mirrored)["area_m2"], 60.0, "still counter-clockwise");
+    run(&mut s, "rotate", json!({"ids": [id], "about": [0, 0], "angle": 90}));
+    assert_eq!(element(&mut s, id)["area_m2"], 60.0);
+    // The project file keeps masses as they are.
+    let file = temp("mass.bimcraft");
+    run(&mut s, "save", json!({"path": file}));
+    let mut t = Session::new();
+    run(&mut t, "open", json!({"path": file}));
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(t.model.elements, s.model.elements);
+    // One undo step each: the rotation, the mirrored copy and the copy.
+    for _ in 0..3 {
+        run(&mut s, "undo", json!({}));
+    }
+    assert_eq!((count(&mut s, "mass"), element(&mut s, id)["boundary"][0].clone()), (2, json!([11000.0, 500.0])));
+    // A level it stands on can't go while it does.
+    assert!(s.execute("delete", &json!({"ids": [1]})).unwrap_err().contains("level"));
+}
+
+#[test]
+fn mass_floors_make_a_floor_for_each_level_the_mass_crosses() {
+    let mut s = Session::new();
+    let (id, [l1, l2, l3, l4]) = tower(&mut s);
+    // At Levels 1, 2 and 3; the top level is the mass's roof, not a floor.
+    let r = run(&mut s, "MF", json!({"mass": id}));
+    let floors: Vec<u64> = r["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    assert_eq!(floors.len(), 3);
+    assert_eq!(count(&mut s, "floor"), 3);
+    for (f, level) in floors.iter().zip([l1, l2, l3]) {
+        let e = element(&mut s, *f);
+        assert_eq!((e["level"].as_u64(), e["area_m2"].as_f64(), e["boundary"].clone()), (Some(level), Some(60.0), block_ccw()));
+    }
+    assert!(!floors.iter().any(|f| s.model.elements[f].category() != "floor"));
+    let _ = l4;
+    // Over its base, it starts at the first level it reaches; under a level, it makes no floor there.
+    let high = run(&mut s, "mass", json!({"boundary": block(), "base_offset": 500, "height": 7000}))["id"].as_u64().unwrap();
+    let r = run(&mut s, "mass_floors", json!({"mass": high}));
+    let levels: Vec<u64> = r["ids"].as_array().unwrap().iter().map(|f| element_level(&s, f.as_u64().unwrap())).collect();
+    assert_eq!(levels, [l2, l3]);
+    // With no `mass`, every mass; with none, it says so.
+    assert_eq!(run(&mut s, "mass_floors", json!({}))["ids"].as_array().map(Vec::len), Some(5));
+    let mut empty = Session::new();
+    assert!(empty.execute("mass_floors", &json!({})).unwrap_err().contains("no mass"));
+    // The floor type is checked, a wall isn't a mass, and a failure leaves no floors behind.
+    let wall = run(&mut s, "wall", json!({"points": [[0, 0], [1000, 0]]}))["ids"][0].as_u64().unwrap();
+    let before = s.model.clone();
+    assert!(s.execute("mass_floors", &json!({"mass": id, "type": "Nothing"})).unwrap_err().contains("type"));
+    assert!(s.execute("mass_floors", &json!({"mass": wall})).unwrap_err().contains("isn't a mass"));
+    assert_eq!(*s.model, *before);
+}
+
+fn block_ccw() -> Value {
+    json!([[0.0, 0.0], [10000.0, 0.0], [10000.0, 6000.0], [0.0, 6000.0]])
+}
+
+fn element_level(s: &Session, id: u64) -> u64 {
+    match &s.model.elements[&id] {
+        crate::model::Element::Floor(f) => f.level,
+        other => panic!("{other:?} isn't a floor"),
+    }
+}
+
+#[test]
+fn a_schedule_of_mass_floors_gives_each_masses_floor_area_and_volume_on_each_level() {
+    let mut s = Session::new();
+    let (_, _) = tower(&mut s);
+    // Another, 7.5 m tall from Level 1: its last floor is only half a storey of volume.
+    run(&mut s, "mass", json!({"boundary": [[20000, 0], [25000, 0], [25000, 4000], [20000, 4000]], "height": 7500, "name": "Annex"}));
+    let r = run(&mut s, "schedule", json!({"category": "massfloors", "sort": ["Mass", "Level"]}));
+    assert_eq!(r["columns"], json!(["Mass", "Level", "Area (m²)", "Perimeter", "Volume"]));
+    assert_eq!(
+        r["rows"],
+        json!([
+            ["Annex", "Level 1", 20.0, 18000.0, 60.0],
+            ["Annex", "Level 2", 20.0, 18000.0, 60.0],
+            ["Annex", "Level 3", 20.0, 18000.0, 30.0],
+            ["Tower", "Level 1", 60.0, 32000.0, 180.0],
+            ["Tower", "Level 2", 60.0, 32000.0, 180.0],
+            ["Tower", "Level 3", 60.0, 32000.0, 180.0],
+        ])
+    );
+    // Summed per mass, the gross floor area and the volume.
+    let r = run(
+        &mut s,
+        "schedule",
+        json!({"name": "Gross", "category": "massfloors", "fields": ["Mass", {"name": "Area", "total": true}, {"name": "Volume", "total": true}], "sort": ["Mass"], "grouped": true}),
+    );
+    assert_eq!(r["rows"], json!([["Annex", 60.0, 150.0], ["Tower", 180.0, 540.0]]));
+    assert_eq!(r["totals"], json!([null, 240.0, 690.0]));
+    // The masses themselves are a schedule too: one row each.
+    let fields = json!(["Name", "Level", "Height", "Area", "Volume", "Gross Floor Area"]);
+    let r = run(&mut s, "schedule", json!({"category": "masses", "fields": fields, "sort": ["Name"]}));
+    assert_eq!(r["rows"], json!([["Annex", "Level 1", 7500.0, 20.0, 150.0, 60.0], ["Tower", "Level 1", 9000.0, 60.0, 540.0, 180.0]]));
+}
+
+#[test]
+fn walls_floors_and_roofs_by_face_follow_a_mass() {
+    let mut s = Session::new();
+    let id = run(&mut s, "mass", json!({"boundary": block()}))["id"].as_u64().unwrap();
+    // A wall on each edge, with its exterior finish on it and facing out, up to the mass's top: so together they
+    // stand inside the footprint, filling it out to its edges.
+    let walls: Vec<u64> = run(&mut s, "WB", json!({"mass": id}))["ids"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap()).collect();
+    assert_eq!(walls.len(), 4);
+    let w = element(&mut s, walls[0]);
+    assert_eq!(
+        (w["start"].clone(), w["end"].clone(), w["level"].as_u64(), w["top_level"].as_u64()),
+        (json!([10000.0, 0.0]), json!([0.0, 0.0]), Some(1), Some(2))
+    );
+    let ring: Vec<P2> = walls.iter().flat_map(|w| crate::walls::outline(&s.model, *w)).collect();
+    let (lo, hi) = (ring.iter().fold(f64::MAX, |a, p| a.min(p.0)), ring.iter().fold(f64::MIN, |a, p| a.max(p.0)));
+    let (south, north) = (ring.iter().fold(f64::MAX, |a, p| a.min(p.1)), ring.iter().fold(f64::MIN, |a, p| a.max(p.1)));
+    assert!((lo.abs() + (hi - 10000.0).abs() + south.abs() + (north - 6000.0).abs()) < 1e-6, "{lo} {hi} {south} {north}");
+    // Chosen faces, of the wall type asked for; a mass with no top level gives its height.
+    let tall = run(&mut s, "mass", json!({"boundary": block(), "height": 4000, "base_offset": 200}))["id"].as_u64().unwrap();
+    let two = run(&mut s, "wall_by_face", json!({"mass": tall, "faces": [1, 3], "location": "centre"}));
+    assert_eq!(two["ids"].as_array().map(Vec::len), Some(2));
+    let w = element(&mut s, two["ids"][0].as_u64().unwrap());
+    assert_eq!(
+        (w["height"].as_f64(), w["base_offset"].as_f64(), w["start"].clone()),
+        (Some(4000.0), Some(200.0), json!([10000.0, 6000.0]))
+    );
+    for (p, says) in [
+        (json!({"mass": tall, "faces": [4]}), "face"),
+        (json!({"mass": tall, "faces": [-1]}), "face"),
+        (json!({"mass": tall, "faces": ["top"]}), "face"),
+        (json!({"mass": tall, "type": "Nothing"}), "type"),
+        (json!({"mass": 1}), "isn't a mass"),
+        (json!({}), "mass"),
+    ] {
+        let e = s.execute("wall_by_face", &p).unwrap_err();
+        assert!(e.contains(says), "{p}: {e}");
+    }
+    // A floor on the top face: at the top level, or `height` over the base; a roof the same, flat unless it has a slope.
+    let f = run(&mut s, "FB", json!({"mass": id}))["id"].as_u64().unwrap();
+    let e = element(&mut s, f);
+    assert_eq!((e["level"].as_u64(), e["offset"].as_f64().unwrap_or(0.0), e["area_m2"].as_f64()), (Some(2), 0.0, Some(60.0)));
+    let f = run(&mut s, "floor_by_face", json!({"mass": tall}))["id"].as_u64().unwrap();
+    let e = element(&mut s, f);
+    assert_eq!((e["level"].as_u64(), e["offset"].as_f64()), (Some(1), Some(4200.0)));
+    let r = run(&mut s, "RB", json!({"mass": id}))["id"].as_u64().unwrap();
+    let e = element(&mut s, r);
+    assert_eq!((e["level"].as_u64(), e["slope"].as_f64().unwrap_or(0.0), e["boundary"].clone()), (Some(2), 0.0, block_ccw()));
+    let r = run(&mut s, "roof_by_face", json!({"mass": tall, "slope": 20}))["id"].as_u64().unwrap();
+    let e = element(&mut s, r);
+    assert_eq!((e["level"].as_u64(), e["offset"].as_f64(), e["slope"].as_f64()), (Some(1), Some(4200.0), Some(20.0)));
+    // They are ordinary elements from then on: the mass can go and they stay.
+    run(&mut s, "delete", json!({"ids": [id, tall]}));
+    assert_eq!((count(&mut s, "wall"), count(&mut s, "roof")), (6, 2));
+}
+
+#[test]
+fn masses_show_in_plans_sections_and_the_3d_view_and_a_category_hides_them() {
+    use crate::render::{self, Prim};
+    let mut s = Session::new();
+    let walls = house(&mut s);
+    let (id, levels) = tower(&mut s);
+    let dashed = |d: &render::Drawing| {
+        d.prims.iter().zip(&d.owners).filter(|(p, o)| **o == Some(id) && matches!(p, Prim::Line { dash: Some(_), .. })).count()
+    };
+    // Where the plan's cut plane passes through it: Levels 1 to 3, not 4, where it ends.
+    let plans: Vec<usize> = levels.iter().map(|l| dashed(&render::plan(&s.model, *l, 800, 600))).collect();
+    assert_eq!(plans.iter().map(|n| *n > 0).collect::<Vec<_>>(), [true, true, true, false], "{plans:?}");
+    // The plan's cut plane, 1200 mm over Level 1: at a mass's base it passes through it, at its top it doesn't.
+    let base = run(&mut s, "mass", json!({"boundary": block(), "base_offset": 1200, "height": 1800}))["id"].as_u64().unwrap();
+    let top = run(&mut s, "mass", json!({"boundary": block(), "height": 1200}))["id"].as_u64().unwrap();
+    let level_1 = render::plan(&s.model, 1, 800, 600);
+    let of = |who: u64| {
+        level_1.prims.iter().zip(&level_1.owners).filter(|(p, o)| **o == Some(who) && matches!(p, Prim::Line { dash: Some(_), .. })).count()
+    };
+    assert_eq!((of(base) > 0, of(top)), (true, 0));
+    // A section through it: where its line crosses the footprint, from the base to the top.
+    let section = run(&mut s, "section", json!({"start": [5000, -4000], "end": [5000, 10000]}))["id"].as_u64().unwrap();
+    let view = render::section_fit(&s.model, section, 800, 600);
+    let d = render::section(&s.model, section, view);
+    assert!(dashed(&d) > 0);
+    assert!(d.prims.iter().zip(&d.owners).all(|(p, o)| *o != Some(id) || !matches!(p, Prim::Fill { .. })), "outlined, not filled in poché");
+    // Its picture leaves the mass out, so only the outline says where the line cuts it; the walls beyond are there.
+    let picture = render::section_image(&s.model, &crate::view3d::Scene::new(&s.model), section, view, &[]).unwrap();
+    let seen = picture.shows();
+    assert!(!seen.contains(&id) && walls.iter().any(|w| seen.contains(w)), "{seen:?}");
+    // In 3D: a solid up to its top, seen through a little unless the view says otherwise.
+    assert_eq!(crate::view3d::tops_at(&s.model, P2(5000.0, 3000.0)).get(&id), Some(&9000.0));
+    assert!(crate::graphics::Look::of_3d(&s.model).transparency(id) > 0);
+    // `mass` is a category a view may hide, in every drawing.
+    run(&mut s, "graphics", json!({"view": 1, "hide": ["masses"]}));
+    run(&mut s, "graphics", json!({"view": section, "hide": ["mass"]}));
+    assert_eq!((dashed(&render::plan(&s.model, 1, 800, 600)), dashed(&render::section(&s.model, section, view))), (0, 0));
+    assert!(dashed(&render::plan(&s.model, 2, 800, 600)) > 0, "Level 2's plan still shows it");
 }

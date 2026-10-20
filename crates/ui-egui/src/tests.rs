@@ -1018,6 +1018,211 @@ fn a_selected_walls_temporary_dimension_sets_its_length() {
 }
 
 #[test]
+fn a_selected_doors_temporary_dimensions_set_where_it_stands() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
+    let door = ids(&h, "door")[0];
+    click(&mut h, P2(2000.0, 0.0));
+    assert_eq!(h.state().selection, [door]);
+    // From each end of its wall to the middle of the door.
+    assert!(h.query_by_label("Temporary dimension 2000").is_some());
+    h.get_by_label("Temporary dimension 6000").click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text("5000".into()));
+    h.run();
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, door, "offset"), json!(3000.0), "5000 from the far end");
+    assert!(h.query_by_label("Temporary dimension 3000").is_some());
+}
+
+/// Click the number of a temporary dimension and type another.
+fn retype_dimension(h: &mut Harness<BimApp>, was: &str, now: &str) {
+    h.get_by_label(&format!("Temporary dimension {was}")).click();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.event(Event::Text(now.into()));
+    h.run();
+    key(h, Key::Enter);
+}
+
+#[test]
+fn a_selected_columns_temporary_dimensions_set_how_far_it_stands_from_the_walls() {
+    let mut h = app(&format!("{BOX}\ncolumn {{\"at\": [3000, 2000]}}"));
+    let column = ids(&h, "column")[0];
+    click(&mut h, P2(3000.0, 2000.0));
+    assert_eq!(h.state().selection, [column]);
+    // To the walls east, north, west and south of it.
+    for n in ["5000", "4000", "3000", "2000"] {
+        assert!(h.query_by_label(&format!("Temporary dimension {n}")).is_some(), "{n}");
+    }
+    retype_dimension(&mut h, "3000", "1000");
+    assert_eq!(field(&h, column, "at"), json!([1000.0, 2000.0]), "1000 from the west wall");
+    assert_eq!(h.state().session.history().last(), Some(&"Move"));
+    assert!(h.query_by_label("Temporary dimension 7000").is_some(), "the east one follows");
+    // From the south wall instead: 2000 up goes to 500.
+    retype_dimension(&mut h, "2000", "500");
+    assert_eq!(field(&h, column, "at"), json!([1000.0, 500.0]));
+    // What isn't a length moves nothing, and says so.
+    let steps = h.state().session.history().len();
+    retype_dimension(&mut h, "1000", "far");
+    assert_eq!(h.state().session.history().len(), steps);
+    assert!(h.state().status.error);
+}
+
+#[test]
+fn a_selected_components_temporary_dimensions_set_how_far_it_stands_from_a_grid_or_wall() {
+    let mut h = app(&format!(
+        "{BOX}\ngrid {{\"start\": [1000, -500], \"end\": [1000, 6500]}}\n\
+         component {{\"family\": \"Table\", \"type\": \"1600 x 900\", \"at\": [3000, 2500]}}"
+    ));
+    let table = ids(&h, "component")[0];
+    // Its top is an outline: click on its east edge.
+    click(&mut h, P2(3800.0, 2500.0));
+    assert_eq!(h.state().selection, [table]);
+    // East 5000 to the wall, north 3500, west 2000 to the grid, south 2500.
+    for n in ["5000", "3500", "2000", "2500"] {
+        assert!(h.query_by_label(&format!("Temporary dimension {n}")).is_some(), "{n}");
+    }
+    retype_dimension(&mut h, "5000", "4000");
+    assert_eq!(field(&h, table, "at"), json!([4000.0, 2500.0]));
+    assert!(h.query_by_label("Temporary dimension 3000").is_some(), "west is now 3000 from the grid");
+}
+
+#[test]
+fn the_column_and_component_tools_show_how_far_a_click_would_stand_from_the_walls() {
+    for (label, east, north, west, south) in [("Column", "5000", "4000", "3000", "2000"), ("Component", "5000", "3500", "3000", "2500")] {
+        let mut h = app(BOX);
+        tool(&mut h, label);
+        let at = P2(3000.0, if label == "Column" { 2000.0 } else { 2500.0 });
+        h.hover_at(h.state().screen(at));
+        h.run();
+        let text = painted_text(&h);
+        for n in [east, north, west, south] {
+            assert!(text.contains(&n.to_string()), "{label} {n}: {text:?}");
+        }
+        assert!(h.state().session.model.elements.values().all(|e| !matches!(e, Element::Column(_) | Element::Component(_))));
+    }
+}
+
+#[test]
+fn the_view_control_bar_sets_a_views_scale_and_detail_level() {
+    use bimcraft_core::graphics::Detail;
+    let mut h = app(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    let section = ids(&h, "section")[0];
+    let g = |h: &Harness<BimApp>, id| plan_graphics(h, id);
+    // A view with no scale says so (its annotation keeps its size on screen); every view starts at fine.
+    let shown = painted_text(&h);
+    assert!(shown.contains(&"Auto".to_string()) && shown.contains(&"Fine".to_string()), "{shown:?}");
+    press(&mut h, "Scale");
+    press(&mut h, "1 : 50");
+    assert_eq!(g(&h, 1).scale, Some(50.0));
+    assert!(painted_text(&h).contains(&"1 : 50".to_string()));
+    assert_eq!(h.state().session.history().last(), Some(&"View Scale"));
+    press(&mut h, "Detail Level");
+    press(&mut h, "Coarse");
+    assert_eq!(g(&h, 1).detail, Detail::Coarse);
+    assert!(painted_text(&h).contains(&"Coarse".to_string()));
+    // Another scale, typed; what isn't one is said and changes nothing.
+    press(&mut h, "Scale");
+    type_into(&mut h, "Custom", "75");
+    key(&mut h, Key::Enter);
+    assert_eq!(g(&h, 1).scale, Some(75.0));
+    assert!(painted_text(&h).contains(&"1 : 75".to_string()));
+    press(&mut h, "Scale");
+    type_into(&mut h, "Custom", "big");
+    key(&mut h, Key::Enter);
+    assert!(h.state().status.error);
+    assert_eq!(g(&h, 1).scale, Some(75.0));
+    // Auto takes it away again.
+    press(&mut h, "Scale");
+    press(&mut h, "Auto");
+    assert_eq!(g(&h, 1).scale, None);
+    // The section has its own, and the bar shows the one of the view on screen.
+    browse(&mut h, "Section 1");
+    assert_eq!(h.state().sheet, Sheet::Section(section));
+    press(&mut h, "Detail Level");
+    press(&mut h, "Medium");
+    assert_eq!((g(&h, section).detail, g(&h, 1).detail), (Detail::Medium, Detail::Coarse));
+    assert!(painted_text(&h).contains(&"Medium".to_string()));
+}
+
+#[test]
+fn the_view_control_bar_sets_the_3d_views_visual_style_and_wf_hl_and_sd_do_too() {
+    use bimcraft_core::graphics::{Look, VisualStyle};
+    let mut h = app(BOX);
+    let style = |h: &Harness<BimApp>| Look::of_3d(&h.state().session.model).style();
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().sheet, Sheet::View3D);
+    // Shaded until told otherwise; a 3D view has no scale or detail level.
+    assert!(painted_text(&h).contains(&"Shaded".to_string()));
+    assert!(h.query_by_label("Scale").is_none() && h.query_by_label("Detail Level").is_none());
+    press(&mut h, "Visual Style");
+    press(&mut h, "Wireframe");
+    assert_eq!(style(&h), VisualStyle::Wireframe);
+    assert!(painted_text(&h).contains(&"Wireframe".to_string()));
+    assert_eq!(h.state().session.history().last(), Some(&"Visual Style"));
+    // Revit's letters: hidden line, shading, wireframe.
+    for (letters, want) in [("HL", VisualStyle::HiddenLine), ("SD", VisualStyle::Shaded), ("WF", VisualStyle::Wireframe)] {
+        shortcut(&mut h, letters);
+        assert_eq!(style(&h), want, "{letters}");
+    }
+    // A plan has no visual style: the letters say so, and the 3D view keeps its own.
+    h.state_mut().open_sheet(Sheet::Plan(1));
+    h.run();
+    h.state_mut().status = crate::Status { text: String::new(), error: false };
+    shortcut(&mut h, "HL");
+    assert!(h.state().status.error);
+    assert_eq!(style(&h), VisualStyle::Wireframe);
+}
+
+/// The text the last frame painted, whatever widget or painter put it there.
+fn painted_text(h: &Harness<BimApp>) -> Vec<String> {
+    fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+        match s {
+            egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    out
+}
+
+#[test]
+fn the_door_and_window_tools_sketch_what_a_click_would_put_in_the_wall() {
+    for label in ["Door", "Window"] {
+        let mut h = app(BOX);
+        tool(&mut h, label);
+        // Over the south wall, 3 m from its start: 3000 to one end and 5000 to the other, where the opening would be.
+        h.hover_at(h.state().screen(P2(3000.0, 0.0)));
+        h.run();
+        let text = painted_text(&h);
+        assert!(text.contains(&"3000".to_string()) && text.contains(&"5000".to_string()), "{label}: {text:?}");
+        assert!(
+            h.state().session.model.elements.values().all(|e| !matches!(e, Element::Door(_) | Element::Window(_))),
+            "a sketch isn't an element"
+        );
+        // In the middle of the room there's no wall to put it in.
+        h.hover_at(h.state().screen(P2(4000.0, 3000.0)));
+        h.run();
+        assert!(!painted_text(&h).contains(&"3000".to_string()), "{label}");
+    }
+}
+
+#[test]
+fn a_door_pointed_at_a_wall_shows_how_far_it_stands_from_the_ends() {
+    use bimcraft_core::model::Element;
+    let m = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}")).state().session.model.clone();
+    let Some(Element::Door(o)) = m.elements.values().find(|e| matches!(e, Element::Door(_))) else { panic!("no door") };
+    let ctx = egui::Context::default();
+    let painter = egui::Painter::new(ctx, egui::LayerId::background(), egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)));
+    let v = bimcraft_core::render::View { scale: 0.06, cx: 4000.0, cy: 3000.0, width: 800, height: 600 };
+    let spans: Vec<String> = crate::canvas::opening_dimensions(&painter, &m, &v, o).into_iter().map(|(_, text, _)| text).collect();
+    assert_eq!(spans, ["2000", "6000"]);
+}
+
+#[test]
 fn properties_edit_every_selected_element_in_one_step() {
     let mut h = app(SAMPLE);
     let one = find(&h, |e| matches!(e, Element::Door(o) if o.mark == "1"));
@@ -1789,7 +1994,8 @@ phase_filter {"name": "Show New", "delete": true}
 phase_filter {"name": "Show Previous + Demolished", "delete": true}
 phase_filter {"name": "Show Previous + New", "delete": true}
 phase_filter {"name": "Mine", "existing": "overridden"}
-option {"set": "Massing", "options": ["Tall", "Low"]}"#;
+option {"set": "Studies", "options": ["Tall", "Low"]}
+mass {"boundary": [[1000, 1000], [3000, 1000], [3000, 2000], [1000, 2000]], "name": "Block A"}"#;
     let mut h =
         app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}\nroof {{}}\ncomponent {{\"family\": \"WC\", \"at\": [4000, 5850]}}\n{extra}"));
     // The probe finds what it looks for: in English, the same labels are all English.
@@ -1799,7 +2005,7 @@ option {"set": "Massing", "options": ["Tall", "Low"]}"#;
         h.run();
         let tr = |en: &'static str| crate::lang::translated(l, en).unwrap_or(en);
         let mut missed = Vec::new();
-        for tab in ["Architecture", "Annotate", "View", "Manage", "Modify"] {
+        for tab in ["Architecture", "Annotate", "Massing", "View", "Manage", "Modify"] {
             press(&mut h, tr(tab));
             missed.extend(english(&h, l));
         }
@@ -1810,7 +2016,14 @@ option {"set": "Massing", "options": ["Tall", "Low"]}"#;
         let tools = ["Wall", "Roof", "Roof by Extrusion", "Floor", "Ceiling", "Shaft", "Dormer", "Stair", "Ramp", "Railing", "Component"]
             .map(|t| (P2(0.0, 0.0), Some(t)));
         // A wall, a door, a roof's edge, a WC's cistern.
-        let picks = [(P2(5000.0, 0.0), None), (P2(2000.0, 0.0), None), (P2(-600.0, 3000.0), None), (P2(4000.0, 5670.0), None)];
+        // (and a mass's outline).
+        let picks = [
+            (P2(5000.0, 0.0), None),
+            (P2(2000.0, 0.0), None),
+            (P2(-600.0, 3000.0), None),
+            (P2(4000.0, 5670.0), None),
+            (P2(2000.0, 1000.0), None),
+        ];
         for (at, tool) in picks.into_iter().chain(tools) {
             key(&mut h, Key::Escape);
             if let Some(tool) = tool {
@@ -1821,6 +2034,19 @@ option {"set": "Massing", "options": ["Tall", "Low"]}"#;
             }
             missed.extend(english(&h, l));
         }
+        // The Mass tool with its Options Bar and prompts, and the Massing tab with a mass selected.
+        key(&mut h, Key::Escape);
+        press(&mut h, tr("Massing"));
+        press(&mut h, tr("Mass"));
+        click(&mut h, P2(4000.0, 3000.0));
+        missed.extend(english(&h, l));
+        click(&mut h, P2(5000.0, 3000.0));
+        missed.extend(english(&h, l));
+        key(&mut h, Key::Escape);
+        key(&mut h, Key::Escape);
+        click(&mut h, P2(2000.0, 1000.0));
+        press(&mut h, tr("Massing"));
+        missed.extend(english(&h, l));
         // Project Parameters; New Schedule; a schedule, its properties' every tab.
         key(&mut h, Key::Escape);
         press(&mut h, tr("Manage"));
@@ -2840,6 +3066,75 @@ fn visibility_graphics_hides_and_overrides_by_category_in_the_active_view_alone(
     press(&mut h, "Cancel");
 }
 
+/// What Level 1's plan shows of the model it is drawn from, as the view control bar leaves it.
+fn plan_shows(h: &mut Harness<BimApp>, id: Id) -> bool {
+    let model = h.state_mut().view_model();
+    bimcraft_core::graphics::Look::of(&model, 1).shows(id)
+}
+
+#[test]
+fn temporary_hide_and_isolate_change_what_a_view_shows_and_nothing_in_the_project() {
+    let mut h = app(&format!("{BOX}\ndoor {{\"at\": [2000, 0]}}"));
+    let (walls, door) = (ids(&h, "wall"), ids(&h, "door")[0]);
+    let (model, steps) = (Arc::clone(&h.state().session.model), h.state().session.history().len());
+    // Hide Element (HH): the south wall is gone from the view, and the selection with it.
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!(h.state().selection, [walls[0]]);
+    shortcut(&mut h, "HH");
+    assert!(h.state().selection.is_empty());
+    assert!(!plan_shows(&mut h, walls[0]) && plan_shows(&mut h, walls[1]));
+    // Hide Category (HC), from the bar: every wall.
+    click(&mut h, P2(8000.0, 3000.0));
+    press(&mut h, "Temporary Hide/Isolate");
+    press(&mut h, "Hide Category (HC)");
+    assert!(walls.iter().all(|w| !plan_shows(&mut h, *w)) && plan_shows(&mut h, door));
+    // Nothing of it is the project's: no new model, no undo step, nothing to save.
+    assert!(Arc::ptr_eq(&model, &h.state().session.model) && h.state().session.history().len() == steps);
+    assert!(!h.state().dirty());
+    // Reset (HR) brings it all back.
+    shortcut(&mut h, "HR");
+    assert!(walls.iter().all(|w| plan_shows(&mut h, *w)));
+    // Isolate Element (HI): only the door.
+    click(&mut h, P2(2000.0, 0.0));
+    assert_eq!(h.state().selection, [door]);
+    shortcut(&mut h, "HI");
+    assert!(plan_shows(&mut h, door) && walls.iter().all(|w| !plan_shows(&mut h, *w)));
+    shortcut(&mut h, "HR");
+    // Isolate Category (IC): the walls, and not the door.
+    click(&mut h, P2(8000.0, 3000.0));
+    shortcut(&mut h, "IC");
+    assert!(walls.iter().all(|w| plan_shows(&mut h, *w)) && !plan_shows(&mut h, door));
+    // What is hidden for now is the view's: another view has all of it.
+    h.state_mut().sheet = Sheet::View3D;
+    let model = h.state_mut().view_model();
+    assert!(bimcraft_core::graphics::Look::of_3d(&model).shows(door));
+}
+
+#[test]
+fn reveal_hidden_elements_shows_what_the_view_hides_for_good_and_apply_makes_a_hide_stick() {
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "EH");
+    assert!(!plan_shows(&mut h, walls[0]));
+    shortcut(&mut h, "RH");
+    assert!(plan_shows(&mut h, walls[0]), "revealed");
+    let model = h.state_mut().view_model();
+    let magenta = bimcraft_core::graphics::graphics_of(&model, 1).and_then(|g| g.elements.get(&walls[0])).map(|o| o.projection.clone());
+    assert!(magenta.is_some_and(|s| !s.is_empty()), "drawn in its own colour");
+    assert!(!plan_graphics(&h, 1).elements.is_empty() && plan_graphics(&h, 1).elements[&walls[0]].hidden, "the project still hides it");
+    shortcut(&mut h, "RH");
+    assert!(!plan_shows(&mut h, walls[0]), "hidden again");
+    // Apply Hide/Isolate to View: a temporary hide of another wall becomes the view's own.
+    click(&mut h, P2(8000.0, 3000.0));
+    shortcut(&mut h, "HH");
+    press(&mut h, "Temporary Hide/Isolate");
+    press(&mut h, "Apply Hide/Isolate to View");
+    assert!(plan_graphics(&h, 1).elements[&walls[1]].hidden);
+    assert!(h.state().temporary().is_none(), "nothing left to hide for now");
+    assert!(h.state().dirty(), "it is a change to the project now");
+}
+
 #[test]
 fn hide_element_hide_category_and_the_elements_tab_work_on_the_selection() {
     let mut h = app(BOX);
@@ -3671,6 +3966,90 @@ fn the_door_tool_places_the_projects_single_door_of_a_family_and_the_type_select
 }
 
 // ---------- updates ----------
+
+/// A tool or button from the Massing tab.
+fn massing(h: &mut Harness<BimApp>, label: &str) {
+    press(h, "Massing");
+    press(h, label);
+}
+
+#[test]
+fn masses_are_clicked_out_as_a_footprint_previewed_and_finished_with_enter_or_the_first_point() {
+    let mut h = app(BOX);
+    massing(&mut h, "Mass");
+    assert!(h.query_by_label("Modify | Create Mass").is_some());
+    click(&mut h, P2(1000.0, 1000.0));
+    click(&mut h, P2(5000.0, 1000.0));
+    // The footprint a third corner would make, with its area.
+    h.hover_at(h.state().screen(P2(5000.0, 4000.0)));
+    h.run();
+    assert!(painted_text(&h).contains(&"6.00 m²".to_string()), "{:?}", painted_text(&h));
+    assert!(ids(&h, "mass").is_empty(), "a preview isn't an element, and nothing is made until it is finished");
+    click(&mut h, P2(5000.0, 4000.0));
+    click(&mut h, P2(1000.0, 4000.0));
+    key(&mut h, Key::Enter);
+    let first = ids(&h, "mass");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        (field(&h, first[0], "area_m2"), field(&h, first[0], "level"), field(&h, first[0], "top_level")),
+        (json!(12.0), json!(1), json!(2))
+    );
+    assert_eq!(h.state().tool, Tool::Mass(Vec::new()), "ready for the next one");
+    // Clicking back on the first point closes it too; two points make nothing.
+    for p in [P2(6000.0, 1000.0), P2(7000.0, 1000.0), P2(7000.0, 2000.0), P2(6000.0, 1000.0)] {
+        click(&mut h, p);
+    }
+    assert_eq!(ids(&h, "mass").len(), 2);
+    click(&mut h, P2(6000.0, 3000.0));
+    click(&mut h, P2(7000.0, 3000.0));
+    key(&mut h, Key::Enter);
+    assert_eq!(ids(&h, "mass").len(), 2);
+    // Selected by its outline, in the plan of every level it passes through; its palette.
+    key(&mut h, Key::Escape);
+    key(&mut h, Key::Escape);
+    click(&mut h, P2(3000.0, 1000.0));
+    assert_eq!(h.state().selection, first);
+    assert!(h.query_by_label("Modify | Masses").is_some());
+}
+
+#[test]
+fn the_massing_tab_makes_floors_walls_a_floor_and_a_roof_from_the_selected_mass() {
+    let mut h =
+        app("level {\"elevation\": 6000}\nmass {\"boundary\": [[0, 0], [10000, 0], [10000, 6000], [0, 6000]], \"top_level\": \"Level 3\"}");
+    let mass = ids(&h, "mass");
+    // With nothing selected there's nothing to make them from.
+    massing(&mut h, "Mass Floors");
+    assert!(ids(&h, "floor").is_empty());
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!(h.state().selection, mass);
+    massing(&mut h, "Mass Floors");
+    assert_eq!(ids(&h, "floor").len(), 2, "Levels 1 and 2; Level 3 is its top");
+    massing(&mut h, "Wall by Face");
+    assert_eq!(ids(&h, "wall").len(), 4);
+    massing(&mut h, "Floor by Face");
+    massing(&mut h, "Roof by Face");
+    assert_eq!((ids(&h, "floor").len(), ids(&h, "roof").len()), (3, 1));
+    // Each its own undo step.
+    key(&mut h, Key::Escape);
+    for _ in 0..4 {
+        h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+        h.run();
+    }
+    assert_eq!((ids(&h, "floor").len(), ids(&h, "wall").len(), ids(&h, "roof").len()), (0, 0, 0));
+    // Their shortcuts.
+    click(&mut h, P2(5000.0, 0.0));
+    shortcut(&mut h, "MF");
+    assert_eq!(ids(&h, "floor").len(), 2);
+    shortcut(&mut h, "WB");
+    shortcut(&mut h, "FB");
+    shortcut(&mut h, "RB");
+    assert_eq!((ids(&h, "wall").len(), ids(&h, "floor").len(), ids(&h, "roof").len()), (4, 3, 1));
+    key(&mut h, Key::Escape);
+    shortcut(&mut h, "MS");
+    assert_eq!(h.state().tool, Tool::Mass(Vec::new()));
+}
+
+mod structure;
 
 mod updates {
     use std::path::PathBuf;

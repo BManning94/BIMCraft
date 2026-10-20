@@ -17,14 +17,35 @@ use crate::schedule;
 
 /// The categories a plan, a section or a 3D view draws, and so may hide and override: those of the
 /// model, then those of the annotation.
-pub const MODEL: [&str; 13] =
-    ["wall", "floor", "ceiling", "shaft", "door", "window", "room", "column", "component", "stair", "ramp", "railing", "roof"];
+pub const MODEL: [&str; 18] = [
+    "wall",
+    "floor",
+    "ceiling",
+    "shaft",
+    "mass",
+    "door",
+    "window",
+    "room",
+    "column",
+    "structuralcolumn",
+    "footing",
+    "beam",
+    "stripfooting",
+    "component",
+    "stair",
+    "ramp",
+    "railing",
+    "roof",
+];
 pub const ANNOTATION: [&str; 8] = ["dimension", "tag", "text", "spot", "grid", "level", "section", "elevation"];
 
 /// Whether views draw elements of `category`.
 pub fn drawn(category: &str) -> bool {
     MODEL.contains(&category) || ANNOTATION.contains(&category)
 }
+
+/// How much of a mass a 3D view sees through, percent, unless its graphics say otherwise.
+pub const MASS_TRANSPARENCY: u8 = 60;
 
 /// The most overrides a view holds (by category, and by element), the filters it applies, and the view
 /// filters and view templates a project has.
@@ -34,6 +55,69 @@ pub const MAX_FILTERS: usize = 64;
 pub const MAX_TEMPLATES: usize = 64;
 /// Line weights, px: 1 px is 0.2 mm on a sheet.
 pub const WEIGHTS: (f64, f64) = (0.5, 20.0);
+
+/// How much a view draws of what it cuts. Coarse: the cut in one poché, an opening only its gap and jambs. Medium: a
+/// compound element's layers, each a fill with a line between, and an opening's leaf, swing and glass. Fine: the layers'
+/// patterns too, and a floor's surface pattern.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Detail {
+    Coarse,
+    Medium,
+    #[default]
+    Fine,
+}
+
+impl Detail {
+    pub const ALL: [Detail; 3] = [Detail::Coarse, Detail::Medium, Detail::Fine];
+
+    /// What it is called, in English.
+    pub fn name(self) -> &'static str {
+        match self {
+            Detail::Coarse => "Coarse",
+            Detail::Medium => "Medium",
+            Detail::Fine => "Fine",
+        }
+    }
+
+    /// A level of detail by its English name, in any case.
+    pub fn parse(s: &str) -> Option<Detail> {
+        Detail::ALL.into_iter().find(|d| d.name().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
+/// How a 3D view draws its surfaces. Shaded: lit, in their materials' colours and textures. Hidden line: paper-white, with
+/// their edges, what a face hides staying hidden. Wireframe: edges only, every one, seen through the faces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualStyle {
+    #[default]
+    Shaded,
+    HiddenLine,
+    Wireframe,
+}
+
+impl VisualStyle {
+    pub const ALL: [VisualStyle; 3] = [VisualStyle::Shaded, VisualStyle::HiddenLine, VisualStyle::Wireframe];
+
+    /// What it is called, in English.
+    pub fn name(self) -> &'static str {
+        match self {
+            VisualStyle::Shaded => "Shaded",
+            VisualStyle::HiddenLine => "Hidden Line",
+            VisualStyle::Wireframe => "Wireframe",
+        }
+    }
+
+    /// A style by its name, in any case, its words apart by a space, an underscore or nothing: `Hidden Line`, `hidden_line`.
+    pub fn parse(s: &str) -> Option<VisualStyle> {
+        let plain = |s: &str| s.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+        VisualStyle::ALL.into_iter().find(|v| plain(v.name()) == plain(s))
+    }
+}
+
+/// The scales, 1 : n, a view's annotation is sized for and a viewport shows it at.
+pub const SCALES: std::ops::RangeInclusive<f64> = 1.0..=100_000.0;
 
 /// How a line is dashed: not at all, or in dashes or dots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +231,14 @@ fn is_zero(x: &u8) -> bool {
     *x == 0
 }
 
+fn is_fine(d: &Detail) -> bool {
+    *d == Detail::Fine
+}
+
+fn is_shaded(v: &VisualStyle) -> bool {
+    *v == VisualStyle::Shaded
+}
+
 /// How a view draws something: hidden, or its lines and fills as they are in projection and
 /// where the view cuts them, lightened (`halftone`, halfway to the paper), and in 3D seen through
 /// (`transparency`, percent).
@@ -253,6 +345,15 @@ pub struct Graphics {
     /// The design option it shows of each set, by set (a set's primary, unless it says).
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub options: BTreeMap<String, String>,
+    /// The scale, 1 : `scale`, a plan's or a section's annotation is sized for; none, annotation keeps its size on screen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f64>,
+    /// How much it draws of what it cuts.
+    #[serde(skip_serializing_if = "is_fine")]
+    pub detail: Detail,
+    /// How a 3D view draws its surfaces.
+    #[serde(skip_serializing_if = "is_shaded")]
+    pub style: VisualStyle,
 }
 
 impl Graphics {
@@ -277,6 +378,16 @@ impl Graphics {
             g.options = t.graphics.options.clone();
         }
         std::borrow::Cow::Owned(g)
+    }
+
+    /// Whether it hides and overrides nothing: its scale and detail level change what the drawing code draws, not what a
+    /// view's [`Look`] says to leave out.
+    fn draws_as_is(&self) -> bool {
+        (&self.template, &self.phase, &self.phase_filter) == (&None, &None, &None)
+            && self.categories.is_empty()
+            && self.filters.is_empty()
+            && self.elements.is_empty()
+            && self.options.is_empty()
     }
 
     /// Whether category `c` is hidden.
@@ -329,6 +440,11 @@ impl Graphics {
             && !m.phase_filters.contains_key(f)
         {
             return Err(format!("there's no phase filter `{f}`{}", known(m.phase_filters.keys())));
+        }
+        if let Some(n) = self.scale
+            && !SCALES.contains(&n)
+        {
+            return Err(format!("its scale 1 : {n} isn't between 1 : {} and 1 : {}", SCALES.start(), SCALES.end()));
         }
         if self.options.len() > crate::phasing::MAX_OPTION_SETS {
             return Err(format!(
@@ -510,6 +626,7 @@ pub fn graphics_of(m: &Model, view: Id) -> Option<&Graphics> {
 pub struct Look {
     hidden: BTreeSet<Id>,
     paint: BTreeMap<Id, Override>,
+    style: VisualStyle,
 }
 
 /// `c` halfway to the paper.
@@ -534,9 +651,9 @@ impl Look {
     /// ponytail: worked out on every draw; cache it per model and view if a filter on a slow field
     /// (a room's area) makes redraws slow.
     pub fn with(m: &Model, own: &Graphics) -> Look {
-        let mut look = Look::default();
+        let mut look = Look { style: own.style, ..Look::default() };
         // Nothing to look for: no graphics of its own, and nothing in the project phased or in an option.
-        if own.is_default() && !crate::phasing::any(m) {
+        if own.draws_as_is() && !crate::phasing::any(m) && !m.elements.values().any(|e| matches!(e, Element::Mass(_))) {
             return look;
         }
         let g = own.resolved(m);
@@ -567,6 +684,10 @@ impl Look {
                 look.hidden.insert(id);
                 continue;
             }
+            // A mass is seen through in 3D unless the view says otherwise.
+            if matches!(e, Element::Mass(_)) && base.transparency == 0 {
+                base.transparency = MASS_TRANSPARENCY;
+            }
             // In a design option the view doesn't show, it isn't shown either.
             if !crate::phasing::option_shown(m, &g, e) {
                 look.hidden.insert(id);
@@ -588,6 +709,11 @@ impl Look {
             }
         }
         look
+    }
+
+    /// How the view draws surfaces in 3D.
+    pub fn style(&self) -> VisualStyle {
+        self.style
     }
 
     /// Whether the view draws element `id`.

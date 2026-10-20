@@ -33,7 +33,7 @@ impl BimApp {
     /// Section or elevation `id`, filling `ui`.
     pub(crate) fn section_view(&mut self, ui: &mut Ui, id: Id) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::CLICK | Sense::DRAG);
-        let model = Arc::clone(&self.session.model);
+        let model = self.view_model();
         let fit = |w, h| render::section_fit(&model, id, w, h);
         let Some((view, local)) = self.canvas.navigate(ui, &response, rect, id, fit) else { return };
         let crop = self.crop_grips(ui, &response, rect, &view, id);

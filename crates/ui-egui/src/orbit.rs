@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use bimcraft_core::graphics::Look;
+use bimcraft_core::graphics::{Look, VisualStyle};
 use bimcraft_core::model::{Id, Model};
 use bimcraft_core::render::{self, Rgb};
 use bimcraft_core::view3d::{AZIMUTH, Camera, ELEVATION, Image, MAX_SIDE, P3, Scene};
@@ -109,7 +109,7 @@ impl BimApp {
             let hover = i.pointer.hover_pos().filter(|_| response.hovered());
             (hover, i.smooth_scroll_delta.y, i.zoom_delta(), i.modifiers.shift, i.pointer.latest_pos())
         });
-        let model = Arc::clone(&self.session.model);
+        let model = self.view_model();
         let (modify, demolish, selection) = (self.tool == Tool::Modify, self.tool == Tool::Demolish, self.selection.clone());
         let (paint, unpaint) = (self.tool == Tool::Paint, self.tool == Tool::Unpaint);
         let o = &mut self.orbit;
@@ -167,7 +167,16 @@ impl BimApp {
             // The model shaded as ever, on the theme's ground: only the background is paper white.
             let ground = color(render::PAPER);
             let (rgba, _) = image.rgba.as_chunks::<4>();
-            let pixels = rgba.iter().map(|&[r, g, b, _]| if [r, g, b] == [255; 3] { ground } else { Color32::from_rgb(r, g, b) }).collect();
+            // Hidden line and wireframe are drawn as a section is, dark in the dark theme: paper and ink swap.
+            let lines = look.style() != VisualStyle::Shaded;
+            let pixels = rgba
+                .iter()
+                .map(|&[r, g, b, _]| match [r, g, b] {
+                    _ if lines => color(Rgb(r, g, b)),
+                    [255, 255, 255] => ground,
+                    _ => Color32::from_rgb(r, g, b),
+                })
+                .collect();
             let pixels = ColorImage { size: [image.width as usize, image.height as usize], pixels, source_size: Default::default() };
             match &mut o.texture {
                 Some(t) => t.set(pixels, TextureOptions::NEAREST),

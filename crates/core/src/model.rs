@@ -1,4 +1,4 @@
-//! The building model: levels, grids, walls, floors, ceilings, shafts, doors, windows, rooms,
+//! The building model: levels, grids, walls, floors, ceilings, shafts, masses, doors, windows, rooms,
 //! columns, stairs, ramps, railings and roofs, the types they use, the dimensions, tags, text notes and spot elevations annotating
 //! views, the sections, elevations, schedules and 3D views looking at it, and the sheets its views
 //! are placed on. Lengths are millimetres, x east, y north, z up; each level has an elevation. In
@@ -316,6 +316,9 @@ pub struct Floor {
     pub slope: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrow: Option<[P2; 2]>,
+    /// Carries load: a structural floor, as Revit's Floor: Structural makes one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub structural: bool,
     /// Its values of the project's parameters, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
@@ -351,6 +354,38 @@ pub struct Shaft {
     pub height: f64,
     #[serde(default)]
     pub base_offset: f64,
+}
+
+/// A mass, Revit's conceptual building volume: `boundary` (counter-clockwise) extruded from `base_offset` above `level`
+/// up to `top_level`, or `height` mm. Walls, floors and roofs are made from its faces; its floors, one for each level it
+/// crosses.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mass {
+    #[serde(default)]
+    pub name: String,
+    pub level: Id,
+    pub boundary: Vec<P2>,
+    #[serde(default)]
+    pub top_level: Option<Id>,
+    #[serde(default)]
+    pub height: f64,
+    #[serde(default)]
+    pub base_offset: f64,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+impl Mass {
+    /// Its footprint, counter-clockwise whichever way round `boundary` was given.
+    pub fn footprint(&self) -> Vec<P2> {
+        let mut ring = self.boundary.clone();
+        if geom::area(&ring) < 0.0 {
+            ring.reverse();
+        }
+        ring
+    }
 }
 
 /// A door or window in a host wall, centred `offset` mm along it from the wall's start. Of a `family`
@@ -449,6 +484,14 @@ pub struct Reference {
     pub id: Id,
     #[serde(default)]
     pub face: Face,
+}
+
+/// How far a point stands from a line `toward` it (a unit vector along x or y): see [`Model::clearances`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Clearance {
+    pub toward: P2,
+    pub distance: f64,
+    pub to: Reference,
 }
 
 /// A dimension in a level's plan. Aligned: the distances between parallel references, along a
@@ -573,6 +616,44 @@ pub struct Column {
     pub height: f64,
     #[serde(default)]
     pub base_offset: f64,
+    /// Its values of the project's parameters, by name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, serde_json::Value>,
+}
+
+/// Which line of a run's section its heights are: the top of it, its middle, or its bottom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Justify {
+    Top,
+    #[default]
+    #[serde(alias = "center")]
+    Centre,
+    Bottom,
+}
+
+/// A straight run from `start` to `end` in plan, of a type (a section `width` across and `depth` deep, or round): a beam,
+/// and what the other disciplines draw with it, a pipe, a conduit, a cable tray. Its `offset` mm over its `level` is the
+/// height of its `justify` line at the start, and `end_offset` at the end (level when none): a sloped run has both, a
+/// vertical one the same `start` and `end` and two heights. Its section is square to its axis. `system` names the system it
+/// belongs to; schedules group by it. Under several categories, as an opening is a door or a window: `Element::Beam`,
+/// `Element::StripFooting`, and a tab adds its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Run {
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub level: Id,
+    pub start: P2,
+    pub end: P2,
+    #[serde(default)]
+    pub offset: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_offset: Option<f64>,
+    #[serde(default)]
+    pub justify: Justify,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub system: String,
     /// Its values of the project's parameters, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
@@ -862,6 +943,7 @@ pub enum Element {
     Floor(Floor),
     Ceiling(Ceiling),
     Shaft(Shaft),
+    Mass(Mass),
     Door(Opening),
     Window(Opening),
     Room(Room),
@@ -872,6 +954,12 @@ pub enum Element {
     Sheet(Sheet),
     Viewport(Viewport),
     Column(Column),
+    /// A column of the structure: the same shape as an architectural one, its own category and types.
+    StructuralColumn(Column),
+    /// An isolated (pad) footing: a column laid flat, its `height` its thickness.
+    Footing(Column),
+    Beam(Run),
+    StripFooting(Run),
     Component(Component),
     Stair(Stair),
     Ramp(Ramp),
@@ -891,10 +979,15 @@ impl Element {
             | Element::Floor(Floor { params, .. })
             | Element::Ceiling(Ceiling { params, .. })
             | Element::Roof(Roof { params, .. })
+            | Element::Mass(Mass { params, .. })
             | Element::Door(Opening { params, .. })
             | Element::Window(Opening { params, .. })
             | Element::Room(Room { params, .. })
             | Element::Column(Column { params, .. })
+            | Element::StructuralColumn(Column { params, .. })
+            | Element::Footing(Column { params, .. })
+            | Element::Beam(Run { params, .. })
+            | Element::StripFooting(Run { params, .. })
             | Element::Component(Component { params, .. })
             | Element::Stair(Stair { params, .. })
             | Element::Ramp(Ramp { params, .. })
@@ -910,10 +1003,15 @@ impl Element {
             | Element::Floor(Floor { params, .. })
             | Element::Ceiling(Ceiling { params, .. })
             | Element::Roof(Roof { params, .. })
+            | Element::Mass(Mass { params, .. })
             | Element::Door(Opening { params, .. })
             | Element::Window(Opening { params, .. })
             | Element::Room(Room { params, .. })
             | Element::Column(Column { params, .. })
+            | Element::StructuralColumn(Column { params, .. })
+            | Element::Footing(Column { params, .. })
+            | Element::Beam(Run { params, .. })
+            | Element::StripFooting(Run { params, .. })
             | Element::Component(Component { params, .. })
             | Element::Stair(Stair { params, .. })
             | Element::Ramp(Ramp { params, .. })
@@ -927,6 +1025,47 @@ impl Element {
         match self {
             Element::Component(c) => Some((&c.family, &c.type_name)),
             Element::Door(o) | Element::Window(o) => o.family.as_deref().map(|f| (f, o.type_name.as_str())),
+            _ => None,
+        }
+    }
+
+    /// The run a beam or a strip footing is, whatever its category.
+    pub fn run(&self) -> Option<&Run> {
+        match self {
+            Element::Beam(r) | Element::StripFooting(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// A run of `category` as an element: a beam, a strip footing. None for a category that has no runs.
+    pub fn of_run(category: &str, r: Run) -> Option<Element> {
+        match category {
+            "beam" => Some(Element::Beam(r)),
+            "stripfooting" => Some(Element::StripFooting(r)),
+            _ => None,
+        }
+    }
+
+    /// The run to change.
+    pub fn run_mut(&mut self) -> Option<&mut Run> {
+        match self {
+            Element::Beam(r) | Element::StripFooting(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// The column an architectural column, a structural one or an isolated footing is, whatever its category.
+    pub fn column(&self) -> Option<&Column> {
+        match self {
+            Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The column to change.
+    pub fn column_mut(&mut self) -> Option<&mut Column> {
+        match self {
+            Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) => Some(c),
             _ => None,
         }
     }
@@ -961,6 +1100,7 @@ impl Element {
             Element::Floor(_) => "floor",
             Element::Ceiling(_) => "ceiling",
             Element::Shaft(_) => "shaft",
+            Element::Mass(_) => "mass",
             Element::Door(_) => "door",
             Element::Window(_) => "window",
             Element::Room(_) => "room",
@@ -971,6 +1111,10 @@ impl Element {
             Element::Sheet(_) => "sheet",
             Element::Viewport(_) => "viewport",
             Element::Column(_) => "column",
+            Element::StructuralColumn(_) => "structuralcolumn",
+            Element::Footing(_) => "footing",
+            Element::Beam(_) => "beam",
+            Element::StripFooting(_) => "stripfooting",
             Element::Component(_) => "component",
             Element::Stair(_) => "stair",
             Element::Ramp(_) => "ramp",
@@ -1031,6 +1175,22 @@ pub struct ColumnType {
     pub round: bool,
 }
 
+/// A run's type: a section `width` across by `depth` deep, or round, `width` across; made of `material` (one of the
+/// library's, or none).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunType {
+    pub width: f64,
+    pub depth: f64,
+    #[serde(default)]
+    pub round: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub material: String,
+}
+
+/// The categories whose elements are runs, as `Element::run` returns them.
+pub const RUN_CATEGORIES: [&str; 2] = ["beam", "stripfooting"];
+
 /// A roof type: how thick its roofs are across their slope and, a compound one, its layers from
 /// the top down.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1066,6 +1226,13 @@ pub struct Types {
     pub ceiling: BTreeMap<String, CeilingType>,
     #[serde(default)]
     pub railing: BTreeMap<String, RailingType>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub structural_column: BTreeMap<String, ColumnType>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub footing: BTreeMap<String, ColumnType>,
+    /// The types of the runs, by category, then name: `runs["beam"]["Beam 200 x 500"]`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub runs: BTreeMap<String, BTreeMap<String, RunType>>,
 }
 
 /// What a project parameter holds: text, a number, a length (mm), or yes or no.
@@ -1093,8 +1260,25 @@ pub struct ProjectParameter {
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
 /// The categories project parameters are for.
-pub const PARAMETER_CATEGORIES: [&str; 12] =
-    ["wall", "floor", "ceiling", "roof", "door", "window", "room", "column", "component", "stair", "ramp", "railing"];
+pub const PARAMETER_CATEGORIES: [&str; 17] = [
+    "wall",
+    "floor",
+    "ceiling",
+    "roof",
+    "door",
+    "window",
+    "room",
+    "column",
+    "component",
+    "stair",
+    "ramp",
+    "railing",
+    "mass",
+    "structuralcolumn",
+    "footing",
+    "beam",
+    "stripfooting",
+];
 
 impl ProjectParameter {
     /// Whether `v` is a value it holds.
@@ -1225,6 +1409,25 @@ impl Model {
         }
         m.types.column.insert("Rectangular 400 x 400".into(), ColumnType { width: 400.0, depth: 400.0, round: false });
         m.types.column.insert("Round 300".into(), ColumnType { width: 300.0, depth: 300.0, round: true });
+        // The structure's: concrete columns, footings, beams and strip footings.
+        for (n, w, d, round) in [
+            ("Concrete 300 x 300", 300.0, 300.0, false),
+            ("Concrete 200 x 500", 200.0, 500.0, false),
+            ("Concrete Round 400", 400.0, 400.0, true),
+        ] {
+            m.types.structural_column.insert(n.into(), ColumnType { width: w, depth: d, round });
+        }
+        for (n, w) in [("Footing 1200 x 1200", 1200.0), ("Footing 1500 x 1500", 1500.0)] {
+            m.types.footing.insert(n.into(), ColumnType { width: w, depth: w, round: false });
+        }
+        let run = |width, depth, round, material: &str| RunType { width, depth, round, material: language.word(material).into() };
+        let beams = [
+            ("Beam 200 x 500", run(200.0, 500.0, false, "Concrete")),
+            ("Beam 150 x 400", run(150.0, 400.0, false, "Concrete")),
+            ("Steel Tube 150", run(150.0, 150.0, true, "Metal")),
+        ];
+        m.types.runs.insert("beam".into(), beams.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        m.types.runs.insert("stripfooting".into(), BTreeMap::from([("Strip 600 x 300".to_string(), run(600.0, 300.0, false, "Concrete"))]));
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0, layers: Vec::new() });
         m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0, layers: Vec::new() });
         m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0, layers: Vec::new() });
@@ -1500,9 +1703,12 @@ impl Model {
             "door" => names(&self.types.door),
             "window" => names(&self.types.window),
             "column" => names(&self.types.column),
+            "structuralcolumn" => names(&self.types.structural_column),
+            "footing" => names(&self.types.footing),
             "roof" => names(&self.types.roof),
             "ceiling" => names(&self.types.ceiling),
             "railing" => names(&self.types.railing),
+            run if RUN_CATEGORIES.contains(&run) => self.types.runs.get(run).map(names).unwrap_or_default(),
             _ => Vec::new(),
         }
     }
@@ -1517,6 +1723,10 @@ impl Model {
             "roof" => "Generic - 300mm",
             "ceiling" => "Generic - 20mm",
             "railing" => "Railing - 1000mm",
+            "structuralcolumn" => "Concrete 300 x 300",
+            "footing" => "Footing 1200 x 1200",
+            "beam" => "Beam 200 x 500",
+            "stripfooting" => "Strip 600 x 300",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);
@@ -1649,9 +1859,11 @@ impl Model {
             Element::Floor(f) => Some(f.level),
             Element::Ceiling(c) => Some(c.level),
             Element::Shaft(sh) => Some(sh.level),
+            Element::Mass(ms) => Some(ms.level),
             Element::Room(r) => Some(r.level),
             Element::Dimension(d) => Some(d.level),
-            Element::Column(c) => Some(c.level),
+            Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) => Some(c.level),
+            Element::Beam(r) | Element::StripFooting(r) => Some(r.level),
             Element::Component(c) => Some(c.level),
             Element::Stair(st) => Some(st.level),
             Element::Ramp(r) => Some(r.level),
@@ -1680,6 +1892,21 @@ impl Model {
     pub fn span(&self, level: Id, base_offset: f64, top_level: Option<Id>, height: f64) -> (f64, f64) {
         let base = self.elevation(level) + base_offset;
         (base, top_level.map_or(base + height, |t| self.elevation(t)))
+    }
+
+    /// Whether the horizontal plane at height `z` passes through mass `ms`.
+    pub fn mass_cut_by(&self, ms: &Mass, z: f64) -> bool {
+        let (bottom, top) = self.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+        bottom <= z && z < top
+    }
+
+    /// The levels a mass crosses, lowest first: from its base up to, not including, its top. Each with its elevation and how
+    /// far the mass goes up from there, to the next of them or its top: what its floor there holds.
+    pub fn mass_slices(&self, ms: &Mass) -> Vec<(Id, f64, f64)> {
+        let (bottom, top) = self.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+        let crossed: Vec<(Id, f64)> =
+            self.levels().into_iter().map(|(id, l)| (id, l.elevation)).filter(|(_, z)| *z >= bottom - TOL && *z < top - TOL).collect();
+        crossed.iter().enumerate().map(|(i, (id, z))| (*id, *z, crossed.get(i + 1).map_or(top, |next| next.1) - z)).collect()
     }
 
     /// A stair's flight: how many risers, how high each is, and how long its runs are together
@@ -1931,10 +2158,31 @@ impl Model {
         (pieces, cut)
     }
 
-    /// A column's outline in plan: its rectangle turned to its angle, or a round one's 24-sided
-    /// polygon. Nothing for an unknown type.
-    pub fn column_outline(&self, col: &Column) -> Vec<P2> {
-        let Some(t) = self.types.column.get(&col.type_name) else { return Vec::new() };
+    /// The type of a column, a structural column or a footing.
+    pub fn column_type(&self, e: &Element) -> Option<&ColumnType> {
+        let (col, types) = match e {
+            Element::Column(c) => (c, &self.types.column),
+            Element::StructuralColumn(c) => (c, &self.types.structural_column),
+            Element::Footing(c) => (c, &self.types.footing),
+            _ => return None,
+        };
+        types.get(&col.type_name)
+    }
+
+    /// The type of a beam or another run.
+    pub fn run_type(&self, e: &Element) -> Option<&RunType> {
+        self.types.runs.get(e.category())?.get(&e.run()?.type_name)
+    }
+
+    /// A run worked out: its ends and its section. None for another element, or a type it doesn't have.
+    pub fn run_geom(&self, e: &Element) -> Option<crate::runs::Geom> {
+        Some(crate::runs::Geom::of(self, e.run()?, self.run_type(e)?))
+    }
+
+    /// A column's outline in plan (a structural column's, a footing's): its rectangle turned to its angle, or a round one's
+    /// 24-sided polygon. Nothing for another element, or an unknown type.
+    pub fn column_outline(&self, e: &Element) -> Vec<P2> {
+        let (Some(col), Some(t)) = (e.column(), self.column_type(e)) else { return Vec::new() };
         if t.round {
             return (0..24).map(|i| col.at + heading(f64::from(i) * 15.0) * (t.width / 2.0)).collect();
         }
@@ -2134,14 +2382,43 @@ impl Model {
             .min_by(|x, y| x.1.total_cmp(&y.1))
     }
 
+    /// How far a point standing on `level` at `at` is from the nearest wall centre line or grid east, north, west and south
+    /// of it (a straight wall the level's plan cuts, as far as it runs; a grid as far as it is drawn): the temporary
+    /// dimensions of a column or a component. A line it stands on is no distance away, so the next one counts.
+    pub fn clearances(&self, level: Id, at: P2) -> [Option<Clearance>; 4] {
+        let lines: Vec<(Reference, Line)> = self
+            .elements
+            .iter()
+            .filter_map(|(&id, e)| match e {
+                Element::Grid(g) => Some((Reference { id, face: Face::Centre }, (g.start, g.end))),
+                Element::Wall(w) if w.arc == 0.0 && self.cut_by(w, level) => {
+                    let (axis, (ext, int)) = (walls::Axis::of(w), walls::faces(self, w));
+                    let mid = (ext + int) / 2.0;
+                    Some((Reference { id, face: Face::Centre }, (axis.at(0.0, mid), axis.at(axis.length(), mid))))
+                }
+                _ => None,
+            })
+            .collect();
+        [P2(1.0, 0.0), P2(0.0, 1.0), P2(-1.0, 0.0), P2(0.0, -1.0)].map(|toward| {
+            lines
+                .iter()
+                .filter_map(|&(to, (a, b))| {
+                    let hit = geom::line_intersection(at, at + toward, a, b)?;
+                    let distance = (hit - at).dot(toward);
+                    (distance > TOL && geom::dist_to_segment(hit, a, b) <= 1e-6).then_some(Clearance { toward, distance, to })
+                })
+                .min_by(|x, y| x.distance.total_cmp(&y.distance))
+        })
+    }
+
     /// The circle a radial dimension measures on `r`: a round column's centre and radius, or a
     /// curved wall's, of its centre line or one of its faces.
     pub fn reference_arc(&self, r: &Reference) -> Result<(P2, f64), String> {
         let what = "a radial dimension measures round columns and curved walls";
         match self.elements.get(&r.id) {
-            Some(Element::Column(c)) => match self.types.column.get(&c.type_name) {
-                Some(t) if t.round => Ok((c.at, t.width / 2.0)),
-                _ => Err(format!("column {} isn't round; {what}", r.id)),
+            Some(e) if e.column().is_some() => match (e.column(), self.column_type(e)) {
+                (Some(c), Some(t)) if t.round => Ok((c.at, t.width / 2.0)),
+                _ => Err(format!("{} {} isn't round; {what}", e.category(), r.id)),
             },
             Some(Element::Wall(w)) => {
                 let (axis, (ext, int)) = (walls::Axis::of(w), walls::faces(self, w));
@@ -2351,9 +2628,30 @@ impl Model {
                 return Err(format!("{who}: its layers add up to {sum} mm, not its thickness, {thickness} mm"));
             }
         }
-        for (n, t) in &self.types.column {
-            size(&format!("column type `{n}` width"), t.width)?;
-            size(&format!("column type `{n}` depth"), t.depth)?;
+        for (cat, types) in
+            [("column", &self.types.column), ("structural column", &self.types.structural_column), ("footing", &self.types.footing)]
+        {
+            for (n, t) in types {
+                size(&format!("{cat} type `{n}` width"), t.width)?;
+                size(&format!("{cat} type `{n}` depth"), t.depth)?;
+            }
+        }
+        for (cat, types) in &self.types.runs {
+            if !RUN_CATEGORIES.contains(&cat.as_str()) {
+                return Err(format!("`{cat}` has no run types; there are {}", RUN_CATEGORIES.join(", ")));
+            }
+            for (n, t) in types {
+                let who = format!("{cat} type `{n}`");
+                size(&format!("{who} width"), t.width)?;
+                size(&format!("{who} depth"), t.depth)?;
+                if t.round && t.depth != t.width {
+                    return Err(format!("{who}: a round section is as deep as it is wide ({} mm), not {} mm", t.width, t.depth));
+                }
+                text(&who, "material", &t.material)?;
+                if !t.material.is_empty() && !self.materials.contains_key(&t.material) {
+                    return Err(format!("{who}: material `{}` isn't in the library; add it with `material`", t.material));
+                }
+            }
         }
         for (n, t) in &self.types.railing {
             size(&format!("railing type `{n}` height"), t.height)?;
@@ -2503,6 +2801,20 @@ impl Model {
                         None => size(&format!("{who} height"), sh.height)?,
                     }
                     let (bottom, top) = self.span(sh.level, sh.base_offset, sh.top_level, sh.height);
+                    if top <= bottom + TOL {
+                        return Err(format!("{who}: its top must be above its base"));
+                    }
+                }
+                Element::Mass(ms) => {
+                    level_ok(ms.level)?;
+                    boundary(&who, &ms.boundary)?;
+                    text(&who, "name", &ms.name)?;
+                    coord(&format!("{who} base_offset"), ms.base_offset)?;
+                    match ms.top_level {
+                        Some(t) => level_ok(t)?,
+                        None => size(&format!("{who} height"), ms.height)?,
+                    }
+                    let (bottom, top) = self.span(ms.level, ms.base_offset, ms.top_level, ms.height);
                     if top <= bottom + TOL {
                         return Err(format!("{who}: its top must be above its base"));
                     }
@@ -2674,8 +2986,13 @@ impl Model {
                     self.family_values_ok(&who, &c.family, f, &c.params)?;
                     f.values(&c.type_name, &c.params).and_then(|v| f.pieces(&v)).map_err(|e| format!("{who}: {e}"))?;
                 }
-                Element::Column(col) => {
-                    known(&who, &col.type_name, &self.types.column)?;
+                Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => {
+                    let types = match e {
+                        Element::StructuralColumn(_) => &self.types.structural_column,
+                        Element::Footing(_) => &self.types.footing,
+                        _ => &self.types.column,
+                    };
+                    known(&who, &col.type_name, types)?;
                     level_ok(col.level)?;
                     point(&who, col.at)?;
                     coord(&format!("{who} angle"), col.angle)?;
@@ -2688,6 +3005,19 @@ impl Model {
                     if top <= bottom + TOL {
                         return Err(format!("{who}: its top must be above its base"));
                     }
+                }
+                Element::Beam(r) | Element::StripFooting(r) => {
+                    let (category, none) = (e.category(), BTreeMap::new());
+                    let t = known(&who, &r.type_name, self.types.runs.get(category).unwrap_or(&none))?;
+                    level_ok(r.level)?;
+                    point(&format!("{who} start"), r.start)?;
+                    point(&format!("{who} end"), r.end)?;
+                    coord(&format!("{who} offset"), r.offset)?;
+                    if let Some(o) = r.end_offset {
+                        coord(&format!("{who} end_offset"), o)?;
+                    }
+                    text(&who, "system", &r.system)?;
+                    crate::runs::check(&who, category, &crate::runs::Geom::of(self, r, t))?;
                 }
                 Element::Stair(st) => {
                     level_ok(st.level)?;

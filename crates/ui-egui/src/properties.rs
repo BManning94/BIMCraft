@@ -63,6 +63,8 @@ enum Kind {
     Values,
     /// A wall's location line: a drop-down.
     LocationLine,
+    /// Which line of a run's section its heights are: a drop-down.
+    Justification,
     /// Whether a roof or a floor is there (a wall's attachment); read only.
     Attached,
 }
@@ -134,6 +136,7 @@ fn rows(category: &str) -> &'static [Row] {
             ("Dimensions", "slope", "Slope (°)", Number),
             ("Dimensions", "area_m2", "Area", AreaShown),
             ("Dimensions", "thickness", "Thickness", LengthShown),
+            ("Structural", "structural", "Structural", Flag),
         ],
         "ceiling" => &[
             ("Constraints", "level", "Level", Level),
@@ -147,6 +150,16 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "top_level", "Top Constraint", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
             ("Dimensions", "area_m2", "Area", AreaShown),
+        ],
+        "mass" => &[
+            ("Constraints", "level", "Base Constraint", Level),
+            ("Constraints", "base_offset", "Base Offset", Length),
+            ("Constraints", "top_level", "Top Constraint", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Dimensions", "area_m2", "Area", AreaShown),
+            ("Dimensions", "volume_m3", "Volume (m³)", Shown),
+            ("Dimensions", "gross_floor_area_m2", "Gross Floor Area", AreaShown),
+            ("Identity Data", "name", "Name", Text),
         ],
         "level" => &[("Constraints", "elevation", "Elevation", Length), ("Identity Data", "name", "Name", Text)],
         "grid" => &[("Identity Data", "name", "Name", Text), ("Other", "start", "Start", Point), ("Other", "end", "End", Point)],
@@ -194,6 +207,24 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "height", "Unconnected Height", Height),
             ("Other", "at", "Location", Point),
             ("Other", "angle", "Rotation (°)", Number),
+        ],
+        "structuralcolumn" | "footing" => &[
+            ("Constraints", "level", "Base Level", Level),
+            ("Constraints", "base_offset", "Base Offset", Length),
+            ("Constraints", "top_level", "Top Level", TopLevel),
+            ("Constraints", "height", "Unconnected Height", Height),
+            ("Other", "at", "Location", Point),
+            ("Other", "angle", "Rotation (°)", Number),
+        ],
+        "beam" | "stripfooting" => &[
+            ("Constraints", "level", "Reference Level", Level),
+            ("Constraints", "offset", "Start Level Offset", Length),
+            ("Constraints", "end_offset", "End Level Offset", Limit("Same as start")),
+            ("Constraints", "justify", "Z Justification", Justification),
+            ("Dimensions", "length", "Length", LengthShown),
+            ("Identity Data", "system", "System", Text),
+            ("Other", "start", "Start", Point),
+            ("Other", "end", "End", Point),
         ],
         "stair" => &[
             ("Constraints", "level", "Base Level", Level),
@@ -255,6 +286,16 @@ const PLAN: &[Row] = &[
     ("View Range", "view_range.depth", "View Depth", Length),
 ];
 
+/// Type `name` of `category` as the project's JSON holds it: `types` is the project's `Types` as JSON.
+fn type_json<'a>(types: &'a Value, category: &str, name: &str) -> &'a Value {
+    let of = match category {
+        "structuralcolumn" => &types["structural_column"],
+        "beam" | "stripfooting" => &types["runs"][category],
+        other => &types[other],
+    };
+    &of[name]
+}
+
 /// A type's parameters, as its Type Properties list them: its field, its label.
 fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
     match category {
@@ -262,7 +303,7 @@ fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
         "floor" => &[("thickness", "Default Thickness")],
         "door" => &[("width", "Width"), ("height", "Height")],
         "window" => &[("width", "Width"), ("height", "Height"), ("sill", "Default Sill Height")],
-        "column" => &[("width", "Width"), ("depth", "Depth")],
+        "column" | "structuralcolumn" | "footing" | "beam" | "stripfooting" => &[("width", "Width"), ("depth", "Depth")],
         "roof" => &[("thickness", "Thickness")],
         "ceiling" => &[("thickness", "Thickness"), ("grid", "Tile Size")],
         "railing" => &[("height", "Height"), ("spacing", "Baluster Spacing")],
@@ -286,13 +327,17 @@ fn icon(category: &str) -> Icon {
         "tag" => Icon::Tag,
         "schedule" => Icon::Schedule,
         "3d view" => Icon::View3D,
-        "column" => Icon::Column,
+        "column" | "structuralcolumn" => Icon::Column,
+        "beam" => Icon::Beam,
+        "footing" => Icon::Footing,
+        "stripfooting" => Icon::WallFooting,
         "component" => Icon::Component,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,
         "floor" => Icon::Floor,
         "ceiling" | "ceiling plan" => Icon::Ceiling,
         "shaft" => Icon::Shaft,
+        "mass" => Icon::Mass,
         "ramp" => Icon::Ramp,
         "railing" => Icon::Railing,
         "text" => Icon::Text,
@@ -510,7 +555,7 @@ impl TypeDialog {
     /// A type's sizes, as typed: lengths in the project's units.
     fn fields(m: &Model, category: &str, name: &str) -> Vec<(&'static str, &'static str, String)> {
         let types = serde_json::to_value(&m.types).unwrap_or_default();
-        type_rows(category).iter().map(|(k, l)| (*k, *l, shown(Length, &types[category][name][k], m.units))).collect()
+        type_rows(category).iter().map(|(k, l)| (*k, *l, shown(Length, &type_json(&types, category, name)[k], m.units))).collect()
     }
 
     /// A layered type's layers, as typed: one structure layer as thick as it, without any.
@@ -568,6 +613,7 @@ impl BimApp {
             ([], Tool::Section(_), _) => Subject::New("section"),
             ([], Tool::Elevation, _) => Subject::New("elevation"),
             ([], Tool::Column, _) => Subject::New("column"),
+            ([], Tool::Run(category, _) | Tool::Stand(category), _) => Subject::New(category),
             ([], Tool::Component, _) => Subject::New("component"),
             ([], Tool::Stair(_), _) => Subject::New("stair"),
             ([], Tool::Ramp(_), _) => Subject::New("ramp"),
@@ -577,6 +623,7 @@ impl BimApp {
             ([], Tool::Floor, _) => Subject::New("floor"),
             ([], Tool::Ceiling, _) => Subject::New("ceiling"),
             ([], Tool::Shaft(_), _) => Subject::New("shaft"),
+            ([], Tool::Mass(_), _) => Subject::New("mass"),
             // A section's or an elevation's view shows its own parameters.
             ([], _, Sheet::Section(id) | Sheet::Paper(id)) => Subject::Element(id),
             // Modify, and the tools that pick walls rather than place anything: the view.
@@ -972,6 +1019,16 @@ impl BimApp {
                                     change = Some((key, Ok(json!(loc.name()))));
                                 }
                             }
+                            Justification => {
+                                let names = [("top", "Top"), ("centre", "Centre"), ("bottom", "Bottom")];
+                                let now = names.iter().find(|(k, _)| val.as_str() == Some(k)).map_or("Centre", |(_, n)| n);
+                                let options: Vec<String> = names.iter().map(|(_, n)| t(n).to_string()).collect();
+                                if let Some(j) = combo(ui, (id, key), name.id, t(now), &options)
+                                    && let Some((k, _)) = names.iter().find(|(_, n)| t(n) == j)
+                                {
+                                    change = Some((key, Ok(json!(k))));
+                                }
+                            }
                             // Revit's greyed checkbox: Attach Top/Base and Detach Top/Base change it.
                             Attached => {
                                 let mut on = !val.is_null();
@@ -1320,7 +1377,17 @@ impl BimApp {
         if create && let Some(new) = d.duplicate.clone() {
             let layered = !model.type_layers(d.category, &d.name).is_empty();
             let made = match d.params(new.trim(), model.units, layered) {
-                Ok(p) => self.run("type", p).is_some(),
+                Ok(mut p) => {
+                    // A duplicate is round, and made of a material, as the type it copies is.
+                    let types = serde_json::to_value(&model.types).unwrap_or_default();
+                    let from = type_json(&types, d.category, &d.name);
+                    for key in ["round", "material"] {
+                        if !from[key].is_null() {
+                            p[key] = from[key].clone();
+                        }
+                    }
+                    self.run("type", p).is_some()
+                }
                 Err(e) => {
                     self.status = Status { text: e, error: true };
                     false

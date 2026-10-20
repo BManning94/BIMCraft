@@ -46,9 +46,17 @@ const PROPERTIES: u64 = 20;
 const DEFINES: u64 = 21;
 const PHASED: u64 = 22;
 const PHASED_DEFINES: u64 = 23;
+const RUN_MATERIALS: u64 = 40;
+const RUN_PROPERTIES: u64 = 41;
+const RUN_DEFINES: u64 = 42;
+const COMMON: u64 = 43;
+const COMMON_DEFINES: u64 = 44;
 
 /// The property set an element's values of the project's parameters go in.
 pub const PARAMETERS: &str = "Project Parameters";
+
+/// The property set a run's system goes in.
+pub const RUN: &str = "BIMCraft_Run";
 
 /// The property set an element's phase and design option go in; on the project, its phases and design option sets.
 pub const PHASING: &str = "BIMCraft_Phasing";
@@ -275,6 +283,27 @@ impl Step {
         self.add(format!("IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,$,#{o},({}))", refs(&inner)))
     }
 
+    /// A body: `profile` swept `depth` along the z axis of placement `at`, which aims it anywhere.
+    fn body_along(&mut self, profile: u64, at: u64, depth: f64) -> u64 {
+        let solid = self.add(format!("IFCEXTRUDEDAREASOLID(#{profile},#{at},#{},{})", self.z, real(depth)));
+        let rep = self.add(format!("IFCSHAPEREPRESENTATION(#{},'Body','SweptSolid',(#{solid}))", self.body));
+        self.add(format!("IFCPRODUCTDEFINITIONSHAPE($,$,(#{rep}))"))
+    }
+
+    /// Axes at the origin with the z axis along `z` and the x axis along `x`, which is square to it.
+    fn aim(&mut self, z: P3, x: P3) -> u64 {
+        let o = self.add("IFCCARTESIANPOINT((0.,0.,0.))");
+        let dir = |w: &mut Step, d: P3| w.add(format!("IFCDIRECTION(({},{},{}))", ratio(d[0]), ratio(d[1]), ratio(d[2])));
+        let (z, x) = (dir(self, z), dir(self, x));
+        self.add(format!("IFCAXIS2PLACEMENT3D(#{o},#{z},#{x})"))
+    }
+
+    /// `Pset_*Common` of something structural: it carries load.
+    fn load_bearing(&mut self, ent: u64, pset: &str, id: Id) {
+        let load = self.add("IFCPROPERTYSINGLEVALUE('LoadBearing',$,IFCBOOLEAN(.T.),$)");
+        self.define(ent, pset, &[load], (COMMON, COMMON_DEFINES), id);
+    }
+
     /// A body: `profile` swept `depth` up from `bottom`, plus any extra representations.
     fn body(&mut self, profile: u64, bottom: f64, depth: f64, extra: &[u64]) -> u64 {
         self.bodies(&[(profile, bottom, depth)], extra)
@@ -496,6 +525,9 @@ pub fn export(m: &Model) -> String {
                 contained.entry(f.level).or_default().push(ent);
                 products.insert(id, ent);
                 hosts.insert(id, (ent, at, m.elevation(f.level)));
+                if f.structural {
+                    w.load_bearing(ent, "Pset_SlabCommon", id);
+                }
             }
             Element::Ceiling(c) => {
                 let Some(&(_, storey)) = storeys.get(&c.level) else { continue };
@@ -534,8 +566,25 @@ pub fn export(m: &Model) -> String {
                 spaces.entry(r.level).or_default().push(ent);
                 products.insert(id, ent);
             }
-            Element::Column(col) => {
-                let (Some(&(_, storey)), Some(t)) = (storeys.get(&col.level), m.types.column.get(&col.type_name)) else { continue };
+            // A mass: a proxy of object type `Mass`, as Revit writes them, its footprint swept up from its base to its top.
+            Element::Mass(ms) => {
+                let Some(&(_, storey)) = storeys.get(&ms.level) else { continue };
+                let (bottom, top) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+                let at = w.place(Some(storey), (0.0, 0.0, 0.0), None);
+                let profile = w.profile(&ms.footprint(), &[]);
+                let shape = w.body(profile, ms.base_offset, top - bottom, &[]);
+                let ent = w.add(format!(
+                    "IFCBUILDINGELEMENTPROXY({},$,{},$,'Mass',#{at},#{shape},'{id}',.USERDEFINED.)",
+                    w.guid(ELEMENT, id),
+                    s(&ms.name)
+                ));
+                contained.entry(ms.level).or_default().push(ent);
+                products.insert(id, ent);
+            }
+            // A structural column and an isolated footing are written as a column is, a footing as an IfcFooting; what is
+            // structural says it carries load.
+            Element::Column(col) | Element::StructuralColumn(col) | Element::Footing(col) => {
+                let (Some(&(_, storey)), Some(t)) = (storeys.get(&col.level), m.column_type(e)) else { continue };
                 let (bottom, top) = m.span(col.level, col.base_offset, col.top_level, col.height);
                 let at = w.place(Some(storey), (col.at.0, col.at.1, col.base_offset), Some(heading(col.angle)));
                 let profile = if t.round {
@@ -546,14 +595,58 @@ pub fn export(m: &Model) -> String {
                     w.rectangle(P2(0.0, 0.0), P2(t.width, t.depth))
                 };
                 let shape = w.body(profile, 0.0, top - bottom, &[]);
+                let (class, kind) =
+                    if matches!(e, Element::Footing(_)) { ("IFCFOOTING", ".PAD_FOOTING.") } else { ("IFCCOLUMN", ".COLUMN.") };
                 let ent = w.add(format!(
-                    "IFCCOLUMN({},$,{},$,{},#{at},#{shape},'{id}',.COLUMN.)",
+                    "{class}({},$,{},$,{},#{at},#{shape},'{id}',{kind})",
                     w.guid(ELEMENT, id),
                     s(&col.type_name),
                     s(&col.type_name)
                 ));
                 contained.entry(col.level).or_default().push(ent);
                 products.insert(id, ent);
+                match e {
+                    Element::StructuralColumn(_) => w.load_bearing(ent, "Pset_ColumnCommon", id),
+                    Element::Footing(_) => w.load_bearing(ent, "Pset_FootingCommon", id),
+                    _ => {}
+                }
+            }
+            // A run: its section swept along its axis, a beam or a footing in its material, with the system it is in.
+            Element::Beam(r) | Element::StripFooting(r) => {
+                let (Some(&(_, storey)), Some(t), Some(g)) = (storeys.get(&r.level), m.run_type(e), m.run_geom(e)) else { continue };
+                let (axis, class, kind, pset) = match e {
+                    Element::Beam(_) => (crate::view3d::unit(crate::view3d::sub(g.b, g.a)), "IFCBEAM", ".BEAM.", "Pset_BeamCommon"),
+                    _ => (crate::view3d::unit(crate::view3d::sub(g.b, g.a)), "IFCFOOTING", ".STRIP_FOOTING.", "Pset_FootingCommon"),
+                };
+                // Placed at the start of its centre line; its section's x across it, level, its y up.
+                let at = w.place(Some(storey), (g.a[0], g.a[1], g.a[2] - m.elevation(r.level)), None);
+                let across = if g.vertical() { [1.0, 0.0, 0.0] } else { crate::view3d::unit([-axis[1], axis[0], 0.0]) };
+                let profile = if g.round {
+                    let c = w.point(P2(0.0, 0.0));
+                    let centre = w.add(format!("IFCAXIS2PLACEMENT2D(#{c},$)"));
+                    w.add(format!("IFCCIRCLEPROFILEDEF(.AREA.,$,#{centre},{})", real(g.width / 2.0)))
+                } else {
+                    w.rectangle(P2(0.0, 0.0), P2(g.width, g.depth))
+                };
+                let along = w.aim(axis, across);
+                let shape = w.body_along(profile, along, g.length());
+                let ent = w.add(format!(
+                    "{class}({},$,{},$,{},#{at},#{shape},'{id}',{kind})",
+                    w.guid(ELEMENT, id),
+                    s(&r.type_name),
+                    s(&r.type_name)
+                ));
+                contained.entry(r.level).or_default().push(ent);
+                products.insert(id, ent);
+                w.load_bearing(ent, pset, id);
+                if !t.material.is_empty() {
+                    let material = w.material(m, &t.material);
+                    w.add(format!("IFCRELASSOCIATESMATERIAL({},$,$,$,(#{ent}),#{material})", w.guid(RUN_MATERIALS, id)));
+                }
+                if !r.system.is_empty() {
+                    let system = w.text_property("System", None, &r.system);
+                    w.define(ent, RUN, &[system], (RUN_PROPERTIES, RUN_DEFINES), id);
+                }
             }
             // A component: its category's element, named by its family and type as Revit names them,
             // each form a closed face set styled in its material's colour.

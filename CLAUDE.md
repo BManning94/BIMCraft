@@ -60,6 +60,10 @@ cargo test --workspace
   reflected ceiling plan: `render {"view": "Level 1", "ceiling": true, "path": "/tmp/rcp.png"}`.
 - 3D: `bimcraft-cli run --sample --cmd 'render {"view": "{3D}", "path": "/tmp/3d.png"}'` (`azimuth` and `elevation`
   turn it). After touching `view3d.rs`, look at it. Sections and elevations render by name the same way: `"view": "Section 1"`.
+- Scale, detail level and style: `bimcraft-cli run --sample --cmd 'scale {"view": "Level 1", "scale": 100}' --cmd 'render {"view": "Level 1",
+  "path": "/tmp/plan.png"}'` (annotation follows the scale at that picture's zoom, so the one that fits is not the one a sheet prints),
+  `detail {"view": "Level 1", "detail": "coarse"}`, and `visual_style {"style": "wireframe"}` then `render {"view": "{3D}", ...}`. After
+  touching `Drawing::grow`, a layer or opening symbol's detail, or `Scene::wireframe`, look at them. In the desktop, the bar's menus in both themes.
 - Schedules: `bimcraft-cli run --sample --cmd 'schedule {"category": "rooms"}'` returns its columns, rows and totals (and
   `available`, the fields there are); one placed on a sheet prints as a table: render the sheet and look at it.
 - Sheets: `bimcraft-cli run --sample --save /tmp/sheets.pdf` prints every sheet; read them back with poppler (`pdfinfo`,
@@ -67,6 +71,10 @@ cargo test --workspace
 - IFC: `bimcraft-cli run --sample --save /tmp/house.ifc`. After touching `ifc.rs`, validate with IfcOpenShell:
   `ifcopenshell.validate.validate(f, logger, express_rules=True)` (needs pytest installed), then build every product's shape
   with `ifcopenshell.geom.create_shape` and compare wall and roof volumes with a hand calculation.
+- Structure: after touching `runs.rs` or how a run, a footing or a structural column goes to IFC, export beams (level, sloped, round), footings, a strip
+  footing, columns and a structural floor, validate with IfcOpenShell (`express_rules=True`), and compare each product's volume and bounding box
+  with a hand calculation (a round section is a polygon in IfcOpenShell's tessellation: a fraction of a percent short). Look at the plan, a
+  section across a beam, and the 3D view in both themes.
 - IFC import: after touching `import.rs` or `step.rs`, open the sample's IFC (`run house.ifc --cmd 'elements {}'`) and
   compare it with the sample, then the same file with its bodies turned into triangle meshes by IfcOpenShell, and a
   building written with IfcOpenShell's API. Render what came in and look at it. After touching how phases and design options
@@ -124,6 +132,23 @@ is runs and landings laid out from its start (`stairs::stair`, `stairs::ramp`): 
 mm up), as deep as the runs are wide, the next run turning by its `turn`; a railing on one follows its walk line moved out to
 its side (`stairs::railing`), so it goes wherever its host goes. `modify` merges into fields that are objects (JSON Merge Patch), so `{"view_range": {"cut": 1500}}` keeps the rest; an element's own field can't be
 called `category`, the tag every element carries.
+What a view hides or reveals for now (Temporary Hide/Isolate, Reveal Hidden Elements; `footer.rs`) is the window's, per `Sheet`, never the
+project's: the plan, the section and the 3D view draw `BimApp::view_model`, a copy of the model whose view graphics went through the `graphics`
+command on a scratch `Session`, made once for each model and each setting. A tool that needs the view's real model (select all, commands)
+still reads `session.model`. The Door and Window tools preview with `opening_of`, which the `door` and `window` commands insert too, so a
+sketch is the element the click makes (`render::sketch`). A selected door or window shows two temporary dimensions to the ends of its wall.
+A selected column or component, and the Column and Component tools' sketches, show up to four: how far it stands from the nearest wall centre
+line or grid east, north, west and south (`Model::clearances`, which finds them in the core; `standing_dimensions` draws them); a typed one runs
+`move` by the difference along that way.
+A view's scale, detail level and visual style are in its `Graphics` (`scale`, `detail`, `style`; the `scale`, `detail` and `visual_style`
+commands, which the view control bar's menus and WF, HL and SD run), not in a view template. A scale is the n of 1 : n (`graphics::SCALES`);
+`render::annotation` turns it and the zoom into `Drawing::k`, the factor annotation is drawn at (`Drawing::px`, `Drawing::grow`: annotation is
+laid out one pixel to the pixel and grown about its anchor), 1 for a view with no scale, which keeps annotation the size it has on screen,
+and 1 on a sheet (`draw_at`, `section_at`), where the viewport's scale already sets paper size. A viewport placed with no scale takes the
+view's. `Drawing::detail` is the level the plan or the section is drawn at: coarse leaves out a compound element's layers and an opening's
+symbols, medium its patterns (`cut_layer`, a floor's `surface`), fine draws as before. In the 3D view `Look::style` picks how
+`Scene::picture` draws: shaded as ever, hidden line as a section's picture is (paper faces, edges), wireframe by `Scene::edges` (where
+surfaces meet at an angle or end, found once) drawn through the faces; a pixel within two of a line picks its element.
 A project parameter (`Model::parameters`) is a value each element of its categories may hold in its `params`, of its kind;
 a component's `params` hold its family's instance values too, so a parameter for components can't take a family
 parameter's name, nor any category's own field's (`schedule::own_field`). A schedule's fields are its category's own
@@ -211,6 +236,19 @@ tool (DW, `BimApp::demolish`, in the Modify tab's Phasing panel) runs `modify {p
 plan, a section or the 3D view: the phase of the view on screen (the project's last unless it has one), or null when the element
 already comes down in it, one undo step a click. A door or window that only follows its wall gets a note instead, and an element that
 holds no `params` (annotation, levels, grids, shafts) says so and changes nothing.
+A mass (`Mass`, category `mass`) is a footprint (`Mass::footprint`: counter-clockwise whichever way `boundary` runs) extruded from
+`base_offset` over `level` up to `top_level` or `height`, as a shaft is, with `params`. A plan dashes its outline where its cut plane
+passes through it (`Model::mass_cut_by`); a section outlines where its line cuts it and never fills it in poché (`section` leaves masses out
+of `cuts`, `view3d::crossings` finds the stretches); 3D draws it as a slab, see-through by `graphics::MASS_TRANSPARENCY` unless the view's
+graphics say otherwise (`Look::with` starts a mass's override there, so a project with masses never takes its plain shortcut).
+`Model::mass_slices` is the levels it crosses, from its base up to, not including, its top, each with how far the mass goes up from there:
+`mass_floors` and the rows of the `massfloor` schedule (`schedule::sources`; a `Row` carries the schedule's category, not its element's) come
+from it. `wall_by_face`, `floor_by_face` and `roof_by_face` build their element by running `wall`, `floor` and `roof` with the face's
+parameters, so those commands' checks stay the one place; a face is a footprint edge (numbered from the first point, counter-clockwise) or
+the top, and what they make is ordinary: nothing ties it to the mass. `commands::category` reads `mass` and `masses` as `mass` (it trims
+every trailing `s`, which would make `ma`). IFC writes a mass as an `IFCBUILDINGELEMENTPROXY` of object type `Mass`; import reads those
+before the proxies that become components of families. The desktop's Massing tab has the Mass tool (`Tool::Mass`: corners clicked, Enter or the
+first corner again finishes, `finish_mass`) and, for each selected mass, the Model by Face buttons, which run the face commands.
 A form is swept, or with an `axis` turned about it (`family::revolve`: `from` to `to` degrees, 32 steps to a turn, the profile to
 one side of the axis); a `void` cuts the solid forms listed before it (`csg::subtract`: convex polygons in binary space
 partitions, built and walked with a worklist rather than recursion and bounded by a `Meter`, so a hostile shape ends in an error;
@@ -233,6 +271,32 @@ a project only through the `favorite` command (`load` never overwrites without `
 (`editor.rs`) edits text (`FormText`, `ParamText`, ...) and changes the project's family only through a `family` command; its
 preview is a scratch `Session` of its own, and it says what's wrong inside the window (the status box, over the view's corner, would lie on its
 buttons).
+
+Structure (`runs.rs`, `structure.rs`; the design for the five discipline tabs is in [docs/disciplines.md](docs/disciplines.md)). A run
+(`model::Run`) is a straight element from `start` to `end` in plan; its `offset` mm over its level is the height of its `justify` line
+(top, centre or bottom) at the start, `end_offset` at the end (level when none), `system` the name of the system it is in: a beam, a
+strip footing, and what the other tabs will draw (pipes, conduits, cable trays, down conductors, data cabling) as further `Element`
+variants over the same struct, as `Door` and `Window` share `Opening`. Its type is `Types::runs[category][name]`, a `RunType`
+(`width` across by `depth` deep, or round, in a `material` of the library). The section is square to the axis, so a sloped run is
+`depth / cos θ` deep vertically (`Geom::half`). `runs::Geom` is the one place that knows the geometry (centre line, `footprint`,
+`prism` for a rectangle, `tube` for a round one, `z_span`); plans, sections (a prism is cut like any solid; a tube isn't, as a
+component's forms aren't), 3D, snaps and IFC call it and know no category. A beam or strip footing can't stand or lean past 75°
+(`runs::check`, `may_stand`: what stands is a column; a pipe's tab may say otherwise). In plan (`render::stands`) a footing or a run
+hangs under the level it is drawn on, its top flush with the view's bottom, and is seen (`seen_below` allows `TOL` for these only,
+or a wall of the storey below would show in the plan above); through the cut plane it's cut; over it and under the view range's top
+it's dashed; a faint dashed centre line is drawn where it's seen or overhead, which is also where a click picks it. A structural column and an
+isolated footing are `Column`s in their own categories (`Element::StructuralColumn`, `Element::Footing`; ask `Element::column()`,
+`Model::column_type(e)` and `column_outline(e)`, which take the element, not the column) with types of their own
+(`Types::structural_column`, `Types::footing`); a footing is laid down, its `height` its thickness and its `base_offset` putting its
+top at the level (the command's `thickness` and `offset`). A floor is `structural` or not, the one flag, and its schedule and IFC say it.
+`runs_of` and `stood_of` build what a command would make, so a tool's sketch is the element its click makes. The desktop's
+`Tool::Run(category, start)` and `Tool::Stand(category)` serve every category: a tab adds a ribbon button and its rows in
+`structure.rs`, `properties.rs` and `lang.rs`, not a tool. The Floor tool makes structural floors while `floor_structural` is set (SB,
+the Structure tab's button; every other `set_tool` clears it); CL is the structural column on the Structure tab and the architectural one
+elsewhere, as in Revit. IFC writes a run as an extrusion along its own axis (`Step::body_along`, `aim`), each structural element with
+`LoadBearing` in its `Pset_*Common`, a run's `System` in `BIMCraft_Run`, and its material as an `IfcMaterial`. Import (`import::run_in`)
+finds a run's axis as the direction its body's points spread furthest in (power iteration on their covariance), so a beam rolled
+about its axis comes in as the box round it, with `justify: centre` and both heights; `LoadBearing` makes a column or a floor structural.
 
 Updates (`crates/update`, drawn by `crates/ui-egui/src/updates.rs`). At startup the desktop asks `api.github.com` for the latest
 release (`LATEST_URL`: never a draft or a pre-release) on a thread of its own, and compares its tag, `vMAJOR.MINOR.PATCH`, with the

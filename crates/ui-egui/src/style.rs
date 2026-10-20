@@ -178,6 +178,9 @@ pub enum Icon {
     Sheet,
     PlaceView,
     Column,
+    Beam,
+    Footing,
+    WallFooting,
     Stair,
     Roof,
     Theme,
@@ -195,6 +198,7 @@ pub enum Icon {
     Floor,
     Ceiling,
     Shaft,
+    Mass,
     SlopeArrow,
     Ramp,
     Railing,
@@ -216,6 +220,8 @@ pub enum Icon {
     Unpaint,
     Favorite,
     FamilyEditor,
+    TempHide,
+    Reveal,
 }
 
 /// Points around `c` at radius `r` from angle `a0` to `a1` (radians, y down).
@@ -414,6 +420,28 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(6.0, 4.0), (18.0, 4.0)]),
             line(&[(6.0, 20.0), (18.0, 20.0)]),
         ],
+        // A beam in section: an I, its flanges top and bottom.
+        Icon::Beam => vec![
+            line(&[(3.0, 5.0), (21.0, 5.0)]),
+            line(&[(3.0, 19.0), (21.0, 19.0)]),
+            line(&[(12.0, 5.0), (12.0, 19.0)]),
+            line(&[(3.0, 5.0), (3.0, 8.0)]),
+            line(&[(21.0, 5.0), (21.0, 8.0)]),
+            line(&[(3.0, 19.0), (3.0, 16.0)]),
+            line(&[(21.0, 19.0), (21.0, 16.0)]),
+        ],
+        // A column on its footing, which is wider and sits on the ground.
+        Icon::Footing => vec![
+            ring(&[(10.0, 3.0), (14.0, 3.0), (14.0, 12.0), (10.0, 12.0)]),
+            ring(&[(4.0, 12.0), (20.0, 12.0), (20.0, 18.0), (4.0, 18.0)]),
+            line(&[(2.0, 20.0), (22.0, 20.0)]),
+        ],
+        // A wall on a strip footing running along it.
+        Icon::WallFooting => vec![
+            ring(&[(9.0, 3.0), (15.0, 3.0), (15.0, 13.0), (9.0, 13.0)]),
+            ring(&[(2.0, 13.0), (22.0, 13.0), (22.0, 18.0), (2.0, 18.0)]),
+            line(&[(2.0, 20.0), (22.0, 20.0)]),
+        ],
         Icon::Stair => vec![ring(&[
             (3.0, 20.0),
             (3.0, 16.0),
@@ -515,6 +543,12 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             ring(&[(4.0, 4.0), (20.0, 4.0), (20.0, 20.0), (4.0, 20.0)]),
             line(&[(4.0, 4.0), (20.0, 20.0)]),
             line(&[(20.0, 4.0), (4.0, 20.0)]),
+        ],
+        // A mass: a block seen from above and to one side.
+        Icon::Mass => vec![
+            ring(&[(3.0, 9.0), (15.0, 9.0), (15.0, 21.0), (3.0, 21.0)]),
+            line(&[(3.0, 9.0), (8.0, 4.0), (20.0, 4.0), (15.0, 9.0)]),
+            line(&[(20.0, 4.0), (20.0, 16.0), (15.0, 21.0)]),
         ],
         // A sloped slab, and the arrow up it.
         Icon::SlopeArrow => vec![
@@ -654,6 +688,20 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
         ],
         // Two crop marks, at opposite corners.
         Icon::Crop => vec![line(&[(6.0, 2.0), (6.0, 18.0), (22.0, 18.0)]), line(&[(2.0, 6.0), (18.0, 6.0), (18.0, 22.0)])],
+        // Sunglasses: what a view hides or isolates for now.
+        Icon::TempHide => vec![
+            Shape::circle_stroke(at(7.0, 14.0), 4.5 * k, s),
+            Shape::circle_stroke(at(17.0, 14.0), 4.5 * k, s),
+            line(&[(11.5, 13.0), (12.0, 12.0), (12.5, 13.0)]),
+            line(&[(2.5, 14.0), (3.0, 7.0)]),
+            line(&[(21.5, 14.0), (21.0, 7.0)]),
+        ],
+        // A light bulb: what a view hides, lit up.
+        Icon::Reveal => vec![
+            Shape::circle_stroke(at(12.0, 10.0), 6.0 * k, s),
+            line(&[(9.5, 15.0), (9.5, 19.0), (14.5, 19.0), (14.5, 15.0)]),
+            line(&[(10.0, 21.5), (14.0, 21.5)]),
+        ],
         // Half light, half dark.
         Icon::Theme => {
             let half: Vec<Pos2> = arc(at(12.0, 12.0), 8.0 * k, FRAC_PI_2, 3.0 * FRAC_PI_2);

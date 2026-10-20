@@ -8,6 +8,7 @@
 mod canvas;
 mod editor;
 mod favorites;
+mod footer;
 mod graphics;
 pub mod lang;
 mod orbit;
@@ -15,18 +16,19 @@ mod paper;
 mod phasing;
 mod properties;
 mod section;
+mod structure;
 mod style;
 #[cfg(test)]
 mod tests;
 mod updates;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bimcraft_core::engine::{self, Session};
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{CEILING_HEIGHT, DimKind, Element, Id, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
+use bimcraft_core::model::{CEILING_HEIGHT, DimKind, Element, Id, Justify, Location, Model, RAMP_WIDTH, Reference, STAIR_WIDTH};
 use bimcraft_core::snap::{Kind as Snap, Snaps};
 use bimcraft_core::units::Units;
 use bimcraft_core::{element_json, render, schedule, stairs};
@@ -43,7 +45,7 @@ use lang::{t, tf};
 use style::{Icon, pal};
 
 /// A view: what the middle of the window shows.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sheet {
     /// A level's floor plan.
     Plan(Id),
@@ -126,6 +128,10 @@ pub enum Tool {
     Elevation,
     /// A column where clicked.
     Column,
+    /// A beam or a wall footing (by category, as `beam` and `stripfooting` name them): its first point, once clicked.
+    Run(&'static str, Option<P2>),
+    /// A structural column or an isolated footing (`structuralcolumn`, `footing`) where clicked.
+    Stand(&'static str),
     /// A family's type where clicked: the one picked, turned by Space.
     Component,
     /// A stair: the points clicked, its start and where its first run ends; the next click, which
@@ -155,6 +161,8 @@ pub enum Tool {
     Ceiling,
     /// A shaft opening: its first corner, once clicked.
     Shaft(Option<P2>),
+    /// A mass: the corners of its footprint, as clicked so far.
+    Mass(Vec<P2>),
     /// The selected floor's slope arrow: its tail, once clicked.
     SlopeArrow(Option<P2>),
 }
@@ -178,7 +186,9 @@ enum Once {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tab {
     Architecture,
+    Structure,
     Annotate,
+    Massing,
     View,
     Manage,
     Modify,
@@ -217,8 +227,9 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 32] = [
+const SHORTCUTS: [(&str, &str); 42] = [
     ("MD", "Modify"),
+    ("SB", "Floor: Structural"),
     ("MM", "Mirror Pick Axis"),
     ("DM", "Mirror Draw Axis"),
     ("AL", "Align"),
@@ -243,12 +254,21 @@ const SHORTCUTS: [(&str, &str); 32] = [
     ("VG", "Visibility/Graphics"),
     ("EH", "Hide Element"),
     ("VH", "Hide Category"),
+    ("HH", "Temporary Hide Element"),
+    ("HC", "Temporary Hide Category"),
+    ("HI", "Temporary Isolate Element"),
+    ("IC", "Temporary Isolate Category"),
+    ("HR", "Reset Temporary Hide/Isolate"),
+    ("RH", "Reveal Hidden Elements"),
     ("EU", "Unhide Elements"),
     ("EO", "Override Graphics by Element"),
     ("FT", "Filters"),
     ("VT", "View Templates"),
     ("PH", "Phasing"),
     ("DO", "Design Options"),
+    ("WF", "Wireframe"),
+    ("HL", "Hidden Line"),
+    ("SD", "Shaded"),
     ("KS", "Keyboard Shortcuts"),
 ];
 
@@ -312,11 +332,20 @@ pub struct BimApp {
     /// The Column tool's top, as `wall_top` and `wall_height` are the Wall tool's.
     column_top: Option<Option<Id>>,
     column_height: String,
+    /// The Floor tool makes structural floors; the Beam tool's justification and height over the level; the footing tools'
+    /// thickness and the height of their tops.
+    floor_structural: bool,
+    run_justify: Justify,
+    beam_offset: String,
+    footing_thickness: String,
+    footing_top: String,
     /// The Stair tool's width; the Roof tool's slope, overhang and gable ends; the Roof by
     /// Extrusion tool's profile, a shed's rather than a gable's; the Dormer tool's width and height,
     /// and whether its front has a window.
     stair_width: String,
     roof_slope: String,
+    /// The scale being typed in the view control bar's Scale menu.
+    scale_text: String,
     roof_overhang: String,
     roof_gable: bool,
     roof_shed: bool,
@@ -334,6 +363,9 @@ pub struct BimApp {
     floor_slope: String,
     shaft_top: Option<Option<Id>>,
     shaft_height: String,
+    /// The Mass tool's top, as the Shaft tool's.
+    mass_top: Option<Option<Id>>,
+    mass_height: String,
     /// Each click ends a wall and starts the next; off, two clicks make one wall.
     chain: bool,
     /// The Wall tool draws arcs, by their ends and a point on them; the line its walls stand on.
@@ -361,8 +393,12 @@ pub struct BimApp {
     units: Units,
     /// A length typed while picking points: the listening dimension.
     typed_length: String,
-    /// A selected wall's temporary dimension being typed: the wall, the length so far.
-    dim_edit: Option<(Id, String)>,
+    /// What each view hides or reveals for now (not the project's), and the model it is drawn from.
+    temporary: HashMap<Sheet, footer::Temp>,
+    shadow: Option<footer::Shadow>,
+    /// A selected element's temporary dimension being typed: the element, which of its dimensions (a wall has one, a
+    /// door or window two: from its wall's start, from its end), the length so far.
+    dim_edit: Option<(Id, usize, String)>,
     /// A selected wall's angle being typed: the wall, whether it turns about its start (else its
     /// end), the angle so far.
     angle_edit: Option<(Id, bool, String)>,
@@ -601,8 +637,14 @@ impl BimApp {
             wall_height: units.length(3000.0),
             column_top: None,
             column_height: units.length(3000.0),
+            floor_structural: false,
+            run_justify: Justify::Top,
+            beam_offset: units.length(0.0),
+            footing_thickness: units.length(400.0),
+            footing_top: units.length(0.0),
             stair_width: units.length(STAIR_WIDTH),
             roof_slope: "30".into(),
+            scale_text: String::new(),
             roof_overhang: units.length(500.0),
             roof_gable: false,
             roof_shed: false,
@@ -618,6 +660,8 @@ impl BimApp {
             floor_slope: "5".into(),
             shaft_top: None,
             shaft_height: units.length(3000.0),
+            mass_top: None,
+            mass_height: units.length(3000.0),
             chain: true,
             wall_arc: false,
             wall_location: Location::Centre,
@@ -636,6 +680,8 @@ impl BimApp {
             lang: Language::English,
             typed_length: String::new(),
             dim_edit: None,
+            temporary: HashMap::new(),
+            shadow: None,
             tab_cycle: false,
             held: Vec::new(),
             show_properties: true,
@@ -741,6 +787,7 @@ impl BimApp {
             Tool::Section(_) => Some("Section"),
             Tool::Elevation => Some("Elevation"),
             Tool::Column => Some("Place Column"),
+            Tool::Run(..) | Tool::Stand(_) => structure::title(&self.tool),
             Tool::Component => Some("Place Component"),
             Tool::Stair(_) => Some("Create Stair"),
             Tool::Ramp(_) => Some("Create Ramp"),
@@ -751,6 +798,7 @@ impl BimApp {
             Tool::Floor => Some("Create Floor"),
             Tool::Ceiling => Some("Place Ceiling"),
             Tool::Shaft(_) => Some("Create Shaft Opening"),
+            Tool::Mass(_) => Some("Create Mass"),
         };
         if let Some(what) = place {
             return Some(format!("{} | {}", t("Modify"), t(what)));
@@ -866,6 +914,7 @@ impl BimApp {
                     self.view_tabs(ui);
                 },
             );
+            self.view_control_bar(ui);
             self.view_rect = ui.available_rect_before_wrap();
             // The plan sets the cursor each frame it shows.
             self.canvas.cursor = None;
@@ -879,6 +928,7 @@ impl BimApp {
                 Sheet::Paper(id) => self.paper_view(ui, id),
                 Sheet::Schedule(_) | Sheet::Table(_) => self.schedule(ui),
             }
+            self.temp_frame(ui);
         });
         self.warning(&ctx);
         self.dialogs(&ctx);
@@ -900,6 +950,7 @@ impl BimApp {
                 &mut self.ramp_height,
                 &mut self.ramp_width,
                 &mut self.shaft_height,
+                &mut self.mass_height,
             ];
             for field in fields {
                 if let Some(mm) = from.parse(field) {
@@ -982,6 +1033,7 @@ impl BimApp {
         {
             match (&self.tool, self.typed_length.is_empty()) {
                 (Tool::Railing(_), true) => self.finish_railing(level),
+                (Tool::Mass(_), true) => self.finish_mass(level),
                 (_, true) => self.finish_wall(level, false),
                 (_, false) => self.place_typed(level),
             }
@@ -1065,12 +1117,37 @@ impl BimApp {
                 self.show_shortcuts = true;
                 return true;
             }
+            // Floor: Structural.
+            "SB" => {
+                self.structural_floor();
+                return true;
+            }
             "VV" | "VG" => {
                 self.open_graphics(0);
                 return true;
             }
             "EH" | "VH" => {
                 self.hide_selection(self.typed == "VH");
+                return true;
+            }
+            "WF" | "HL" | "SD" => {
+                let style = match self.typed.as_str() {
+                    "WF" => bimcraft_core::graphics::VisualStyle::Wireframe,
+                    "HL" => bimcraft_core::graphics::VisualStyle::HiddenLine,
+                    _ => bimcraft_core::graphics::VisualStyle::Shaded,
+                };
+                self.set_visual_style(style);
+                return true;
+            }
+            "HH" | "HC" | "HI" | "IC" | "HR" | "RH" => {
+                match self.typed.as_str() {
+                    "HH" => self.temp_hide(false),
+                    "HC" => self.temp_hide(true),
+                    "HI" => self.temp_isolate(false),
+                    "IC" => self.temp_isolate(true),
+                    "HR" => self.temp_reset(),
+                    _ => self.temp_reveal(),
+                }
                 return true;
             }
             "EU" => {
@@ -1127,7 +1204,19 @@ impl BimApp {
                 Some("text") => Tool::Text,
                 Some("spot") => Tool::Spot,
                 Some("tag") => Tool::Tag,
+                // Revit's CL is the structural column on its Structure tab, the architectural one elsewhere.
+                Some("column") if self.tab == Tab::Structure || (self.tab == Tab::Context && self.back == Tab::Structure) => {
+                    Tool::Stand("structuralcolumn")
+                }
                 Some("column") => Tool::Column,
+                Some("beam") => Tool::Run("beam", None),
+                Some("footing") => Tool::Stand("footing"),
+                Some("strip_footing") => Tool::Run("stripfooting", None),
+                Some("mass") => Tool::Mass(Vec::new()),
+                Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face")) => {
+                    self.by_mass(c);
+                    return true;
+                }
                 Some("component") => Tool::Component,
                 Some("section") => Tool::Section(None),
                 Some("measure") => Tool::Measure(None),
@@ -1181,9 +1270,14 @@ impl BimApp {
             Some(Element::Floor(_)) => Tool::Floor,
             Some(Element::Ceiling(_)) => Tool::Ceiling,
             Some(Element::Shaft(_)) => Tool::Shaft(None),
+            Some(Element::Mass(_)) => Tool::Mass(Vec::new()),
             Some(Element::Roof(r)) if r.extrusion.is_some() => Tool::ExtrusionRoof(Vec::new()),
             Some(Element::Roof(_)) => Tool::Roof,
             Some(Element::Column(_)) => Tool::Column,
+            Some(Element::StructuralColumn(_)) => Tool::Stand("structuralcolumn"),
+            Some(Element::Footing(_)) => Tool::Stand("footing"),
+            Some(Element::Beam(_)) => Tool::Run("beam", None),
+            Some(Element::StripFooting(_)) => Tool::Run("stripfooting", None),
             Some(Element::Component(c)) => {
                 self.component = Some((c.family.clone(), c.type_name.clone()));
                 Tool::Component
@@ -1216,6 +1310,8 @@ impl BimApp {
             self.types.insert(e.category(), name.to_string());
         }
         self.set_tool(tool);
+        // A structural floor's likeness is structural.
+        self.floor_structural = matches!(picked.map(|(_, e)| e), Some(Element::Floor(f)) if f.structural);
     }
 
     /// Select All Instances (SA): every element the open view shows of a type selected, a
@@ -1306,6 +1402,8 @@ impl BimApp {
         }
         self.typed.clear();
         self.typed_length.clear();
+        // The Floor tool makes structural floors only when the Structure tab asks (`structural_floor`).
+        self.floor_structural = false;
         if !matches!(tool, Tool::Measure(_)) {
             self.measured = None;
         }
@@ -1397,8 +1495,9 @@ impl BimApp {
     fn base(&self) -> Option<P2> {
         match &self.tool {
             Tool::Wall(chain) => chain.last().copied(),
+            Tool::Run(_, start) => *start,
             Tool::Grid(start) | Tool::Move(start) | Tool::Copy(start) | Tool::Section(start) | Tool::SlopeArrow(start) => *start,
-            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) => pts.last().copied(),
+            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::Mass(pts) => pts.last().copied(),
             _ => None,
         }
     }
@@ -1424,6 +1523,7 @@ impl BimApp {
         self.tool = match std::mem::replace(&mut self.tool, Tool::Modify) {
             Tool::Wall(chain) if !chain.is_empty() => Tool::Wall(Vec::new()),
             Tool::Grid(Some(_)) => Tool::Grid(None),
+            Tool::Run(c, Some(_)) => Tool::Run(c, None),
             Tool::Mirror { draw, start: Some(_) } => Tool::Mirror { draw, start: None },
             Tool::Align(Some(_)) => Tool::Align(None),
             Tool::Trim(Some(_)) => Tool::Trim(None),
@@ -1437,6 +1537,7 @@ impl BimApp {
             Tool::Stair(pts) if !pts.is_empty() => Tool::Stair(Vec::new()),
             Tool::Ramp(pts) if !pts.is_empty() => Tool::Ramp(Vec::new()),
             Tool::Railing(pts) if !pts.is_empty() => Tool::Railing(Vec::new()),
+            Tool::Mass(pts) if !pts.is_empty() => Tool::Mass(Vec::new()),
             Tool::Shaft(Some(_)) => Tool::Shaft(None),
             Tool::SlopeArrow(Some(_)) => Tool::SlopeArrow(None),
             Tool::ExtrusionRoof(pts) if !pts.is_empty() => Tool::ExtrusionRoof(Vec::new()),
@@ -1487,11 +1588,11 @@ impl BimApp {
         }
         match &mut self.tool {
             Tool::Wall(chain) => chain.clear(),
-            Tool::Grid(start) => *start = None,
+            Tool::Grid(start) | Tool::Run(_, start) => *start = None,
             Tool::Dimension(refs) | Tool::Angular(refs) => refs.clear(),
             Tool::Radial(r) => *r = None,
             Tool::Section(start) | Tool::Shaft(start) | Tool::Measure(start) => *start = None,
-            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::ExtrusionRoof(pts) => pts.clear(),
+            Tool::Stair(pts) | Tool::Ramp(pts) | Tool::Railing(pts) | Tool::ExtrusionRoof(pts) | Tool::Mass(pts) => pts.clear(),
             Tool::Move(_) | Tool::Copy(_) | Tool::SlopeArrow(_) | Tool::GableEdge => self.tool = Tool::Modify,
             _ => {}
         }
@@ -1729,7 +1830,9 @@ impl BimApp {
                 MenuButton::from_button(file).ui(ui, |ui| self.file_menu(ui, &ctx));
                 for (tab, label) in [
                     (Tab::Architecture, "Architecture"),
+                    (Tab::Structure, "Structure"),
                     (Tab::Annotate, "Annotate"),
+                    (Tab::Massing, "Massing"),
                     (Tab::View, "View"),
                     (Tab::Manage, "Manage"),
                     (Tab::Modify, "Modify"),
@@ -1749,7 +1852,9 @@ impl BimApp {
         Frame::new().inner_margin(vec2(8.0, 6.0)).show(ui, |ui| {
             ui.horizontal(|ui| match self.tab {
                 Tab::Architecture => self.architecture_tab(ui),
+                Tab::Structure => self.structure_tab(ui),
                 Tab::Annotate => self.annotate_tab(ui),
+                Tab::Massing => self.massing_tab(ui),
                 Tab::View => self.view_tab(ui),
                 Tab::Manage => self.manage_tab(ui),
                 Tab::Modify | Tab::Context => self.modify_tab(ui),
@@ -1805,12 +1910,53 @@ impl BimApp {
     fn tools(&mut self, ui: &mut Ui, name: &str, tools: Tools) {
         panel(ui, name, |ui| {
             for (icon, label, tip, tool) in tools {
-                let active = std::mem::discriminant(&self.tool) == std::mem::discriminant(tool);
+                let active = structure::same_tool(&self.tool, tool);
                 if big_button(ui, *icon, label, active, tip).clicked() {
                     self.set_tool(tool.clone());
                 }
             }
         });
+    }
+
+    fn massing_tab(&mut self, ui: &mut Ui) {
+        let tip = "Mass (MS): click the corners of the footprint; Enter, or the first corner again, finishes; Esc cancels";
+        self.tools(ui, "Conceptual Mass", &[(Icon::Mass, "Mass", tip, Tool::Mass(Vec::new()))]);
+        let selected = !self.selected_masses().is_empty();
+        panel(ui, "Model by Face", |ui| {
+            ui.add_enabled_ui(selected, |ui| {
+                for (icon, label, tip, command) in [
+                    (Icon::Floor, "Mass Floors", "Mass Floors (MF): a floor at each level the selected masses cross", "mass_floors"),
+                    (
+                        Icon::Wall,
+                        "Wall by Face",
+                        "Wall by Face (WB): a wall on each edge of the selected masses' footprints",
+                        "wall_by_face",
+                    ),
+                    (Icon::Floor, "Floor by Face", "Floor by Face (FB): a floor on the selected masses' top faces", "floor_by_face"),
+                    (Icon::Roof, "Roof by Face", "Roof by Face (RB): a roof on the selected masses' top faces", "roof_by_face"),
+                ] {
+                    if big_button(ui, icon, label, false, tip).clicked() {
+                        self.by_mass(command);
+                    }
+                }
+            });
+        });
+    }
+
+    /// The masses selected.
+    fn selected_masses(&self) -> Vec<Id> {
+        self.selection.iter().copied().filter(|id| matches!(self.session.model.elements.get(id), Some(Element::Mass(_)))).collect()
+    }
+
+    /// A Model by Face button or shortcut: `command` for each mass selected.
+    fn by_mass(&mut self, command: &str) {
+        let masses = self.selected_masses();
+        if masses.is_empty() {
+            self.status = Status { text: t("Select a mass first.").into(), error: true };
+        }
+        for id in masses {
+            self.run(command, json!({"mass": id}));
+        }
     }
 
     fn architecture_tab(&mut self, ui: &mut Ui) {
@@ -2343,9 +2489,16 @@ impl BimApp {
                         height_options(ui, &self.session.model, level, &mut self.column_top, &mut self.column_height, "column-top");
                     }
                 }
+                Tool::Run(category, _) => self.run_options(ui, category),
+                Tool::Stand(category) => self.stand_options(ui, category),
                 Tool::Shaft(_) => {
                     if let Some(level) = self.plan_level() {
                         height_options(ui, &self.session.model, level, &mut self.shaft_top, &mut self.shaft_height, "shaft-top");
+                    }
+                }
+                Tool::Mass(_) => {
+                    if let Some(level) = self.plan_level() {
+                        height_options(ui, &self.session.model, level, &mut self.mass_top, &mut self.mass_height, "mass-top");
                     }
                 }
                 Tool::Ceiling => {
@@ -2566,6 +2719,7 @@ impl BimApp {
             Tool::Section(Some(_)) => "Click the section's end.",
             Tool::Elevation => "Click beside the building: the elevation looks at the side you click by.",
             Tool::Column => "Click to place a column, as high as the Options Bar says.",
+            Tool::Run(..) | Tool::Stand(_) => structure::hint(&self.tool).unwrap_or_default(),
             Tool::Component => "Click where the component goes; Space turns it a quarter turn.",
             Tool::Stair(pts) if pts.is_empty() => "Click where the stair starts: the middle of its first riser.",
             Tool::Stair(pts) if pts.len() == 1 => {
@@ -2588,6 +2742,9 @@ impl BimApp {
             Tool::Ceiling => "Click inside a room: a ceiling out to its walls' faces, as high as the Options Bar says.",
             Tool::Shaft(None) => "Click a corner of the shaft opening.",
             Tool::Shaft(Some(_)) => "Click the opposite corner: the shaft cuts the floors, ceilings and roofs up to its top. Esc cancels.",
+            Tool::Mass(pts) if pts.is_empty() => "Click the first corner of the mass's footprint.",
+            Tool::Mass(pts) if pts.len() < 3 => "Click the footprint's next corner. Esc cancels.",
+            Tool::Mass(_) => "Click the next corner; Enter, or the first corner again, finishes the mass. Esc cancels.",
             Tool::SlopeArrow(None) => "Click the slope arrow's tail: where the floor's top stays at its height offset.",
             Tool::SlopeArrow(Some(_)) => "Click its head: the floor rises toward it at the Options Bar's slope. Esc cancels.",
         }
