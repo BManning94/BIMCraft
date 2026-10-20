@@ -207,7 +207,7 @@ incremental validation (0.5), and links (0.9).
 |---|---|---|
 | **Structure** | First slice done: beams, structural columns, isolated and wall footings, structural floors, with types, schedules, IFC and the Structure tab ([design](docs/disciplines.md)). Left: braces (a sloped run, `IfcMember`), joins and framing types, slab foundations, beam systems, an analytical model exported to open formats | L |
 | **Site** | Toposolids from points or contours (and imported DXF or LandXML), pads, property lines with bearings, cut and fill quantities | L |
-| **Massing** | Extruded masses, mass floors and gross floor area, and walls, floors and roofs by face are in. Left: blends, lofts and sloped or tapering masses, curtain systems by face, and elements by face that follow the mass when it changes | M |
+| **Massing** | Extruded and lofted masses (a top outline, or a lean for a sloped one), mass floors you can run again, gross floor area, Show Mass, and walls, floors and roofs by face that follow the mass on Update to Face are in. Left: blends between outlines of different corner counts, revolved masses, curtain systems by face, and elements that follow the mass by themselves | M |
 | **MEP** | The Plumbing, Electrical, SPDA (lightning protection) and Data tabs, designed with Structure's in [docs/disciplines.md](docs/disciplines.md): each adds `Element` variants over the run (pipes, conduits, cable trays, down conductors, cabling), family categories for its fixtures and devices, and a ribbon tab, with no new engine code. Then fittings and connectors, auto-routing, sizing, circuits and panel schedules | XL+ |
 
 Structure and site come before MEP: they are smaller, they reuse the existing solids and hosting, and architects need

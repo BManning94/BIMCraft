@@ -4050,6 +4050,35 @@ fn the_massing_tab_makes_floors_walls_a_floor_and_a_roof_from_the_selected_mass(
 }
 
 #[test]
+fn a_mass_edits_its_levels_and_its_top_outline_in_its_properties_which_lofts_it() {
+    let mut h =
+        app("level {\"elevation\": 6000}\nmass {\"boundary\": [[0, 0], [10000, 0], [10000, 6000], [0, 6000]], \"top_level\": \"Level 3\"}");
+    click(&mut h, P2(5000.0, 0.0));
+    let mass = h.state().selection[0];
+    assert!(h.query_by_label("Base Constraint").is_some() && h.query_by_label("Top Constraint").is_some());
+    assert!(h.query_by_label("Top Outline").is_some());
+    assert_eq!(field(&h, mass, "volume_m3"), json!(360.0));
+    // Typed corner by corner as the footprint's are, twin for twin: 6 x 2 m in the middle.
+    type_into(&mut h, "Top Outline", "2000, 2000; 8000, 2000; 8000, 4000; 2000, 4000");
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, mass, "top"), json!([[2000.0, 2000.0], [8000.0, 2000.0], [8000.0, 4000.0], [2000.0, 4000.0]]));
+    assert_eq!(field(&h, mass, "volume_m3"), json!(200.0));
+    // The wrong number of corners is refused, and the mass is as it was.
+    type_into(&mut h, "Top Outline", "2000, 2000; 8000, 2000; 8000, 4000");
+    key(&mut h, Key::Enter);
+    assert!(h.state().status.error, "{}", h.state().status.text);
+    assert_eq!(field(&h, mass, "volume_m3"), json!(200.0));
+    // Blank takes the loft away.
+    h.get_by_label("Top Outline").focus();
+    h.run();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    key(&mut h, Key::Backspace);
+    key(&mut h, Key::Enter);
+    assert_eq!(field(&h, mass, "volume_m3"), json!(360.0));
+    assert!(field(&h, mass, "top").is_null());
+}
+
+#[test]
 fn update_to_face_makes_what_was_made_by_face_follow_the_selected_mass_again() {
     let mut h = app(&format!("{BOX}\nmass {{\"boundary\": [[0, 0], [4000, 0], [4000, 3000], [0, 3000]], \"height\": 3000}}"));
     let mass = ids(&h, "mass");

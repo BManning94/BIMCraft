@@ -210,7 +210,7 @@ impl Scene {
                     r.courtyards.iter().chain(&r.openings).for_each(|o| s.points.extend(ring(o)));
                 }
                 Element::Shaft(sh) if sh.level == level => s.points.extend(ring(&sh.boundary)),
-                Element::Mass(ms) if m.mass_cut_by(ms, cut) => s.points.extend(ring(&ms.boundary)),
+                Element::Mass(ms) if m.mass_cut_by(ms, cut) => s.points.extend(ring(&m.mass_outline(ms, cut))),
                 Element::Stair(st) if st.level == level && near(&[st.start]) => s.points.push((st.start, Kind::Endpoint)),
                 Element::Ramp(r) if r.level == level && near(&[r.start]) => s.points.push((r.start, Kind::Endpoint)),
                 Element::Railing(r) if r.level == level => s.points.extend(ring(&r.path)),
@@ -462,6 +462,16 @@ mod tests {
         // Level 2's plan cuts at 4200 mm, over its top at 2000: nothing there to snap to.
         let f = snap(&m, 2, P2(5030.0, 4020.0), REACH, &[], false, &o);
         assert_eq!((f.at, f.kind), (P2(5030.0, 4020.0), Kind::Free));
+    }
+
+    #[test]
+    fn points_snap_to_the_corners_of_a_lofted_mass_at_the_height_the_plan_cuts_it() {
+        let m = model(
+            r#"mass {"boundary": [[0,0],[10000,0],[10000,6000],[0,6000]], "height": 6000, "top": [[2000,2000],[8000,2000],[8000,4000],[2000,4000]]}"#,
+        );
+        // Level 1's plan cuts 1200 mm up, a fifth of the way to the top outline: the corner is at 400, 400.
+        let f = at(&m, P2(430.0, 380.0), &[], &Snaps::default());
+        assert_eq!((f.at.0.round(), f.at.1.round(), f.kind), (400.0, 400.0, Kind::Endpoint));
     }
 
     #[test]

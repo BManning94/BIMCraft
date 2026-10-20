@@ -372,12 +372,31 @@ pub struct Mass {
     pub height: f64,
     #[serde(default)]
     pub base_offset: f64,
+    /// Its outline at the top, point for point with `boundary` at the base: the mass is lofted straight between the two. A
+    /// sloped mass is one whose top outline is its footprint moved sideways. None: it stands straight up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<Vec<P2>>,
     /// Its values of the project's parameters, by name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub params: BTreeMap<String, serde_json::Value>,
 }
 
 impl Mass {
+    /// Whether its top outline is not its footprint: it is lofted between the two.
+    pub fn lofted(&self) -> bool {
+        self.top.as_ref().is_some_and(|t| *t != self.boundary)
+    }
+
+    /// Its top outline, counter-clockwise like [`Mass::footprint`] and point for point with it: the footprint itself when it
+    /// stands straight up.
+    pub fn top_ring(&self) -> Vec<P2> {
+        let mut ring = self.top.as_ref().filter(|t| t.len() == self.boundary.len()).unwrap_or(&self.boundary).clone();
+        if geom::area(&self.boundary) < 0.0 {
+            ring.reverse();
+        }
+        ring
+    }
+
     /// Where its top face is: a level, and how far over it.
     pub fn top_face(&self) -> (Id, f64) {
         self.top_level.map_or((self.level, self.base_offset + self.height), |t| (t, 0.0))
@@ -1905,6 +1924,24 @@ impl Model {
         bottom <= z && z < top
     }
 
+    /// The outline of mass `ms` at height `z`: its footprint, or when it's lofted each corner that far along its straight way
+    /// to its twin in the top outline.
+    pub fn mass_outline(&self, ms: &Mass, z: f64) -> Vec<P2> {
+        if !ms.lofted() {
+            return ms.footprint();
+        }
+        let (bottom, top) = self.span(ms.level, ms.base_offset, ms.top_level, ms.height);
+        let t = if top > bottom { ((z - bottom) / (top - bottom)).clamp(0.0, 1.0) } else { 0.0 };
+        crate::massing::ring_at(&ms.footprint(), &ms.top_ring(), t)
+    }
+
+    /// The volume of mass `ms` between heights `from` and `to`, mm³. Its cross section's area is a quadratic of the height, so
+    /// Simpson's rule gives it exactly.
+    pub fn mass_volume(&self, ms: &Mass, from: f64, to: f64) -> f64 {
+        let area = |z: f64| geom::area(&self.mass_outline(ms, z)).abs();
+        (to - from) / 6.0 * (area(from) + 4.0 * area((from + to) / 2.0) + area(to))
+    }
+
     /// The levels a mass crosses, lowest first: from its base up to, not including, its top. Each with its elevation and how
     /// far the mass goes up from there, to the next of them or its top: what its floor there holds.
     pub fn mass_slices(&self, ms: &Mass) -> Vec<(Id, f64, f64)> {
@@ -2826,6 +2863,15 @@ impl Model {
                     let (bottom, top) = self.span(ms.level, ms.base_offset, ms.top_level, ms.height);
                     if top <= bottom + TOL {
                         return Err(format!("{who}: its top must be above its base"));
+                    }
+                    if let Some(crown) = &ms.top {
+                        // Its points first: past that, the rings pair up and the cross sections can be worked out.
+                        if crown.len() == ms.boundary.len() {
+                            boundary(&format!("{who} top"), crown)?;
+                        }
+                        if let Some(why) = crate::massing::loft_problem(&ms.boundary, crown) {
+                            return Err(format!("{who}: {why}"));
+                        }
                     }
                 }
                 Element::Door(o) | Element::Window(o) => {

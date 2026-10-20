@@ -35,6 +35,8 @@ enum Kind {
     Point,
     /// `[x, y]` on paper, in mm.
     PaperPoint,
+    /// A mass's top outline: corners as `x, y`, parted by `;`, or blank for none.
+    Outline,
     Flag,
     Level,
     /// A level, shown by name; read only.
@@ -156,6 +158,7 @@ fn rows(category: &str) -> &'static [Row] {
             ("Constraints", "base_offset", "Base Offset", Length),
             ("Constraints", "top_level", "Top Constraint", TopLevel),
             ("Constraints", "height", "Unconnected Height", Height),
+            ("Dimensions", "top", "Top Outline", Outline),
             ("Dimensions", "area_m2", "Area", AreaShown),
             ("Dimensions", "volume_m3", "Volume (m³)", Shown),
             ("Dimensions", "gross_floor_area_m2", "Gross Floor Area", AreaShown),
@@ -370,6 +373,13 @@ fn shown(kind: Kind, v: &Value, units: Units) -> String {
         v => v.as_f64().map_or_else(String::new, f),
     };
     match kind {
+        Outline => match v {
+            Value::Array(corners) => {
+                let corner = |p: &Value| Some(format!("{}, {}", units.length(p.get(0)?.as_f64()?), units.length(p.get(1)?.as_f64()?)));
+                corners.iter().filter_map(corner).collect::<Vec<_>>().join("; ")
+            }
+            _ => String::new(),
+        },
         Length | LengthIf | Height | Limit(_) | Point | LengthShown | Values => each(&|x| units.length(x)),
         MetresShown => each(&|x| units.length(x * 1000.0)),
         AreaShown => each(&|x| {
@@ -388,6 +398,8 @@ fn parse(kind: Kind, s: &str, units: Units) -> Result<Value, String> {
         Length | LengthIf | Height => length(s).map(|x| json!(x)),
         Limit(_) if s.trim().is_empty() => Ok(Value::Null),
         Limit(_) => length(s).map(|x| json!(x)),
+        Outline if s.trim().is_empty() => Ok(Value::Null),
+        Outline => s.split(';').map(|corner| parse(Point, corner, units)).collect::<Result<Vec<_>, _>>().map(Value::Array),
         // Lengths with feet and inches hold spaces: a comma parts x from y.
         Point => match s.split(',').collect::<Vec<_>>()[..] {
             [x, y] => Ok(json!([length(x)?, length(y)?])),
@@ -1036,7 +1048,7 @@ impl BimApp {
                                 r.widget_info(|| WidgetInfo::selected(WidgetType::Checkbox, false, on, label));
                                 r.labelled_by(name.id);
                             }
-                            Text | Number | Length | LengthIf | Point | PaperPoint | Height | Limit(_) => {
+                            Text | Number | Length | LengthIf | Point | PaperPoint | Outline | Height | Limit(_) => {
                                 // Blank across a selection may be values that differ, not nothing.
                                 let hint = match kind {
                                     Limit(hint) if ids.len() == 1 => t(hint),

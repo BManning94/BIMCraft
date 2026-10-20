@@ -739,13 +739,14 @@ fn sources<'a>(m: &'a Model, cat: &str) -> Vec<(&'a Element, Value)> {
     let mut out = Vec::new();
     for (&id, e) in &m.elements {
         let Element::Mass(ms) = e else { continue };
-        let (area, perimeter) = (crate::geom::area(&ms.boundary).abs(), crate::geom::perimeter(&ms.boundary));
-        for (level, _, up) in m.mass_slices(ms) {
+        for (level, z, up) in m.mass_slices(ms) {
+            let outline = m.mass_outline(ms, z);
+            let (area, perimeter) = (crate::geom::area(&outline).abs(), crate::geom::perimeter(&outline));
             out.push((
                 e,
                 serde_json::json!({
                     "id": id, "mass": ms.name, "level": level, "area_m2": crate::commands::m2(area),
-                    "perimeter_m": (perimeter / 10.0).round() / 100.0, "volume_m3": (area * up / 1e7).round() / 100.0,
+                    "perimeter_m": (perimeter / 10.0).round() / 100.0, "volume_m3": (m.mass_volume(ms, z, z + up) / 1e7).round() / 100.0,
                 }),
             ));
         }

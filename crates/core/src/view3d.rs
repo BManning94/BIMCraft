@@ -449,6 +449,11 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                     }
                 }
             }
+            // Lofted, a skin of triangles from the footprint to the top outline.
+            Element::Mass(ms) if ms.lofted() => {
+                let tris = crate::massing::tris(&ms.footprint(), &ms.top_ring(), m.span(ms.level, ms.base_offset, ms.top_level, ms.height));
+                out.push(Solid::Mesh { owner: id, color: MASS, tex: 0, tris, caps: 0, round: false });
+            }
             Element::Mass(ms) => out.push(slab(id, MASS, &ms.footprint(), m.span(ms.level, ms.base_offset, ms.top_level, ms.height))),
             // Each form in its material's colour; a curved one's facets one surface, as a curved wall's are.
             Element::Component(c) => {
@@ -1904,5 +1909,36 @@ mod tests {
         assert_eq!(tinted.color(x, y), Rgb(255, 0, 0), "a selected wall's edges in the selection's colour");
         let colours = plain.rgba.chunks(4).filter(|c| c[..3] != [255, 255, 255]).map(|c| (c[0], c[1], c[2])).collect::<BTreeSet<_>>();
         assert_eq!(colours, BTreeSet::from([(EDGE.0, EDGE.1, EDGE.2)]), "lines in the edge colour, nothing else");
+    }
+
+    #[test]
+    fn a_lofted_mass_is_a_closed_skin_of_triangles_turned_out_that_encloses_its_exact_volume() {
+        use serde_json::json;
+        let mut s = crate::engine::Session::new();
+        s.execute("level", &json!({"elevation": 6000, "name": "Level 3"})).unwrap();
+        let (base, crown) =
+            (json!([[0, 0], [10000, 0], [10000, 6000], [0, 6000]]), json!([[2000, 2000], [8000, 2000], [8000, 4000], [2000, 4000]]));
+        let r = s.execute("mass", &json!({"boundary": base, "height": 6000, "top": crown})).unwrap();
+        let id = r["id"].as_u64().unwrap_or_default();
+        let mut tris = Vec::new();
+        let solids = solids(&s.model);
+        assert!(solids.iter().filter(|x| x.owner() == id).all(|x| matches!(x, Solid::Mesh { .. })));
+        solids.iter().filter(|x| x.owner() == id).for_each(|x| x.tris(&mut tris));
+        // Turned out, the sum of the tetrahedra to the origin is the volume: 6 m x (60 + 4 x 32 + 12) / 6 m².
+        let volume: f64 = tris.iter().map(|t| dot(t.p[0], cross(t.p[1], t.p[2])) / 6.0).sum();
+        assert!((volume - 200e9).abs() < 1.0, "{volume}");
+        // Closed: each edge is walked once one way and once the other.
+        let key = |p: P3| p.map(|x| (x * 1e3).round() as i64);
+        let mut walked: HashMap<([i64; 3], [i64; 3]), usize> = HashMap::new();
+        for t in &tris {
+            for k in 0..3 {
+                *walked.entry((key(t.p[k]), key(t.p[(k + 1) % 3]))).or_default() += 1;
+            }
+        }
+        assert!(walked.iter().all(|((a, b), n)| *n == 1 && walked.get(&(*b, *a)) == Some(&1)), "an open or doubled edge");
+        // Over its middle it stands 6 m; over a corner of its footprint, past the top outline, it is lower.
+        assert_eq!(tops_at(&s.model, P2(5000.0, 3000.0)).get(&id), Some(&6000.0));
+        let corner = tops_at(&s.model, P2(500.0, 500.0)).get(&id).copied().unwrap_or(f64::MAX);
+        assert!(corner > 0.0 && corner < 6000.0, "{corner}");
     }
 }

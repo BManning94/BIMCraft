@@ -1689,6 +1689,23 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
 
     // Masses: proxies whose object type says so, each its outline and how high it stands. One outline: a courtyard
     // in it is more than a mass holds.
+    // A lofted one is written as a face set and says in a property set of its own how its two outlines pair up.
+    #[derive(serde::Deserialize)]
+    struct Loft {
+        bottom: Vec<P2>,
+        top: Vec<P2>,
+    }
+    let lofts: Vec<(Vec<u64>, Loft)> = named(&["IFCRELDEFINESBYPROPERTIES"])
+        .into_iter()
+        .filter_map(e)
+        .filter_map(|rel| {
+            let set = reference(rel.args.get(5))
+                .and_then(e)
+                .filter(|x| x.name == "IFCPROPERTYSET" && text(x.args.get(2)) == Some(crate::ifc::LOFT))?;
+            let loft = refs(set.args.get(4)).into_iter().filter_map(e).find(|p| text(p.args.first()) == Some("Loft"))?;
+            Some((refs(rel.args.get(4)), read_json(loft).ok()?))
+        })
+        .collect();
     for id in named(&["IFCBUILDINGELEMENTPROXY"]) {
         let Some(x) = e(id).filter(|x| text(x.args.get(4)) == Some("Mass")) else { continue };
         let faces = r.body(x);
@@ -1696,18 +1713,45 @@ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
             leave(&mut skipped, &mut seen, id, "it has no body BIMCraft can read");
             continue;
         };
+        let flat = |g: geom::Region| -> Vec<P2> { g.outer.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect() };
         let region = outline(&faces, Plane::flat(z1), true).filter(|g| g.holes.is_empty());
-        let Some(geom::Region { outer: ring, .. }) = region else {
+        let Some(crown) = region.map(flat) else {
             leave(&mut skipped, &mut seen, id, "its top isn't one level outline");
             continue;
+        };
+        let base = outline(&faces, Plane::flat(z0), false).filter(|g| g.holes.is_empty()).map(flat);
+        let noted = lofts.iter().find(|(on, _)| on.contains(&id)).map(|(_, l)| l);
+        let (boundary, top) = match (noted, base) {
+            (Some(l), Some(b))
+                if same(&l.bottom, &b) && same(&l.top, &crown) && crate::massing::loft_problem(&l.bottom, &l.top).is_none() =>
+            {
+                (l.bottom.clone(), Some(l.top.clone()))
+            }
+            (_, Some(b)) if !same(&b, &crown) => {
+                leave(
+                    &mut skipped,
+                    &mut seen,
+                    id,
+                    "its outline changes from its base to its top, and no BIMCraft_Mass property set says how its corners pair up",
+                );
+                continue;
+            }
+            _ => (crown, None),
         };
         let level = level_for(id, z0);
         let (top_level, height) = topped(level, z0, z1);
         let base_offset = ((z0 - elevation(level)) * 1000.0).round() / 1000.0 + 0.0;
         let name = text(x.args.get(2)).map(clip).unwrap_or_default();
-        let boundary = ring.into_iter().map(|p| micron(r.flat([p.0, p.1, 0.0]))).collect();
-        let mass =
-            Mass { name, level, boundary, top_level, height: (height * 1000.0).round() / 1000.0, base_offset, params: Default::default() };
+        let mass = Mass {
+            name,
+            level,
+            boundary,
+            top,
+            top_level,
+            height: (height * 1000.0).round() / 1000.0,
+            base_offset,
+            params: Default::default(),
+        };
         let mid = m.insert(Element::Mass(mass));
         from.insert(mid, who(id));
         elements_from.entry(id).or_default().push(mid);

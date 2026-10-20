@@ -1031,6 +1031,7 @@ const WORDS: &[[&str; 3]] = &[
     ["Massing", "Volumetria", "Volumetría"],
     ["Conceptual Mass", "Massa conceitual", "Masa conceptual"],
     ["Model by Face", "Modelo por face", "Modelo por cara"],
+    ["Top Outline", "Contorno superior", "Contorno superior"],
     ["Show Mass", "Mostrar massa", "Mostrar masa"],
     [
         "Show Mass (MH): hides the masses in this view, or shows them again",

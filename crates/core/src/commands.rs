@@ -122,9 +122,13 @@ pub static ALL: &[Command] = &[
         "mass",
         "Mass",
         &["MS"],
-        "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?, name?} a mass, Revit's conceptual volume: the \
-         footprint extruded from `base_offset` above the level up to the next level, or `height` mm, or up to `top_level`. \
-         Drawn dashed in plans and sections, a see-through solid in 3D; its own category, `mass`, which views may hide. Make \
+        "{boundary: [[x,y],…], level?, top_level?, height?, base_offset?, top?: [[x,y],…], lean?: [dx,dy], name?} a mass, Revit's \
+         conceptual volume: the footprint extruded from `base_offset` above the level up to the next level, or `height` mm, or up \
+         to `top_level`. With `top`, an outline of as many points as the footprint (twin for twin, running the same way round), \
+         it is lofted straight from the footprint to it; `lean` makes one by moving the footprint sideways by [dx, dy] for its \
+         top, a sloped mass. Drawn dashed in plans and sections (the outline at the height they cut it, between the two when \
+         lofted), a see-through solid in 3D; its own category, `mass`, which views may hide. Its areas and volumes, per level \
+         too, are those of the cross sections between its outlines, exactly. Make \
          floors from it with `mass_floors`, walls, a floor and a roof from its faces with `wall_by_face`, `floor_by_face` \
          and `roof_by_face`",
         mass,
@@ -1145,7 +1149,8 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("area_m2".into(), json!(area));
             extra.insert("height".into(), json!(height));
             extra.insert("volume_m3".into(), json!(volume));
-            extra.insert("gross_floor_area_m2".into(), json!(m2(m.mass_slices(ms).len() as f64 * geom::area(&ms.boundary).abs())));
+            let gross: f64 = m.mass_slices(ms).iter().map(|(_, z, _)| geom::area(&m.mass_outline(ms, *z)).abs()).sum();
+            extra.insert("gross_floor_area_m2".into(), json!(m2(gross)));
             extra.insert("levels".into(), json!(m.mass_slices(ms).iter().map(|(l, _, _)| *l).collect::<Vec<Id>>()));
         }
         Element::Room(r) => {
@@ -2588,8 +2593,7 @@ fn shaft(s: &mut Session, p: &Value) -> R {
 /// A mass's footprint area (m²), height (mm) and volume (m³).
 fn mass_size(m: &Model, ms: &Mass) -> (f64, f64, f64) {
     let (bottom, top) = m.span(ms.level, ms.base_offset, ms.top_level, ms.height);
-    let a = geom::area(&ms.boundary).abs();
-    (m2(a), top - bottom, (a * (top - bottom) / 1e7).round() / 100.0)
+    (m2(geom::area(&ms.boundary).abs()), top - bottom, (m.mass_volume(ms, bottom, top) / 1e7).round() / 100.0)
 }
 
 fn mass(s: &mut Session, p: &Value) -> R {
@@ -2597,14 +2601,28 @@ fn mass(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let level = level_param(c, m, p, "level")?;
     let mut boundary = points(c, p, "boundary")?;
+    let mut top = match (absent(p.get("top")), absent(p.get("lean"))) {
+        (false, false) => return Err(bad(c, "give `top`, an outline, or `lean`, how far the top moves sideways, not both")),
+        (false, true) => Some(points(c, p, "top")?),
+        (true, false) => {
+            let by = point_req(c, p, "lean")?;
+            Some(boundary.iter().map(|q| *q + by).collect::<Vec<P2>>())
+        }
+        (true, true) => None,
+    };
+    // Counter-clockwise, and its top outline the same way round, twin for twin.
     if geom::area(&boundary) < 0.0 {
         boundary.reverse();
+        if let Some(t) = top.as_mut() {
+            t.reverse();
+        }
     }
     let (top_level, height) = top_param(c, m, p, level)?;
     let name = string(c, p, "name")?.unwrap_or_else(|| m.language.word("Mass").into());
     let ms = Mass {
         name,
         level,
+        top: top.filter(|t| *t != boundary),
         boundary,
         top_level,
         height,
@@ -2660,10 +2678,13 @@ fn mass_floors(s: &mut Session, p: &Value) -> R {
     let (mut ids, mut made, mut updated, mut stale, mut removed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (mass, ms) in &masses {
         let held = massing::floors_of(&s.model, *mass);
-        let levels: Vec<Id> = s.model.mass_slices(ms).into_iter().map(|(level, _, _)| level).collect();
-        for &level in &levels {
+        let slices = s.model.mass_slices(ms);
+        let levels: Vec<Id> = slices.iter().map(|(level, _, _)| *level).collect();
+        for &(level, z, _) in &slices {
+            // The outline of the mass at the level: its footprint, or between that and its top outline if it's lofted.
+            let ring = s.model.mass_outline(ms, z);
             let Some(&(f, _)) = held.iter().find(|(_, l)| *l == level) else {
-                let made_one = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level})))?;
+                let made_one = floor(s, &passing(p, &["type"], json!({"boundary": ring, "level": level})))?;
                 for id in mark(s, &made_one["id"], massing::FLOOR, json!({"mass": mass, "level": level})) {
                     made.push(id);
                     ids.push(id);
@@ -2671,8 +2692,7 @@ fn mass_floors(s: &mut Session, p: &Value) -> R {
                 continue;
             };
             ids.push(f);
-            // A floor that already has the footprint (and the type) is left alone, so a second run is no undo step.
-            let ring = ms.footprint();
+            // A floor that already has the outline (and the type) is left alone, so a second run is no undo step.
             if let Some(Element::Floor(fl)) = s.model.elements.get(&f)
                 && (fl.boundary != ring || kind.as_ref().is_some_and(|k| *k != fl.type_name))
                 && let Some(Element::Floor(fl)) = s.model_mut().elements.get_mut(&f)
@@ -2712,16 +2732,28 @@ fn show_mass(s: &mut Session, p: &Value) -> R {
 fn wall_by_face(s: &mut Session, p: &Value) -> R {
     let c = "wall_by_face";
     let (mass, ms) = mass_of(c, &s.model, p)?;
-    let ring = ms.footprint();
+    let (ring, crown) = (ms.footprint(), ms.top_ring());
     let n = ring.len();
+    // A wall stands plumb, so only on a face whose top edge is right over its bottom edge.
     let faces: BTreeSet<usize> = match p.get("faces") {
-        v if absent(v) => (0..n).collect(),
+        v if absent(v) => {
+            let faces: BTreeSet<usize> = (0..n).filter(|f| massing::plumb(&ring, &crown, *f)).collect();
+            if faces.is_empty() {
+                return Err(bad(c, "every face of the mass leans, and a wall stands plumb; none can stand on one"));
+            }
+            faces
+        }
         Some(Value::Array(a)) if a.len() <= MAX_POINTS => a
             .iter()
             .map(|v| {
-                v.as_u64().and_then(|f| usize::try_from(f).ok()).filter(|f| *f < n).ok_or_else(|| {
+                let face = v.as_u64().and_then(|f| usize::try_from(f).ok()).filter(|f| *f < n).ok_or_else(|| {
                     bad(c, format!("face {v} isn't an edge of the footprint: 0 to {}, from its first point", n.saturating_sub(1)))
-                })
+                })?;
+                if massing::plumb(&ring, &crown, face) {
+                    Ok(face)
+                } else {
+                    Err(bad(c, format!("face {face} leans, and a wall stands plumb")))
+                }
             })
             .collect::<Result<_, _>>()?,
         Some(v) => return Err(bad(c, format!("`faces` must be a list of edge numbers, got {v}"))),
@@ -2743,7 +2775,7 @@ fn wall_by_face(s: &mut Session, p: &Value) -> R {
 fn floor_by_face(s: &mut Session, p: &Value) -> R {
     let (mass, ms) = mass_of("floor_by_face", &s.model, p)?;
     let (level, offset) = ms.top_face();
-    let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.footprint(), "level": level, "offset": offset})))?;
+    let made = floor(s, &passing(p, &["type"], json!({"boundary": ms.top_ring(), "level": level, "offset": offset})))?;
     mark(s, &made["id"], massing::FACE, json!({"mass": mass, "face": "top"}));
     Ok(made)
 }
@@ -2751,7 +2783,7 @@ fn floor_by_face(s: &mut Session, p: &Value) -> R {
 fn roof_by_face(s: &mut Session, p: &Value) -> R {
     let (mass, ms) = mass_of("roof_by_face", &s.model, p)?;
     let (level, offset) = ms.top_face();
-    let q = json!({"boundary": ms.footprint(), "level": level, "offset": offset, "slope": 0, "overhang": 0});
+    let q = json!({"boundary": ms.top_ring(), "level": level, "offset": offset, "slope": 0, "overhang": 0});
     let made = roof(s, &passing(p, &["type", "slope", "overhang"], q))?;
     mark(s, &made["id"], massing::FACE, json!({"mass": mass, "face": "top"}));
     Ok(made)
@@ -4645,10 +4677,19 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
                 cl.boundary.reverse();
             }
         }
-        Element::Shaft(Shaft { boundary, .. }) | Element::Mass(Mass { boundary, .. }) => {
+        Element::Shaft(Shaft { boundary, .. }) => {
             boundary.iter_mut().for_each(|q| *q = f(*q));
             if mo.mirror {
                 boundary.reverse();
+            }
+        }
+        // Its top outline goes the same way, twin for twin.
+        Element::Mass(Mass { boundary, top, .. }) => {
+            for ring in std::iter::once(boundary).chain(top.as_mut()) {
+                ring.iter_mut().for_each(|q| *q = f(*q));
+                if mo.mirror {
+                    ring.reverse();
+                }
             }
         }
         Element::Room(r) => r.point = f(r.point),
