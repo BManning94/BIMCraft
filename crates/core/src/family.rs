@@ -44,6 +44,14 @@ pub enum Category {
     InspectionBox,
     Lighting,
     Generic,
+    /// A data outlet (ponto de dados).
+    DataOutlet,
+    /// A voice outlet (ponto de voz).
+    VoiceOutlet,
+    /// A patch panel.
+    PatchPanel,
+    /// A rack.
+    Rack,
     Door,
     Window,
 }
@@ -51,7 +59,7 @@ pub enum Category {
 impl Category {
     /// The categories a component may be of (a door's or a window's family is placed in a wall), in the order an import reads
     /// them.
-    pub const PLACED: [Category; 13] = [
+    pub const PLACED: [Category; 17] = [
         Category::Furniture,
         Category::Plumbing,
         Category::Drain,
@@ -65,6 +73,10 @@ impl Category {
         Category::InspectionBox,
         Category::Lighting,
         Category::Generic,
+        Category::DataOutlet,
+        Category::VoiceOutlet,
+        Category::PatchPanel,
+        Category::Rack,
     ];
 
     /// How IFC writes a component of it: the product's class, its predefined type, and the object type a proxy carries where
@@ -81,6 +93,10 @@ impl Category {
             Category::Outlet => ("IFCOUTLET", ".POWEROUTLET.", None),
             Category::Switch => ("IFCSWITCHINGDEVICE", ".TOGGLESWITCH.", None),
             // IFC4 and IFC4X3 have no class for lightning protection: a proxy of an object type a reader can filter on.
+            Category::DataOutlet => ("IFCOUTLET", ".DATAOUTLET.", None),
+            Category::VoiceOutlet => ("IFCOUTLET", ".TELEPHONEOUTLET.", None),
+            Category::PatchPanel => ("IFCCOMMUNICATIONSAPPLIANCE", ".NETWORKAPPLIANCE.", None),
+            Category::Rack => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("Rack")),
             Category::AirTerminal => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("LightningTerminal")),
             Category::Earthing => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("EarthingRod")),
             Category::InspectionBox => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("InspectionBox")),

@@ -27,6 +27,7 @@ pub(crate) fn title(tool: &Tool) -> Option<&'static str> {
         Tool::Run("wire", _) => Some("Place Wire"),
         Tool::Run("downconductor", _) => Some("Place Down Conductor"),
         Tool::Run("groundconductor", _) => Some("Place Earthing Conductor"),
+        Tool::Run("cable", _) => Some("Place Cabling"),
         Tool::Run(_, _) => Some("Place Wall Footing"),
         Tool::Stand("structuralcolumn") => Some("Place Structural Column"),
         Tool::Stand(_) => Some("Place Isolated Footing"),

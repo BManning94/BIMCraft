@@ -31,6 +31,8 @@ pub const IFC: &[(&str, &str, &str)] = &[
     // `Category` tells them apart).
     ("downconductor", "IFCCABLESEGMENT", ".CONDUCTORSEGMENT."),
     ("groundconductor", "IFCCABLESEGMENT", ".CONDUCTORSEGMENT."),
+    // A data cable is a cable segment, as a wire is (BIMCraft's own `Category` tells them apart).
+    ("cable", "IFCCABLESEGMENT", ".CABLESEGMENT."),
 ];
 
 /// The IFC class and predefined type a run of `category` is written as.

@@ -196,6 +196,11 @@ pub enum Icon {
     Electrode,
     InspectionBox,
     GroundConductor,
+    DataOutlet,
+    VoiceOutlet,
+    Rack,
+    PatchPanel,
+    Cabling,
     Stair,
     Roof,
     Theme,
@@ -512,6 +517,43 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(3.0, 16.0), (21.0, 16.0)]),
             line(&[(8.0, 3.0), (8.0, 21.0)]),
             line(&[(16.0, 3.0), (16.0, 21.0)]),
+        ],
+        // A data outlet: a plate with a jack, its contacts in a row.
+        Icon::DataOutlet => vec![
+            ring(&[(4.0, 5.0), (20.0, 5.0), (20.0, 19.0), (4.0, 19.0)]),
+            ring(&[(8.0, 9.0), (16.0, 9.0), (16.0, 15.0), (8.0, 15.0)]),
+            line(&[(9.5, 15.0), (9.5, 12.0)]),
+            line(&[(12.0, 15.0), (12.0, 12.0)]),
+            line(&[(14.5, 15.0), (14.5, 12.0)]),
+        ],
+        // A voice outlet: a plate with a handset.
+        Icon::VoiceOutlet => vec![
+            ring(&[(4.0, 5.0), (20.0, 5.0), (20.0, 19.0), (4.0, 19.0)]),
+            line(&[(8.0, 10.0), (11.0, 8.0), (13.0, 8.0), (16.0, 10.0)]),
+            line(&[(8.0, 10.0), (8.0, 12.0)]),
+            line(&[(16.0, 10.0), (16.0, 12.0)]),
+            line(&[(9.0, 15.0), (15.0, 15.0)]),
+        ],
+        // A rack: its frame, its units in rows.
+        Icon::Rack => vec![
+            ring(&[(6.0, 2.0), (18.0, 2.0), (18.0, 22.0), (6.0, 22.0)]),
+            line(&[(6.0, 7.0), (18.0, 7.0)]),
+            line(&[(6.0, 12.0), (18.0, 12.0)]),
+            line(&[(6.0, 17.0), (18.0, 17.0)]),
+        ],
+        // A patch panel: a strip of ports.
+        Icon::PatchPanel => vec![
+            ring(&[(2.0, 8.0), (22.0, 8.0), (22.0, 16.0), (2.0, 16.0)]),
+            line(&[(6.0, 10.0), (6.0, 14.0)]),
+            line(&[(10.0, 10.0), (10.0, 14.0)]),
+            line(&[(14.0, 10.0), (14.0, 14.0)]),
+            line(&[(18.0, 10.0), (18.0, 14.0)]),
+        ],
+        // Cabling: three cables running together.
+        Icon::Cabling => vec![
+            line(&[(2.0, 7.0), (8.0, 7.0), (11.0, 12.0), (22.0, 12.0)]),
+            line(&[(2.0, 12.0), (8.0, 12.0), (11.0, 7.0), (22.0, 7.0)]),
+            line(&[(2.0, 17.0), (22.0, 17.0)]),
         ],
         // A distribution board: a box, its door and its breakers in rows.
         Icon::Equipment => vec![

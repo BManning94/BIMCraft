@@ -260,6 +260,15 @@ pub static ALL: &[Command] = &[
         ground_conductor,
     ),
     edit(
+        "cabling",
+        "Cabling",
+        &["CB"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} structured cabling \
+         (cabeamento estruturado, NBR 14565) for each segment of the points, as `pipe` lays them: round, `width` the cable's outside \
+         diameter; `system` names the link or the network it belongs to",
+        cabling,
+    ),
+    edit(
         "stair",
         "Stair",
         &[],
@@ -3012,6 +3021,10 @@ fn ground_conductor(s: &mut Session, p: &Value) -> R {
     chain(s, p, "groundconductor")
 }
 
+fn cabling(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "cable")
+}
+
 fn chain(s: &mut Session, p: &Value, category: &str) -> R {
     let made = runs_of(&s.model, p, category)?;
     let m = s.model_mut();
@@ -3036,6 +3049,7 @@ pub fn command_of(category: &str) -> &'static str {
         "wire" => "wire",
         "downconductor" => "down_conductor",
         "groundconductor" => "ground_conductor",
+        "cable" => "cabling",
         "footing" => "footing",
         _ => "column",
     }

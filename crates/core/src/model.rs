@@ -967,6 +967,7 @@ macro_rules! run_arm {
             | Element::Wire($r)
             | Element::DownConductor($r)
             | Element::GroundConductor($r)
+            | Element::Cable($r)
     };
 }
 pub(crate) use run_arm;
@@ -1003,6 +1004,7 @@ pub enum Element {
     Wire(Run),
     DownConductor(Run),
     GroundConductor(Run),
+    Cable(Run),
     Component(Component),
     Stair(Stair),
     Ramp(Ramp),
@@ -1089,6 +1091,7 @@ impl Element {
             "wire" => Some(Element::Wire(r)),
             "downconductor" => Some(Element::DownConductor(r)),
             "groundconductor" => Some(Element::GroundConductor(r)),
+            "cable" => Some(Element::Cable(r)),
             _ => None,
         }
     }
@@ -1168,6 +1171,7 @@ impl Element {
             Element::Wire(_) => "wire",
             Element::DownConductor(_) => "downconductor",
             Element::GroundConductor(_) => "groundconductor",
+            Element::Cable(_) => "cable",
             Element::Component(_) => "component",
             Element::Stair(_) => "stair",
             Element::Ramp(_) => "ramp",
@@ -1242,7 +1246,8 @@ pub struct RunType {
 }
 
 /// The categories whose elements are runs, as `Element::run` returns them.
-pub const RUN_CATEGORIES: [&str; 8] = ["beam", "stripfooting", "pipe", "conduit", "cabletray", "wire", "downconductor", "groundconductor"];
+pub const RUN_CATEGORIES: [&str; 9] =
+    ["beam", "stripfooting", "pipe", "conduit", "cabletray", "wire", "downconductor", "groundconductor", "cable"];
 
 /// A roof type: how thick its roofs are across their slope and, a compound one, its layers from
 /// the top down.
@@ -1313,7 +1318,7 @@ pub struct ProjectParameter {
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
 /// The categories project parameters are for.
-pub const PARAMETER_CATEGORIES: [&str; 23] = [
+pub const PARAMETER_CATEGORIES: [&str; 24] = [
     "wall",
     "floor",
     "ceiling",
@@ -1337,6 +1342,7 @@ pub const PARAMETER_CATEGORIES: [&str; 23] = [
     "wire",
     "downconductor",
     "groundconductor",
+    "cable",
 ];
 
 impl ProjectParameter {
@@ -1525,6 +1531,10 @@ impl Model {
         m.types.runs.insert("downconductor".into(), down.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         let ground = [("Copper 9", run(9.0, 9.0, true, "Copper")), ("Steel 8", run(8.0, 8.0, true, "Metal"))];
         m.types.runs.insert("groundconductor".into(), ground.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        // Data and voice cabling (NBR 14565): twisted pair by category, and an optical cable.
+        let cables =
+            [("Cat6", run(6.0, 6.0, true, "PVC")), ("Cat6A", run(7.5, 7.5, true, "PVC")), ("Optical 3", run(3.0, 3.0, true, "PVC"))];
+        m.types.runs.insert("cable".into(), cables.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         m.types.runs.insert("wire".into(), wires.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         // The electrical's: PVC and steel conduits (eletrodutos), perforated trays (eletrocalhas) and wires, by their outside size.
         let conduits = [
@@ -1852,6 +1862,7 @@ impl Model {
             "wire" => "Wire 2.5",
             "downconductor" => "Steel 8",
             "groundconductor" => "Copper 9",
+            "cable" => "Cat6",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);

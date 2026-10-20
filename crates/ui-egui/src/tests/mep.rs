@@ -104,10 +104,22 @@ const RUN_TOOLS: &[RunTool] = &[
         other: "Steel 8",
         round: true,
     },
+    RunTool {
+        tab: "Data",
+        button: "Cabling",
+        category: "cable",
+        command: "cabling",
+        context: "Modify | Place Cabling",
+        letters: "CB",
+        default_type: "Cat6",
+        width: 6.0,
+        other: "Cat6A",
+        round: true,
+    },
 ];
 
 /// What Visibility/Graphics lists the categories of these tabs as.
-const CATEGORY_NAMES: &[&str] = &["Pipes", "Conduits", "Cable Trays", "Wires", "Down Conductors", "Earthing Conductors"];
+const CATEGORY_NAMES: &[&str] = &["Pipes", "Conduits", "Cable Trays", "Wires", "Down Conductors", "Earthing Conductors", "Cables"];
 
 /// A fixture tab's tool: the tab, the button, its contextual tab, the shortcut, the families it places and one it doesn't.
 struct FixtureTool {
@@ -214,14 +226,55 @@ const FIXTURE_TOOLS: &[FixtureTool] = &[
         not_listed: "Earthing Electrode: 3000",
         first: "Inspection Box",
     },
+    FixtureTool {
+        tab: "Data",
+        button: "Data Outlet",
+        key: "dataoutlet",
+        context: "Modify | Place Data Outlet",
+        letters: "DT",
+        listed: "Data Outlet: Medium 1100",
+        not_listed: "Rack: 600 x 1000",
+        first: "Data Outlet",
+    },
+    FixtureTool {
+        tab: "Data",
+        button: "Voice Outlet",
+        key: "voiceoutlet",
+        context: "Modify | Place Voice Outlet",
+        letters: "VO",
+        listed: "Voice Outlet: Medium 1100",
+        not_listed: "Data Outlet: Medium 1100",
+        first: "Voice Outlet",
+    },
+    FixtureTool {
+        tab: "Data",
+        button: "Rack",
+        key: "rack",
+        context: "Modify | Place Rack",
+        letters: "RK",
+        listed: "Rack: 800 x 1000",
+        not_listed: "Patch Panel: 24 ports",
+        first: "Rack",
+    },
+    FixtureTool {
+        tab: "Data",
+        button: "Patch Panel",
+        key: "patchpanel",
+        context: "Modify | Place Patch Panel",
+        letters: "PN",
+        listed: "Patch Panel: 48 ports",
+        not_listed: "Rack: 600 x 1000",
+        first: "Patch Panel",
+    },
 ];
 
 #[test]
 fn each_discipline_tab_has_its_tools_and_none_of_the_architecture_tabs() {
-    let tabs: [(&str, &[&str]); 3] = [
+    let tabs: [(&str, &[&str]); 4] = [
         ("Plumbing", &["Pipe", "Plumbing Fixture", "Pipe Fitting", "Pipe Accessory"]),
         ("Electrical", &["Electrical Equipment", "Device", "Lighting Fixture", "Conduit", "Cable Tray", "Wire"]),
         ("Lightning Protection", &["Air Terminal", "Down Conductor", "Earthing Electrode", "Inspection Box", "Earthing Conductor"]),
+        ("Data", &["Data Outlet", "Voice Outlet", "Rack", "Patch Panel", "Cable Tray", "Cabling"]),
     ];
     for (tab, labels) in tabs {
         let mut h = app(BOX);
@@ -506,7 +559,8 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
          cable_tray {{\"points\": [[1000, 3000], [5000, 3000]], \"offset\": 2600}}\nwire {{\"points\": [[1000, 4000], [5000, 4000]], \"offset\": 2400}}\n\
          component {{\"family\": \"WC\", \"at\": [7000, 1000]}}\ncomponent {{\"family\": \"Outlet\", \"type\": \"Low 300\", \"at\": [7000, 3000]}}\n\
          down_conductor {{\"points\": [[6000, 5000], [6000, 5000]], \"offset\": 0, \"end_offset\": 3000}}\n\
-         component {{\"family\": \"Air Terminal\", \"type\": \"1000\", \"at\": [7000, 5000]}}"
+         component {{\"family\": \"Air Terminal\", \"type\": \"1000\", \"at\": [7000, 5000]}}\n\
+         cabling {{\"points\": [[500, 5000], [2000, 5000]], \"offset\": 2400}}"
     );
     let mut h = app(&script);
     assert!(english(&h, Language::Spanish).contains(&"Plumbing".to_string()), "the probe finds what it looks for");
@@ -517,6 +571,7 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
                 ("Hidrossanitário", vec!["Tubulação", "Peça sanitária", "Conexão de tubulação", "Acessório de tubulação"]),
                 ("Elétrico", vec!["Equipamento elétrico", "Dispositivo", "Luminária", "Eletroduto", "Eletrocalha", "Fio"]),
                 ("SPDA", vec!["Captor", "Condutor de descida", "Haste de aterramento", "Caixa de inspeção", "Condutor de aterramento"]),
+                ("Lógica, Dados e Voz", vec!["Ponto de dados", "Ponto de voz", "Rack", "Patch panel", "Eletrocalha", "Cabeamento"]),
             ],
         ),
         (
@@ -534,6 +589,7 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
                         "Conductor de puesta a tierra",
                     ],
                 ),
+                ("Datos y Voz", vec!["Punto de datos", "Punto de voz", "Rack", "Panel de parcheo", "Bandeja portacables", "Cableado"]),
             ],
         ),
     ];
@@ -564,6 +620,7 @@ fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
             P2(7000.0, 1000.0),
             P2(6000.0, 5000.0),
             P2(7000.0, 5000.0),
+            P2(1000.0, 5000.0),
         ] {
             click(&mut h, point);
             missed.extend(english(&h, l));

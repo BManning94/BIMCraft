@@ -21,7 +21,7 @@ pub fn faces(category: &str) -> &'static [&'static str] {
         "wall" => &["exterior", "interior"],
         "floor" | "roof" | "ceiling" => &["top", "bottom"],
         "column" | "structuralcolumn" | "footing" | "beam" | "stripfooting" | "pipe" | "conduit" | "cabletray" | "wire"
-        | "downconductor" | "groundconductor" | "component" | "door" | "window" | "stair" | "ramp" | "railing" => &["all"],
+        | "downconductor" | "groundconductor" | "cable" | "component" | "door" | "window" | "stair" | "ramp" | "railing" => &["all"],
         _ => &[],
     }
 }

@@ -110,6 +110,42 @@ pub(crate) const FIXTURES: &[FixtureTool] = &[
         tip: "Inspection Box (IB): over an electrode, flush with the level, where you click; Space turns it",
         icon: Icon::InspectionBox,
     },
+    FixtureTool {
+        key: "dataoutlet",
+        kinds: &[Category::DataOutlet],
+        letters: "DT",
+        label: "Data Outlet",
+        title: "Place Data Outlet",
+        tip: "Data Outlet (DT): a data point, where you click on the wall; Space turns it",
+        icon: Icon::DataOutlet,
+    },
+    FixtureTool {
+        key: "voiceoutlet",
+        kinds: &[Category::VoiceOutlet],
+        letters: "VO",
+        label: "Voice Outlet",
+        title: "Place Voice Outlet",
+        tip: "Voice Outlet (VO): a telephone point, where you click on the wall; Space turns it",
+        icon: Icon::VoiceOutlet,
+    },
+    FixtureTool {
+        key: "rack",
+        kinds: &[Category::Rack],
+        letters: "RK",
+        label: "Rack",
+        title: "Place Rack",
+        tip: "Rack (RK): a floor rack, where you click; Space turns it",
+        icon: Icon::Rack,
+    },
+    FixtureTool {
+        key: "patchpanel",
+        kinds: &[Category::PatchPanel],
+        letters: "PN",
+        label: "Patch Panel",
+        title: "Place Patch Panel",
+        tip: "Patch Panel (PN): a panel on the wall, where you click; Space turns it",
+        icon: Icon::PatchPanel,
+    },
 ];
 
 pub(crate) fn fixture(key: &str) -> Option<&'static FixtureTool> {
@@ -168,6 +204,37 @@ impl BimApp {
                 Tool::Run("wire", None),
             );
             self.buttons(ui, &[conduit, tray, wire]);
+        });
+    }
+
+    /// The Data tab (lógica, dados e voz, NBR 14565): its outlets, its rack and panels, and the trays and cabling between.
+    pub(crate) fn data_tab(&mut self, ui: &mut Ui) {
+        self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
+        panel(ui, "Outlets & Equipment", |ui| {
+            self.buttons(
+                ui,
+                &[
+                    Self::fixture_button("dataoutlet"),
+                    Self::fixture_button("voiceoutlet"),
+                    Self::fixture_button("rack"),
+                    Self::fixture_button("patchpanel"),
+                ],
+            );
+        });
+        panel(ui, "Cabling", |ui| {
+            let tray = (
+                Icon::CableTray,
+                "Cable Tray",
+                "Cable Tray (CT): click its start and its end; a chain of clicks makes a tray for each step",
+                Tool::Run("cabletray", None),
+            );
+            let cabling = (
+                Icon::Cabling,
+                "Cabling",
+                "Cabling (CB): click its start and its end; a chain of clicks makes a cable for each step",
+                Tool::Run("cable", None),
+            );
+            self.buttons(ui, &[tray, cabling]);
         });
     }
 

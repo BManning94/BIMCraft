@@ -17,7 +17,7 @@ use crate::schedule;
 
 /// The categories a plan, a section or a 3D view draws, and so may hide and override: those of the
 /// model, then those of the annotation.
-pub const MODEL: [&str; 24] = [
+pub const MODEL: [&str; 25] = [
     "wall",
     "floor",
     "ceiling",
@@ -37,6 +37,7 @@ pub const MODEL: [&str; 24] = [
     "wire",
     "downconductor",
     "groundconductor",
+    "cable",
     "component",
     "stair",
     "ramp",

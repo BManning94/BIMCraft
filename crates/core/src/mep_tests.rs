@@ -94,6 +94,17 @@ const CASES: &[Case] = &[
         class: "IFCCABLESEGMENT",
         predefined: ".CONDUCTORSEGMENT.",
     },
+    Case {
+        category: "cable",
+        command: "cabling",
+        alias: "CB",
+        default_type: "Cat6",
+        round: true,
+        columns: &["System", "Length", "Diameter"],
+        alone: false,
+        class: "IFCCABLESEGMENT",
+        predefined: ".CABLESEGMENT.",
+    },
 ];
 
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
@@ -696,6 +707,42 @@ const FIXTURES: &[Fixture] = &[
         base: (-350.0, -200.0),
         top: (0.0, 0.0),
     },
+    Fixture {
+        family: "Data Outlet",
+        category: Category::DataOutlet,
+        class: "IFCOUTLET",
+        predefined: ".DATAOUTLET.",
+        object_type: None,
+        base: (200.0, 1200.0),
+        top: (300.0, 1300.0),
+    },
+    Fixture {
+        family: "Voice Outlet",
+        category: Category::VoiceOutlet,
+        class: "IFCOUTLET",
+        predefined: ".TELEPHONEOUTLET.",
+        object_type: None,
+        base: (200.0, 1200.0),
+        top: (300.0, 1300.0),
+    },
+    Fixture {
+        family: "Patch Panel",
+        category: Category::PatchPanel,
+        class: "IFCCOMMUNICATIONSAPPLIANCE",
+        predefined: ".NETWORKAPPLIANCE.",
+        object_type: None,
+        base: (1400.0, 1600.0),
+        top: (1500.0, 1700.0),
+    },
+    Fixture {
+        family: "Rack",
+        category: Category::Rack,
+        class: "IFCBUILDINGELEMENTPROXY",
+        predefined: ".USERDEFINED.",
+        object_type: Some("Rack"),
+        base: (-1.0, 1.0),
+        top: (1900.0, 2100.0),
+    },
 ];
 
 #[test]
@@ -740,6 +787,12 @@ fn a_category_of_family_is_written_as_its_ifc_class_and_read_back_as_the_same_ca
     assert_eq!(Category::from_ifc("IFCBEAM", None, None), None);
     assert_eq!(Category::from_ifc("IFCBUILDINGELEMENTPROXY", None, None), Some(Category::Generic));
     assert_eq!(Category::from_ifc("IFCFURNISHINGELEMENT", None, None), Some(Category::Furniture));
+    // An outlet of no type, or of one BIMCraft has no category for, is the power outlet, the class's first; a type it has is its own.
+    assert_eq!(Category::from_ifc("IFCOUTLET", None, None), Some(Category::Outlet));
+    assert_eq!(Category::from_ifc("IFCOUTLET", Some("NOTDEFINED"), None), Some(Category::Outlet));
+    assert_eq!(Category::from_ifc("IFCOUTLET", Some("TELEPHONEOUTLET"), None), Some(Category::VoiceOutlet));
+    // A proxy of an object type no category names is the generic one's.
+    assert_eq!(Category::from_ifc("IFCBUILDINGELEMENTPROXY", Some("USERDEFINED"), Some("Sculpture")), Some(Category::Generic));
 }
 
 #[test]
@@ -769,4 +822,21 @@ fn fixtures_are_ifc_products_of_their_class_and_come_back_in_a_family_of_their_c
         assert_eq!(family.category, f.category, "{}", f.family);
     }
     assert_eq!(t.model.elements.values().filter(|e| e.category() == "component").count(), FIXTURES.len());
+}
+
+#[test]
+fn an_upright_run_comes_back_running_up_whichever_end_it_was_drawn_from() {
+    for c in CASES {
+        let mut s = Session::new();
+        // Drawn downward: from 3000 to 500 over its level.
+        made(&mut s, c.command, json!({"points": [[2000, 2000], [2000, 2000]], "offset": 3000, "end_offset": 500}));
+        let path = std::env::temp_dir().join(format!("bimcraft-test-{}-riser-{}.ifc", std::process::id(), c.category));
+        run(&mut s, "save", json!({"path": path}));
+        let mut t = Session::new();
+        run(&mut t, "open", json!({"path": path}));
+        let _ = std::fs::remove_file(&path);
+        let id = t.model.elements.iter().find(|(_, e)| e.category() == c.category).map(|(id, _)| *id).unwrap();
+        let e = element_json(&t.model, id);
+        assert_eq!((e["offset"].as_f64(), e["end_offset"].as_f64()), (Some(500.0), Some(3000.0)), "{}: {e}", c.category);
+    }
 }

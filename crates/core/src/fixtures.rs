@@ -13,6 +13,7 @@ pub fn library(language: Language) -> Vec<(String, Value)> {
     out.extend(pipework(language));
     out.extend(electrical(language));
     out.extend(lightning(language));
+    out.extend(telecom(language));
     out
 }
 
@@ -356,6 +357,75 @@ fn lightning(language: Language) -> Vec<(String, Value)> {
                 "forms": [
                     post(n(0.0), n(0.0), f(format!("{diameter} / 2")), f(format!("-({height})")), n(0.0), &mat),
                     void(post(n(0.0), n(0.0), f(format!("{diameter} / 2 - 20")), f(format!("-({height}) + 20")), n(0.0), ""))
+                ]
+            }),
+        ),
+    ]
+}
+
+/// Data and voice (NBR 14565): outlets, a patch panel and a rack. A wall device stands as an electrical one does, its back on its
+/// x axis, at the height its type says, here its bottom.
+fn telecom(language: Language) -> Vec<(String, Value)> {
+    let w = |s: &str| language.word(s).to_string();
+    let (width, depth, height, mounting) = (w("Width"), w("Depth"), w("Height"), w("Mounting Height"));
+    let (mat, metal, plaster) = (w("Material"), w("Metal"), w("Plaster"));
+    let n = |x: f64| json!(x);
+    // The mounting height, and `d` mm over it.
+    let up = |d: f64| f(format!("{mounting} + ({d})"));
+    let (half_w, minus_half_w) = (format!("{width} / 2"), format!("-({width}) / 2"));
+    // A wall plate with a jack opening cut into it for each of `ports`.
+    let plate = |ports: usize| {
+        let mut forms = vec![block([n(-42.0), n(-12.0), n(42.0), n(0.0)], f(mounting.clone()), up(85.0), &plaster)];
+        for k in 0..ports {
+            let x = (k as f64 - (ports as f64 - 1.0) / 2.0) * 28.0;
+            forms.push(void(block([n(x - 8.0), n(-12.0), n(x + 8.0), n(-5.0)], up(30.0), up(55.0), "")));
+        }
+        forms
+    };
+    vec![
+        (
+            w("Data Outlet"),
+            json!({
+                "category": "dataoutlet",
+                "parameters": [size(&mounting, 300.0)],
+                "types": {"Low 300": {}, "Medium 1100": {&mounting: 1100}},
+                "forms": plate(2)
+            }),
+        ),
+        (
+            w("Voice Outlet"),
+            json!({
+                "category": "voiceoutlet",
+                "parameters": [size(&mounting, 300.0)],
+                "types": {"Low 300": {}, "Medium 1100": {&mounting: 1100}},
+                "forms": plate(1)
+            }),
+        ),
+        // A patch panel, 19 inches wide and one unit high, on the wall.
+        (
+            w("Patch Panel"),
+            json!({
+                "category": "patchpanel",
+                "parameters": [size(&mounting, 1500.0), material(&mat, &metal)],
+                "types": {"24 ports": {}, "48 ports": {}},
+                "forms": [block([n(-241.5), n(-50.0), n(241.5), n(0.0)], f(mounting.clone()), up(44.0), &mat)]
+            }),
+        ),
+        // A floor rack, 19 inches: its frame and its front door.
+        (
+            w("Rack"),
+            json!({
+                "category": "rack",
+                "parameters": [size(&width, 600.0), size(&depth, 1000.0), size(&height, 2000.0), material(&mat, &metal)],
+                "types": {"600 x 1000": {}, "800 x 1000": {&width: 800}, "600 x 800": {&depth: 800}},
+                "forms": [
+                    block([f(minus_half_w.clone()), f(format!("-({depth})")), f(half_w.clone()), n(0.0)], n(0.0), f(height.clone()), &mat),
+                    block(
+                        [f(format!("{minus_half_w} + 20")), f(format!("-({depth}) - 25")), f(format!("{half_w} - 20")), f(format!("-({depth})"))],
+                        n(60.0),
+                        f(format!("{height} - 40")),
+                        &plaster
+                    )
                 ]
             }),
         ),
