@@ -22,14 +22,120 @@ pub enum Category {
     #[default]
     Furniture,
     Casework,
+    /// A sanitary fixture: a basin, a WC, a sink, a shower.
     Plumbing,
+    /// A floor drain.
+    Drain,
+    /// An elbow, a tee: what joins pipes, carried by a component until fittings have connectors.
+    PipeFitting,
+    /// A valve, a cleanout.
+    PipeAccessory,
+    /// A distribution board.
+    Equipment,
+    /// A power outlet (tomada).
+    Outlet,
+    /// A light switch (interruptor).
+    Switch,
+    /// A lightning air terminal (captor).
+    AirTerminal,
+    /// An earthing electrode (haste de aterramento).
+    Earthing,
+    /// An earthing inspection box (caixa de inspeção).
+    InspectionBox,
     Lighting,
     Generic,
+    /// A data outlet (ponto de dados).
+    DataOutlet,
+    /// A voice outlet (ponto de voz).
+    VoiceOutlet,
+    /// A patch panel.
+    PatchPanel,
+    /// A rack.
+    Rack,
     Door,
     Window,
 }
 
 impl Category {
+    /// The categories a component may be of (a door's or a window's family is placed in a wall), in the order an import reads
+    /// them.
+    pub const PLACED: [Category; 17] = [
+        Category::Furniture,
+        Category::Plumbing,
+        Category::Drain,
+        Category::PipeFitting,
+        Category::PipeAccessory,
+        Category::Equipment,
+        Category::Outlet,
+        Category::Switch,
+        Category::AirTerminal,
+        Category::Earthing,
+        Category::InspectionBox,
+        Category::Lighting,
+        Category::Generic,
+        Category::DataOutlet,
+        Category::VoiceOutlet,
+        Category::PatchPanel,
+        Category::Rack,
+    ];
+
+    /// How IFC writes a component of it: the product's class, its predefined type, and the object type a proxy carries where
+    /// the class has no home for it (IFC4 has no lightning protection).
+    pub fn ifc(self) -> (&'static str, &'static str, Option<&'static str>) {
+        const OPEN: &str = ".NOTDEFINED.";
+        match self {
+            Category::Furniture | Category::Casework => ("IFCFURNITURE", OPEN, None),
+            Category::Plumbing => ("IFCSANITARYTERMINAL", OPEN, None),
+            Category::Drain => ("IFCWASTETERMINAL", ".FLOORTRAP.", None),
+            Category::PipeFitting => ("IFCPIPEFITTING", OPEN, None),
+            Category::PipeAccessory => ("IFCVALVE", OPEN, None),
+            Category::Equipment => ("IFCELECTRICDISTRIBUTIONBOARD", ".DISTRIBUTIONBOARD.", None),
+            Category::Outlet => ("IFCOUTLET", ".POWEROUTLET.", None),
+            Category::Switch => ("IFCSWITCHINGDEVICE", ".TOGGLESWITCH.", None),
+            // IFC4 and IFC4X3 have no class for lightning protection: a proxy of an object type a reader can filter on.
+            Category::DataOutlet => ("IFCOUTLET", ".DATAOUTLET.", None),
+            Category::VoiceOutlet => ("IFCOUTLET", ".TELEPHONEOUTLET.", None),
+            Category::PatchPanel => ("IFCCOMMUNICATIONSAPPLIANCE", ".NETWORKAPPLIANCE.", None),
+            Category::Rack => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("Rack")),
+            Category::AirTerminal => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("LightningTerminal")),
+            Category::Earthing => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("EarthingRod")),
+            Category::InspectionBox => ("IFCBUILDINGELEMENTPROXY", ".USERDEFINED.", Some("InspectionBox")),
+            Category::Lighting => ("IFCLIGHTFIXTURE", OPEN, None),
+            Category::Generic | Category::Door | Category::Window => ("IFCBUILDINGELEMENTPROXY", OPEN, None),
+        }
+    }
+
+    /// The classes other tools write a product of it as, besides the one BIMCraft does.
+    fn classes(self) -> &'static [&'static str] {
+        match self {
+            Category::Furniture => &["IFCFURNISHINGELEMENT", "IFCSYSTEMFURNITUREELEMENT"],
+            _ => &[],
+        }
+    }
+
+    /// Every IFC class a component may be read from.
+    pub fn read_classes() -> Vec<&'static str> {
+        Category::PLACED.into_iter().flat_map(|c| std::iter::once(c.ifc().0).chain(c.classes().iter().copied())).collect()
+    }
+
+    /// The category an IFC product of `class` is, from its predefined type `kind` (as the file spells it, without the dots) and
+    /// its object type: the one that names the object type, else the one whose predefined type it is, else the class's first.
+    pub fn from_ifc(class: &str, kind: Option<&str>, object_type: Option<&str>) -> Option<Category> {
+        Category::PLACED
+            .into_iter()
+            .filter(|c| {
+                let (own, _, object) = c.ifc();
+                (own == class || c.classes().contains(&class)) && (object.is_none() || object == object_type)
+            })
+            .fold(None, |best: Option<(Category, u8)>, c| {
+                let (_, predefined, object) = c.ifc();
+                let score = 2 * u8::from(object.is_some()) + u8::from(Some(predefined.trim_matches('.')) == kind);
+                // Strictly better, so a tie goes to the first.
+                if best.is_none_or(|(_, s)| score > s) { Some((c, score)) } else { best }
+            })
+            .map(|(c, _)| c)
+    }
+
     /// Whether a family of it stands in a wall: a door's or a window's, drawn in the opening's own axes (x along
     /// the wall from the opening's middle, y across it toward the wall's left, z up from its sill).
     pub fn hosted(self) -> bool {
@@ -1305,6 +1411,7 @@ pub fn library(language: crate::language::Language) -> BTreeMap<String, Family> 
         }),
     ));
     families.extend(hosted_library(language));
+    families.extend(crate::fixtures::library(language));
     families.into_iter().filter_map(|(name, v)| serde_json::from_value(v).ok().map(|f| (name, f))).collect()
 }
 

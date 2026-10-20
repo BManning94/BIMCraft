@@ -4466,6 +4466,7 @@ fn the_massing_tab_makes_floors_walls_a_floor_and_a_roof_from_the_selected_mass(
     assert_eq!(h.state().tool, Tool::Mass(Vec::new()));
 }
 
+mod mep;
 mod structure;
 
 mod updates {

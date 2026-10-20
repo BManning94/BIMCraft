@@ -33,17 +33,7 @@ pub(crate) struct FavoritesDialog {
 
 /// A family's category, as the window names it.
 fn category_name(c: bimcraft_core::family::Category) -> String {
-    use bimcraft_core::family::Category::*;
-    t(match c {
-        Furniture => "Furniture",
-        Casework => "Casework",
-        Plumbing => "Plumbing",
-        Lighting => "Lighting",
-        Generic => "Generic",
-        Door => "Door",
-        Window => "Window",
-    })
-    .to_string()
+    crate::editor::category_label(c)
 }
 
 /// The favorites in the file at `path`, or at the usual place.

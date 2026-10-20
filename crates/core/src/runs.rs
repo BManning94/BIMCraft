@@ -1,6 +1,7 @@
-//! Runs: the geometry of a straight element between two points, whatever it carries (a beam, a strip footing, and a pipe,
-//! a conduit or a cable tray when their tabs come): the ends of its centre line, its footprint in plan, the prism or the
-//! tube it makes in 3D. It knows no category; the plan, the section, the 3D view, the snaps and IFC ask it.
+//! Runs: the geometry of a straight element between two points, whatever it carries (a beam, a strip footing, a pipe, a
+//! conduit, a cable tray, a wire, a conductor, a cable): the ends of its centre line, its footprint in plan, the prism or the
+//! tube it makes in 3D. It knows no category but for the table that gives its IFC class and the defaults it takes (may it stand,
+//! where its heights are); the plan, the section, the 3D view, the snaps and IFC ask it.
 
 use crate::geom::P2;
 use crate::model::{Justify, MAX_SLOPE, Model, Run, RunType, TOL, heading};
@@ -14,6 +15,46 @@ pub const SIDES: usize = 24;
 /// strip footing, which are columns when they stand.
 pub fn may_stand(category: &str) -> bool {
     !matches!(category, "beam" | "stripfooting")
+}
+
+/// How each run category is written in IFC: its class and predefined type (all of them take a product's nine attributes). Import
+/// reads the same table back, a class and a type to the first category that has them.
+pub const IFC: &[(&str, &str, &str)] = &[
+    ("beam", "IFCBEAM", ".BEAM."),
+    ("stripfooting", "IFCFOOTING", ".STRIP_FOOTING."),
+    ("pipe", "IFCPIPESEGMENT", ".RIGIDSEGMENT."),
+    ("conduit", "IFCCABLECARRIERSEGMENT", ".CONDUITSEGMENT."),
+    ("cabletray", "IFCCABLECARRIERSEGMENT", ".CABLETRAYSEGMENT."),
+    // A ladder is a tray to BIMCraft, written as a tray: only a file of another tool's says it.
+    ("cabletray", "IFCCABLECARRIERSEGMENT", ".CABLELADDERSEGMENT."),
+    ("wire", "IFCCABLESEGMENT", ".CABLESEGMENT."),
+    // IFC has no lightning protection: a down conductor is a conductor segment, as is an earthing conductor (BIMCraft's own
+    // `Category` tells them apart).
+    ("downconductor", "IFCCABLESEGMENT", ".CONDUCTORSEGMENT."),
+    ("groundconductor", "IFCCABLESEGMENT", ".CONDUCTORSEGMENT."),
+    // A data cable is a cable segment, as a wire is (BIMCraft's own `Category` tells them apart).
+    ("cable", "IFCCABLESEGMENT", ".CABLESEGMENT."),
+];
+
+/// The IFC class and predefined type a run of `category` is written as.
+pub fn ifc(category: &str) -> Option<(&'static str, &'static str)> {
+    IFC.iter().find(|(c, ..)| *c == category).map(|(_, class, kind)| (*class, *kind))
+}
+
+/// The category of a run an IFC product is, from its `class`, its `kind` (the predefined type) and, when a file of BIMCraft's says
+/// so, the `declared` category: that one if the class has it, else the one whose type it is, else the class's first.
+pub fn from_ifc(class: &str, kind: Option<&str>, declared: Option<&str>) -> Option<&'static str> {
+    let class = if class == "IFCBEAMSTANDARDCASE" { "IFCBEAM" } else { class };
+    let rows = || IFC.iter().filter(move |(_, c, _)| *c == class);
+    let by_kind = |k: &str| rows().find(|(_, _, t)| t.trim_matches('.') == k);
+    let by_name = |d: &str| rows().find(|(c, ..)| *c == d);
+    declared.and_then(by_name).or_else(|| kind.and_then(by_kind)).or_else(|| rows().next()).map(|(c, ..)| *c)
+}
+
+/// The line of its section a run of `category` has its heights at unless told: the top of a beam or a footing, as engineers
+/// think of them (top of beam at the top of slab), the middle of anything that carries something (a pipe, a cable).
+pub fn default_justify(category: &str) -> Justify {
+    if may_stand(category) { Justify::Centre } else { Justify::Top }
 }
 
 /// Why `g`, a run of `category`, isn't one the model takes, if it isn't.
@@ -77,7 +118,7 @@ impl Geom {
     }
 
     /// Half the section's depth, taken straight up: more than half of it, square to the line, where the line slopes.
-    fn half(&self) -> f64 {
+    pub fn half(&self) -> f64 {
         let plan = self.plan_length();
         if plan > TOL { self.depth / 2.0 * self.length() / plan } else { 0.0 }
     }

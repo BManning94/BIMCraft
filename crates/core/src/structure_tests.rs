@@ -97,7 +97,7 @@ fn run_types_are_made_changed_and_checked_with_type() {
     );
     assert!(fails(&mut s, "type", json!({"category": "beam", "name": "Flat", "width": 100})).contains("depth"));
     assert!(fails(&mut s, "type", json!({"category": "beam", "name": "Zero", "width": 0, "depth": 10})).contains("above zero"));
-    let e = fails(&mut s, "type", json!({"category": "pipe", "name": "P", "width": 10}));
+    let e = fails(&mut s, "type", json!({"category": "duct", "name": "P", "width": 10}));
     assert!(e.contains("beam"), "the message lists what has types: {e}");
     // The strip footing's, and the columns' own.
     run(&mut s, "type", json!({"category": "stripfooting", "name": "Strip 800 x 300", "width": 800, "depth": 300}));
@@ -452,7 +452,9 @@ fn a_beam_is_an_ifc_beam_swept_along_its_axis_in_its_material() {
             && file.contains("'Pset_BeamCommon'")
             && file.contains("IFCPROPERTYSINGLEVALUE('LoadBearing',$,IFCBOOLEAN(.T.),$)")
     );
-    assert!(file.contains("'BIMCraft_Run'") && file.contains("IFCTEXT('Frame A')"));
+    // In the system it is in: an IfcSystem it is assigned to, and its justification in a property set of its own.
+    assert!(file.contains("'BIMCraft_Run'") && file.contains("IFCTEXT('top')"));
+    assert!(entities(&file, "IFCSYSTEM")[0].contains("'Frame A'") && entities(&file, "IFCRELASSIGNSTOGROUP").len() == 1);
 }
 
 #[test]
@@ -715,7 +717,7 @@ fn a_project_whose_run_type_is_round_and_not_as_deep_as_it_is_wide_is_refused() 
     assert!(m.check().unwrap_err().contains("round section"), "{:?}", m.check());
     // Or of a category that has no runs, or a material the library hasn't.
     let mut m = (*s.model).clone();
-    m.types.runs.insert("pipe".into(), Default::default());
+    m.types.runs.insert("duct".into(), Default::default());
     assert!(m.check().unwrap_err().contains("no run types"));
     let mut m = (*s.model).clone();
     if let Some(t) = m.types.runs.get_mut("beam").and_then(|t| t.get_mut("Beam 200 x 500")) {

@@ -1133,7 +1133,11 @@ fn a_new_project_comes_with_a_library_of_families() {
         let m = Model::new_in("x", language);
         assert_eq!(m.check(), Ok(()), "{language:?}");
         let names: Vec<&str> = m.families.keys().map(String::as_str).collect();
-        assert_eq!(names.len(), 10 + 4, "{names:?}: furniture, fittings, and a door's and a window's of two kinds each");
+        assert_eq!(
+            names.len(),
+            10 + 4 + crate::fixtures::library(language).len(),
+            "{names:?}: furniture, fittings, a door's and a window's of two kinds each, and the tabs' fixtures"
+        );
         // Every type of every family places and builds: a component's as one, a door's or a window's in a wall's opening.
         let mut s = Session::new();
         s.reset(m.clone(), None);

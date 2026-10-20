@@ -11,6 +11,7 @@ mod favorites;
 mod footer;
 mod graphics;
 pub mod lang;
+mod mep;
 mod orbit;
 mod paper;
 mod phasing;
@@ -128,12 +129,15 @@ pub enum Tool {
     Elevation,
     /// A column where clicked.
     Column,
-    /// A beam or a wall footing (by category, as `beam` and `stripfooting` name them): its first point, once clicked.
+    /// A run (a beam, a pipe, a conduit…, by category, as `beam` and `pipe` name them): its first point, once clicked.
     Run(&'static str, Option<P2>),
     /// A structural column or an isolated footing (`structuralcolumn`, `footing`) where clicked.
     Stand(&'static str),
     /// A family's type where clicked: the one picked, turned by Space.
     Component,
+    /// A fixture or a device of one tab's kinds (`mep::FIXTURES`, by key) where clicked: the family picked among the
+    /// families of those kinds, turned by Space.
+    Fixture(&'static str),
     /// A stair: the points clicked, its start and where its first run ends; the next click, which
     /// way its next run turns from the landing.
     Stair(Vec<P2>),
@@ -187,6 +191,10 @@ enum Once {
 enum Tab {
     Architecture,
     Structure,
+    Plumbing,
+    Electrical,
+    Lightning,
+    Data,
     Annotate,
     Massing,
     View,
@@ -275,7 +283,11 @@ const SHORTCUTS: [(&str, &str); 42] = [
 /// Every two-letter shortcut and what it does: the desktop's own, then the commands' aliases.
 fn shortcuts() -> Vec<(&'static str, &'static str)> {
     let aliases = engine::commands().iter().flat_map(|c| c.aliases.iter().map(move |a| (*a, c.label)));
-    SHORTCUTS.into_iter().chain(aliases.filter(|(a, _)| !SHORTCUTS.iter().any(|(s, _)| s == a))).collect()
+    SHORTCUTS
+        .into_iter()
+        .chain(mep::FIXTURES.iter().map(|f| (f.letters, f.label)))
+        .chain(aliases.filter(|(a, _)| !SHORTCUTS.iter().any(|(s, _)| s == a)))
+        .collect()
 }
 
 /// What an IFC import brought in, and the first few things it left out (the core's reasons, in
@@ -337,6 +349,9 @@ pub struct BimApp {
     floor_structural: bool,
     run_justify: Justify,
     beam_offset: String,
+    /// The Options Bar's justification and offset of the run tools not on screen, by category, and whose are.
+    run_kept: BTreeMap<&'static str, (Justify, String)>,
+    run_loaded: &'static str,
     footing_thickness: String,
     footing_top: String,
     /// The Stair tool's width; the Roof tool's slope, overhang and gable ends; the Roof by
@@ -640,6 +655,8 @@ impl BimApp {
             floor_structural: false,
             run_justify: Justify::Top,
             beam_offset: units.length(0.0),
+            run_kept: BTreeMap::new(),
+            run_loaded: "beam",
             footing_thickness: units.length(400.0),
             footing_top: units.length(0.0),
             stair_width: units.length(STAIR_WIDTH),
@@ -789,6 +806,7 @@ impl BimApp {
             Tool::Column => Some("Place Column"),
             Tool::Run(..) | Tool::Stand(_) => structure::title(&self.tool),
             Tool::Component => Some("Place Component"),
+            Tool::Fixture(key) => mep::fixture(key).map(|f| f.title),
             Tool::Stair(_) => Some("Create Stair"),
             Tool::Ramp(_) => Some("Create Ramp"),
             Tool::Railing(_) => Some("Create Railing Path"),
@@ -1049,7 +1067,7 @@ impl BimApp {
         if self.tool == Tool::Modify && pressed(Modifiers::NONE, Key::Space) {
             self.flip();
         }
-        if self.tool == Tool::Component && pressed(Modifiers::NONE, Key::Space) {
+        if matches!(self.tool, Tool::Component | Tool::Fixture(_)) && pressed(Modifiers::NONE, Key::Space) {
             self.component_angle = (self.component_angle + 90.0) % 360.0;
         }
         let typed: String = ctx.input(|i| {
@@ -1188,6 +1206,8 @@ impl BimApp {
                 };
                 return true;
             }
+            code if mep::fixture_with(code).is_some() => Tool::Fixture(mep::fixture_with(code).map_or("", |f| f.key)),
+            code if mep::run_with(code).is_some() => Tool::Run(mep::run_with(code).unwrap_or("beam"), None),
             code => match engine::find(code).map(|c| c.id) {
                 Some("wall") => Tool::Wall(Vec::new()),
                 Some("door") => Tool::Door,
@@ -1209,9 +1229,7 @@ impl BimApp {
                     Tool::Stand("structuralcolumn")
                 }
                 Some("column") => Tool::Column,
-                Some("beam") => Tool::Run("beam", None),
                 Some("footing") => Tool::Stand("footing"),
-                Some("strip_footing") => Tool::Run("stripfooting", None),
                 Some("mass") => Tool::Mass(Vec::new()),
                 Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face")) => {
                     self.by_mass(c);
@@ -1276,8 +1294,7 @@ impl BimApp {
             Some(Element::Column(_)) => Tool::Column,
             Some(Element::StructuralColumn(_)) => Tool::Stand("structuralcolumn"),
             Some(Element::Footing(_)) => Tool::Stand("footing"),
-            Some(Element::Beam(_)) => Tool::Run("beam", None),
-            Some(Element::StripFooting(_)) => Tool::Run("stripfooting", None),
+            Some(e) if e.run().is_some() => Tool::Run(e.category(), None),
             Some(Element::Component(c)) => {
                 self.component = Some((c.family.clone(), c.type_name.clone()));
                 Tool::Component
@@ -1404,6 +1421,9 @@ impl BimApp {
         self.typed_length.clear();
         // The Floor tool makes structural floors only when the Structure tab asks (`structural_floor`).
         self.floor_structural = false;
+        if let Tool::Run(category, _) = &tool {
+            self.keep_run_options(category);
+        }
         if !matches!(tool, Tool::Measure(_)) {
             self.measured = None;
         }
@@ -1831,6 +1851,10 @@ impl BimApp {
                 for (tab, label) in [
                     (Tab::Architecture, "Architecture"),
                     (Tab::Structure, "Structure"),
+                    (Tab::Plumbing, "Plumbing"),
+                    (Tab::Electrical, "Electrical"),
+                    (Tab::Lightning, "Lightning Protection"),
+                    (Tab::Data, "Data"),
                     (Tab::Annotate, "Annotate"),
                     (Tab::Massing, "Massing"),
                     (Tab::View, "View"),
@@ -1853,6 +1877,10 @@ impl BimApp {
             ui.horizontal(|ui| match self.tab {
                 Tab::Architecture => self.architecture_tab(ui),
                 Tab::Structure => self.structure_tab(ui),
+                Tab::Plumbing => self.plumbing_tab(ui),
+                Tab::Electrical => self.electrical_tab(ui),
+                Tab::Lightning => self.lightning_tab(ui),
+                Tab::Data => self.data_tab(ui),
                 Tab::Annotate => self.annotate_tab(ui),
                 Tab::Massing => self.massing_tab(ui),
                 Tab::View => self.view_tab(ui),
@@ -2375,7 +2403,7 @@ impl BimApp {
             });
         }
         // Placing a component: Revit's Mode panel, which loads a family from a file.
-        if self.tool == Tool::Component {
+        if matches!(self.tool, Tool::Component | Tool::Fixture(_)) {
             panel(ui, "Mode", |ui| {
                 let tip = "Load Family: a family saved as a .json file, BIMCraft's own";
                 if big_button(ui, Icon::LoadFamily, "Load Family", false, tip).clicked()
@@ -2720,7 +2748,7 @@ impl BimApp {
             Tool::Elevation => "Click beside the building: the elevation looks at the side you click by.",
             Tool::Column => "Click to place a column, as high as the Options Bar says.",
             Tool::Run(..) | Tool::Stand(_) => structure::hint(&self.tool).unwrap_or_default(),
-            Tool::Component => "Click where the component goes; Space turns it a quarter turn.",
+            Tool::Component | Tool::Fixture(_) => "Click where the component goes; Space turns it a quarter turn.",
             Tool::Stair(pts) if pts.is_empty() => "Click where the stair starts: the middle of its first riser.",
             Tool::Stair(pts) if pts.len() == 1 => {
                 "Click where its run ends: past its last riser, one run to the level above; short of it, a landing. Esc cancels."
@@ -2898,13 +2926,17 @@ impl BimApp {
     }
 
     /// The family and type the Component tool places: the one picked, while its family has it, else
-    /// the first there is.
+    /// the first there is. A fixture tool's are of its kinds only.
     pub(crate) fn placing(&self) -> Option<(String, String)> {
         let m = &self.session.model;
+        let fits = |f: &bimcraft_core::family::Family| match self.tool {
+            Tool::Fixture(key) => mep::kinds(key).contains(&f.category),
+            _ => true,
+        };
         self.component
             .clone()
-            .filter(|(f, t)| m.families.get(f).is_some_and(|f| f.types.contains_key(t)))
-            .or_else(|| m.families.iter().find_map(|(n, f)| f.types.keys().next().map(|t| (n.clone(), t.clone()))))
+            .filter(|(f, t)| m.families.get(f).is_some_and(|f| fits(f) && f.types.contains_key(t)))
+            .or_else(|| m.families.iter().filter(|(_, f)| fits(f)).find_map(|(n, f)| f.types.keys().next().map(|t| (n.clone(), t.clone()))))
     }
 
     // ---------- the middle: view tabs, schedules ----------

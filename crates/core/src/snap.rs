@@ -188,7 +188,7 @@ impl Scene {
                 Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) if c.level == level && near(&[c.at]) => {
                     s.points.push((c.at, Kind::Centre))
                 }
-                Element::Beam(r) | Element::StripFooting(r) if r.level == level && near(&[r.start, r.end]) => {
+                crate::model::run_arm!(r) if r.level == level && near(&[r.start, r.end]) => {
                     s.points.extend([
                         (r.start, Kind::Endpoint),
                         (r.end, Kind::Endpoint),

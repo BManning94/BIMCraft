@@ -12,19 +12,22 @@ use crate::lang::{t, tf};
 use crate::style::Icon;
 use crate::{BimApp, Status, Tool, big_button, panel, top_params};
 
-/// The command that makes elements of `category`, and the title of the contextual tab while its tool is on.
+/// The command that makes elements of `category`.
 pub(crate) fn command(category: &str) -> &'static str {
-    match category {
-        "beam" => "beam",
-        "stripfooting" => "strip_footing",
-        "structuralcolumn" => "structural_column",
-        _ => "footing",
-    }
+    bimcraft_core::command_of(category)
 }
 
+/// The title of the contextual tab while the tool is on.
 pub(crate) fn title(tool: &Tool) -> Option<&'static str> {
     match tool {
         Tool::Run("beam", _) => Some("Place Beam"),
+        Tool::Run("pipe", _) => Some("Place Pipe"),
+        Tool::Run("conduit", _) => Some("Place Conduit"),
+        Tool::Run("cabletray", _) => Some("Place Cable Tray"),
+        Tool::Run("wire", _) => Some("Place Wire"),
+        Tool::Run("downconductor", _) => Some("Place Down Conductor"),
+        Tool::Run("groundconductor", _) => Some("Place Earthing Conductor"),
+        Tool::Run("cable", _) => Some("Place Cabling"),
         Tool::Run(_, _) => Some("Place Wall Footing"),
         Tool::Stand("structuralcolumn") => Some("Place Structural Column"),
         Tool::Stand(_) => Some("Place Isolated Footing"),
@@ -46,12 +49,26 @@ pub(crate) fn hint(tool: &Tool) -> Option<&'static str> {
 /// Whether two tools are the same button's: the same kind, and of runs and standing things, the same category.
 pub(crate) fn same_tool(a: &Tool, b: &Tool) -> bool {
     match (a, b) {
-        (Tool::Run(x, _), Tool::Run(y, _)) | (Tool::Stand(x), Tool::Stand(y)) => x == y,
+        (Tool::Run(x, _), Tool::Run(y, _)) | (Tool::Stand(x), Tool::Stand(y)) | (Tool::Fixture(x), Tool::Fixture(y)) => x == y,
         _ => std::mem::discriminant(a) == std::mem::discriminant(b),
     }
 }
 
 impl BimApp {
+    /// Switching to the run tool of `category`: the justification and the offset on the Options Bar are the last that tool had,
+    /// or its usual.
+    pub(crate) fn keep_run_options(&mut self, category: &'static str) {
+        if self.run_loaded == category {
+            return;
+        }
+        let was = (self.run_justify, std::mem::take(&mut self.beam_offset));
+        self.run_kept.insert(self.run_loaded, was);
+        let zero = self.session.model.units.length(0.0);
+        (self.run_justify, self.beam_offset) =
+            self.run_kept.remove(category).unwrap_or_else(|| (bimcraft_core::runs::default_justify(category), zero));
+        self.run_loaded = category;
+    }
+
     /// The Structure tab: Revit's Structure panel (a column, a beam, a structural floor) and its Foundation panel.
     pub(crate) fn structure_tab(&mut self, ui: &mut Ui) {
         self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
@@ -99,10 +116,10 @@ impl BimApp {
         self.floor_structural = true;
     }
 
-    /// The Options Bar of a run's tool: a beam's justification and its height over the level, a wall footing's top; Chain.
+    /// The Options Bar of a run's tool: its justification and its height over the level, a wall footing's top; Chain.
     pub(crate) fn run_options(&mut self, ui: &mut Ui, category: &'static str) {
         let hint = self.session.model.units.name();
-        if category == "beam" {
+        if category != "stripfooting" {
             let l = ui.label(t("Justification:"));
             let now = self.run_justify;
             let c = ComboBox::from_id_salt("run-justify").selected_text(t(justify_name(now))).width(90.0).show_ui(ui, |ui| {
@@ -150,7 +167,7 @@ impl BimApp {
         let command = command(category);
         let height = |text: &str| m.units.parse(text).ok_or_else(|| tf("{}: `{}` is not a height", &[command, text]));
         let mut p = json!({"points": [[a.0, a.1], [b.0, b.1]], "level": level});
-        if category == "beam" {
+        if category != "stripfooting" {
             p["justify"] = json!(self.run_justify);
             p["offset"] = json!(height(&self.beam_offset)?);
         } else {

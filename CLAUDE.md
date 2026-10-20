@@ -76,6 +76,13 @@ cargo test --workspace
   footing, columns and a structural floor, validate with IfcOpenShell (`express_rules=True`), and compare each product's volume and bounding box
   with a hand calculation (a round section is a polygon in IfcOpenShell's tessellation: a fraction of a percent short). Look at the plan, a
   section across a beam, and the 3D view in both themes.
+- Discipline tabs (Plumbing, Electrical, SPDA, Data): after touching `fixtures.rs`, `runs::IFC`, `Category::ifc` or the run arm of `ifc.rs`, script
+  one of every run category (sloped, upright, each justification, in a system) and one of every starter family, `--save` the IFC, validate it with
+  IfcOpenShell (`express_rules=True`: 0 statements), build every product's shape and compare the runs' volumes and boxes with a hand calculation,
+  check the `IfcSystem`s with the runs assigned to each and the proxies' object types, then read it back (`run x.ifc --cmd 'elements {"category": "pipe"}'`)
+  as written, with its bodies turned into triangle meshes by IfcOpenShell, and with BIMCraft's `BIMCraft_Run` property sets taken out. Look at each
+  tab, a run tool's preview, a fixture tool with its Type Selector open, Edit Type, a section across a pipe and a tray, and the 3D view with the
+  walls hidden (`graphics {"view": "{3D}", "hide": ["wall"]}`), in both themes.
 - IFC import: after touching `import.rs` or `step.rs`, open the sample's IFC (`run house.ifc --cmd 'elements {}'`) and
   compare it with the sample, then the same file with its bodies turned into triangle meshes by IfcOpenShell, and a
   building written with IfcOpenShell's API. Render what came in and look at it. After touching how phases and design options
@@ -188,7 +195,8 @@ A family (`Model::families`, `family.rs`) is parameters, types that set them and
 component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
 `yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;
 `Model::component_pieces` are its forms where it stands. Plans draw them from above, a form's edges hidden under a higher
-form of the same component; sections show them beyond their line and never cut them (`Solid::Mesh` has no `across`); the
+form of the same component; sections show them beyond their line and never cut them (a `Solid::Mesh` is cut only where its `cut`
+says, as a round run's tube is); the
 3D view takes a form's triangles that share an edge and turn under 20° there as one curved surface, so a curve draws no
 edge between its facets (`view3d::facets`) and shades smoothly across them, each corner lit by the angle-weighted mean of
 its own surface's normals there, so a crease keeps its step (`corner_normals`); IFC writes each form as a closed face set,
@@ -279,13 +287,17 @@ buttons).
 Structure (`runs.rs`, `structure.rs`; the design for the five discipline tabs is in [docs/disciplines.md](docs/disciplines.md)). A run
 (`model::Run`) is a straight element from `start` to `end` in plan; its `offset` mm over its level is the height of its `justify` line
 (top, centre or bottom) at the start, `end_offset` at the end (level when none), `system` the name of the system it is in: a beam, a
-strip footing, and what the other tabs will draw (pipes, conduits, cable trays, down conductors, data cabling) as further `Element`
-variants over the same struct, as `Door` and `Window` share `Opening`. Its type is `Types::runs[category][name]`, a `RunType`
+strip footing, a pipe (Plumbing), and what the other tabs draw (conduits, cable trays, down conductors, data cabling) as further
+`Element` variants over the same struct, as `Door` and `Window` share `Opening`; `model::run_arm!` is the pattern for any of them, so a
+place that treats runs alike names no category, and a new category is a line there. Its type is `Types::runs[category][name]`, a `RunType`
 (`width` across by `depth` deep, or round, in a `material` of the library). The section is square to the axis, so a sloped run is
 `depth / cos θ` deep vertically (`Geom::half`). `runs::Geom` is the one place that knows the geometry (centre line, `footprint`,
-`prism` for a rectangle, `tube` for a round one, `z_span`); plans, sections (a prism is cut like any solid; a tube isn't, as a
-component's forms aren't), 3D, snaps and IFC call it and know no category. A beam or strip footing can't stand or lean past 75°
-(`runs::check`, `may_stand`: what stands is a column; a pipe's tab may say otherwise). In plan (`render::stands`) a footing or a run
+`prism` for a rectangle, `tube` for a round one, `z_span`); plans, sections (a prism is cut like any solid; a tube by the plane
+through the section's line, `Solid::cuts`: the hull of where its edges cross it, a ring, an ellipse when oblique), 3D, snaps and IFC call
+it and know no category. A run's heights are those of its `justify` line, which a beam or a footing has at the top by default and
+anything else at the middle (`runs::default_justify`); the desktop keeps each run tool's own justification and offset
+(`keep_run_options`). A beam or strip footing can't stand or lean past 75°
+(`runs::check`, `may_stand`: what stands is a column; a pipe, a conduit or a conductor may stand, a riser). In plan (`render::stands`) a footing or a run
 hangs under the level it is drawn on, its top flush with the view's bottom, and is seen (`seen_below` allows `TOL` for these only,
 or a wall of the storey below would show in the plan above); through the cut plane it's cut; over it and under the view range's top
 it's dashed; a faint dashed centre line is drawn where it's seen or overhead, which is also where a click picks it. A structural column and an
@@ -297,10 +309,35 @@ top at the level (the command's `thickness` and `offset`). A floor is `structura
 `Tool::Run(category, start)` and `Tool::Stand(category)` serve every category: a tab adds a ribbon button and its rows in
 `structure.rs`, `properties.rs` and `lang.rs`, not a tool. The Floor tool makes structural floors while `floor_structural` is set (SB,
 the Structure tab's button; every other `set_tool` clears it); CL is the structural column on the Structure tab and the architectural one
-elsewhere, as in Revit. IFC writes a run as an extrusion along its own axis (`Step::body_along`, `aim`), each structural element with
-`LoadBearing` in its `Pset_*Common`, a run's `System` in `BIMCraft_Run`, and its material as an `IfcMaterial`. Import (`import::run_in`)
-finds a run's axis as the direction its body's points spread furthest in (power iteration on their covariance), so a beam rolled
-about its axis comes in as the box round it, with `justify: centre` and both heights; `LoadBearing` makes a column or a floor structural.
+elsewhere, as in Revit. IFC writes a run as an extrusion along its own axis (`Step::body_along`, `aim`) of the class and predefined type
+the one table `runs::IFC` gives its category (import reads the same table back, `runs::from_ifc`), each structural element with
+`LoadBearing` in its `Pset_*Common`, a run's system as an `IfcSystem` (named for it, its GlobalIds following the name) the runs in it
+are assigned to by an `IfcRelAssignsToGroup`, its `Justification` and `Category` in `BIMCraft_Run`, and its material as an `IfcMaterial`.
+Import (`import::run_in`) finds a run's axis as the direction its body's points spread furthest in (power iteration on their
+covariance), so a beam rolled about its axis comes in as the box round it; an axis that stands (a riser) has its width along east and
+runs up; the justification BIMCraft wrote puts the heights back on the line they were typed at (`Geom::half`), none meaning the middle;
+a system comes from the IfcSystem the product is assigned to, and its category from the class and type, or BIMCraft's `Category`
+where a class has several; `LoadBearing` makes a column or a floor structural.
+
+The discipline tabs after Structure add data to this, no engine code of their own. Plumbing: `pipe` (PI), types in PVC and copper
+(`Types::runs["pipe"]`, outside diameters, so a pipe's `width` is its diameter and its schedule says Diameter). Electrical: `conduit`
+(CN), `cabletray` (CT, `cable_tray`: the one rectangular run) and `wire` (EW), by their outside size. Lightning protection (NBR 5419):
+`downconductor` (DC, may stand: a riser down a wall) and `groundconductor` (GC), two runs of one IFC class that `BIMCraft_Run`'s `Category`
+tells apart; an air terminal, an earthing electrode and an inspection box are components of their own family categories, written as
+`IfcBuildingElementProxy` of the object type `Category::ifc` names, so the product's name (not its object type) holds `Family:Type` and
+import reads it from there. Data (NBR 14565): `cable` (CB, `cabling`), a run like a wire, so a file's `IfcCableSegment` is a wire unless its
+`Category` says cable; data and voice outlets (`IfcOutlet` `DATAOUTLET`, `TELEPHONEOUTLET`; one of no type reads as the power outlet,
+`Category::from_ifc` taking the first of equals), a patch panel (`IfcCommunicationsAppliance`) and a rack (a proxy of object type `Rack`);
+the Cable Tray tool is the Electrical tab's, on the Data tab too. A fixture or a
+device is a component of a family whose `family::Category` says what it is (a sanitary fixture, a floor drain, a pipe fitting, a pipe
+accessory…); `Category::ifc` is its IFC class, predefined type and, where IFC has no class (lightning protection), the object type a
+proxy carries, and `Category::from_ifc` reads the same table back, so a category is one row, in `family.rs`. The starter families are
+`fixtures.rs` (original forms, named in the project's language; a fitting or a valve is centred on its pipe, along x, so placing it at the
+pipe's height lines them up; a wall device, a board and a luminaire carry their `Mounting Height` in their type, so the Fixture tool
+places them at the level and they stand where they hang). The desktop's `mep.rs` has one tool for every fixture and device, `Tool::Fixture(key)`: the families of the
+kinds its `FixtureTool` names, listed in its Type Selector and placed as the Component tool places them (`placing` takes the tool's
+kinds), and the tabs' ribbon panels; a fixture's two-letter shortcut is in `mep::FIXTURES`, not `SHORTCUTS`, since no command makes
+one. Edit Type of a run type also sets whether it is round (a diameter, no depth) and its material.
 
 Updates (`crates/update`, drawn by `crates/ui-egui/src/updates.rs`). At startup the desktop asks `api.github.com` for the latest
 release (`LATEST_URL`: never a draft or a pre-release) on a thread of its own, and compares its tag, `vMAJOR.MINOR.PATCH`, with the

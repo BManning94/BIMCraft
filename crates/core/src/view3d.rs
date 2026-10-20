@@ -111,13 +111,13 @@ impl Frame {
 /// face, level or sloped, and what lies up to `rise` mm above it (a floor, a column, a roof's
 /// slope); a prism: a ring in plan from one plane up to another (a wall's part; of a curved wall,
 /// with its centre and its centre line's radius, its faces being one surface each); or triangles
-/// (a component's form, which sections show and don't cut): a round one's sides, past `caps`, are
-/// one curved surface; any other's facets that turn little where they meet are ([`facets`]).
+/// (a component's form, which sections show and don't cut; a round run's tube, convex, which they do, as `cut` says): a round
+/// one's sides, past `caps`, are one curved surface; any other's facets that turn little where they meet are ([`facets`]).
 pub(crate) enum Solid {
     Box { owner: Id, color: Rgb, tex: u32, frame: Frame, a: (f64, f64), c: (f64, f64), z: (f64, f64) },
     Slab { owner: Id, color: Rgb, tex: u32, face: Vec<P3>, rise: f64 },
     Prism { owner: Id, color: Rgb, tex: u32, ring: Vec<P2>, bottom: Plane, top: Plane, curve: Option<(P2, f64)> },
-    Mesh { owner: Id, color: Rgb, tex: u32, tris: Vec<[P3; 3]>, caps: usize, round: bool },
+    Mesh { owner: Id, color: Rgb, tex: u32, tris: Vec<[P3; 3]>, caps: usize, round: bool, cut: bool },
 }
 
 /// A level slab: `ring` from `z.0` up to `z.1`.
@@ -244,6 +244,38 @@ impl Solid {
         }
     }
 
+    /// The rings a section along unit `u` from `p`, `len` long, cuts it into, as (along, up) in mm: where it lies over the
+    /// line, level or along a sloped face; a convex mesh that `cut` allows is cut by the plane through the line, where its
+    /// edges cross it (a tube across is its ring, an ellipse if it is oblique).
+    pub(crate) fn cuts(&self, p: P2, u: P2, len: f64) -> Vec<Vec<P2>> {
+        if let Solid::Mesh { tris, cut: true, .. } = self {
+            let side = |q: P3| (P2(q[0], q[1]) - p).dot(u.perp());
+            let at = |q: P3| P2((P2(q[0], q[1]) - p).dot(u), q[2]);
+            let mut pts = Vec::new();
+            for [a, b, c] in tris {
+                for (x, y) in [(a, b), (b, c), (c, a)] {
+                    let (dx, dy) = (side(*x), side(*y));
+                    if dx.abs() < 1e-9 {
+                        pts.push(at(*x));
+                    } else if dx * dy < 0.0 {
+                        pts.push(at(*x) + (at(*y) - at(*x)) * (dx / (dx - dy)));
+                    }
+                }
+            }
+            let ring = geom::clip(&geom::clip(&geom::hull(pts), |q| q.0), |q| len - q.0);
+            return if ring.len() >= 3 && geom::area(&ring) > 1e-6 { vec![ring] } else { Vec::new() };
+        }
+        self.across(p, u)
+            .into_iter()
+            .filter_map(|(a, b)| {
+                let (a, b) = (a.max(0.0), b.min(len));
+                // Level, or along a sloped face.
+                let ((a0, a1), (b0, b1)) = (self.z_at(p + u * a), self.z_at(p + u * b));
+                (b - a > 1e-6).then(|| vec![P2(a, a0), P2(b, b0), P2(b, b1), P2(a, a1)])
+            })
+            .collect()
+    }
+
     fn tris(&self, out: &mut Vec<Tri>) {
         match self {
             Solid::Box { owner, color, tex, frame, a, c, z } => frame.cuboid(out, *owner, (*color, *tex), *a, *c, *z),
@@ -276,7 +308,7 @@ impl Solid {
             }
             // Each surface keyed by its first triangle's place in `out`, which no other form's shares.
             // ponytail: worked out again for each component of a family; keep it per form if many big meshes slow a scene.
-            Solid::Mesh { owner, color, tex, tris, caps, round } => {
+            Solid::Mesh { owner, color, tex, tris, caps, round, .. } => {
                 let first = out.len();
                 let surfaces = if *round { (0..tris.len()).map(|i| (i >= *caps).then_some(*caps)).collect() } else { facets(tris) };
                 for (p, s) in tris.iter().zip(surfaces) {
@@ -436,13 +468,13 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                 out.push(slab(id, STRUCTURE, &m.column_outline(e), m.span(col.level, col.base_offset, col.top_level, col.height)))
             }
             // A rectangular run is a sloped prism, which a section cuts; a round one a tube, shown beyond its line.
-            Element::Beam(_) | Element::StripFooting(_) => {
+            crate::model::run_arm!(_) => {
                 if let (Some(t), Some(g)) = (m.run_type(e), m.run_geom(e)) {
                     let color = m.materials.get(&t.material).map_or(STRUCTURE, |x| Rgb(x.color[0], x.color[1], x.color[2]));
                     let tex = skin(m, &t.material);
                     if g.round {
                         let (tris, caps) = g.tube();
-                        out.push(Solid::Mesh { owner: id, color, tex, tris, caps, round: true });
+                        out.push(Solid::Mesh { owner: id, color, tex, tris, caps, round: true, cut: true });
                     } else {
                         let (ring, bottom, top) = g.prism();
                         out.push(Solid::Prism { owner: id, color, tex, ring, bottom, top, curve: None });
@@ -461,6 +493,7 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                         tris: piece.tris,
                         caps: piece.caps,
                         round: piece.round,
+                        cut: false,
                     });
                 }
             }
@@ -525,6 +558,7 @@ pub(crate) fn solids(m: &Model) -> Vec<Solid> {
                             tris: piece.tris,
                             caps: piece.caps,
                             round: piece.round,
+                            cut: false,
                         });
                     }
                 } else if let (Some(t), Some(w)) = (m.opening_type(e), m.wall(o.host)) {
@@ -1341,7 +1375,7 @@ mod tests {
 
     #[test]
     fn a_meshs_facets_that_turn_little_read_as_one_surface_and_its_creases_keep_their_edges() {
-        let mesh = |owner, tris: Vec<[P3; 3]>| Solid::Mesh { owner, color: EDGE, tex: 0, caps: tris.len(), round: false, tris };
+        let mesh = |owner, tris: Vec<[P3; 3]>| Solid::Mesh { owner, color: EDGE, tex: 0, caps: tris.len(), round: false, cut: false, tris };
         // Each cylinder's planes: its sides one surface where they turn 20° or less at their edges,
         // else a plane to each side; and a plane to each cap, however many triangles make it.
         for (n, planes_of) in [(4, 6), (8, 10), (16, 18), (20, 3), (24, 3), (64, 3)] {
@@ -1464,7 +1498,7 @@ mod tests {
     fn a_curves_corners_take_the_normals_of_the_surface_they_are_on() {
         let n = 24;
         let mut out = Vec::new();
-        Solid::Mesh { owner: 1, color: EDGE, tex: 0, caps: 0, round: false, tris: cylinder(n, 200.0, 450.0) }.tris(&mut out);
+        Solid::Mesh { owner: 1, color: EDGE, tex: 0, caps: 0, round: false, cut: false, tris: cylinder(n, 200.0, 450.0) }.tris(&mut out);
         let normals = corner_normals(&out);
         // Its caps are flat faces: none. Each corner of its sides points straight out from the axis, the top
         // ones as the bottom ones (two triangles meet at some corners, one at others).
@@ -1483,7 +1517,7 @@ mod tests {
         let mut roofed = cylinder(n, 200.0, 450.0);
         roofed.extend((0..n).map(|k| [ring(k), ring(k + 1), [0.0, 0.0, 850.0]]));
         let mut out = Vec::new();
-        Solid::Mesh { owner: 1, color: EDGE, tex: 0, caps: 0, round: false, tris: roofed }.tris(&mut out);
+        Solid::Mesh { owner: 1, color: EDGE, tex: 0, caps: 0, round: false, cut: false, tris: roofed }.tris(&mut out);
         let normals = corner_normals(&out);
         let normal = |i: usize| normals[i].as_deref().unwrap();
         assert!((2 * n..4 * n).all(|i| normal(i).iter().all(|v| v[2].abs() < 1e-9)));
@@ -1904,5 +1938,70 @@ mod tests {
         assert_eq!(tinted.color(x, y), Rgb(255, 0, 0), "a selected wall's edges in the selection's colour");
         let colours = plain.rgba.chunks(4).filter(|c| c[..3] != [255, 255, 255]).map(|c| (c[0], c[1], c[2])).collect::<BTreeSet<_>>();
         assert_eq!(colours, BTreeSet::from([(EDGE.0, EDGE.1, EDGE.2)]), "lines in the edge colour, nothing else");
+    }
+
+    #[test]
+    fn a_section_cuts_a_tube_in_its_ring_an_oblique_one_in_an_ellipse_and_leaves_other_meshes_whole() {
+        use crate::runs::Geom;
+        // A pipe 200 across along east at 500 up, from x = 0 to 4000, and a section 2000 along it, level and then at 45°.
+        let g = Geom { a: [0.0, 0.0, 500.0], b: [4000.0, 0.0, 500.0], width: 200.0, depth: 200.0, round: true };
+        let (tris, caps) = g.tube();
+        let tube = |cut| Solid::Mesh { owner: 1, color: EDGE, tex: 0, tris: tris.clone(), caps, round: true, cut };
+        let extent = |rings: &[Vec<P2>]| {
+            let pts: Vec<P2> = rings.iter().flatten().copied().collect();
+            let (lo, hi) = pts.iter().fold((P2(f64::MAX, f64::MAX), P2(f64::MIN, f64::MIN)), |(lo, hi), q| {
+                (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1)))
+            });
+            (hi.0 - lo.0, hi.1 - lo.1, lo.0, lo.1)
+        };
+        let square = tube(true).cuts(P2(2000.0, -1000.0), P2(0.0, 1.0), 2000.0);
+        assert_eq!(square.len(), 1);
+        let (w, h, x0, z0) = extent(&square);
+        assert!(
+            (w - 200.0).abs() < 1e-6 && (h - 200.0).abs() < 1e-6 && (x0 - 900.0).abs() < 1e-6 && (z0 - 400.0).abs() < 1e-6,
+            "{w} {h} {x0} {z0}"
+        );
+        // A regular 24-gon in a circle of radius 100: its area, and counter-clockwise.
+        let area = 12.0 * 100.0 * 100.0 * (std::f64::consts::TAU / 24.0).sin();
+        assert!((geom::area(&square[0]) - area).abs() < 1e-6 * area, "{}", geom::area(&square[0]));
+        // Slanting, its ring is longer along the line by 1 / sin 45°, as high as before.
+        let slanted = tube(true).cuts(P2(1000.0, -1000.0), P2(1.0, 1.0).unit(), 3000.0);
+        let (w, h, ..) = extent(&slanted);
+        assert!((w - 200.0 * 2f64.sqrt()).abs() < 1e-6 && (h - 200.0).abs() < 1e-6, "{w} {h}");
+        // Past the section's end it is clipped; clear of the pipe, or not allowed to be cut, it leaves nothing.
+        let (w, ..) = extent(&tube(true).cuts(P2(2000.0, -1000.0), P2(0.0, 1.0), 1050.0));
+        assert!((w - 150.0).abs() < 1e-6, "{w}");
+        // A line that starts inside the pipe cuts what is past its start only.
+        let (w, _, x0, _) = extent(&tube(true).cuts(P2(2000.0, -50.0), P2(0.0, 1.0), 2000.0));
+        assert!((w - 150.0).abs() < 1e-6 && x0.abs() < 1e-6, "{w} {x0}");
+        assert!(tube(true).cuts(P2(2000.0, -1000.0), P2(0.0, 1.0), 500.0).is_empty());
+        assert!(tube(true).cuts(P2(5000.0, -1000.0), P2(0.0, 1.0), 2000.0).is_empty());
+        assert!(tube(false).cuts(P2(2000.0, -1000.0), P2(0.0, 1.0), 2000.0).is_empty());
+        // A plane that lies in a face of a convex mesh (vertices exactly in it, no edge crossing it) gives that face.
+        let corner = |x: f64, y: f64, z: f64| [x, y, z];
+        let (a, b, c, d) = (corner(0.0, -100.0, 0.0), corner(200.0, -100.0, 0.0), corner(200.0, 100.0, 0.0), corner(0.0, 100.0, 0.0));
+        let (e, f, g, h) =
+            (corner(0.0, -100.0, 200.0), corner(200.0, -100.0, 200.0), corner(200.0, 100.0, 200.0), corner(0.0, 100.0, 200.0));
+        let tris = vec![
+            [a, c, b],
+            [a, d, c],
+            [e, f, g],
+            [e, g, h],
+            [a, b, f],
+            [a, f, e],
+            [b, c, g],
+            [b, g, f],
+            [c, d, h],
+            [c, h, g],
+            [d, a, e],
+            [d, e, h],
+        ];
+        let cube = Solid::Mesh { owner: 1, color: EDGE, tex: 0, tris, caps: 0, round: false, cut: true };
+        let (w, h, ..) = extent(&cube.cuts(P2(0.0, 100.0), P2(1.0, 0.0), 1000.0));
+        assert!((w - 200.0).abs() < 1e-6 && (h - 200.0).abs() < 1e-6, "{w} {h}");
+        // A section along the pipe cuts it lengthwise: a strip as long as the pipe is and as high as it is round.
+        let along = tube(true).cuts(P2(0.0, 0.0), P2(1.0, 0.0), 4000.0);
+        let (w, h, ..) = extent(&along);
+        assert!((w - 4000.0).abs() < 1e-6 && (h - 200.0).abs() < 1e-6, "{w} {h}");
     }
 }

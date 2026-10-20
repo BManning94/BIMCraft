@@ -216,7 +216,7 @@ fn rows(category: &str) -> &'static [Row] {
             ("Other", "at", "Location", Point),
             ("Other", "angle", "Rotation (°)", Number),
         ],
-        "beam" | "stripfooting" => &[
+        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[
             ("Constraints", "level", "Reference Level", Level),
             ("Constraints", "offset", "Start Level Offset", Length),
             ("Constraints", "end_offset", "End Level Offset", Limit("Same as start")),
@@ -290,7 +290,7 @@ const PLAN: &[Row] = &[
 fn type_json<'a>(types: &'a Value, category: &str, name: &str) -> &'a Value {
     let of = match category {
         "structuralcolumn" => &types["structural_column"],
-        "beam" | "stripfooting" => &types["runs"][category],
+        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &types["runs"][category],
         other => &types[other],
     };
     &of[name]
@@ -303,7 +303,8 @@ fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
         "floor" => &[("thickness", "Default Thickness")],
         "door" => &[("width", "Width"), ("height", "Height")],
         "window" => &[("width", "Width"), ("height", "Height"), ("sill", "Default Sill Height")],
-        "column" | "structuralcolumn" | "footing" | "beam" | "stripfooting" => &[("width", "Width"), ("depth", "Depth")],
+        "column" | "structuralcolumn" | "footing" => &[("width", "Width"), ("depth", "Depth")],
+        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[("width", "Width"), ("depth", "Depth")],
         "roof" => &[("thickness", "Thickness")],
         "ceiling" => &[("thickness", "Thickness"), ("grid", "Tile Size")],
         "railing" => &[("height", "Height"), ("spacing", "Baluster Spacing")],
@@ -331,6 +332,13 @@ fn icon(category: &str) -> Icon {
         "beam" => Icon::Beam,
         "footing" => Icon::Footing,
         "stripfooting" => Icon::WallFooting,
+        "pipe" => Icon::Pipe,
+        "conduit" => Icon::Conduit,
+        "cabletray" => Icon::CableTray,
+        "wire" => Icon::Wire,
+        "downconductor" => Icon::DownConductor,
+        "groundconductor" => Icon::GroundConductor,
+        "cable" => Icon::Cabling,
         "component" => Icon::Component,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,
@@ -539,12 +547,18 @@ pub(crate) struct TypeDialog {
     /// make it.
     layers: Vec<LayerRow>,
     layers_were: Vec<LayerRow>,
+    /// A run type's section: whether it is round (then it has a diameter and no depth) and what it is made of ("" for nothing).
+    shape: Option<(bool, String)>,
 }
 
 impl TypeDialog {
     pub(crate) fn new(m: &Model, category: &'static str, name: String, elements: Vec<Id>) -> TypeDialog {
         let (fields, layers) = (TypeDialog::fields(m, category, &name), TypeDialog::layers(m, category, &name));
-        TypeDialog { category, name, elements, fields, duplicate: None, layers_were: layers.clone(), layers }
+        let shape = bimcraft_core::model::RUN_CATEGORIES.contains(&category).then(|| {
+            let t = m.types.runs.get(category).and_then(|t| t.get(&name));
+            (t.is_some_and(|t| t.round), t.map(|t| t.material.clone()).unwrap_or_default())
+        });
+        TypeDialog { category, name, elements, fields, duplicate: None, layers_were: layers.clone(), layers, shape }
     }
 
     /// The dialog showing type `name` as the model has it now.
@@ -580,8 +594,13 @@ impl TypeDialog {
             });
             p["layers"] = Value::Array(layers.collect::<Result<_, String>>()?);
         }
-        for (key, label, typed) in self.fields.iter().filter(|(key, ..)| !(layered && *key == "thickness")) {
+        let round = self.shape.as_ref().is_some_and(|(round, _)| *round);
+        for (key, label, typed) in self.fields.iter().filter(|(key, ..)| !(layered && *key == "thickness") && !(round && *key == "depth")) {
             p[*key] = json!(units.parse(typed).ok_or_else(|| tf("{}: `{}` is not a length", &[t(label), typed]))?);
+        }
+        if let Some((round, material)) = &self.shape {
+            p["round"] = json!(round);
+            p["material"] = json!(material);
         }
         Ok(p)
     }
@@ -614,7 +633,7 @@ impl BimApp {
             ([], Tool::Elevation, _) => Subject::New("elevation"),
             ([], Tool::Column, _) => Subject::New("column"),
             ([], Tool::Run(category, _) | Tool::Stand(category), _) => Subject::New(category),
-            ([], Tool::Component, _) => Subject::New("component"),
+            ([], Tool::Component | Tool::Fixture(_), _) => Subject::New("component"),
             ([], Tool::Stair(_), _) => Subject::New("stair"),
             ([], Tool::Ramp(_), _) => Subject::New("ramp"),
             ([], Tool::Railing(_), _) => Subject::New("railing"),
@@ -816,7 +835,11 @@ impl BimApp {
         let pairs: Vec<(String, String)> = model
             .families
             .iter()
-            .filter(|(_, x)| if category == "component" { !x.category.hosted() } else { hosted == Some(x.category) })
+            .filter(|(_, x)| match (category, &self.tool) {
+                ("component", Tool::Fixture(key)) => crate::mep::kinds(key).contains(&x.category),
+                ("component", _) => !x.category.hosted(),
+                _ => hosted == Some(x.category),
+            })
             .flat_map(|(f, x)| x.types.keys().map(move |t| (f.clone(), t.clone())))
             .collect();
         let label = |(f, t): &(String, String)| format!("{f}: {t}");
@@ -1352,9 +1375,25 @@ impl BimApp {
                 ui.label(RichText::new(t("Parameter")).color(pal().muted));
                 ui.label(RichText::new(t("Value")).color(pal().muted));
                 ui.end_row();
-                for (_, label, typed) in &mut d.fields {
-                    let l = ui.label(t(label));
+                let round = d.shape.as_ref().is_some_and(|(round, _)| *round);
+                for (key, label, typed) in &mut d.fields {
+                    // A round section has a diameter and no depth.
+                    if round && *key == "depth" {
+                        continue;
+                    }
+                    let l = ui.label(t(if round && *key == "width" { "Diameter" } else { label }));
                     ui.add(TextEdit::singleline(typed).desired_width(160.0)).labelled_by(l.id);
+                    ui.end_row();
+                }
+                if let Some((round, material)) = &mut d.shape {
+                    ui.label("");
+                    ui.checkbox(round, t("Round"));
+                    ui.end_row();
+                    let l = ui.label(t("Material"));
+                    let names: Vec<String> = model.materials.keys().cloned().collect();
+                    if let Some(n) = combo(ui, (0, "type-material"), l.id, material, &names) {
+                        *material = n;
+                    }
                     ui.end_row();
                 }
             });
@@ -1381,9 +1420,11 @@ impl BimApp {
                     // A duplicate is round, and made of a material, as the type it copies is.
                     let types = serde_json::to_value(&model.types).unwrap_or_default();
                     let from = type_json(&types, d.category, &d.name);
-                    for key in ["round", "material"] {
-                        if !from[key].is_null() {
-                            p[key] = from[key].clone();
+                    if d.shape.is_none() {
+                        for key in ["round", "material"] {
+                            if !from[key].is_null() {
+                                p[key] = from[key].clone();
+                            }
                         }
                     }
                     self.run("type", p).is_some()
