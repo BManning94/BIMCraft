@@ -31,6 +31,11 @@
 </p>
 
 <p align="center">
+  <a href="docs/video/showcase.mp4"><img src="docs/images/showcase.jpg" alt="Play the 34-second BIMCraft tour: the sample house in its 3D view, with the 58 lines of text that build it beside it, its hipped roof just dropped on" width="70%"></a>
+  <br><sub><b>BIMCraft in 34 seconds</b> (<a href="docs/video/showcase.mp4">mp4, about 9 MB</a>, AI-generated voiceover): the sample house built from 58 lines of text, its plans, sections, sheets and 3D view, a wall moved with its doors and room areas following, IFC in and out, and an agent building a house over MCP.</sub>
+</p>
+
+<p align="center">
   <a href="#screenshots">Screenshots</a> ·
   <a href="#why-bimcraft">Why BIMCraft</a> ·
   <a href="#what-works-today">What works today</a> ·
