@@ -435,7 +435,7 @@ fn cut_unions(look: &Look, outlines: impl Iterator<Item = (Id, Vec<P2>)>) -> Vec
 
 /// The plan of `level` fitted into `width` x `height` px.
 pub fn plan(m: &Model, level: Id, width: u32, height: u32) -> Drawing {
-    draw(m, level, fit(&plan_extent(m, level), width, height))
+    draw(m, level, fit(&plan_extent(m, level), width, height, scale_of(m, level)))
 }
 
 /// What a plan of `level` takes on paper: all it shows, or cropped, its crop region and the grids'
@@ -580,24 +580,34 @@ fn shown_heights(m: &Model, v: &Section, look: &Look) -> (f64, f64) {
 }
 
 /// The view section or elevation `id` fits into `width` x `height` px: along its line from its
-/// start, and up, with room for its levels' names and its grids' bubbles.
+/// start, and up, with room for its levels' names and its grids' bubbles, which are as big as its
+/// scale makes them.
 pub fn section_fit(m: &Model, id: Id, width: u32, height: u32) -> View {
-    // At no scale, the level names take no room; at the scale that gives, they do.
-    let first = section_extent(m, id, f64::INFINITY).map_or_else(|| fit(&[], width, height), |e| fit(&e, width, height));
-    section_extent(m, id, first.scale).map_or(first, |e| fit(&e, width, height))
+    let Some([lo, hi]) = section_bare(m, id) else { return fit(&[], width, height, None) };
+    let (n, names) = (scale_of(m, id), level_names(m));
+    fit_by(|scale| [lo, P2(hi.0 + f64::from(annotation_of(n, scale) * names) / scale, hi.1)], width, height, n)
 }
 
-/// What section or elevation `id` shows, along its line and up, at `scale` px per mm: from its
-/// start to its end, past its lowest and highest heights, with room past the end for the widest
+/// What section or elevation `id` shows, along its line and up, at `scale` px per mm, its annotation `k` times the size it is
+/// laid out at: from its start to its end, past its lowest and highest heights, with room past the end for the widest
 /// level name.
-pub(crate) fn section_extent(m: &Model, id: Id, scale: f64) -> Option<[P2; 2]> {
+pub(crate) fn section_extent(m: &Model, id: Id, scale: f64, k: f32) -> Option<[P2; 2]> {
+    let [lo, hi] = section_bare(m, id)?;
+    Some([lo, P2(hi.0 + f64::from(k * level_names(m)) / scale, hi.1)])
+}
+
+/// Section or elevation `id` from its start to its end, past its lowest and highest heights: all it shows but the names of
+/// its levels.
+fn section_bare(m: &Model, id: Id) -> Option<[P2; 2]> {
     let v = m.section(id)?;
-    let ((lo, hi), len) = (shown_heights(m, v, &Look::of(m, id)), v.start.dist(v.end));
-    // The widest level name or height.
-    let head =
-        m.levels().iter().map(|(_, l)| font::width(&l.name, 10.0).max(font::width(&m.units.length(l.elevation), 10.0))).fold(0.0, f32::max)
-            + 12.0;
-    Some([P2(0.0, lo - GRID_PAST), P2(len + f64::from(head) / scale, hi + GRID_PAST)])
+    let (lo, hi) = shown_heights(m, v, &Look::of(m, id));
+    Some([P2(0.0, lo - GRID_PAST), P2(v.start.dist(v.end), hi + GRID_PAST)])
+}
+
+/// The room, px, the widest level name or height takes past the end of a section's line, drawn at the size it is laid out at.
+fn level_names(m: &Model) -> f32 {
+    m.levels().iter().map(|(_, l)| font::width(&l.name, 10.0).max(font::width(&m.units.length(l.elevation), 10.0))).fold(0.0, f32::max)
+        + 12.0
 }
 
 /// The camera, and what it keeps, that show what section or elevation `id` sees through `view`.
@@ -852,7 +862,7 @@ pub fn draw(m: &Model, level: Id, view: View) -> Drawing {
 
 /// The reflected ceiling plan of `level` fitted into `width` x `height` px.
 pub fn ceiling_plan(m: &Model, level: Id, width: u32, height: u32) -> Drawing {
-    draw_ceiling(m, level, fit(&plan_shows(m, level), width, height))
+    draw_ceiling(m, level, fit(&plan_shows(m, level), width, height, scale_of(m, level)))
 }
 
 /// The reflected ceiling plan of `level` as `view` shows it: cut [`CEILING_CUT`] above the level
@@ -869,7 +879,17 @@ pub fn draw_ceiling(m: &Model, level: Id, view: View) -> Drawing {
 /// shortcut: clamped to a tenth and ten times, so a hostile scale or zoom can't draw lettering a screen tall; widen it
 /// if a plan at 1 : 10000 on screen wants more.
 pub fn annotation(m: &Model, id: Id, view: View) -> f32 {
-    crate::graphics::graphics_of(m, id).and_then(|g| g.scale).map_or(1.0, |n| (n * view.scale / sheet::DENSITY).clamp(0.1, 10.0) as f32)
+    annotation_of(scale_of(m, id), view.scale)
+}
+
+/// [`annotation`] for a view at scale 1 : `n` (none: no scale) shown at `scale` pixels to the mm.
+fn annotation_of(n: Option<f64>, scale: f64) -> f32 {
+    n.map_or(1.0, |n| (n * scale / sheet::DENSITY).clamp(0.1, 10.0) as f32)
+}
+
+/// The scale, 1 : n, view `id` is held at.
+fn scale_of(m: &Model, id: Id) -> Option<f64> {
+    crate::graphics::graphics_of(m, id).and_then(|g| g.scale)
 }
 
 /// The level of detail view `id` draws at.
@@ -1450,14 +1470,32 @@ fn clip_ring(ring: &[(f32, f32)], lo: (f32, f32), hi: (f32, f32)) -> Vec<(f32, f
     pts
 }
 
-/// A view fitting `pts` into the image, leaving the margin free.
-fn fit(pts: &[P2], width: u32, height: u32) -> View {
+/// A view fitting `pts` into the image, leaving the margin free: see [`fit_by`].
+fn fit(pts: &[P2], width: u32, height: u32, n: Option<f64>) -> View {
     let lo = pts.iter().fold(P2(f64::MAX, f64::MAX), |a, p| P2(a.0.min(p.0), a.1.min(p.1)));
     let hi = pts.iter().fold(P2(f64::MIN, f64::MIN), |a, p| P2(a.0.max(p.0), a.1.max(p.1)));
     let (lo, hi) = if pts.is_empty() { (P2(-5000.0, -5000.0), P2(5000.0, 5000.0)) } else { (lo, hi) };
-    let room = |px: u32| (f64::from(px) - 2.0 * MARGIN).max(1.0);
-    let scale = (room(width) / (hi.0 - lo.0).max(1000.0)).min(room(height) / (hi.1 - lo.1).max(1000.0));
-    View { scale, cx: (lo.0 + hi.0) / 2.0, cy: (lo.1 + hi.1) / 2.0, width, height }
+    fit_by(|_| [lo, hi], width, height, n)
+}
+
+/// A view fitting what `extent` says is shown at a scale (px per mm) into the image, leaving the margin free: `MARGIN` px
+/// round it, and as many times that as the annotation of a view at 1 : `n` is bigger than on screen ([`annotation_of`]), which
+/// would otherwise outgrow it. The annotation's size and so the margin follow the scale the view comes out at, so that is
+/// found by halving: the largest scale at which the view and its margin fit.
+fn fit_by(extent: impl Fn(f64) -> [P2; 2], width: u32, height: u32, n: Option<f64>) -> View {
+    let fits = |scale: f64| {
+        let [lo, hi] = extent(scale);
+        let room = |px: u32| (f64::from(px) - 2.0 * MARGIN * f64::from(annotation_of(n, scale)).max(1.0)).max(1.0);
+        (hi.0 - lo.0).max(1000.0) * scale <= room(width) && (hi.1 - lo.1).max(1000.0) * scale <= room(height)
+    };
+    // A view is at least a metre across, so no scale is past a pixel to the mm of the image's smaller side.
+    let (mut fits_at, mut too_big) = (0.0, f64::from(width.min(height).max(1)) / 1000.0);
+    for _ in 0..48 {
+        let mid = (fits_at + too_big) / 2.0;
+        *(if fits(mid) { &mut fits_at } else { &mut too_big }) = mid;
+    }
+    let [lo, hi] = extent(fits_at);
+    View { scale: fits_at, cx: (lo.0 + hi.0) / 2.0, cy: (lo.1 + hi.1) / 2.0, width, height }
 }
 
 /// A door or window the cut plane at height `cut` passes through: a gap in the wall, jambs, and
@@ -2589,6 +2627,48 @@ mod tests {
         assert!(door >= 3 && window >= 3, "which are still there");
         // The ceiling plan is the same level's.
         assert!(drawn_by(&ceiling_plan(&s.model, 1, 800, 600), 3) > 0);
+    }
+
+    /// The extremes of what `d` draws, px: left, top, right, bottom.
+    fn drawn_extent(d: &Drawing) -> [f32; 4] {
+        let mut e = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        let pts = d.prims.iter().flat_map(|p| match p {
+            Prim::Fill { rings, .. } => rings.iter().flatten().copied().collect::<Vec<_>>(),
+            Prim::Line { pts, .. } => pts.clone(),
+            Prim::Image { .. } => Vec::new(),
+        });
+        for (x, y) in pts {
+            e = [e[0].min(x), e[1].min(y), e[2].max(x), e[3].max(y)];
+        }
+        e
+    }
+
+    #[test]
+    fn a_big_scale_leaves_room_round_a_view_for_the_annotation_it_makes_big() {
+        let mut s = house();
+        // The section is 11, the elevation 12.
+        s.script("section {\"start\": [-1000, 3000], \"end\": [9000, 3000]}\nelevation {\"facing\": \"south\"}").unwrap();
+        let (w, h) = (1000, 800);
+        let mut reached = Vec::new();
+        for n in [None, Some(20), Some(100), Some(500), Some(5000)] {
+            for view in [1, 11, 12] {
+                s.execute("scale", &serde_json::json!({"view": view, "scale": n})).unwrap();
+            }
+            let (flat, ceiling) = (plan(&s.model, 1, w, h), ceiling_plan(&s.model, 1, w, h));
+            let cut = |id| section(&s.model, id, section_fit(&s.model, id, w, h));
+            for (what, d) in [("plan", flat), ("ceiling plan", ceiling), ("section", cut(11)), ("elevation", cut(12))] {
+                let [l, t, r, b] = drawn_extent(&d);
+                assert!(l >= 0.0 && t >= 0.0 && r <= w as f32 && b <= h as f32, "1 : {n:?}, {what}: {l} {t} {r} {b} in {w} x {h}");
+                if what == "plan" {
+                    reached.push((n, d.view.scale));
+                }
+            }
+        }
+        // The room is the annotation's, no more: a plan at 1 : 20 is as large as one with no scale, and at 1 : 500 not so small
+        // that the drawing is a dot.
+        let at = |n| reached.iter().find(|(k, _)| *k == n).map(|(_, s)| *s).unwrap();
+        assert_eq!(at(Some(20)), at(None));
+        assert!(at(Some(500)) > at(None) / 4.0 && at(Some(500)) < at(None), "{reached:?}");
     }
 
     #[test]

@@ -44,7 +44,7 @@ fn framing(m: &Model, view: Id, scale: f64) -> Option<View> {
     let k = DENSITY / scale;
     let pts: Vec<P2> = match m.elements.get(&view)? {
         Element::Level(_) => render::plan_extent(m, view),
-        Element::Section(_) | Element::Elevation(_) => render::section_extent(m, view, k)?.to_vec(),
+        Element::Section(_) | Element::Elevation(_) => render::section_extent(m, view, k, 1.0)?.to_vec(),
         Element::Schedule(sc) => {
             let (width, height) = table_size(&sc.name, &table_of(m, sc));
             return Some(View { scale: 1.0, cx: 0.0, cy: 0.0, width, height });
