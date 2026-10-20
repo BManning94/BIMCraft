@@ -18,8 +18,16 @@ pub fn may_stand(category: &str) -> bool {
 
 /// How each run category is written in IFC: its class and predefined type (all of them take a product's nine attributes). Import
 /// reads the same table back, a class and a type to the first category that has them.
-pub const IFC: &[(&str, &str, &str)] =
-    &[("beam", "IFCBEAM", ".BEAM."), ("stripfooting", "IFCFOOTING", ".STRIP_FOOTING."), ("pipe", "IFCPIPESEGMENT", ".RIGIDSEGMENT.")];
+pub const IFC: &[(&str, &str, &str)] = &[
+    ("beam", "IFCBEAM", ".BEAM."),
+    ("stripfooting", "IFCFOOTING", ".STRIP_FOOTING."),
+    ("pipe", "IFCPIPESEGMENT", ".RIGIDSEGMENT."),
+    ("conduit", "IFCCABLECARRIERSEGMENT", ".CONDUITSEGMENT."),
+    ("cabletray", "IFCCABLECARRIERSEGMENT", ".CABLETRAYSEGMENT."),
+    // A ladder is a tray to BIMCraft, written as a tray: only a file of another tool's says it.
+    ("cabletray", "IFCCABLECARRIERSEGMENT", ".CABLELADDERSEGMENT."),
+    ("wire", "IFCCABLESEGMENT", ".CABLESEGMENT."),
+];
 
 /// The IFC class and predefined type a run of `category` is written as.
 pub fn ifc(category: &str) -> Option<(&'static str, &'static str)> {

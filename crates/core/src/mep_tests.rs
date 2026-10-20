@@ -27,17 +27,52 @@ struct Case {
     predefined: &'static str,
 }
 
-const CASES: &[Case] = &[Case {
-    category: "pipe",
-    command: "pipe",
-    alias: "PI",
-    default_type: "PVC 50",
-    round: true,
-    columns: &["System", "Length", "Diameter"],
-    alone: true,
-    class: "IFCPIPESEGMENT",
-    predefined: ".RIGIDSEGMENT.",
-}];
+const CASES: &[Case] = &[
+    Case {
+        category: "pipe",
+        command: "pipe",
+        alias: "PI",
+        default_type: "PVC 50",
+        round: true,
+        columns: &["System", "Length", "Diameter"],
+        alone: true,
+        class: "IFCPIPESEGMENT",
+        predefined: ".RIGIDSEGMENT.",
+    },
+    Case {
+        category: "conduit",
+        command: "conduit",
+        alias: "CN",
+        default_type: "PVC 25",
+        round: true,
+        columns: &["System", "Length", "Diameter"],
+        alone: true,
+        class: "IFCCABLECARRIERSEGMENT",
+        predefined: ".CONDUITSEGMENT.",
+    },
+    Case {
+        category: "cabletray",
+        command: "cable_tray",
+        alias: "CT",
+        default_type: "Perforated 100 x 50",
+        round: false,
+        columns: &["System", "Length", "Width", "Depth"],
+        alone: true,
+        class: "IFCCABLECARRIERSEGMENT",
+        predefined: ".CABLETRAYSEGMENT.",
+    },
+    Case {
+        category: "wire",
+        command: "wire",
+        alias: "EW",
+        default_type: "Wire 2.5",
+        round: true,
+        columns: &["System", "Length", "Diameter"],
+        alone: true,
+        class: "IFCCABLESEGMENT",
+        predefined: ".CABLESEGMENT.",
+    },
+];
 
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
     s.execute(id, &p).unwrap_or_else(|e| panic!("{id} {p}: {e}"))
@@ -148,7 +183,11 @@ fn a_run_of_the_mep_that_cannot_be_one_is_refused_and_nothing_changes() {
 fn types_of_a_run_are_made_and_changed_with_type_round_or_not_and_in_a_material() {
     for c in CASES {
         let mut s = Session::new();
-        let made = run(&mut s, "type", json!({"category": c.category, "name": "Mine", "width": 75, "round": c.round, "material": "Metal"}));
+        let made = run(
+            &mut s,
+            "type",
+            json!({"category": c.category, "name": "Mine", "width": 75, "depth": 75, "round": c.round, "material": "Metal"}),
+        );
         assert_eq!(made["type"], json!({"width": 75.0, "depth": 75.0, "round": c.round, "material": "Metal"}), "{}", c.category);
         let id = ids(&run(&mut s, c.command, json!({"points": [[0, 0], [3000, 0]], "type": "Mine"})))[0];
         run(&mut s, "type", json!({"category": c.category, "name": "Mine", "width": 90}));
@@ -562,6 +601,51 @@ const FIXTURES: &[Fixture] = &[
         object_type: None,
         base: (-100.0, -10.0),
         top: (40.0, 300.0),
+    },
+    Fixture {
+        family: "Distribution Board",
+        category: Category::Equipment,
+        class: "IFCELECTRICDISTRIBUTIONBOARD",
+        predefined: ".DISTRIBUTIONBOARD.",
+        object_type: None,
+        base: (1200.0, 1400.0),
+        top: (1700.0, 2300.0),
+    },
+    Fixture {
+        family: "Ceiling Luminaire",
+        category: Category::Lighting,
+        class: "IFCLIGHTFIXTURE",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (2900.0, 3000.0),
+        top: (2950.0, 3050.0),
+    },
+    Fixture {
+        family: "Recessed Luminaire",
+        category: Category::Lighting,
+        class: "IFCLIGHTFIXTURE",
+        predefined: ".NOTDEFINED.",
+        object_type: None,
+        base: (2900.0, 3000.0),
+        top: (2950.0, 3050.0),
+    },
+    Fixture {
+        family: "Outlet",
+        category: Category::Outlet,
+        class: "IFCOUTLET",
+        predefined: ".POWEROUTLET.",
+        object_type: None,
+        base: (200.0, 2100.0),
+        top: (300.0, 2200.0),
+    },
+    Fixture {
+        family: "Switch",
+        category: Category::Switch,
+        class: "IFCSWITCHINGDEVICE",
+        predefined: ".TOGGLESWITCH.",
+        object_type: None,
+        base: (200.0, 1200.0),
+        top: (300.0, 1300.0),
     },
 ];
 

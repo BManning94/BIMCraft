@@ -2,7 +2,7 @@
 
 A client asked for the complementary-project tabs Revit users know: structure (estrutural), plumbing and drainage
 (hidrossanitário), electrical (elétrico), lightning protection (SPDA) and data and voice (lógica, dados e voz). This note
-is how BIMCraft builds all five with as little new machinery as possible. Structure and Plumbing are built; the other three are
+is how BIMCraft builds all five with as little new machinery as possible. Structure, Plumbing and Electrical are built; the other two are
 follow-ups that add data to what is described here, not new engine code. The rules in [CLAUDE.md](../CLAUDE.md) apply
 to all of it (everything is a command, `Model::check` validates, the core has no UI, clean-room).
 
@@ -48,7 +48,7 @@ section, and the 3D view draws it as a sloped prism, or a round one as a tube.
 
 A run is one Rust type serialized under several categories, as `Door` and `Window` share `Opening`. The category is the
 `Element` variant, so Visibility/Graphics, schedules, project parameters, phases, view filters and the IFC class all
-work per category without a line of per-category machinery. Today: `beam`, `stripfooting` and `pipe`. A tab adds a variant, a name
+work per category without a line of per-category machinery. Today: `beam`, `stripfooting`, `pipe`, `conduit`, `cabletray` and `wire`. A tab adds a variant, a name
 in `model::run_arm!` and a row to each table below:
 
 | Category | Tab | Revit's name |
@@ -100,12 +100,12 @@ IFC4 (ISO 16739-1:2018). Class names are checked against the IFC4 and IFC4X3_ADD
 | structural `floor` | `IfcSlab` `.FLOOR.` (`.BASESLAB.` for a foundation slab) with `Pset_SlabCommon.LoadBearing` | yes |
 | `pipe` | `IfcPipeSegment` `.RIGIDSEGMENT.`; fittings `IfcPipeFitting`, valves `IfcValve` | yes |
 | sanitary fixtures | `IfcSanitaryTerminal` (`.NOTDEFINED.`: a family has one category and its forms, not a kind of fixture; `.WASHHANDBASIN.`, `.TOILETPAN.`, `.SINK.`, `.SHOWER.` would need one per kind); floor drains `IfcWasteTerminal` `.FLOORTRAP.` | yes |
-| `conduit` | `IfcCableCarrierSegment` `.CONDUITSEGMENT.` | |
-| `cabletray` | `IfcCableCarrierSegment` `.CABLETRAYSEGMENT.` (`.CABLELADDERSEGMENT.`) | |
-| `wire`, `cable` | `IfcCableSegment` `.CABLESEGMENT.` | |
-| panels, boards | `IfcElectricDistributionBoard` `.DISTRIBUTIONBOARD.` | |
-| luminaires | `IfcLightFixture` | |
-| outlets, switches | `IfcOutlet` (`.POWEROUTLET.`, `.DATAOUTLET.`, `.TELEPHONEOUTLET.`), `IfcSwitchingDevice` | |
+| `conduit` | `IfcCableCarrierSegment` `.CONDUITSEGMENT.` | yes |
+| `cabletray` | `IfcCableCarrierSegment` `.CABLETRAYSEGMENT.` (`.CABLELADDERSEGMENT.`, which only another tool writes, is read as a tray) | yes |
+| `wire`, `cable` | `IfcCableSegment` `.CABLESEGMENT.` | `wire` |
+| panels, boards | `IfcElectricDistributionBoard` `.DISTRIBUTIONBOARD.` | yes |
+| luminaires | `IfcLightFixture` | yes |
+| outlets, switches | `IfcOutlet` (`.POWEROUTLET.`, `.DATAOUTLET.`, `.TELEPHONEOUTLET.`), `IfcSwitchingDevice` (`.TOGGLESWITCH.`) | power outlets and switches |
 | data equipment | `IfcCommunicationsAppliance` (`.NETWORKAPPLIANCE.`, `.ROUTER.`…). A rack has no class: `IfcElectricDistributionBoard` or a proxy | |
 | `downconductor` | `IfcCableSegment` `.CONDUCTORSEGMENT.` | |
 | air terminals, earthing rods | **no IFC class.** IFC4 and IFC4X3 have none for lightning protection. `IfcBuildingElementProxy` with `ObjectType` `LightningTerminal` or `EarthingRod`, so a reader can filter on it. Surge protection has `IfcProtectiveDevice` `.VARISTOR.` | |
@@ -127,7 +127,7 @@ and says so.
 |---|---|---|
 | **Structure** / Estrutura / Estructura | Column CL, Beam BM, Floor (Structural) SB; Foundation: Isolated FI, Wall FW (Revit's FT is Filters here) | pilar, viga, laje, sapata, sapata corrida, baldrame |
 | **Plumbing** / Hidrossanitário / Fontanería | Pipe PI, Plumbing Fixture PX, Pipe Fitting PF, Pipe Accessory PA (built) | tubulação, peça sanitária, ramal, prumada, água fria (NBR 5626), esgoto (NBR 8160) |
-| **Electrical** / Elétrico / Eléctrico | Conduit CN, Cable Tray CT, Wire EW, Electrical Equipment EE, Lighting Fixture LF, Device | eletroduto, eletrocalha, quadro de distribuição, luminária, tomada, circuito (NBR 5410) |
+| **Electrical** / Elétrico / Eléctrico | Conduit CN, Cable Tray CT, Wire EW, Electrical Equipment EE, Lighting Fixture LF, Device DV (built) | eletroduto, eletrocalha, quadro de distribuição, luminária, tomada, circuito (NBR 5410) |
 | **Lightning Protection (SPDA)** / SPDA / SPDA | Air Terminal, Down Conductor, Earthing Electrode, Inspection Box | captor, condutor de descida, haste de aterramento, caixa de inspeção, malha (NBR 5419) |
 | **Data** / Lógica, Dados e Voz / Datos y Voz | Data Outlet, Voice Outlet, Rack, Cable Tray CT, Cabling | ponto de dados, ponto de voz, rack, patch panel, cabeamento estruturado (NBR 14565) |
 

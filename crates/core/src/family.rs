@@ -30,6 +30,12 @@ pub enum Category {
     PipeFitting,
     /// A valve, a cleanout.
     PipeAccessory,
+    /// A distribution board.
+    Equipment,
+    /// A power outlet (tomada).
+    Outlet,
+    /// A light switch (interruptor).
+    Switch,
     Lighting,
     Generic,
     Door,
@@ -39,12 +45,15 @@ pub enum Category {
 impl Category {
     /// The categories a component may be of (a door's or a window's family is placed in a wall), in the order an import reads
     /// them.
-    pub const PLACED: [Category; 7] = [
+    pub const PLACED: [Category; 10] = [
         Category::Furniture,
         Category::Plumbing,
         Category::Drain,
         Category::PipeFitting,
         Category::PipeAccessory,
+        Category::Equipment,
+        Category::Outlet,
+        Category::Switch,
         Category::Lighting,
         Category::Generic,
     ];
@@ -59,6 +68,9 @@ impl Category {
             Category::Drain => ("IFCWASTETERMINAL", ".FLOORTRAP.", None),
             Category::PipeFitting => ("IFCPIPEFITTING", OPEN, None),
             Category::PipeAccessory => ("IFCVALVE", OPEN, None),
+            Category::Equipment => ("IFCELECTRICDISTRIBUTIONBOARD", ".DISTRIBUTIONBOARD.", None),
+            Category::Outlet => ("IFCOUTLET", ".POWEROUTLET.", None),
+            Category::Switch => ("IFCSWITCHINGDEVICE", ".TOGGLESWITCH.", None),
             Category::Lighting => ("IFCLIGHTFIXTURE", OPEN, None),
             Category::Generic | Category::Door | Category::Window => ("IFCBUILDINGELEMENTPROXY", OPEN, None),
         }

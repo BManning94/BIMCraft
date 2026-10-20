@@ -475,13 +475,16 @@ impl FamilyEditor {
 }
 
 /// The categories a family may be of, in the order they're offered.
-pub(crate) const CATEGORIES: [Category; 10] = [
+pub(crate) const CATEGORIES: [Category; 13] = [
     Category::Furniture,
     Category::Casework,
     Category::Plumbing,
     Category::Drain,
     Category::PipeFitting,
     Category::PipeAccessory,
+    Category::Equipment,
+    Category::Outlet,
+    Category::Switch,
     Category::Lighting,
     Category::Generic,
     Category::Door,
@@ -496,6 +499,9 @@ pub(crate) fn category_label(c: Category) -> String {
         Category::Drain => "Drains",
         Category::PipeFitting => "Pipe Fittings",
         Category::PipeAccessory => "Pipe Accessories",
+        Category::Equipment => "Electrical Equipment",
+        Category::Outlet => "Outlets",
+        Category::Switch => "Switches",
         Category::Lighting => "Lighting",
         Category::Generic => "Generic",
         Category::Door => "Door",

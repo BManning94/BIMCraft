@@ -959,7 +959,12 @@ pub struct Viewport {
 /// that treats runs alike takes them.
 macro_rules! run_arm {
     ($r:pat) => {
-        Element::Beam($r) | Element::StripFooting($r) | Element::Pipe($r)
+        Element::Beam($r)
+            | Element::StripFooting($r)
+            | Element::Pipe($r)
+            | Element::Conduit($r)
+            | Element::CableTray($r)
+            | Element::Wire($r)
     };
 }
 pub(crate) use run_arm;
@@ -991,6 +996,9 @@ pub enum Element {
     Beam(Run),
     StripFooting(Run),
     Pipe(Run),
+    Conduit(Run),
+    CableTray(Run),
+    Wire(Run),
     Component(Component),
     Stair(Stair),
     Ramp(Ramp),
@@ -1072,6 +1080,9 @@ impl Element {
             "beam" => Some(Element::Beam(r)),
             "stripfooting" => Some(Element::StripFooting(r)),
             "pipe" => Some(Element::Pipe(r)),
+            "conduit" => Some(Element::Conduit(r)),
+            "cabletray" => Some(Element::CableTray(r)),
+            "wire" => Some(Element::Wire(r)),
             _ => None,
         }
     }
@@ -1146,6 +1157,9 @@ impl Element {
             Element::Beam(_) => "beam",
             Element::StripFooting(_) => "stripfooting",
             Element::Pipe(_) => "pipe",
+            Element::Conduit(_) => "conduit",
+            Element::CableTray(_) => "cabletray",
+            Element::Wire(_) => "wire",
             Element::Component(_) => "component",
             Element::Stair(_) => "stair",
             Element::Ramp(_) => "ramp",
@@ -1220,7 +1234,7 @@ pub struct RunType {
 }
 
 /// The categories whose elements are runs, as `Element::run` returns them.
-pub const RUN_CATEGORIES: [&str; 3] = ["beam", "stripfooting", "pipe"];
+pub const RUN_CATEGORIES: [&str; 6] = ["beam", "stripfooting", "pipe", "conduit", "cabletray", "wire"];
 
 /// A roof type: how thick its roofs are across their slope and, a compound one, its layers from
 /// the top down.
@@ -1291,7 +1305,7 @@ pub struct ProjectParameter {
 pub const MAX_PROJECT_PARAMETERS: usize = 256;
 
 /// The categories project parameters are for.
-pub const PARAMETER_CATEGORIES: [&str; 18] = [
+pub const PARAMETER_CATEGORIES: [&str; 21] = [
     "wall",
     "floor",
     "ceiling",
@@ -1310,6 +1324,9 @@ pub const PARAMETER_CATEGORIES: [&str; 18] = [
     "beam",
     "stripfooting",
     "pipe",
+    "conduit",
+    "cabletray",
+    "wire",
 ];
 
 impl ProjectParameter {
@@ -1470,6 +1487,46 @@ impl Model {
             ("Copper 22", run(22.0, 22.0, true, "Copper")),
         ];
         m.types.runs.insert("pipe".into(), pipes.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        // The electrical's: PVC and steel conduits (eletrodutos), perforated trays (eletrocalhas) and wires, by their outside size.
+        let conduits = [
+            ("PVC 20", run(20.0, 20.0, true, "PVC")),
+            ("PVC 25", run(25.0, 25.0, true, "PVC")),
+            ("PVC 32", run(32.0, 32.0, true, "PVC")),
+            ("Steel 25", run(25.0, 25.0, true, "Metal")),
+        ];
+        m.types.runs.insert("conduit".into(), conduits.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        let trays = [
+            ("Perforated 100 x 50", run(100.0, 50.0, false, "Metal")),
+            ("Perforated 200 x 50", run(200.0, 50.0, false, "Metal")),
+            ("Perforated 300 x 100", run(300.0, 100.0, false, "Metal")),
+        ];
+        m.types.runs.insert("cabletray".into(), trays.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        let wires = [
+            ("Wire 2.5", run(4.0, 4.0, true, "Copper")),
+            ("Wire 4", run(5.0, 5.0, true, "Copper")),
+            ("Wire 6", run(6.5, 6.5, true, "Copper")),
+        ];
+        m.types.runs.insert("wire".into(), wires.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        // The electrical's: PVC and steel conduits (eletrodutos), perforated trays (eletrocalhas) and wires, by their outside size.
+        let conduits = [
+            ("PVC 20", run(20.0, 20.0, true, "PVC")),
+            ("PVC 25", run(25.0, 25.0, true, "PVC")),
+            ("PVC 32", run(32.0, 32.0, true, "PVC")),
+            ("Steel 25", run(25.0, 25.0, true, "Metal")),
+        ];
+        m.types.runs.insert("conduit".into(), conduits.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        let trays = [
+            ("Perforated 100 x 50", run(100.0, 50.0, false, "Metal")),
+            ("Perforated 200 x 50", run(200.0, 50.0, false, "Metal")),
+            ("Perforated 300 x 100", run(300.0, 100.0, false, "Metal")),
+        ];
+        m.types.runs.insert("cabletray".into(), trays.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
+        let wires = [
+            ("Wire 2.5", run(4.0, 4.0, true, "Copper")),
+            ("Wire 4", run(5.0, 5.0, true, "Copper")),
+            ("Wire 6", run(6.5, 6.5, true, "Copper")),
+        ];
+        m.types.runs.insert("wire".into(), wires.into_iter().map(|(n, t)| (n.to_string(), t)).collect());
         m.types.roof.insert("Generic - 300mm".into(), RoofType { thickness: 300.0, layers: Vec::new() });
         m.types.ceiling.insert("Generic - 20mm".into(), CeilingType { thickness: 20.0, grid: 0.0, layers: Vec::new() });
         m.types.ceiling.insert("Tile 600 x 600".into(), CeilingType { thickness: 20.0, grid: 600.0, layers: Vec::new() });
@@ -1771,6 +1828,9 @@ impl Model {
             "beam" => "Beam 200 x 500",
             "stripfooting" => "Strip 600 x 300",
             "pipe" => "PVC 50",
+            "conduit" => "PVC 25",
+            "cabletray" => "Perforated 100 x 50",
+            "wire" => "Wire 2.5",
             _ => "Fixed 1200 x 1500",
         };
         let names = self.type_names(category);

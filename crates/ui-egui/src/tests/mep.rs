@@ -25,24 +25,65 @@ struct RunTool {
     letters: &'static str,
     default_type: &'static str,
     width: f64,
-    /// Another type the Type Selector lists, and the label the palette's section row has.
+    /// Another type the Type Selector lists.
     other: &'static str,
+    /// Whether the default type is round (a diameter) or not (a width and a depth).
+    round: bool,
 }
 
-const RUN_TOOLS: &[RunTool] = &[RunTool {
-    tab: "Plumbing",
-    button: "Pipe",
-    category: "pipe",
-    command: "pipe",
-    context: "Modify | Place Pipe",
-    letters: "PI",
-    default_type: "PVC 50",
-    width: 50.0,
-    other: "Copper 22",
-}];
+const RUN_TOOLS: &[RunTool] = &[
+    RunTool {
+        tab: "Plumbing",
+        button: "Pipe",
+        category: "pipe",
+        command: "pipe",
+        context: "Modify | Place Pipe",
+        letters: "PI",
+        default_type: "PVC 50",
+        width: 50.0,
+        other: "Copper 22",
+        round: true,
+    },
+    RunTool {
+        tab: "Electrical",
+        button: "Conduit",
+        category: "conduit",
+        command: "conduit",
+        context: "Modify | Place Conduit",
+        letters: "CN",
+        default_type: "PVC 25",
+        width: 25.0,
+        other: "Steel 25",
+        round: true,
+    },
+    RunTool {
+        tab: "Electrical",
+        button: "Cable Tray",
+        category: "cabletray",
+        command: "cable_tray",
+        context: "Modify | Place Cable Tray",
+        letters: "CT",
+        default_type: "Perforated 100 x 50",
+        width: 100.0,
+        other: "Perforated 200 x 50",
+        round: false,
+    },
+    RunTool {
+        tab: "Electrical",
+        button: "Wire",
+        category: "wire",
+        command: "wire",
+        context: "Modify | Place Wire",
+        letters: "EW",
+        default_type: "Wire 2.5",
+        width: 4.0,
+        other: "Wire 4",
+        round: true,
+    },
+];
 
 /// What Visibility/Graphics lists the categories of these tabs as.
-const CATEGORY_NAMES: &[&str] = &["Pipes"];
+const CATEGORY_NAMES: &[&str] = &["Pipes", "Conduits", "Cable Trays", "Wires"];
 
 /// A fixture tab's tool: the tab, the button, its contextual tab, the shortcut, the families it places and one it doesn't.
 struct FixtureTool {
@@ -89,11 +130,45 @@ const FIXTURE_TOOLS: &[FixtureTool] = &[
         not_listed: "Tee: 50",
         first: "Gate Valve",
     },
+    FixtureTool {
+        tab: "Electrical",
+        button: "Electrical Equipment",
+        key: "equipment",
+        context: "Modify | Place Electrical Equipment",
+        letters: "EE",
+        listed: "Distribution Board: 24 circuits",
+        not_listed: "Outlet: Low 300",
+        first: "Distribution Board",
+    },
+    FixtureTool {
+        tab: "Electrical",
+        button: "Device",
+        key: "device",
+        context: "Modify | Place Device",
+        letters: "DV",
+        listed: "Switch: Medium 1100",
+        not_listed: "Ceiling Luminaire: 300",
+        first: "Outlet",
+    },
+    FixtureTool {
+        tab: "Electrical",
+        button: "Lighting Fixture",
+        key: "lighting",
+        context: "Modify | Place Lighting Fixture",
+        letters: "LF",
+        listed: "Recessed Luminaire: 600 x 600",
+        not_listed: "Switch: Medium 1100",
+        first: "Ceiling Luminaire",
+    },
 ];
 
 #[test]
 fn each_discipline_tab_has_its_tools_and_none_of_the_architecture_tabs() {
-    for (tab, labels) in [("Plumbing", ["Pipe", "Plumbing Fixture", "Pipe Fitting", "Pipe Accessory"])] {
+    let tabs: [(&str, &[&str]); 2] = [
+        ("Plumbing", &["Pipe", "Plumbing Fixture", "Pipe Fitting", "Pipe Accessory"]),
+        ("Electrical", &["Electrical Equipment", "Device", "Lighting Fixture", "Conduit", "Cable Tray", "Wire"]),
+    ];
+    for (tab, labels) in tabs {
         let mut h = app(BOX);
         press(&mut h, tab);
         for label in labels {
@@ -252,8 +327,10 @@ fn revits_shortcuts_pick_the_tools_of_the_discipline_tabs() {
         key(&mut h, Key::Escape);
     }
     let listed: Vec<(&str, &str)> = crate::shortcuts();
-    for (letters, name) in [("PI", "Pipe"), ("PX", "Plumbing Fixture"), ("PF", "Pipe Fitting"), ("PA", "Pipe Accessory")] {
-        assert!(listed.contains(&(letters, name)), "{letters}");
+    // Each is listed by its button's name, which the command's label (Conduit, Cable Tray, Wire…) is.
+    let names = RUN_TOOLS.iter().map(|c| (c.letters, c.button)).chain(FIXTURE_TOOLS.iter().map(|c| (c.letters, c.button)));
+    for (letters, name) in names {
+        assert!(listed.contains(&(letters, name)), "{letters} {name}");
     }
 }
 
@@ -270,24 +347,32 @@ fn a_selected_run_of_the_mep_has_its_palette_and_edit_type_changes_its_round_sec
         type_into(&mut h, "System", "Esgoto");
         key(&mut h, Key::Enter);
         assert_eq!(field(&h, a, "system"), json!("Esgoto"));
-        // Edit Type: a round type says its diameter, not a depth, and its roundness and material can change.
+        // Edit Type: a round type says its diameter, not a depth; a rectangular one its width and its depth; and its roundness and
+        // material can change.
         press(&mut h, "Edit Type");
-        assert!(h.query_by_label("Diameter").is_some() && h.query_by_label("Depth").is_none());
-        type_into(&mut h, "Diameter", "63");
+        let (size, depth) = if c.round { ("Diameter", "Depth") } else { ("Width", "Diameter") };
+        assert!(h.query_by_label(size).is_some() && h.query_by_label(depth).is_none(), "{}", c.category);
+        type_into(&mut h, size, "63");
         h.get_by_role_and_label(Role::ComboBox, "Material").click();
         h.run();
         press(&mut h, "Copper");
         press(&mut h, "OK");
         let t = h.state().session.model.types.runs[c.category][c.default_type].clone();
-        assert_eq!((t.width, t.depth, t.round, t.material.as_str()), (63.0, 63.0, true, "Copper"), "{}", c.category);
+        let (d, round) = if c.round { (63.0, true) } else { (t.depth, false) };
+        assert_eq!((t.width, t.depth, t.round, t.material.as_str()), (63.0, d, round, "Copper"), "{}", c.category);
         assert_eq!(field(&h, a, "width"), json!(63.0));
-        // Not round, it is a rectangle with a depth of its own.
+        // Made round or not, it takes the other shape.
         press(&mut h, "Edit Type");
         press(&mut h, "Round");
-        type_into(&mut h, "Depth", "40");
+        if c.round {
+            type_into(&mut h, "Depth", "40");
+        } else {
+            type_into(&mut h, "Diameter", "80");
+        }
         press(&mut h, "OK");
         let t = h.state().session.model.types.runs[c.category][c.default_type].clone();
-        assert_eq!((t.width, t.depth, t.round), (63.0, 40.0, false), "{}", c.category);
+        let expected = if c.round { (63.0, 40.0, false) } else { (80.0, 80.0, true) };
+        assert_eq!((t.width, t.depth, t.round), expected, "{}", c.category);
     }
 }
 
@@ -352,7 +437,7 @@ fn the_new_schedule_dialog_lists_the_categories_of_the_discipline_tabs_and_names
 }
 
 #[test]
-fn the_plumbing_tab_speaks_portuguese_and_spanish_and_leaves_no_english() {
+fn the_discipline_tabs_speak_portuguese_and_spanish_and_leave_no_english() {
     use bimcraft_core::language::Language;
     use egui_kittest::kittest::{By, NodeT};
     let english = |h: &Harness<BimApp>, l: Language| -> Vec<String> {
@@ -361,30 +446,55 @@ fn the_plumbing_tab_speaks_portuguese_and_spanish_and_leaves_no_english() {
             .filter(|s| crate::lang::translated(l, s).is_some_and(|x| x != s))
             .collect()
     };
-    let mut h = app(&format!(
-        "{BOX}\npipe {{\"points\": [[1000, 1000], [5000, 1000]], \"offset\": 2400}}\ncomponent {{\"family\": \"WC\", \"at\": [3000, 3000]}}"
-    ));
+    let script = format!(
+        "{BOX}\npipe {{\"points\": [[1000, 1000], [5000, 1000]], \"offset\": 2400}}\nconduit {{\"points\": [[1000, 2000], [5000, 2000]], \"offset\": 2400}}\n\
+         cable_tray {{\"points\": [[1000, 3000], [5000, 3000]], \"offset\": 2600}}\nwire {{\"points\": [[1000, 4000], [5000, 4000]], \"offset\": 2400}}\n\
+         component {{\"family\": \"WC\", \"at\": [7000, 1000]}}\ncomponent {{\"family\": \"Outlet\", \"type\": \"Low 300\", \"at\": [7000, 3000]}}"
+    );
+    let mut h = app(&script);
     assert!(english(&h, Language::Spanish).contains(&"Plumbing".to_string()), "the probe finds what it looks for");
     let expected = [
-        (Language::Portuguese, "Hidrossanitário", ["Tubulação", "Peça sanitária", "Conexão de tubulação", "Acessório de tubulação"]),
-        (Language::Spanish, "Fontanería", ["Tubería", "Aparato sanitario", "Conexión de tubería", "Accesorio de tubería"]),
+        (
+            Language::Portuguese,
+            [
+                ("Hidrossanitário", vec!["Tubulação", "Peça sanitária", "Conexão de tubulação", "Acessório de tubulação"]),
+                ("Elétrico", vec!["Equipamento elétrico", "Dispositivo", "Luminária", "Eletroduto", "Eletrocalha", "Fio"]),
+            ],
+        ),
+        (
+            Language::Spanish,
+            [
+                ("Fontanería", vec!["Tubería", "Aparato sanitario", "Conexión de tubería", "Accesorio de tubería"]),
+                ("Eléctrico", vec!["Equipo eléctrico", "Dispositivo", "Luminaria", "Tubo conduit", "Bandeja portacables", "Cable"]),
+            ],
+        ),
     ];
-    for (l, tab, labels) in expected {
+    for (l, tabs) in expected {
         h.state_mut().lang = l;
         h.run();
-        press(&mut h, tab);
         let mut missed = english(&h, l);
-        for label in labels {
-            assert!(h.query_by_label(label).is_some(), "{label}");
-            press(&mut h, label);
+        for (tab, labels) in tabs {
+            press(&mut h, tab);
             missed.extend(english(&h, l));
-            click(&mut h, P2(100.0, 100.0));
+            for label in labels {
+                assert!(h.query_by_label(label).is_some(), "{label}");
+                press(&mut h, label);
+                missed.extend(english(&h, l));
+                click(&mut h, P2(100.0, 100.0));
+                missed.extend(english(&h, l));
+                key(&mut h, Key::Escape);
+                key(&mut h, Key::Escape);
+            }
+        }
+        // What they made, selected: the palette and the contextual tab; and a pipe's type dialog.
+        for point in
+            [P2(3000.0, 1000.0), P2(3000.0, 2000.0), P2(3000.0, 3000.0), P2(3000.0, 4000.0), P2(7000.0, 3000.0), P2(7000.0, 1000.0)]
+        {
+            click(&mut h, point);
             missed.extend(english(&h, l));
-            key(&mut h, Key::Escape);
             key(&mut h, Key::Escape);
         }
         click(&mut h, P2(3000.0, 1000.0));
-        missed.extend(english(&h, l));
         press(&mut h, crate::lang::translated(l, "Edit Type").unwrap_or("Edit Type"));
         missed.extend(english(&h, l));
         press(&mut h, crate::lang::translated(l, "Cancel").unwrap_or("Cancel"));
@@ -396,8 +506,11 @@ fn the_plumbing_tab_speaks_portuguese_and_spanish_and_leaves_no_english() {
     h.state_mut().lang = Language::English;
     h.run();
     use crate::lang::category;
-    assert_eq!([category("pipe", false), category("pipe", true)], ["Pipe", "Pipes"]);
+    assert_eq!([category("pipe", false), category("cabletray", true)], ["Pipe", "Cable Trays"]);
     h.state_mut().lang = Language::Portuguese;
     h.run();
-    assert_eq!([category("pipe", false), category("pipe", true)], ["Tubulação", "Tubulações"]);
+    assert_eq!(
+        [category("pipe", true), category("conduit", false), category("cabletray", false)],
+        ["Tubulações", "Eletroduto", "Eletrocalha"]
+    );
 }

@@ -22,6 +22,9 @@ pub(crate) fn title(tool: &Tool) -> Option<&'static str> {
     match tool {
         Tool::Run("beam", _) => Some("Place Beam"),
         Tool::Run("pipe", _) => Some("Place Pipe"),
+        Tool::Run("conduit", _) => Some("Place Conduit"),
+        Tool::Run("cabletray", _) => Some("Place Cable Tray"),
+        Tool::Run("wire", _) => Some("Place Wire"),
         Tool::Run(_, _) => Some("Place Wall Footing"),
         Tool::Stand("structuralcolumn") => Some("Place Structural Column"),
         Tool::Stand(_) => Some("Place Isolated Footing"),

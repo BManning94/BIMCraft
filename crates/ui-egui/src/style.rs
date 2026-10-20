@@ -185,6 +185,12 @@ pub enum Icon {
     Fixture,
     Fitting,
     Accessory,
+    Conduit,
+    CableTray,
+    Wire,
+    Equipment,
+    Device,
+    Luminaire,
     Stair,
     Roof,
     Theme,
@@ -452,6 +458,45 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(7.0, 21.0), (21.0, 7.0)]),
             line(&[(3.0, 17.0), (7.0, 21.0)]),
             line(&[(17.0, 3.0), (21.0, 7.0)]),
+        ],
+        // A conduit bending: a tube between two lines, turned up at its end.
+        Icon::Conduit => vec![
+            line(&[(3.0, 15.0), (14.0, 15.0), (14.0, 4.0)]),
+            line(&[(3.0, 20.0), (19.0, 20.0), (19.0, 4.0)]),
+            line(&[(14.0, 4.0), (19.0, 4.0)]),
+        ],
+        // A tray seen from the side: two rails and its rungs.
+        Icon::CableTray => vec![
+            line(&[(2.0, 8.0), (22.0, 8.0)]),
+            line(&[(2.0, 16.0), (22.0, 16.0)]),
+            line(&[(6.0, 8.0), (6.0, 16.0)]),
+            line(&[(12.0, 8.0), (12.0, 16.0)]),
+            line(&[(18.0, 8.0), (18.0, 16.0)]),
+        ],
+        // A wire, running in a gentle wave.
+        Icon::Wire => vec![line(&[(2.0, 14.0), (6.0, 8.0), (10.0, 14.0), (14.0, 8.0), (18.0, 14.0), (22.0, 8.0)])],
+        // A distribution board: a box, its door and its breakers in rows.
+        Icon::Equipment => vec![
+            ring(&[(5.0, 3.0), (19.0, 3.0), (19.0, 21.0), (5.0, 21.0)]),
+            ring(&[(8.0, 6.0), (16.0, 6.0), (16.0, 10.0), (8.0, 10.0)]),
+            line(&[(8.0, 13.0), (16.0, 13.0)]),
+            line(&[(8.0, 16.0), (16.0, 16.0)]),
+            line(&[(8.0, 19.0), (16.0, 19.0)]),
+        ],
+        // An outlet's plate, its two slots.
+        Icon::Device => vec![
+            ring(&[(5.0, 4.0), (19.0, 4.0), (19.0, 20.0), (5.0, 20.0)]),
+            line(&[(9.0, 9.0), (9.0, 12.0)]),
+            line(&[(15.0, 9.0), (15.0, 12.0)]),
+            line(&[(12.0, 15.0), (12.0, 17.0)]),
+        ],
+        // A luminaire hung from the ceiling: its cord, its shade, its rays.
+        Icon::Luminaire => vec![
+            line(&[(12.0, 2.0), (12.0, 8.0)]),
+            ring(&[(5.0, 15.0), (8.0, 8.0), (16.0, 8.0), (19.0, 15.0)]),
+            line(&[(8.0, 19.0), (6.0, 22.0)]),
+            line(&[(12.0, 19.0), (12.0, 22.0)]),
+            line(&[(16.0, 19.0), (18.0, 22.0)]),
         ],
         // A washbasin with its tap, on its pedestal.
         Icon::Fixture => vec![

@@ -218,6 +218,30 @@ pub static ALL: &[Command] = &[
         pipe,
     ),
     edit(
+        "conduit",
+        "Conduit",
+        &["CN"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} a conduit (eletroduto) \
+         for each segment of the points, as `pipe` lays them: round, `width` its outside diameter; `system` names its circuit",
+        conduit,
+    ),
+    edit(
+        "cable_tray",
+        "Cable Tray",
+        &["CT"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} a cable tray (eletrocalha) \
+         for each segment of the points, as `pipe` lays them: its section the type's `width` across by `depth` deep",
+        cable_tray,
+    ),
+    edit(
+        "wire",
+        "Wire",
+        &["EW"],
+        "{points: [[x,y],…], closed?, type?, level?, offset?, end_offset?, justify?: top|centre|bottom, system?} a wire (condutor) for \
+         each segment of the points, as `pipe` lays them: round, `width` its outside diameter; `system` names its circuit",
+        wire,
+    ),
+    edit(
         "stair",
         "Stair",
         &[],
@@ -2950,11 +2974,28 @@ fn pipe(s: &mut Session, p: &Value) -> R {
     chain(s, p, "pipe")
 }
 
+fn conduit(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "conduit")
+}
+
+fn cable_tray(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "cabletray")
+}
+
+fn wire(s: &mut Session, p: &Value) -> R {
+    chain(s, p, "wire")
+}
+
 fn chain(s: &mut Session, p: &Value, category: &str) -> R {
     let made = runs_of(&s.model, p, category)?;
     let m = s.model_mut();
     let ids: Vec<Id> = made.into_iter().map(|e| m.insert(e)).collect();
     Ok(json!({"ids": ids}))
+}
+
+/// The run category a command makes, if it makes runs (`pipe`, `cable_tray`): `command_of`'s other way.
+pub fn run_category_of(command: &str) -> Option<&'static str> {
+    crate::model::RUN_CATEGORIES.into_iter().find(|c| command_of(c) == command)
 }
 
 /// The command that makes elements of `category`.
@@ -2964,6 +3005,9 @@ pub fn command_of(category: &str) -> &'static str {
         "stripfooting" => "strip_footing",
         "beam" => "beam",
         "pipe" => "pipe",
+        "conduit" => "conduit",
+        "cabletray" => "cable_tray",
+        "wire" => "wire",
         "footing" => "footing",
         _ => "column",
     }

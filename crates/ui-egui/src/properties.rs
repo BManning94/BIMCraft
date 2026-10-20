@@ -216,7 +216,7 @@ fn rows(category: &str) -> &'static [Row] {
             ("Other", "at", "Location", Point),
             ("Other", "angle", "Rotation (°)", Number),
         ],
-        "beam" | "stripfooting" | "pipe" => &[
+        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[
             ("Constraints", "level", "Reference Level", Level),
             ("Constraints", "offset", "Start Level Offset", Length),
             ("Constraints", "end_offset", "End Level Offset", Limit("Same as start")),
@@ -303,7 +303,8 @@ fn type_rows(category: &str) -> &'static [(&'static str, &'static str)] {
         "floor" => &[("thickness", "Default Thickness")],
         "door" => &[("width", "Width"), ("height", "Height")],
         "window" => &[("width", "Width"), ("height", "Height"), ("sill", "Default Sill Height")],
-        "column" | "structuralcolumn" | "footing" | "beam" | "stripfooting" | "pipe" => &[("width", "Width"), ("depth", "Depth")],
+        "column" | "structuralcolumn" | "footing" => &[("width", "Width"), ("depth", "Depth")],
+        run if bimcraft_core::model::RUN_CATEGORIES.contains(&run) => &[("width", "Width"), ("depth", "Depth")],
         "roof" => &[("thickness", "Thickness")],
         "ceiling" => &[("thickness", "Thickness"), ("grid", "Tile Size")],
         "railing" => &[("height", "Height"), ("spacing", "Baluster Spacing")],
@@ -332,6 +333,9 @@ fn icon(category: &str) -> Icon {
         "footing" => Icon::Footing,
         "stripfooting" => Icon::WallFooting,
         "pipe" => Icon::Pipe,
+        "conduit" => Icon::Conduit,
+        "cabletray" => Icon::CableTray,
+        "wire" => Icon::Wire,
         "component" => Icon::Component,
         "stair" => Icon::Stair,
         "roof" => Icon::Roof,

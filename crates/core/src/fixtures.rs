@@ -11,6 +11,7 @@ use crate::language::Language;
 pub fn library(language: Language) -> Vec<(String, Value)> {
     let mut out = plumbing(language);
     out.extend(pipework(language));
+    out.extend(electrical(language));
     out
 }
 
@@ -217,4 +218,95 @@ pub fn pipework(language: Language) -> Vec<(String, Value)> {
             }),
         ),
     ]
+}
+
+/// Electrical equipment, luminaires and devices: a distribution board, a ceiling and a recessed luminaire, an outlet and a switch.
+/// A wall device stands with its back on its x axis, its front toward -y, at the height its type says (`Mounting Height`: a board's
+/// bottom, a device's centre); a luminaire hangs from the height it is given, the underside of the slab by default.
+fn electrical(language: Language) -> Vec<(String, Value)> {
+    let w = |s: &str| language.word(s).to_string();
+    let (width, depth, height, mounting) = (w("Width"), w("Depth"), w("Height"), w("Mounting Height"));
+    let (diameter, mat, metal, plaster, glass) = (w("Diameter"), w("Material"), w("Metal"), w("Plaster"), w("Glass"));
+    let n = |x: f64| json!(x);
+    let (half_w, minus_half_w) = (format!("{width} / 2"), format!("-({width}) / 2"));
+    // The mounting height, and `d` mm over it.
+    let up = |d: f64| f(format!("{mounting} + ({d})"));
+    let mut out = Vec::new();
+
+    // A distribution board: a box on the wall, its door a little proud of it.
+    out.push((
+        w("Distribution Board"),
+        json!({
+            "category": "equipment",
+            "parameters": [size(&width, 400.0), size(&height, 500.0), size(&depth, 120.0), size(&mounting, 1300.0), material(&mat, &metal)],
+            "types": {"12 circuits": {}, "24 circuits": {&width: 500, &height: 700}, "36 circuits": {&width: 600, &height: 900}},
+            "forms": [
+                block([f(minus_half_w.clone()), f(format!("-({depth})")), f(half_w.clone()), n(0.0)], f(mounting.clone()), f(format!("{mounting} + {height}")), &mat),
+                block(
+                    [f(format!("{minus_half_w} + 15")), f(format!("-({depth}) - 12")), f(format!("{half_w} - 15")), f(format!("-({depth})"))],
+                    up(15.0),
+                    f(format!("{mounting} + {height} - 15")),
+                    &mat
+                )
+            ]
+        }),
+    ));
+
+    // A ceiling luminaire, round: its body against the slab and its lens under it.
+    let r = format!("{diameter} / 2");
+    out.push((
+        w("Ceiling Luminaire"),
+        json!({
+            "category": "lighting",
+            "parameters": [size(&diameter, 300.0), size(&mounting, 3000.0)],
+            "types": {"300": {}, "400": {&diameter: 400}},
+            "forms": [
+                post(n(0.0), n(0.0), f(r.clone()), up(-40.0), f(mounting.clone()), &plaster),
+                post(n(0.0), n(0.0), f(format!("{r} * 0.9")), up(-60.0), up(-40.0), &glass)
+            ]
+        }),
+    ));
+
+    // A recessed luminaire, square, flush with the ceiling's underside.
+    out.push((
+        w("Recessed Luminaire"),
+        json!({
+            "category": "lighting",
+            "parameters": [size(&width, 600.0), size(&depth, 600.0), size(&mounting, 3000.0)],
+            "types": {"600 x 600": {}, "1200 x 300": {&width: 1200, &depth: 300}},
+            "forms": [
+                block([f(minus_half_w.clone()), f(format!("-({depth}) / 2")), f(half_w.clone()), f(format!("{depth} / 2"))], up(-30.0), f(mounting.clone()), &metal),
+                block(
+                    [f(format!("{minus_half_w} + 15")), f(format!("-({depth}) / 2 + 15")), f(format!("{half_w} - 15")), f(format!("{depth} / 2 - 15"))],
+                    up(-35.0),
+                    up(-30.0),
+                    &glass
+                )
+            ]
+        }),
+    ));
+
+    // An outlet and a switch: a 100 mm plate on the wall, centred on the height its type says, a socket cut into the one and a
+    // rocker on the other.
+    let plate = block([n(-50.0), n(-12.0), n(50.0), n(0.0)], up(-50.0), up(50.0), &plaster);
+    let socket = void(json!({"plane": "xz", "circle": {"centre": [0, mounting.clone()], "radius": 25}, "from": -12, "to": -6}));
+    out.push((
+        w("Outlet"),
+        json!({
+            "category": "outlet",
+            "parameters": [size(&mounting, 300.0)],
+            "types": {"Low 300": {}, "Medium 1100": {&mounting: 1100}, "High 2100": {&mounting: 2100}},
+            "forms": [plate.clone(), socket]
+        }),
+    ));
+    out.push((
+        w("Switch"),
+        json!({
+            "category": "switch",
+            "parameters": [size(&mounting, 1100.0)],
+            "types": {"Medium 1100": {}, "Low 300": {&mounting: 300}},
+            "forms": [plate, block([n(-12.0), n(-18.0), n(12.0), n(-12.0)], up(-30.0), up(30.0), &plaster)]
+        }),
+    ));
+    out
 }

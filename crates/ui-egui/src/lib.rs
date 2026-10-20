@@ -192,6 +192,7 @@ enum Tab {
     Architecture,
     Structure,
     Plumbing,
+    Electrical,
     Annotate,
     Massing,
     View,
@@ -1204,6 +1205,7 @@ impl BimApp {
                 return true;
             }
             code if mep::fixture_with(code).is_some() => Tool::Fixture(mep::fixture_with(code).map_or("", |f| f.key)),
+            code if mep::run_with(code).is_some() => Tool::Run(mep::run_with(code).unwrap_or("beam"), None),
             code => match engine::find(code).map(|c| c.id) {
                 Some("wall") => Tool::Wall(Vec::new()),
                 Some("door") => Tool::Door,
@@ -1225,10 +1227,7 @@ impl BimApp {
                     Tool::Stand("structuralcolumn")
                 }
                 Some("column") => Tool::Column,
-                Some("beam") => Tool::Run("beam", None),
                 Some("footing") => Tool::Stand("footing"),
-                Some("strip_footing") => Tool::Run("stripfooting", None),
-                Some("pipe") => Tool::Run("pipe", None),
                 Some("mass") => Tool::Mass(Vec::new()),
                 Some(c @ ("mass_floors" | "wall_by_face" | "floor_by_face" | "roof_by_face")) => {
                     self.by_mass(c);
@@ -1293,9 +1292,7 @@ impl BimApp {
             Some(Element::Column(_)) => Tool::Column,
             Some(Element::StructuralColumn(_)) => Tool::Stand("structuralcolumn"),
             Some(Element::Footing(_)) => Tool::Stand("footing"),
-            Some(Element::Beam(_)) => Tool::Run("beam", None),
-            Some(Element::StripFooting(_)) => Tool::Run("stripfooting", None),
-            Some(Element::Pipe(_)) => Tool::Run("pipe", None),
+            Some(e) if e.run().is_some() => Tool::Run(e.category(), None),
             Some(Element::Component(c)) => {
                 self.component = Some((c.family.clone(), c.type_name.clone()));
                 Tool::Component
@@ -1853,6 +1850,7 @@ impl BimApp {
                     (Tab::Architecture, "Architecture"),
                     (Tab::Structure, "Structure"),
                     (Tab::Plumbing, "Plumbing"),
+                    (Tab::Electrical, "Electrical"),
                     (Tab::Annotate, "Annotate"),
                     (Tab::Massing, "Massing"),
                     (Tab::View, "View"),
@@ -1876,6 +1874,7 @@ impl BimApp {
                 Tab::Architecture => self.architecture_tab(ui),
                 Tab::Structure => self.structure_tab(ui),
                 Tab::Plumbing => self.plumbing_tab(ui),
+                Tab::Electrical => self.electrical_tab(ui),
                 Tab::Annotate => self.annotate_tab(ui),
                 Tab::Massing => self.massing_tab(ui),
                 Tab::View => self.view_tab(ui),

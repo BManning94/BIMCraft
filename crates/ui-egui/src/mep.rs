@@ -23,6 +23,11 @@ pub(crate) struct FixtureTool {
     pub icon: Icon,
 }
 
+/// The run category a two-letter shortcut picks (the command's alias), if it is one.
+pub(crate) fn run_with(letters: &str) -> Option<&'static str> {
+    bimcraft_core::engine::find(letters).and_then(|c| bimcraft_core::run_category_of(c.id))
+}
+
 pub(crate) const FIXTURES: &[FixtureTool] = &[
     FixtureTool {
         key: "plumbing",
@@ -50,6 +55,33 @@ pub(crate) const FIXTURES: &[FixtureTool] = &[
         title: "Place Pipe Accessory",
         tip: "Pipe Accessory (PA): a valve, where you click on a pipe's height; Space turns it",
         icon: Icon::Accessory,
+    },
+    FixtureTool {
+        key: "equipment",
+        kinds: &[Category::Equipment],
+        letters: "EE",
+        label: "Electrical Equipment",
+        title: "Place Electrical Equipment",
+        tip: "Electrical Equipment (EE): a distribution board, where you click on the wall; Space turns it",
+        icon: Icon::Equipment,
+    },
+    FixtureTool {
+        key: "device",
+        kinds: &[Category::Outlet, Category::Switch],
+        letters: "DV",
+        label: "Device",
+        title: "Place Device",
+        tip: "Device (DV): an outlet or a switch, where you click on the wall; Space turns it",
+        icon: Icon::Device,
+    },
+    FixtureTool {
+        key: "lighting",
+        kinds: &[Category::Lighting],
+        letters: "LF",
+        label: "Lighting Fixture",
+        title: "Place Lighting Fixture",
+        tip: "Lighting Fixture (LF): a luminaire, where you click, hung from the slab; Space turns it",
+        icon: Icon::Luminaire,
     },
 ];
 
@@ -81,6 +113,35 @@ impl BimApp {
     fn fixture_button(key: &'static str) -> (Icon, &'static str, &'static str, Tool) {
         let f = fixture(key);
         (f.map_or(Icon::Component, |f| f.icon), f.map_or("", |f| f.label), f.map_or("", |f| f.tip), Tool::Fixture(key))
+    }
+
+    /// The Electrical tab: Revit's Electrical panel, a board, a device and a luminaire, and the conduit, tray and wire between.
+    pub(crate) fn electrical_tab(&mut self, ui: &mut Ui) {
+        self.tools(ui, "Select", &[(Icon::Modify, "Modify", "Modify (MD): select elements", Tool::Modify)]);
+        panel(ui, "Electrical", |ui| {
+            self.buttons(ui, &[Self::fixture_button("equipment"), Self::fixture_button("device"), Self::fixture_button("lighting")]);
+        });
+        panel(ui, "Conduit & Wire", |ui| {
+            let conduit = (
+                Icon::Conduit,
+                "Conduit",
+                "Conduit (CN): click its start and its end; a chain of clicks makes a conduit for each step",
+                Tool::Run("conduit", None),
+            );
+            let tray = (
+                Icon::CableTray,
+                "Cable Tray",
+                "Cable Tray (CT): click its start and its end; a chain of clicks makes a tray for each step",
+                Tool::Run("cabletray", None),
+            );
+            let wire = (
+                Icon::Wire,
+                "Wire",
+                "Wire (EW): click its start and its end; a chain of clicks makes a wire for each step",
+                Tool::Run("wire", None),
+            );
+            self.buttons(ui, &[conduit, tray, wire]);
+        });
     }
 
     /// The Plumbing tab: Revit's Plumbing & Piping panel, a pipe, the fixtures that go on it and what joins and stops it.
