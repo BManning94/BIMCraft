@@ -10,8 +10,15 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Reads Revit's .rvt and .rfa files. That code is ported from rvt-rs and is Apache-2.0 only (docs/rvt-provenance.md),
+# so a build without it, which keeps the repository's MIT OR Apache-2.0, is `--no-default-features`.
+default = ["rvt"]
+rvt = ["dep:bimcraft-rvt"]
+
 [dependencies]
 bimcraft-core = { workspace = true }
+bimcraft-rvt = { workspace = true, optional = true }
 bimcraft-ui-egui = { workspace = true }
 bimcraft-update = { workspace = true }
 eframe = { workspace = true }

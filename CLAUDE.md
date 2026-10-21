@@ -16,8 +16,11 @@ and MCP server, and milestone 2, the egui desktop app, are done. What works and 
 - **Validate in one place.** Commands build elements; `Model::check` validates the whole model after each command and the
   engine rolls back when it fails. New rules go there, with an error that says what to fix.
 - **Clean-room.** Never copy Autodesk content: no families (`.rfa`), templates, icons, help text, or anything from inside
-  `.rvt` files. Formats come from public specifications (IFC4 is ISO 16739). Assets are original or openly licensed; the
-  lettering is drawn in code (`font.rs`).
+  `.rvt` files; a reader may read a user's file, it never bundles or extracts assets for the project. Formats come from
+  public specifications (IFC4 is ISO 16739). A format with no public specification (Revit's `.rvt` and `.rfa`) may be read
+  only under the fence in [docs/rvt-provenance.md](docs/rvt-provenance.md): the code is `crates/rvt`, Apache-2.0 only
+  because it holds code ported from rvt-rs, `bimcraft-core` never depends on it, and every module and format finding
+  there names its source. Assets are original or openly licensed; the lettering is drawn in code (`font.rs`).
 - **The core has no UI.** `bimcraft-core` must not depend on a UI toolkit, so front ends stay swappable.
 - **The UI is thin.** `crates/ui-egui` reads `session.model` and changes it only through `Session::execute`, never by editing
   the model. Logic any front end needs (what a plan shows, what's under the cursor) belongs in the core: the canvas draws

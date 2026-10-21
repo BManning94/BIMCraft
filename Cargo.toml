@@ -19,6 +19,8 @@ flate2 = "1"
 zune-jpeg = "0.5"
 bimcraft-ui-egui = { path = "crates/ui-egui" }
 bimcraft-update = { path = "crates/update" }
+# The Revit reader: Apache-2.0 only, so the command line and the desktop take it through an optional feature.
+bimcraft-rvt = { path = "crates/rvt" }
 egui = "0.36"
 eframe = "0.36"
 egui_kittest = "0.36"
@@ -29,6 +31,9 @@ sys-locale = "0.3"
 semver = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 ring = "0.17"
+# The Revit reader's: Revit's files are Compound Files (OLE), and a byte search that scans the partitions fast.
+cfb = "0.15"
+memchr = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

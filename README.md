@@ -712,6 +712,13 @@ its own makes the check fail, quietly, and a corporate root isn't consulted. Sig
 BIMCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 Copyright (c) 2026 IPedrax and the BIMCraft contributors.
 
+The one exception is the Revit file reader, [`crates/rvt`](crates/rvt), which holds code ported from
+[rvt-rs](https://github.com/DrunkOnJava/rvt-rs) (Copyright 2026 Griffin Long) and is Apache-2.0 only: see its
+[LICENSE](crates/rvt/LICENSE) and [NOTICE](crates/rvt/NOTICE). The desktop app and the command line take it through a Cargo
+feature, `rvt`, which is on by default, so **a build that includes it is distributed under Apache-2.0**, and a build with
+`--no-default-features` is MIT OR Apache-2.0 as before. How the reader is sourced, and what it may and may not use, is in
+[docs/rvt-provenance.md](docs/rvt-provenance.md).
+
 BIMCraft's logo, its icons, its stroke lettering and its sample house are original work, drawn or built in code. Its
 architecture, its rules and its MCP design follow [CADCraft](https://github.com/storytold/cadcraft) (MIT OR Apache-2.0) by
 the ArtCraft team, as its logo follows CADCraft's style.

@@ -1,7 +1,8 @@
 # BIMCraft roadmap
 
 BIMCraft is a clean-room building information modeler in pure Rust. It follows the workflow of the established BIM tools,
-Revit among them, but it shares no code, content, file format or text with any of them. This roadmap is based on what the
+Revit among them, but it shares no content or text with any of them, and reads Revit's own files only under the fence in
+principle 5. This roadmap is based on what the
 code does today: what is missing, and the order that makes sense to build it in. What works now is in the
 [README](README.md), and the rules every change follows are in [CLAUDE.md](CLAUDE.md).
 
@@ -40,8 +41,10 @@ The README lists what the engine, the desktop, the CLI and the MCP server do. Wh
    that cheap and it is what sets BIMCraft apart.
 4. **The rules stay.** Everything is a command, validation lives in `Model::check`, the core has no UI, tests come first
    and nothing panics. A feature lands as commands with tests, then as a tool.
-5. **Clean room.** File formats come only from public specifications (IFC, DXF, gbXML, BCF, glTF), content is original or
-   openly licensed, a library's licence must suit MIT or Apache, and Revit's name only describes the workflow.
+5. **Clean room.** File formats come from public specifications (IFC, DXF, gbXML, BCF, glTF), and a format with no public
+   specification (Revit's `.rvt` and `.rfa`) may be read only under the fence in [docs/rvt-provenance.md](docs/rvt-provenance.md).
+   Content is original or openly licensed, a library's licence must suit MIT or Apache (the one exception is the
+   Apache-2.0-only Revit reader, `crates/rvt`, which holds ported code), and Revit's name only describes the workflow.
 
 ---
 
@@ -133,6 +136,7 @@ The goal is that BIMCraft fits into a mixed-software office.
 | Item | Size | Notes |
 |---|---|---|
 | DXF import (as a link or underlay in a view) and DXF export of views and sheets | L | Use the public DXF reference. Native DWG needs a licensed SDK or a GPL library, which conflicts with MIT or Apache, so DXF comes first and DWG is decided separately |
+| Revit `.rvt` and `.rfa` reader, in three parts: the container, metadata and element inventory (`bimcraft-cli info`); the elements into the model; File > Open | L | Read only under the fence in [docs/rvt-provenance.md](docs/rvt-provenance.md); `crates/rvt`, Apache-2.0 only. IFC stays the way out |
 | Linked models: other `.bimcraft` and IFC files as references, positioned shared or origin to origin | L | Built on the 0.5 GUIDs; groundwork for worksharing |
 | IFC export completeness: `Pset_*Common`, `Qto_*BaseQuantities`, space boundaries, classification references, an IFC4x3 option | L | Keep validating with IfcOpenShell |
 | glTF 2.0 and OBJ export (for visualisation and the web) | M | |
