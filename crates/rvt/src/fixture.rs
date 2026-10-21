@@ -90,3 +90,174 @@ fn build(streams: &[(&str, &[u8])]) -> std::io::Result<Vec<u8>> {
     file.flush()?;
     Ok(file.into_inner().into_inner())
 }
+
+/// What goes into a synthetic `BasicFileInfo`.
+pub struct Basic<'a> {
+    pub release: u32,
+    pub build: &'a str,
+    pub guid: &'a str,
+    pub username: &'a str,
+    pub path: &'a str,
+    /// A one-byte field in the binary head puts the text block at an odd offset, as it is in some releases.
+    pub odd: bool,
+    /// Revit 2016 to 2018 wrote `Revit Build: Autodesk Revit 2016 (Build: ...)` where later releases write `Format:` and `Build:`.
+    pub legacy: bool,
+}
+
+impl Default for Basic<'_> {
+    fn default() -> Self {
+        Self {
+            release: 2024,
+            build: "20230308_1635(x64)",
+            guid: "badabcab-cff7-4b43-8935-d6520041e7ca",
+            username: "",
+            path: "C:\\Users\\someone\\Documents\\house.rvt",
+            odd: false,
+            legacy: false,
+        }
+    }
+}
+
+fn wide(text: &str) -> Vec<u8> {
+    text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+/// A `BasicFileInfo` as Revit writes it: a binary head with the release and build as counted UTF-16 strings, then lines of
+/// `Key: value` in UTF-16 separated by CR LF, one of them (`IsSingleUserCloudModel`) with a narrow value inside the wide text.
+pub fn basic_file_info(b: &Basic) -> Vec<u8> {
+    let mut out = vec![0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for field in [b.release.to_string(), b.build.to_string(), b.path.to_string()] {
+        out.extend_from_slice(&(field.encode_utf16().count() as u32).to_le_bytes());
+        out.extend_from_slice(&wide(&field));
+    }
+    if b.odd {
+        out.push(1);
+    }
+    let build_line = if b.legacy {
+        format!("Revit Build: Autodesk Revit {} (Build: {})", b.release, b.build.trim_end_matches("(x64)"))
+    } else {
+        format!("Format: {}", b.release)
+    };
+    let mut lines: Vec<Vec<u8>> =
+        vec![wide("Worksharing: Not enabled"), wide(&format!("Username: {}", b.username)), wide("Central Model Path: "), wide(&build_line)];
+    if !b.legacy {
+        lines.push(wide(&format!("Build: {}", b.build)));
+    }
+    lines.push(wide(&format!("Last Save Path: {}", b.path)));
+    lines.push(wide("Open Workset Default: 3"));
+    lines.push(wide("Locale when saved: ENU"));
+    lines.push(wide(&format!("Unique Document GUID: {}", b.guid)));
+    lines.push(wide("Unique Document Increments: 22"));
+    // A narrow value in the wide text: a NUL, the ASCII, a NUL.
+    let mut cloud = wide("IsSingleUserCloudModel: ");
+    cloud.extend_from_slice(b"\0False\0");
+    lines.push(cloud);
+    lines.push(wide("Author: Autodesk Revit"));
+    lines.push(wide("ClientAppName: RevitApplication"));
+    let last = lines.len() - 1;
+    for (i, line) in lines.into_iter().enumerate() {
+        out.extend_from_slice(&line);
+        // Every line ends in CR LF as UTF-16; the stream's last one in a narrow CR LF.
+        out.extend_from_slice(if i == last { &[0x0d, 0x0a] } else { &[0x0d, 0, 0x0a, 0] });
+    }
+    out
+}
+
+/// A ZIP archive with one entry, as Revit's `ProjectInformation` is (the entry's name is a path with a user folder in it).
+pub fn zip_entry(body: &[u8], deflate: bool) -> Vec<u8> {
+    let name = b"C:\\Users\\someone\\AppData\\Local\\Temp\\Revit0000.project.xml";
+    let data = if deflate {
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::default());
+        let _ = enc.write_all(body);
+        enc.finish().unwrap_or_default()
+    } else {
+        body.to_vec()
+    };
+    let mut out = b"PK\x03\x04".to_vec();
+    out.extend_from_slice(&20u16.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&(if deflate { 8u16 } else { 0 }).to_le_bytes());
+    out.extend_from_slice(&[0; 8]);
+    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(name);
+    out.extend_from_slice(&data);
+    out.extend_from_slice(b"PK\x05\x06");
+    out
+}
+
+/// A PNG of `width` by `height` black pixels, with the chunks and CRCs a decoder checks.
+pub fn png(width: u32, height: u32) -> Vec<u8> {
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let mut crc = Crc::new();
+        crc.update(kind);
+        crc.update(data);
+        out.extend_from_slice(&crc.sum().to_be_bytes());
+    }
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+    let mut raw = Vec::new();
+    for _ in 0..height.min(64) {
+        raw.push(0);
+        raw.resize(raw.len() + width.min(64) as usize * 3, 0);
+    }
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), Compression::default());
+    let _ = z.write_all(&raw);
+    let idat = z.finish().unwrap_or_default();
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &idat);
+    chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+/// One class of a synthetic `Formats/Latest`: its name, the field names (each a `u32`) and the base class it derives from,
+/// defined inline right after it when given.
+pub struct Class<'a> {
+    pub name: &'a str,
+    pub fields: &'a [&'a str],
+    pub base: Option<&'a Class<'a>>,
+}
+
+/// A page-stripped `Formats/Latest` in the grammar the reader knows: a zero `u16`, then each class (counted name, base
+/// reference, version, field count, the fields, no GUIDs). Tags run from 12 in definition order, inline bases included.
+pub fn schema(classes: &[Class]) -> Vec<u8> {
+    fn class(out: &mut Vec<u8>, c: &Class, next_tag: &mut u16) {
+        let tag = *next_tag;
+        *next_tag += 1;
+        out.extend_from_slice(&(c.name.len() as u16).to_le_bytes());
+        out.extend_from_slice(c.name.as_bytes());
+        match c.base {
+            Some(base) => {
+                out.extend_from_slice(&(0x8000 | *next_tag).to_le_bytes());
+                out.extend_from_slice(&0u16.to_le_bytes());
+                class(out, base, next_tag);
+            }
+            None => out.extend_from_slice(&0u16.to_le_bytes()),
+        }
+        let _ = tag;
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&(c.fields.len() as u32).to_le_bytes());
+        for field in c.fields {
+            out.extend_from_slice(&(field.len() as u32).to_le_bytes());
+            out.extend_from_slice(field.as_bytes());
+            out.extend_from_slice(&5u32.to_le_bytes());
+        }
+        out.extend_from_slice(&0u32.to_le_bytes());
+    }
+    let mut out = Vec::new();
+    let mut next_tag = 12;
+    for c in classes {
+        out.extend_from_slice(&0u16.to_le_bytes());
+        class(&mut out, c, &mut next_tag);
+    }
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}

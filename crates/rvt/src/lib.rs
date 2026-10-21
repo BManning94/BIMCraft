@@ -5,11 +5,15 @@
 //! `docs/rvt-provenance.md`. It reads a user's file and nothing more: it never bundles or extracts assets (families,
 //! templates, icons, help text) for the project.
 
+pub mod atom;
 mod container;
 mod error;
 #[cfg(any(test, feature = "testing"))]
 pub mod fixture;
 pub mod gzip;
+pub mod info;
+pub mod preview;
+pub mod schema;
 
 pub use container::{BASIC_FILE_INFO, Limits, Revit};
 pub use error::{Error, Result};

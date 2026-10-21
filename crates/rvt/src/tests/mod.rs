@@ -75,6 +75,8 @@ fn the_fence_is_written_into_the_policy_documents() {
     }
 }
 
+mod metadata;
+
 // ---------- the container ----------
 
 use crate::fixture::{container, global, gzip, paged, partition, stored_gzip, truncated_gzip};
