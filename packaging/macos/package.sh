@@ -125,17 +125,36 @@ fi
 # ---- the DMG -----------------------------------------------------------------------------------
 echo "==> building $DMG"
 STAGE="$WORK/dmg"
+MNT="$WORK/mnt"
+# hdiutil fails on CI runners now and then ("Resource busy"): try again.
+retry() { local n; for n in 1 2 3 4 5; do "$@" && return 0; sleep $((n * 3)); done; return 1; }
+mount_dmg() { mkdir -p "$MNT"; retry hdiutil attach "$@" -nobrowse -noautoopen -mountpoint "$MNT"; }
+unmount_dmg() { retry hdiutil detach "$MNT" || hdiutil detach -force "$MNT"; }
+
 mkdir -p "$STAGE"
 ditto "$APP" "$STAGE/BIMCraft.app"
+xattr -cr "$STAGE" # before the link: xattr follows it into /Applications
 ln -s /Applications "$STAGE/Applications"
 rm -f "$DMG" "$WORK/raw.dmg"
-# makehybrid and convert build the image without attaching a device, as `create -srcfolder` does,
-# which fails on CI runners now and then ("Resource busy").
-hdiutil makehybrid -hfs -hfs-volume-name "BIMCraft" -hfs-openfolder "$STAGE" -o "$WORK/raw.dmg" "$STAGE"
+# Not `makehybrid -hfs`: it writes Finder info into the image's catalog, which turns into a
+# com.apple.FinderInfo attribute on a file once the app is copied out, and `codesign --strict`
+# refuses the app for it (issue 15). A plain copy into a volume carries only what the staging tree has.
+retry hdiutil create -srcfolder "$STAGE" -volname BIMCraft -fs HFS+ -format UDRW -ov "$WORK/raw.dmg"
+mount_dmg "$WORK/raw.dmg" -readwrite -noverify
+bless --folder "$MNT" --openfolder "$MNT" || warn "macOS: the image won't open its window when mounted"
+unmount_dmg
 hdiutil convert "$WORK/raw.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
 rm -f "$WORK/raw.dmg"
 sign "$DMG"
 codesign --verify --strict --verbose=2 "$DMG"
+
+# What a user gets is the app copied out of the finished image, as Finder and the updater
+# (crates/update/src/macos.rs) copy it: that copy has to verify, not only the staging tree.
+rm -rf "$WORK/from-dmg.app"
+mount_dmg "$DMG" -readonly -noverify
+ditto "$MNT/BIMCraft.app" "$WORK/from-dmg.app" || true
+unmount_dmg
+codesign --verify --strict --deep --verbose=2 "$WORK/from-dmg.app"
 if [ "$NOTARIZE" = 1 ]; then
   notarize "$DMG"
   xcrun stapler staple "$DMG"

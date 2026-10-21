@@ -608,8 +608,11 @@ through the file chooser; it has no network, so it never looks for updates (inst
 | The CLI alone | `bimcraft-cli-<ver>-macos-universal.zip` |
 
 Open the DMG and drag BIMCraft to Applications. It opens `.bimcraft` projects from Finder and offers itself under Open
-With for `.ifc` files. Until releases are signed with a Developer ID, macOS asks before it opens the app the first time:
-Control-click it, then Open (on macOS 15, System Settings > Privacy & Security > Open Anyway). BIMCraft looks for a newer
+With for `.ifc` files. Until releases are signed with a Developer ID and notarized, macOS refuses the first launch: it says
+Apple could not verify that the app is free of malware, and offers only Move to Trash and Done. The download is not damaged
+(`SHA256SUMS` has its checksum). On macOS 15 and later, open System Settings > Privacy & Security, scroll to Security and
+click Open Anyway next to the message about BIMCraft; the disk image can raise the same message the first time you open it,
+and the answer is the same. On macOS 14 and earlier, Control-click the app, then Open. BIMCraft looks for a newer
 version itself and replaces the app in place (see [Updates](#updates)).
 
 Versions are published on the [releases page](https://github.com/IPedrax/bimcraft/releases) as they're tagged, with a
