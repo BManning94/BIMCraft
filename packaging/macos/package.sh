@@ -135,16 +135,12 @@ mkdir -p "$STAGE"
 ditto "$APP" "$STAGE/BIMCraft.app"
 xattr -cr "$STAGE" # before the link: xattr follows it into /Applications
 ln -s /Applications "$STAGE/Applications"
-rm -f "$DMG" "$WORK/raw.dmg"
+rm -f "$DMG"
 # Not `makehybrid -hfs`: it writes Finder info into the image's catalog, which turns into a
 # com.apple.FinderInfo attribute on a file once the app is copied out, and `codesign --strict`
 # refuses the app for it (issue 15). A plain copy into a volume carries only what the staging tree has.
-retry hdiutil create -srcfolder "$STAGE" -volname BIMCraft -fs HFS+ -format UDRW -ov "$WORK/raw.dmg"
-mount_dmg "$WORK/raw.dmg" -readwrite -noverify
-bless --folder "$MNT" --openfolder "$MNT" || warn "macOS: the image won't open its window when mounted"
-unmount_dmg
-hdiutil convert "$WORK/raw.dmg" -format UDZO -imagekey zlib-level=9 -o "$DMG"
-rm -f "$WORK/raw.dmg"
+# The image doesn't open its window when mounted: `bless --openfolder` is refused on Apple Silicon.
+retry hdiutil create -srcfolder "$STAGE" -volname BIMCraft -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
 sign "$DMG"
 codesign --verify --strict --verbose=2 "$DMG"
 
