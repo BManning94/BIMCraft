@@ -79,12 +79,23 @@ Its README's legal claims were not copied and are not relied on.
 
 | File | What it does | Source |
 |---|---|---|
-| `lib.rs` | the crate's documentation and its tests | BIMCraft |
+| `lib.rs` | the crate's documentation and exports | BIMCraft |
+| `error.rs` | the errors, each saying what is wrong with the file | BIMCraft |
+| `container.rs` | opens a Compound File with limits (file size, stream count, stored size), lists and reads streams, checks it is a Revit file | Ported in part from rvt-rs `src/reader.rs` and `src/streams.rs` at `b6086d4`, changed (read on demand instead of loaded whole, one `Limits` struct, no panics). The container itself is MS-CFB, read with the `cfb` crate |
+| `gzip.rs` | gzip header, bounded inflate, joining a partition's members, the stored-page constants and which streams are paged | Ported in part from rvt-rs `src/compression.rs` at `b6086d4`, changed (no panics, in-place page stripping, members found by walking from the end of the last one, one inflate cap for a whole stream, trailer checked). The format is RFC 1951 and RFC 1952 |
+| `fixture.rs` | synthetic Compound Files, gzip members, paged and partition streams for tests | BIMCraft |
 
 ## Format findings
 
 | Finding | Source | Confirmed here on |
 |---|---|---|
+| A Revit file is a Compound File (signature `D0 CF 11 E0 A1 B1 1A E1`) with a `BasicFileInfo` stream | MS-CFB; rvt-rs `reader.rs` | the four samples |
+| The streams of a project: `BasicFileInfo`, `Contents`, `Formats/Latest`, `Global/{ContentDocuments, DocumentIncrementTable, ElemTable, History, Latest, PartitionTable}`, `Partitions/NN`, `ProjectInformation`, `TransmissionData` (a family has `PartAtom` instead of `ProjectInformation`) | rvt-rs `streams.rs` | the four samples list exactly these 12 |
+| The number NN of the partition is not fixed by the release: rvt-rs's table gives 66 to 69 for 2023 to 2026, the samples have 20, 21, 20 and 21. The reader finds partitions by the `Partitions/` prefix | byte observation | the four samples |
+| A `Global/*` stream is eight bytes and then one gzip member; `Formats/Latest` starts with its member at byte 0 | rvt-rs `compression.rs` (`inflate_at_auto`); observation | the four samples (the member is found in the first 256 bytes) |
+| A partition is a 44-byte header and then gzip members of about 128 KiB of output each, with 40 bytes between one and the next: the previous member's CRC-32 and length, then 32 bytes of header the reader does not read | byte observation (rvt-rs finds members by scanning for the magic and does not describe the gap) | 2024 sample. The reader does not depend on the 44 and the 40 |
+| The container stores the schema, the `Global` gzip streams and the partitions in pages of 65,249 bytes, 64,896 of data and a 353-byte trailer; inflate runs on the stream with the trailers removed | rvt-rs `compression.rs`, which credits `ahzs645/reviter`'s analysis of a loader and its Discussion #112 (their basis was not checked, see the risk) | the CRC-32 and length of **every** gzip member of every such stream match, 1,660 members on four samples; a wrong strip would break them on any stream over one page |
+| The gzip members are standard, with CRC-32 and length after the deflate stream; rvt-rs calls Revit's streams "truncated" (no trailer). The reader accepts both and reports how many members carried a matching trailer | observation | all 1,660 members of the four samples carry a matching trailer. A file with truncated members is only covered by a synthetic test |
 
 ## Sample files
 

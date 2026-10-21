@@ -74,3 +74,397 @@ fn the_fence_is_written_into_the_policy_documents() {
         assert!(provenance.contains(rule), "the provenance document states `{rule}`");
     }
 }
+
+// ---------- the container ----------
+
+use crate::fixture::{container, global, gzip, paged, partition, stored_gzip, truncated_gzip};
+use crate::gzip::{PAGE_PAYLOAD, PAGE_STORED, strip_pages};
+use crate::{Error, Limits, Revit};
+
+/// A stand-in for BasicFileInfo: the container only needs the stream to be there.
+const BASIC: &[u8] = b"b\0f\0i\0";
+
+fn revit(streams: &[(&str, &[u8])], limits: Limits) -> Result<Revit, Error> {
+    let mut all = vec![("BasicFileInfo", BASIC)];
+    all.extend_from_slice(streams);
+    Revit::from_bytes(container(&all), limits)
+}
+
+/// Data that deflate cannot shrink, so a gzip member of it is longer than a page.
+fn noise(len: usize) -> Vec<u8> {
+    let mut x = 0x2545_f491_4f6c_dd1du64;
+    (0..len)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 24) as u8
+        })
+        .collect()
+}
+
+#[test]
+fn a_container_lists_its_streams_by_path_and_reads_them_back() {
+    let r = &mut revit(&[("Global/Latest", b"abc"), ("Partitions/21", b"defg")], Limits::default()).unwrap();
+    assert_eq!(r.stream_names(), ["BasicFileInfo", "Global/Latest", "Partitions/21"]);
+    assert_eq!(r.stream_len("Global/Latest"), Some(3));
+    assert_eq!(r.stream_len("Global/Nope"), None);
+    assert_eq!(r.read_stream("Partitions/21").unwrap(), b"defg");
+    assert!(r.read_stream("Nope").unwrap_err().to_string().contains("no stream named Nope"));
+}
+
+#[test]
+fn what_is_not_a_compound_file_is_refused_and_the_error_says_what_it_starts_with() {
+    for (bytes, says) in [
+        (b"PK\x03\x04rest of a zip".to_vec(), "50 4B 03 04"),
+        (b"short".to_vec(), "73 68 6F 72 74"),
+        (Vec::new(), "is empty"),
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1".to_vec(), "Compound File"),
+    ] {
+        let e = Revit::from_bytes(bytes, Limits::default()).unwrap_err();
+        assert!(e.to_string().contains(says), "{e}");
+    }
+    let signature = Revit::from_bytes(b"PK\x03\x04".to_vec(), Limits::default()).unwrap_err();
+    assert!(signature.to_string().contains("D0 CF 11 E0 A1 B1 1A E1"), "{signature}");
+}
+
+#[test]
+fn a_compound_file_that_is_not_a_revit_file_is_refused() {
+    let bytes = container(&[("WordDocument", b"hello"), ("1Table", b"x")]);
+    let e = Revit::from_bytes(bytes, Limits::default()).unwrap_err();
+    assert!(e.to_string().contains("BasicFileInfo"), "{e}");
+}
+
+#[test]
+fn a_file_over_the_size_limit_is_refused_whether_it_is_in_memory_or_on_disk() {
+    let bytes = container(&[("BasicFileInfo", BASIC)]);
+    let small = Limits { max_file: bytes.len() as u64 - 1, ..Limits::default() };
+    assert!(matches!(Revit::from_bytes(bytes.clone(), small), Err(Error::TooBig { .. })));
+    let path = std::env::temp_dir().join(format!("bimcraft-rvt-{}.rvt", std::process::id()));
+    std::fs::write(&path, &bytes).unwrap();
+    assert!(Revit::open(&path, Limits::default()).is_ok());
+    let e = Revit::open(&path, small).unwrap_err();
+    assert!(e.to_string().contains("limit"), "{e}");
+    let _ = std::fs::remove_file(&path);
+    let missing = Revit::open(Path::new("/no/such/file.rvt"), Limits::default()).unwrap_err();
+    assert!(missing.to_string().contains("/no/such/file.rvt"), "{missing}");
+}
+
+#[test]
+fn a_stream_that_declares_gigabytes_is_refused_without_reading_it() {
+    let mut bytes = container(&[("BasicFileInfo", BASIC), ("Big", &[7; 100])]);
+    // The directory entry for `Big`: its name in UTF-16, 128-byte entries, the stream size at +120.
+    let name: Vec<u8> = "Big".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let at = (0..bytes.len() - 128).step_by(128).find(|&i| bytes[i..].starts_with(&name)).unwrap();
+    bytes[at + 120..at + 128].copy_from_slice(&(6u64 << 30).to_le_bytes());
+    let mut r = Revit::from_bytes(bytes, Limits::default()).unwrap();
+    let e = r.read_stream("Big").unwrap_err();
+    assert!(matches!(e, Error::TooBig { .. }), "{e}");
+    assert!(r.inflate("Big").is_err() && r.inflate_all("Big").is_err());
+}
+
+#[test]
+fn a_stream_over_the_limit_and_too_many_streams_are_refused() {
+    let big = [("Big", &[1u8; 5000][..])];
+    let r = &mut revit(&big, Limits { max_stream: 4999, ..Limits::default() }).unwrap();
+    assert!(matches!(r.read_stream("Big"), Err(Error::TooBig { .. })));
+    let r = &mut revit(&big, Limits { max_stream: 5000, ..Limits::default() }).unwrap();
+    assert_eq!(r.read_stream("Big").unwrap().len(), 5000);
+    let many: Vec<(String, Vec<u8>)> = (0..40).map(|i| (format!("S{i}"), vec![0u8; 4])).collect();
+    let mut all: Vec<(&str, &[u8])> = many.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    all.push(("BasicFileInfo", BASIC));
+    let e = Revit::from_bytes(container(&all), Limits { max_streams: 10, ..Limits::default() }).unwrap_err();
+    assert!(e.to_string().contains("41 streams"), "{e}");
+}
+
+// ---------- gzip ----------
+
+#[test]
+fn a_gzip_member_inflates_with_or_without_its_trailer_and_says_whether_the_trailer_matched() {
+    let data = b"Revit writes gzip and leaves the trailer out, or not".repeat(20);
+    let r = &mut revit(
+        &[
+            ("Global/Latest", &global(&data)),
+            ("Formats/Latest", &truncated_gzip(&data)),
+            ("Global/ElemTable", &{
+                let mut g = global(&data);
+                let n = g.len();
+                g[n - 8] ^= 0xff; // the CRC is wrong
+                g
+            }),
+        ],
+        Limits::default(),
+    )
+    .unwrap();
+    let ok = r.inflate("Global/Latest").unwrap();
+    assert_eq!((ok.bytes.as_slice(), ok.trailers_ok, ok.members), (data.as_slice(), 1, 1));
+    let cut = r.inflate("Formats/Latest").unwrap();
+    assert_eq!((cut.bytes.as_slice(), cut.trailers_ok), (data.as_slice(), 0));
+    let wrong = r.inflate("Global/ElemTable").unwrap();
+    assert_eq!((wrong.bytes.as_slice(), wrong.trailers_ok), (data.as_slice(), 0), "the data is returned, and the mismatch is reported");
+}
+
+#[test]
+fn a_gzip_bomb_stops_at_the_cap_and_the_error_says_so() {
+    let bomb = global(&vec![0u8; 8 << 20]); // 8 MiB of zeros in a few KiB
+    assert!(bomb.len() * 100 < 8 << 20, "{}", bomb.len());
+    let limits = Limits { max_inflated: 1 << 20, ..Limits::default() };
+    let r = &mut revit(&[("Global/Latest", &bomb), ("Partitions/21", &partition(&[&vec![0u8; 8 << 20]]))], limits).unwrap();
+    for e in [r.inflate("Global/Latest").unwrap_err(), r.inflate_all("Partitions/21").unwrap_err()] {
+        assert!(matches!(e, Error::TooMuch { .. }), "{e}");
+        assert!(e.to_string().contains("1048576"), "{e}");
+    }
+    // The cap is for the whole stream: members that are each under it, together over it.
+    let half = vec![0u8; 700_000];
+    let r = &mut revit(&[("Partitions/22", &partition(&[&half, &half]))], limits).unwrap();
+    assert!(matches!(r.inflate_all("Partitions/22"), Err(Error::TooMuch { .. })));
+}
+
+#[test]
+fn a_stream_with_no_gzip_in_it_or_a_damaged_member_is_an_error_that_names_the_stream() {
+    let r = &mut revit(
+        &[
+            ("Global/Latest", &[5; 300]),
+            ("Global/History", &{
+                let mut g = global(b"hello hello hello hello hello");
+                g.truncate(g.len() - 14);
+                g.iter_mut().skip(12).for_each(|b| *b = 0xff);
+                g
+            }),
+        ],
+        Limits::default(),
+    )
+    .unwrap();
+    let none = r.inflate("Global/Latest").unwrap_err();
+    assert!(none.to_string().contains("Global/Latest") && none.to_string().contains("gzip"), "{none}");
+    let bad = r.inflate("Global/History").unwrap_err();
+    assert!(bad.to_string().contains("Global/History"), "{bad}");
+}
+
+#[test]
+fn stripping_pages_removes_exactly_each_full_pages_trailer() {
+    assert_eq!((PAGE_STORED, PAGE_PAYLOAD), (65_249, 64_896));
+    let payload = noise(PAGE_PAYLOAD * 2 + 1000);
+    let stored = paged(&payload);
+    assert_eq!(stored.len(), payload.len() + 2 * (PAGE_STORED - PAGE_PAYLOAD));
+    assert_eq!(strip_pages(stored), payload);
+    let short = noise(PAGE_STORED - 1); // a short last page is kept whole
+    assert_eq!(strip_pages(short.clone()), short);
+    assert_eq!(strip_pages(Vec::new()), Vec::<u8>::new());
+}
+
+#[test]
+fn a_paged_stream_inflates_across_its_page_trailers_and_an_unpaged_one_is_left_alone() {
+    let data = noise(150_000);
+    let member = gzip(&data);
+    assert!(member.len() > 2 * PAGE_PAYLOAD);
+    let r = &mut revit(
+        &[("Formats/Latest", &paged(&member)), ("Global/Latest", &paged(&global(&data))), ("Other", &member)],
+        Limits::default(),
+    )
+    .unwrap();
+    for name in ["Formats/Latest", "Global/Latest"] {
+        let got = r.inflate(name).unwrap();
+        assert!(got.bytes == data && got.trailers_ok == 1, "{name}");
+    }
+    // `Other` is not a stream Revit pages, so nothing is stripped, and a plain member still inflates.
+    assert_eq!(r.inflate("Other").unwrap().bytes, data);
+}
+
+#[test]
+fn partition_members_join_in_order_and_a_false_magic_inside_one_is_not_a_member() {
+    let first = b"first chunk ".repeat(50);
+    let second = noise(300);
+    let tricky = b"before \x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x0b not a member".to_vec();
+    let mut stream = partition(&[&first, &second]);
+    // A member that stores its bytes verbatim carries a gzip header inside itself.
+    stream.extend_from_slice(&[0x77; 32]);
+    stream.extend_from_slice(&stored_gzip(&tricky));
+    let r = &mut revit(&[("Partitions/21", &stream)], Limits::default()).unwrap();
+    let got = r.inflate_all("Partitions/21").unwrap();
+    let all = [first.as_slice(), &second, &tricky].concat();
+    assert_eq!(got.bytes, all);
+    assert_eq!(got.ends, [first.len(), first.len() + second.len(), all.len()]);
+    assert_eq!((got.members, got.trailers_ok), (3, 2), "the verbatim member has no trailer");
+}
+
+#[test]
+fn junk_between_members_and_a_member_cut_short_are_skipped() {
+    let a = b"alpha ".repeat(40);
+    let b = b"omega ".repeat(40);
+    let mut cut = gzip(&noise(500));
+    cut.truncate(60);
+    let mut stream = partition(&[&a]);
+    stream.extend_from_slice(&[0x33; 17]);
+    stream.extend_from_slice(&cut);
+    stream.extend_from_slice(&[0x44; 9]);
+    stream.extend_from_slice(&gzip(&b));
+    let r = &mut revit(&[("Partitions/21", &stream)], Limits::default()).unwrap();
+    let got = r.inflate_all("Partitions/21").unwrap();
+    assert_eq!(got.bytes, [a, b].concat());
+    assert_eq!(got.skipped, 1, "the cut-short member is counted");
+}
+
+// ---------- hostile input ----------
+
+#[test]
+fn a_bounded_mutation_sweep_never_panics_and_never_returns_more_than_the_limits_allow() {
+    let data = noise(20_000);
+    let streams: Vec<(&str, Vec<u8>)> = vec![
+        ("BasicFileInfo", BASIC.to_vec()),
+        ("Global/Latest", global(&data)),
+        ("Formats/Latest", truncated_gzip(&data)),
+        ("Partitions/21", partition(&[&data[..9000], &data[9000..]])),
+        ("TransmissionData", vec![0x41; 6000]),
+    ];
+    let borrowed: Vec<(&str, &[u8])> = streams.iter().map(|(n, d)| (*n, d.as_slice())).collect();
+    let original = container(&borrowed);
+    let limits = Limits { max_file: 1 << 20, max_streams: 64, max_stream: 1 << 20, max_inflated: 1 << 20 };
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut opened = 0;
+    let header = original.len().min(1536);
+    for round in 0..1500 {
+        let mut bytes = original.clone();
+        // Half the rounds break the headers and tables at the front, the rest anything anywhere.
+        let span = if round % 2 == 0 { header } else { bytes.len() };
+        for _ in 0..1 + next() % 4 {
+            let at = (next() % span as u64) as usize;
+            bytes[at] = match next() % 3 {
+                0 => 0xff,
+                1 => 0x00,
+                _ => next() as u8,
+            };
+        }
+        if round % 17 == 0 {
+            bytes.truncate((next() % bytes.len() as u64) as usize);
+        }
+        let Ok(mut r) = Revit::from_bytes(bytes, limits) else { continue };
+        opened += 1;
+        for name in r.stream_names().into_iter().map(String::from).collect::<Vec<_>>() {
+            if let Ok(stored) = r.read_stream(&name) {
+                assert!(stored.len() as u64 <= limits.max_stream);
+            }
+            for inflated in [r.inflate(&name), r.inflate_all(&name)].into_iter().flatten() {
+                assert!(inflated.bytes.len() <= limits.max_inflated);
+                assert_eq!(inflated.ends.last().copied().unwrap_or(0), inflated.bytes.len());
+            }
+        }
+    }
+    assert!(opened > 100, "the sweep must reach the readers, not only the front door: {opened}");
+}
+
+#[test]
+fn a_file_cut_short_anywhere_is_an_error_or_a_smaller_file_never_a_panic() {
+    let data = noise(30_000);
+    let whole = container(&[("BasicFileInfo", BASIC), ("Global/Latest", &global(&data)), ("Partitions/21", &partition(&[&data]))]);
+    let limits = Limits { max_stream: 1 << 20, max_inflated: 1 << 20, ..Limits::default() };
+    for len in (0..whole.len()).step_by(97) {
+        let Ok(mut r) = Revit::from_bytes(whole[..len].to_vec(), limits) else { continue };
+        for name in r.stream_names().into_iter().map(String::from).collect::<Vec<_>>() {
+            let _ = (r.read_stream(&name), r.inflate(&name), r.inflate_all(&name));
+        }
+    }
+}
+
+// ---------- real files ----------
+
+/// The sample files, when `BIMCRAFT_RVT_SAMPLES` names a folder of them (each in a folder of its own is fine). Autodesk's
+/// files are never committed, so these tests skip without it.
+fn samples() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rvt" || e == "rfa") {
+                out.push(path);
+            }
+        }
+    }
+    let Some(dir) = std::env::var_os("BIMCRAFT_RVT_SAMPLES") else { return Vec::new() };
+    let mut out = Vec::new();
+    walk(Path::new(&dir), &mut out);
+    out.sort();
+    out
+}
+
+#[test]
+fn every_sample_opens_and_every_gzip_stream_inflates_with_a_matching_trailer() {
+    for path in samples() {
+        let r = &mut Revit::open(&path, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        for name in ["BasicFileInfo", "Formats/Latest", "Global/ElemTable", "Global/Latest"] {
+            assert!(r.stream_len(name).is_some(), "{}: no {name}", path.display());
+        }
+        let mut members = 0;
+        for name in r.stream_names().into_iter().map(String::from).collect::<Vec<_>>() {
+            let whole = name.starts_with("Partitions/");
+            let single = name == "Formats/Latest" || name.starts_with("Global/");
+            if !whole && !single {
+                continue;
+            }
+            let got = if whole { r.inflate_all(&name) } else { r.inflate(&name) }.unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            eprintln!(
+                "{} {name}: {} bytes, {} members, {} trailers match, {} skipped",
+                path.display(),
+                got.bytes.len(),
+                got.members,
+                got.trailers_ok,
+                got.skipped
+            );
+            assert_eq!(
+                got.trailers_ok,
+                got.members,
+                "{} {name}: the page trailers are stripped exactly when every member's CRC matches",
+                path.display()
+            );
+            assert_eq!(got.skipped, 0, "{} {name}", path.display());
+            members += got.members;
+        }
+        assert!(members > 8, "{}", path.display());
+    }
+}
+
+#[test]
+fn damaging_a_real_files_container_never_panics_and_stays_within_the_limits() {
+    let Some(path) = samples().into_iter().next() else { return };
+    let original = std::fs::read(&path).unwrap();
+    let limits = Limits { max_file: 64 << 20, max_streams: 64, max_stream: 16 << 20, max_inflated: 64 << 20 };
+    let mut seed = 0x1234_5678_9abc_def1u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let mut opened = 0;
+    for round in 0..400 {
+        let mut bytes = original.clone();
+        // The header sector, the front of the file, and the last sectors, where this file's tables are.
+        for _ in 0..1 + next() % 3 {
+            let at = match round % 3 {
+                0 => next() % 1024,
+                1 => next() % 8192,
+                _ => bytes.len() as u64 - 1 - next() % 65_536,
+            } as usize;
+            bytes[at] = next() as u8;
+        }
+        let Ok(mut r) = Revit::from_bytes(bytes, limits) else { continue };
+        opened += 1;
+        for name in ["BasicFileInfo", "Global/ElemTable", "Global/PartitionTable", "Contents"] {
+            if let Ok(stored) = r.read_stream(name) {
+                assert!(stored.len() as u64 <= limits.max_stream);
+            }
+            if let Ok(got) = r.inflate(name) {
+                assert!(got.bytes.len() <= limits.max_inflated);
+            }
+        }
+    }
+    assert!(opened > 50, "{opened}");
+}
