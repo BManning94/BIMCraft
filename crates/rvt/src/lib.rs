@@ -7,12 +7,16 @@
 
 pub mod atom;
 mod container;
+pub mod elem_table;
 mod error;
 #[cfg(any(test, feature = "testing"))]
 pub mod fixture;
 pub mod gzip;
 pub mod info;
+pub mod inventory;
 pub mod preview;
+#[cfg(any(test, feature = "testing"))]
+pub mod project_fixture;
 pub mod schema;
 
 pub use container::{BASIC_FILE_INFO, Limits, Revit};

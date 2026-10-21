@@ -92,6 +92,12 @@ cargo test --workspace
   cross (`ifc::PHASING`), do it with a phased sample too: `run --sample --script phased.txt --save p.ifc`, `convert p.ifc
   p.bimcraft`, and compare `phases`, `phase_filters`, `phase_overrides`, `option_sets` and each element's `params` with the project's.
 
+- Revit files: Autodesk's files are never committed. Download sample projects into folders of their own outside the repo (the
+  URLs, sizes and hashes are in [docs/rvt-provenance.md](docs/rvt-provenance.md)), then `BIMCRAFT_RVT_SAMPLES=<folder> cargo test -p
+  bimcraft-rvt` runs the real-file tests (they skip when it is unset) and `bimcraft-cli info x.rvt` shows what a file holds. After
+  touching the reader, compare it with rvt-rs built from its own clone and target directory on the same files (a measuring stick,
+  never a dependency), and add a row to the provenance document for every module and every format finding.
+
 - Packages: `packaging/linux/package.sh` writes the AppImage, deb, rpm and tarball into `dist/release` (build on Ubuntu
   22.04, as CI does, so they run on its glibc and later; riscv64 is cross-built on 24.04, deb, rpm and tarball only, as the
   `linux-riscv64` job shows); `flatpak-bundle.sh` and `arch-package.sh` repackage that tarball as a Flatpak and an Arch

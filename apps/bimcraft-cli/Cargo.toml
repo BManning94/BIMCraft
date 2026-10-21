@@ -19,3 +19,7 @@ rvt = ["dep:bimcraft-rvt"]
 bimcraft-core = { workspace = true }
 bimcraft-rvt = { workspace = true, optional = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Synthetic Revit-shaped files for the tests of `info`.
+bimcraft-rvt = { workspace = true, features = ["testing"] }

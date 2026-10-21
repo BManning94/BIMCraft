@@ -84,6 +84,11 @@ fn an_atom_entry_gives_the_title_the_omniclass_and_the_product_version() {
     assert_eq!(atom.omniclass.as_deref(), Some("23.40.20.14.17"));
     assert_eq!(atom.categories, ["23.40.20.14.17", "Furniture"]);
     assert_eq!(atom.product_version.as_deref(), Some("2024"));
+    // A nested title that comes first is not the entry's.
+    let nested =
+        crate::atom::Atom::parse(br#"<entry><link><A:title>nested</A:title><title>deeper</title></link><title>Real</title></entry>"#)
+            .unwrap();
+    assert_eq!(nested.title.as_deref(), Some("Real"));
     let attrs = br#"<entry xmlns="http://www.w3.org/2005/Atom"><title>T&#233;st</title><category term="22.1.2" scheme="x"/><!-- <title>no</title> --><![CDATA[<title>no</title>]]></entry>"#;
     let attrs = crate::atom::Atom::parse(attrs).unwrap();
     assert_eq!((attrs.title.as_deref(), attrs.omniclass.as_deref()), (Some("T\u{e9}st"), Some("22.1.2")));
@@ -165,7 +170,7 @@ fn a_preview_that_is_not_a_sound_png_is_refused() {
     cases.push((not_ihdr, "IHDR"));
     let mut huge_chunk = good.clone();
     huge_chunk[33..37].copy_from_slice(&u32::MAX.to_be_bytes()); // the first IDAT claims 4 GiB
-    cases.push((huge_chunk, "chunk"));
+    cases.push((huge_chunk, "over the limit"));
     for (bytes, says) in cases {
         let e = crate::preview::find(&bytes).unwrap_err();
         assert!(e.to_string().contains(says), "{says}: {e}");
@@ -204,6 +209,13 @@ fn a_schema_that_breaks_the_grammar_stops_there_and_keeps_the_classes_before_it(
     assert!(schema.stopped.as_deref().unwrap().contains("name length"), "{:?}", schema.stopped);
     assert!(crate::schema::Schema::parse(&[]).classes.is_empty());
     assert!(crate::schema::Schema::parse(&[1, 2, 3, 4]).stopped.is_some());
+    // An inline base whose reference repeats another tag than the one it was given is not trusted.
+    let mut mismatched =
+        fixture::schema(&[Class { name: "Wall", fields: &[], base: Some(&Class { name: "Element", fields: &[], base: None }) }]);
+    let at = mismatched.windows(4).position(|w| w == b"Wall").unwrap() + 4;
+    mismatched[at..at + 2].copy_from_slice(&(0x8000u16 | 99).to_le_bytes());
+    let schema = crate::schema::Schema::parse(&mismatched);
+    assert!(schema.classes.is_empty() && schema.stopped.as_deref().unwrap().contains("inline tag"), "{:?}", schema.stopped);
     // Inline bases nest; a file that nests them without end stops instead of overflowing the stack.
     let mut nested = Vec::new();
     for tag in 12u16..400 {
@@ -231,7 +243,7 @@ fn the_schema_is_read_from_formats_latest_in_a_container() {
 // ---------- real files ----------
 
 /// The year a sample sits in a folder of, when its folder is named for one.
-fn folder_year(path: &Path) -> Option<u32> {
+pub(super) fn folder_year(path: &Path) -> Option<u32> {
     path.parent()?.file_name()?.to_str()?.parse().ok()
 }
 

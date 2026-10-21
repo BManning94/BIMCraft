@@ -87,6 +87,9 @@ Its README's legal claims were not copied and are not relied on.
 | `atom.rs` | the Atom entry of `PartAtom` (families) and of `ProjectInformation` (a one-entry ZIP): title, save time, product version, OmniClass, categories | Ported in part from rvt-rs `src/part_atom.rs` and `src/project_information.rs` at `b6086d4`, changed (a small scanner of its own instead of quick-xml, size, depth and tag limits). The ZIP is PKWARE's public APPNOTE; the XML is Atom (RFC 4287) with Autodesk's `urn:schemas-autodesk-com:partatom` elements |
 | `preview.rs` | finds and checks the PNG in `RevitPreview4.0` | Ported in part from rvt-rs `src/reader.rs` (`preview_png`) at `b6086d4`, changed (every chunk's size and CRC-32 checked, dimensions bounded). The PNG format is the W3C/ISO 15948 specification |
 | `schema.rs` | `Formats/Latest`: the list of classes with tag, base, version and field count | Ported in part from rvt-rs `src/formats.rs` (`schema_classes`, the grammar reader) at `b6086d4`, changed (class list only, bounds-checked, nesting capped). The grammar is credited by rvt-rs to STE1200 (Discussion #112), whose basis was not checked |
+| `elem_table.rs` | the ElementIds `Global/ElemTable` declares, in the 28-byte or 40-byte record layout | Ported in part from rvt-rs `src/elem_table.rs` at `b6086d4`, changed (ids only, no 12-byte fallback, all counts and offsets checked). rvt-rs credits the frame to STE1200, measured by puzzbobb on 30 files |
+| `inventory.rs` | the elements of a project by `BuiltInCategory` (placed instances told from the rest), and its levels with names and elevations | Ported in part from rvt-rs `src/partition_element_records.rs`, `src/partition_element_records_2023.rs` and `src/partition_level_records.rs` at `b6086d4`, changed (marker always from the file's schema, bounds-checked offsets, only id, category, class and placed kept, no bounding boxes or reference lists). The category ids are Autodesk's published `BuiltInCategory` constants; the names are rvt-rs's, measured in Revit's own IFC export of sample files |
+| `project_fixture.rs` | a synthetic project (element table, schema, partition records in both forms, levels with name blocks) for tests | BIMCraft, written from the layouts in `inventory.rs` |
 | `fixture.rs` | synthetic Compound Files, gzip members, paged and partition streams, `BasicFileInfo`, ZIP, PNG and schema bytes for tests | BIMCraft |
 
 ## Format findings
@@ -106,6 +109,35 @@ Its README's legal claims were not copied and are not relied on.
 | A family's `PartAtom` is the same Atom entry as plain XML; its OmniClass code is a category term of dotted digits | rvt-rs `part_atom.rs` | **not confirmed on a real file** (the samples are projects): synthetic test only |
 | `RevitPreview4.0` is a wrapper of about 300 bytes and then a PNG | rvt-rs `reader.rs` | **not confirmed on a real file**: the four sample projects have no such stream. Synthetic test only |
 | `Formats/Latest` is a list of classes in a grammar (zero `u16`, counted name, base reference, version, field count, fields, GUIDs); a class's tag is its definition ordinal starting at 12, inline bases included | rvt-rs `formats.rs`, which credits STE1200's measurements (Discussion #112) | the four samples read to their last byte with no stop, 4,418 / 4,492 / 4,600 / 4,690 classes (2023 to 2026), the count and the tags of `Outline`, `ElementParents` and `Plane` equal to what rvt-rs reads on the same files |
+| A partition holds one record per element: a header (`u64` ElementId, `u32` size, `u16` constant, `u16` count), a body, and a 16-byte trailer that repeats the size. The constant is the last tag of the record marker less 12 | rvt-rs `partition_element_records.rs` (RE-35) | 2024, 2025, 2026: the chain, walked from byte 0 until a header or trailer does not fit, has exactly one record for each declared ElementId (13,819 / 13,861 / 13,936), and ends a few MB into a partition of about 40 MB (the rest is the loaded families' own documents) |
+| From 2024 an element record's frame has fixed offsets from its start: `BuiltInCategory` (`i64`, negative) at `+0x12`, container at `+0x32`, placement kind at `+0x42`, class tag at `+0x4a`, the marker `[Outline tag] ff ff ff ff [ElementParents tag]` at `+0x50`, a bounding box of six `f64` (feet) at `+0x58`. The tags come from the file's own schema. A record with no container and the kind `0xffffef7f` is a placed instance (the rest are a type's symbols, a group's members) | rvt-rs `partition_element_records.rs` (RE-21, RE-32, RE-80) | 2024, 2025, 2026: 5,851 records per file, equal to rvt-rs's by category |
+| Up to 2023 the record is laid out back from the marker: `u32` ElementId 52 bytes before it, the tag of `ElementHeader` at +8 from the id, `BuiltInCategory` 38 before, container (`u32`) 22 before, kind 14 before, class tag 6 before | rvt-rs `partition_element_records_2023.rs` (RE-81, RE-107) | 2023: 5,851 records, equal to rvt-rs's and to the 2024 file's of the same model |
+| A frame whose first `u64` is 0 or not an ElementId (the second prologue) is a placed instance inside another record's body and takes that record's ElementId | rvt-rs `partition_element_records.rs` (RE-30, RE-35) | **not confirmed on a real file**: none of the 5,851 records of the four samples is such a frame (rvt-rs attributes 0 as well). rvt-rs measured the rule on Autodesk's Snowdon Towers samples, which were not used here. Synthetic tests only (with the chain it rests on checked above) |
+| A Level record is found by `OST_Levels` (-2000240) at `+0x12`, with the last six bytes of the marker at `+0x50` (it has no bounding box); its name and elevation are in a block keyed by its ElementId: a run of `ff` (56 bytes, 28 up to 2023), three bytes of padding, the name as a counted UTF-16 string, then `05 00 00 00` and the tag of `Plane`, and 55 bytes from the start of that marker the elevation in feet, which appears again with the 24 bytes before it. A level rewritten in a later partition keeps its older block: the highest-numbered partition's is current | rvt-rs `partition_level_records.rs` (RE-24, RE-51, RE-107) | the four samples: nine levels each, names and elevations (-2700 mm to 9000 mm) equal to rvt-rs's, none unread |
+| `Global/ElemTable`: a `u16`, a `u32` count, records from byte 6, 28 bytes up to 2023 and 40 from 2024, the ElementId at +4 or +20 | rvt-rs `elem_table.rs`, credited to STE1200 and puzzbobb | the four samples (13,821 / 13,819 / 13,861 / 13,936 ids, rising, count fits to a short tail) |
+
+### The stored-page constants, and where they come from
+
+`gzip.rs` has three constants and a list: a stored page is 65,249 bytes, of which 64,896 are data and 353 a trailer, and the
+streams the container pages are the partitions, the schema and six `Global` streams. All of it is ported from rvt-rs's
+`compression.rs`, and that file credits the constants to "ahzs645/reviter's ODA loader analysis and Discussion #112". ODA
+internals are on the forbidden list, so this is exactly what was and was not done with that claim:
+
+- **Ported:** the three numbers and the list of paged streams, from rvt-rs. Nothing from reviter, from ODA or from any
+  Autodesk code was read by whoever wrote this reader; the origin claim is rvt-rs's, second-hand, and was not checked.
+- **Confirmed from the bytes of the samples:** with those constants the pages are removed, the CRC-32 and length at the end of
+  **every** gzip member of every paged stream match, 1,660 members over the four files (the real-file test in
+  `tests/mod.rs`). Without them, any member that crosses a page boundary does not inflate to its CRC. A second check, run
+  once as a scratch program and not committed: for the first member of the 2024 sample's partition that crosses a boundary,
+  every pair of (position of a removed run, its length) with the position in 64,000 to 65,500 and the length in 1 to 1,100
+  was tried (1.65 million inflates); exactly one pair makes the member verify, 64,896 and 353. That says the bytes force these
+  numbers within that window. It is not a blind derivation: the window was chosen around the known answer.
+- **Recommendation:** re-derive the constants from the bytes alone before anyone relies on this reader in a way that makes the
+  origin matter, and replace the rvt-rs attribution in this table with the derivation. It is possible: the members are gzip
+  with a CRC, so the position and length of a removed run can be searched for with no prior, using the spacing of the members
+  and the period between runs; a first attempt here (a blind search near where raw inflate stops) did not finish usefully, and
+  a better search was not built in part 1. The constants are facts about a file layout and are verified true; whether
+  their provenance through a third party's analysis matters is for the owner to decide.
 
 ## Sample files
 
@@ -133,7 +165,10 @@ part of this repository). Equal on all four samples, release by release:
 | schema classes (and whether the parse reached the end) | 4,418 (yes) | 4,492 (yes) | 4,600 (yes) | 4,690 (yes) |
 | tags of `Outline`, `ElementParents`, `Plane` | 316, 1410, 565 | 326, 1451, 584 | 345, 1491, 605 | 353, 1521, 613 |
 
-(The element inventory is compared in the same way once it exists.)
+The element inventory (`bimcraft-rvt` against the same example of rvt-rs, which decodes every element record and the levels)
+is equal on all four files: 5,851 records, 45 categories of element records with the same number of elements and of placed
+instances in each (and the levels as a 46th category here: 10 elements, 9 placed), the same nine levels with the same names
+and elevations, and the same number of declared ElementIds. 5,861 elements in all, 5,591 of them placed.
 
 ## Not verified
 

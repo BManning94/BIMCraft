@@ -19,7 +19,10 @@ fn only_the_command_line_and_the_desktop_take_the_reader_and_only_through_a_defa
     }
     for manifest in ["apps/bimcraft-cli/Cargo.toml", "apps/bimcraft/Cargo.toml"] {
         let text = read(manifest);
-        let dep = text.lines().find(|l| l.starts_with("bimcraft-rvt")).unwrap_or_else(|| panic!("{manifest} has no bimcraft-rvt"));
+        // The tests of the command line build synthetic files with the crate's `testing` feature: a dev-dependency.
+        let (normal, dev) = text.split_once("[dev-dependencies]").unwrap_or((text.as_str(), ""));
+        assert!(dev.is_empty() || (manifest.contains("cli") && dev.contains("features = [\"testing\"]")), "{manifest}: {dev}");
+        let dep = normal.lines().find(|l| l.starts_with("bimcraft-rvt")).unwrap_or_else(|| panic!("{manifest} has no bimcraft-rvt"));
         assert!(dep.contains("optional = true"), "{manifest}: the reader is an optional dependency, `{dep}`");
         assert!(text.contains("default = [\"rvt\"]"), "{manifest}: the `rvt` feature is on by default");
         assert!(text.contains("rvt = [\"dep:bimcraft-rvt\"]"), "{manifest}: the `rvt` feature turns the reader on and nothing else");
@@ -75,6 +78,7 @@ fn the_fence_is_written_into_the_policy_documents() {
     }
 }
 
+mod inventory;
 mod metadata;
 
 // ---------- the container ----------
@@ -277,7 +281,8 @@ fn a_paged_stream_inflates_across_its_page_trailers_and_an_unpaged_one_is_left_a
 fn partition_members_join_in_order_and_a_false_magic_inside_one_is_not_a_member() {
     let first = b"first chunk ".repeat(50);
     let second = noise(300);
-    let tricky = b"before \x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x0b not a member".to_vec();
+    // Stored verbatim inside the member: a gzip member of its own, which is data here and not a member of the stream.
+    let tricky = [&b"before "[..], &gzip(b"hidden"), b" after"].concat();
     let mut stream = partition(&[&first, &second]);
     // A member that stores its bytes verbatim carries a gzip header inside itself.
     stream.extend_from_slice(&[0x77; 32]);
@@ -305,6 +310,33 @@ fn junk_between_members_and_a_member_cut_short_are_skipped() {
     let got = r.inflate_all("Partitions/21").unwrap();
     assert_eq!(got.bytes, [a, b].concat());
     assert_eq!(got.skipped, 1, "the cut-short member is counted");
+}
+
+#[test]
+fn the_inflate_cap_allows_exactly_its_size_and_a_header_with_a_reserved_flag_is_not_a_member() {
+    let limits = Limits { max_inflated: 1000, ..Limits::default() };
+    let at =
+        |n: usize| revit(&[("Global/Latest", &global(&vec![7u8; n])), ("Partitions/21", &partition(&[&vec![7u8; n]]))], limits).unwrap();
+    let (r, over) = (&mut at(1000), &mut at(1001));
+    assert_eq!((r.inflate("Global/Latest").unwrap().bytes.len(), r.inflate_all("Partitions/21").unwrap().bytes.len()), (1000, 1000));
+    assert!(matches!(over.inflate("Global/Latest"), Err(Error::TooMuch { .. })));
+    assert!(matches!(over.inflate_all("Partitions/21"), Err(Error::TooMuch { .. })));
+    let mut flagged = global(b"hello hello hello");
+    flagged[8 + 3] = 0x20; // the gzip flags byte, with a reserved bit set
+    let r = &mut revit(&[("Global/Latest", &flagged)], Limits::default()).unwrap();
+    assert!(r.inflate("Global/Latest").is_err());
+}
+
+#[test]
+fn a_file_with_exactly_as_many_streams_as_the_limit_is_read_and_one_more_is_not() {
+    let many: Vec<(String, Vec<u8>)> = (0..9).map(|i| (format!("S{i}"), vec![0u8; 4])).collect();
+    let mut all: Vec<(&str, &[u8])> = many.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    all.push(("BasicFileInfo", BASIC));
+    assert_eq!(all.len(), 10);
+    let limits = Limits { max_streams: 10, ..Limits::default() };
+    assert!(Revit::from_bytes(container(&all), limits).is_ok());
+    all.push(("S9", &[0; 4]));
+    assert!(matches!(Revit::from_bytes(container(&all), limits), Err(Error::TooBig { .. })));
 }
 
 // ---------- hostile input ----------
