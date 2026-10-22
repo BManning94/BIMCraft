@@ -180,12 +180,14 @@ impl BimApp {
         let came_in: usize = report.counts.iter().map(|(_, n)| n).sum();
         let left_out: usize = left.iter().filter_map(|n| count_left_out(n)).sum();
         let mut close = false;
+        // As tall as the window allows, so that a long list is read without scrolling where it can be.
+        let height = (ctx.content_rect().height() * 0.65).max(200.0);
         let r = Modal::new(Id::new("revit-report")).show(ctx, |ui| {
             ui.set_width(560.0);
             ui.label(RichText::new(t("Revit import report")).heading());
             ui.label(RichText::new(format!("{} · {}", report.file, report.schema)).color(pal().muted));
             ui.add_space(6.0);
-            ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+            ScrollArea::vertical().max_height(height).show(ui, |ui| {
                 ui.label(RichText::new(tf("Came in: {}", &[&came_in.to_string()])).strong());
                 for (cat, n) in &report.counts {
                     ui.label(format!("{n} {}", category(cat, *n != 1)));
