@@ -7,8 +7,9 @@
     wix build packaging\windows\bimcraft.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=0.2.0
       -d BinDir=target\x86_64-pc-windows-msvc\release -o bimcraft-0.2.0-windows-x64.msi
 
-  It works as CADCraft's installer does. It installs for every user into Program Files\BIMCraft: the
-  app, the CLI and the licences, a Start menu shortcut, .bimcraft projects opening in BIMCraft, and
+  It works as CADCraft's installer does. It installs for every user into Program Files\BIMCraft, or into the
+  folder chosen on the wizard's folder page (silent: INSTALLFOLDER="D:\Apps\BIMCraft"), which an upgrade keeps:
+  the app, the CLI and the licences, a Start menu shortcut, .bimcraft projects opening in BIMCraft, and
   BIMCraft offered under "Open with" for .ifc files, without taking over the user's default app. A
   newer version upgrades an older one in place, and so does a rebuild of the same version.
 
@@ -35,6 +36,15 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="BIMCraft" />
     </StandardDirectory>
+
+    <!-- Where the previous install put BIMCraft, from the key the app component writes, so an upgrade (the wizard's, or an
+         update's /passive) stays in the folder that was chosen. None, or a folder that's gone: the default above. Secure,
+         so the elevated install sees the folder the wizard picked. -->
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\BIMCraft" Name="InstallFolder" Type="directory" Bitness="always64" />
+    </Property>
+    <!-- The folder page edits this directory. -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
     <!-- "Create a desktop shortcut": the wizard's checkbox sets it to 1 (unticked, it's unset), and a
          silent install passes DESKTOPSHORTCUT=1. Secure, so the elevated install sees the wizard's choice. -->
@@ -66,6 +76,7 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\bimcraft.exe\shell\open\command" Value="&quot;[#BimcraftExe]&quot; &quot;%1&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\.ifc\OpenWithProgids" Name="BIMCraft.Ifc" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\BIMCraft.Ifc\shell\open\command" Value="&quot;[#BimcraftExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\BIMCraft" Name="InstallFolder" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
       <Component Id="Cli" Directory="INSTALLFOLDER">
         <File Id="BimcraftCliExe" Source="$(var.BinDir)\bimcraft-cli.exe" KeyPath="yes" />
@@ -86,9 +97,9 @@
   </Package>
 
   <!--
-    The setup wizard, as CADCraft's: WixUI_InstallDir's flow without the licence and folder pages,
-    plus a Shortcuts page.
-      install:     Welcome > Shortcuts > Ready to install > Progress > Finish
+    The setup wizard, as CADCraft's: WixUI_InstallDir's flow without the licence page,
+    plus a Shortcuts page after the folder's.
+      install:     Welcome > Folder > Shortcuts > Ready to install > Progress > Finish
       maintenance: Maintenance welcome > Repair or Remove > Ready > Progress > Finish
   -->
   <Fragment>
@@ -98,6 +109,7 @@
       <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
       <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
 
+      <DialogRef Id="BrowseDlg" />
       <DialogRef Id="DiskCostDlg" />
       <DialogRef Id="ErrorDlg" />
       <DialogRef Id="FatalError" />
@@ -127,10 +139,22 @@
 
       <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
 
-      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Condition="NOT Installed" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Condition="NOT Installed" />
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="Installed AND PATCH" />
 
-      <Publish Dialog="ShortcutsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <!-- WixUI_InstallDir's own events for the folder page and its Browse dialog, with the path check (the x64 build of
+           WiX's WixUIValidatePath) that stops a folder Windows can't use before the install starts. -->
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="SetTargetPath" Value="[WIXUI_INSTALLDIR]" Order="1" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="DoAction" Value="WixUIValidatePath_X64" Order="2" Condition="NOT WIXUI_DONTVALIDATEPATH" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="SpawnDialog" Value="InvalidDirDlg" Order="3" Condition="NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID&lt;&gt;&quot;1&quot;" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Order="4" Condition="WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;" />
+      <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Property="_BrowseProperty" Value="[WIXUI_INSTALLDIR]" Order="1" />
+      <Publish Dialog="InstallDirDlg" Control="ChangeFolder" Event="SpawnDialog" Value="BrowseDlg" Order="2" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="DoAction" Value="WixUIValidatePath_X64" Order="3" Condition="NOT WIXUI_DONTVALIDATEPATH" />
+      <Publish Dialog="BrowseDlg" Control="OK" Event="SpawnDialog" Value="InvalidDirDlg" Order="4" Condition="NOT WIXUI_DONTVALIDATEPATH AND WIXUI_INSTALLDIR_VALID&lt;&gt;&quot;1&quot;" />
+
+      <Publish Dialog="ShortcutsDlg" Control="Back" Event="NewDialog" Value="InstallDirDlg" />
       <Publish Dialog="ShortcutsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" />
 
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="1" Condition="NOT Installed" />
