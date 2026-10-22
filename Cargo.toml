@@ -50,3 +50,13 @@ dbg_macro = "warn"
 # The 3D view renders in software: build the core optimised in debug builds too, so it orbits smoothly.
 [profile.dev.package.bimcraft-core]
 opt-level = 2
+
+# The Revit reader inflates and scans tens of megabytes per file, which its real-file tests do over and over.
+[profile.dev.package.bimcraft-rvt]
+opt-level = 2
+[profile.dev.package.miniz_oxide]
+opt-level = 2
+[profile.dev.package.memchr]
+opt-level = 2
+[profile.dev.package.cfb]
+opt-level = 2

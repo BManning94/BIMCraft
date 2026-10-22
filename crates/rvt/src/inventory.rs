@@ -5,7 +5,8 @@
 // their name and elevation blocks).
 // Changed: rewritten for BIMCraft; the record marker always comes from the file's own schema, every offset is bounds-checked,
 // only the id, category, class and whether the record is a placed instance are kept (no bounding boxes, no reference
-// lists), the walk over a partition is one function per record form, and Levels inside other elements are not filtered out.
+// lists), the walk over a partition is one function per record form, and a Level's Building Story setting and the Levels that
+// sit inside other elements (RE-51, RE-118) are read from the same blocks.
 //! The element inventory: which elements a project holds, by `BuiltInCategory`, and its levels.
 //!
 //! A partition (`Partitions/NN`) holds one record per element, each opening with a header (the ElementId, the record's size,
@@ -21,45 +22,25 @@
 //!
 //! A Level has no bounding box, so no `Outline` marker: it is found by its category, and its name and elevation are in a
 //! separate block keyed by its ElementId (a run of `ff`, the name as counted UTF-16, then an elevation in feet that appears
-//! twice).
+//! twice). Past the name the block holds Revit's Building Story setting, which says whether the level is a storey. A Level that
+//! sits inside another element has a block whose run of `ff` is broken by that element's id; it is not a project level.
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::data::{Data, category_materials, column_bottoms, column_nodes, element_data, material_names, newest, room_entries};
 use crate::error::{Error, Result};
-use crate::schema::Schema;
+use crate::names::{Latest, entries_32, entries_64};
+use crate::records::{
+    CATEGORY_AT, CONTAINER_AT, HEADER_TAG_AFTER_ID, KIND_AT, KIND_PLACED, MARKER_AT, NO_CONTAINER, Record, Tags, TypeRecord, chain,
+    declared, enclosing, f64_at, no_id, records_32, records_64, types_32, types_64, u16_at, u32_at, u64_at,
+};
+use crate::types::first_name;
 
-/// The band `BuiltInCategory` values fall in.
-const CATEGORY_MIN: i64 = -2_100_000;
-const CATEGORY_MAX: i64 = -1_990_000;
 /// `OST_Levels`.
 pub const OST_LEVELS: i64 = -2_000_240;
 
-/// Offsets of a 2024 and later frame from its start.
-const CATEGORY_AT: usize = 0x12;
-const CONTAINER_AT: usize = 0x32;
-const KIND_AT: usize = 0x42;
-const CLASS_AT: usize = 0x4a;
-const MARKER_AT: usize = 0x50;
-const BBOX_AT: usize = 0x58;
-const FRAME_LEN: usize = BBOX_AT + 48;
-/// The kind word of a placed instance, and "no container".
-const KIND_PLACED: u32 = 0xffff_ef7f;
 /// The kind Revit 2015 to 2018 write on a Level.
 const LEVEL_KIND_2015: u32 = 0xffff_ef6f;
-const NO_CONTAINER: u64 = u64::MAX;
-
-/// A record chain's header and trailer lengths.
-const CHAIN_HEADER: usize = 16;
-const CHAIN_TRAILER: usize = 16;
-
-/// 32-bit form (up to 2023), as offsets back from the marker.
-const ID_BEFORE_MARKER: usize = 52;
-const CATEGORY_BEFORE_MARKER: usize = 38;
-const CONTAINER_BEFORE_MARKER: usize = 22;
-const KIND_BEFORE_MARKER: usize = 14;
-const CLASS_BEFORE_MARKER: usize = 6;
-const HEADER_TAG_AFTER_ID: usize = 8;
-
 /// Level name blocks.
 const RUN_64: usize = 56;
 const RUN_32: usize = 28;
@@ -68,6 +49,12 @@ const ELEVATION_SEARCH: usize = 2048;
 const ELEVATION_AFTER_MARKER: usize = 55;
 const CONFIRM_LEAD_IN: usize = 24;
 const MAX_ELEVATION_FEET: f64 = 1.0e7;
+/// Where a level's Building Story setting is looked for past its name, and what frames it: an unset id, `00 01`, a number and
+/// the level's own id (`u64` from 2024, `u32` before), then the setting.
+const STORY_WINDOW: usize = 0x200;
+/// Where the level's name starts from the `u64` ElementId of its block, and the `01 00 00 00` that opens an object keyed by one.
+const NAME_AFTER_OWNER: usize = 0x47;
+const OBJECT_PREFIX: [u8; 4] = [1, 0, 0, 0];
 
 /// The releases the record forms are known for (rvt-rs's), of which 2023 to 2026 are checked here on sample files.
 pub const RELEASES: std::ops::RangeInclusive<u32> = 2015..=2027;
@@ -88,6 +75,8 @@ pub struct Level {
     pub id: u32,
     pub name: String,
     pub elevation_feet: f64,
+    /// Revit's Building Story setting, where the block holds it: only a building story is a storey in Revit's own IFC export.
+    pub building_story: Option<bool>,
 }
 
 impl Level {
@@ -115,8 +104,10 @@ pub struct Inventory {
     pub elements: Vec<Element>,
     /// The levels whose name and elevation could be read, by elevation.
     pub levels: Vec<Level>,
-    /// Level elements (placed instances) with no readable name block.
+    /// Level elements (placed instances) with no readable name block, not counting those inside other elements.
     pub unread_levels: usize,
+    /// Level elements whose block names another element that holds them: not project levels, and not in `levels`.
+    pub owned_levels: Vec<u32>,
 }
 
 impl Inventory {
@@ -205,63 +196,6 @@ const NAMES: &[(i64, &str)] = &[
     (-2_000_011, "Walls"),
 ];
 
-fn u16_at(buf: &[u8], at: usize) -> Option<u16> {
-    let b = buf.get(at..at.checked_add(2)?)?;
-    Some(u16::from_le_bytes([b[0], b[1]]))
-}
-
-fn u32_at(buf: &[u8], at: usize) -> Option<u32> {
-    let b = buf.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-}
-
-fn u64_at(buf: &[u8], at: usize) -> Option<u64> {
-    let b = buf.get(at..at.checked_add(8)?)?;
-    Some(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
-}
-
-fn f64_at(buf: &[u8], at: usize) -> Option<f64> {
-    u64_at(buf, at).map(f64::from_bits)
-}
-
-fn in_band(category: i64) -> bool {
-    (CATEGORY_MIN..=CATEGORY_MAX).contains(&category)
-}
-
-/// The tags of the schema classes the scan reads the file's layout from.
-struct Tags {
-    outline: u16,
-    parents: u16,
-    header: u16,
-    plane: u16,
-}
-
-impl Tags {
-    fn of(schema: &Schema) -> Result<Self> {
-        let tag = |name: &str| {
-            schema
-                .tag(name)
-                .ok_or_else(|| Error::Format(format!("Formats/Latest has no class {name}, so the element records cannot be found")))
-        };
-        Ok(Self { outline: tag("Outline")?, parents: tag("ElementParents")?, header: tag("ElementHeader")?, plane: tag("Plane")? })
-    }
-
-    /// `[Outline tag] ff ff ff ff [ElementParents tag]`, the marker of an element record.
-    fn marker(&self) -> [u8; 8] {
-        let mut m = [0xff; 8];
-        m[..2].copy_from_slice(&self.outline.to_le_bytes());
-        m[6..].copy_from_slice(&self.parents.to_le_bytes());
-        m
-    }
-
-    /// `05 00 00 00` and the tag of `Plane`: what precedes a Level's elevation block.
-    fn elevation_marker(&self) -> [u8; 6] {
-        let mut m = [5, 0, 0, 0, 0, 0];
-        m[4..].copy_from_slice(&self.plane.to_le_bytes());
-        m
-    }
-}
-
 /// What a scan of one partition finds.
 #[derive(Default)]
 struct Found {
@@ -269,12 +203,15 @@ struct Found {
     elements: BTreeMap<(i64, u32), (u16, bool)>,
     level_records: BTreeMap<u32, bool>,
     blocks: Vec<Block>,
+    /// Declared ids with the block of a level inside another element.
+    owned: BTreeSet<u32>,
 }
 
 struct Block {
     id: u32,
     name: String,
     elevation_feet: f64,
+    building_story: Option<bool>,
 }
 
 impl Found {
@@ -286,122 +223,6 @@ impl Found {
 
     fn level(&mut self, id: u32, placed: bool) {
         *self.level_records.entry(id).or_insert(false) |= placed;
-    }
-}
-
-fn declared(ids: &[u32], id: u32) -> bool {
-    id != 0 && ids.binary_search(&id).is_ok()
-}
-
-/// A record in a partition's chain: where it starts and ends, and its ElementId.
-struct Span {
-    start: usize,
-    end: usize,
-    id: u64,
-}
-
-/// The leading chain of records of a 2024 and later partition: header (`u64` id, `u32` size, `u16` constant, `u16`
-/// count), body, and a 16-byte trailer that repeats the size. The constant is the marker's last tag less 12.
-fn chain(buf: &[u8], marker: &[u8; 8]) -> Vec<Span> {
-    let constant = u16::from_le_bytes([marker[6], marker[7]]).wrapping_sub(12);
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    while let Some(id) = u64_at(buf, at) {
-        let Some(size) = u32_at(buf, at + 8).map(|v| v as usize) else { break };
-        if size < CHAIN_HEADER || u16_at(buf, at + 0x0c) != Some(constant) {
-            break;
-        }
-        let Some(end) = at.checked_add(size) else { break };
-        let flags = end.checked_add(8).and_then(|t| u32_at(buf, t));
-        let echo = end.checked_add(12).and_then(|t| u32_at(buf, t));
-        if !matches!(flags, Some(0 | 0x0100_0000)) || echo.map(|v| v as usize) != Some(size) {
-            break;
-        }
-        out.push(Span { start: at, end, id });
-        at = end + CHAIN_TRAILER;
-    }
-    out
-}
-
-/// How many records a partition's chain has (for tests).
-#[cfg(test)]
-pub(crate) fn chain_len(buf: &[u8], schema: &Schema) -> Option<(usize, usize)> {
-    let marker = Tags::of(schema).ok()?.marker();
-    let spans = chain(buf, &marker);
-    Some((spans.len(), spans.last().map_or(0, |s| s.end + CHAIN_TRAILER)))
-}
-
-fn enclosing(chain: &[Span], at: usize) -> Option<&Span> {
-    let i = chain.partition_point(|s| s.start <= at);
-    let span = chain.get(i.checked_sub(1)?)?;
-    (at < span.end).then_some(span)
-}
-
-/// A frame with no ElementId of its own: 0, or a value that is not a `u32` ElementId.
-fn no_id(raw: u64) -> bool {
-    raw == 0 || raw >= u64::from(u32::MAX)
-}
-
-fn finite_box(buf: &[u8], at: usize) -> bool {
-    let mut b = [0.0f64; 6];
-    for (i, v) in b.iter_mut().enumerate() {
-        match f64_at(buf, at + i * 8) {
-            Some(x) if x.is_finite() => *v = x,
-            _ => return false,
-        }
-    }
-    (0..3).all(|a| b[a + 3] >= b[a])
-}
-
-/// Elements of a 2024 and later partition.
-fn scan_64(buf: &[u8], tags: &Tags, ids: &[u32], found: &mut Found) {
-    let marker = tags.marker();
-    let spans = chain(buf, &marker);
-    for hit in memchr::memmem::find_iter(buf, &marker) {
-        let Some(f) = hit.checked_sub(MARKER_AT) else { continue };
-        if f + FRAME_LEN > buf.len() || u16_at(buf, f + 0x10) != Some(0) {
-            continue;
-        }
-        let Some(category) = u64_at(buf, f + CATEGORY_AT).map(|v| v as i64).filter(|&c| in_band(c)) else { continue };
-        let container = u64_at(buf, f + CONTAINER_AT).unwrap_or(0);
-        let kind = u64_at(buf, f + KIND_AT).map_or(0, |v| v as u32);
-        let placed = container == NO_CONTAINER && kind == KIND_PLACED;
-        let raw = u64_at(buf, f).unwrap_or(0);
-        let id = if no_id(raw) {
-            // The second prologue: a placed instance inside another record, which gives it its id.
-            let host = placed.then(|| enclosing(&spans, f)).flatten().and_then(|s| u32::try_from(s.id).ok());
-            match host {
-                Some(id) => id,
-                None => continue,
-            }
-        } else {
-            raw as u32
-        };
-        if !declared(ids, id) || !finite_box(buf, f + BBOX_AT) {
-            continue;
-        }
-        found.element(category, id, u16_at(buf, f + CLASS_AT).unwrap_or(0), placed);
-    }
-}
-
-/// Elements of a partition up to 2023.
-fn scan_32(buf: &[u8], tags: &Tags, ids: &[u32], found: &mut Found) {
-    for hit in memchr::memmem::find_iter(buf, &tags.marker()) {
-        let Some(id_at) = hit.checked_sub(ID_BEFORE_MARKER) else { continue };
-        let Some(id) = u32_at(buf, id_at).filter(|&id| declared(ids, id)) else { continue };
-        if u16_at(buf, id_at + HEADER_TAG_AFTER_ID) != Some(tags.header) {
-            continue;
-        }
-        let Some(category) = u64_at(buf, hit - CATEGORY_BEFORE_MARKER).map(|v| v as i64).filter(|&c| in_band(c)) else {
-            continue;
-        };
-        if !finite_box(buf, hit + 8) {
-            continue;
-        }
-        let container = u32_at(buf, hit - CONTAINER_BEFORE_MARKER);
-        let kind = u32_at(buf, hit - KIND_BEFORE_MARKER);
-        let placed = container == Some(u32::MAX) && kind == Some(KIND_PLACED);
-        found.element(category, id, u16_at(buf, hit - CLASS_BEFORE_MARKER).unwrap_or(0), placed);
     }
 }
 
@@ -490,7 +311,91 @@ fn block_at(buf: &[u8], tags: &Tags, ids: &[u32], start: usize, id_len: usize, r
     let copy = buf.get(at.checked_sub(CONFIRM_LEAD_IN)?..at + 8)?;
     let later = buf.get(at + 8..(at + 8 + ELEVATION_SEARCH).min(buf.len()))?;
     memchr::memmem::find(later, copy)?;
-    Some(Block { id, name, elevation_feet })
+    Some(Block { id, name, elevation_feet, building_story: building_story_after(buf, end, id_len == 8) })
+}
+
+/// A level's Building Story setting: the byte after the first unset id and `00 01` past its name, a number (0 on most levels)
+/// and the level's own id, 1 for a building story and 0 for a level that is not. None where the frame is not found or the
+/// byte is neither.
+fn building_story_after(buf: &[u8], name_end: usize, wide: bool) -> Option<bool> {
+    let unset: &[u8] = if wide { &[0xff; 8] } else { &[0xff; 4] };
+    let anchor = [unset, &[0, 1][..]].concat();
+    let window = buf.get(name_end..(name_end + STORY_WINDOW).min(buf.len()))?;
+    let after = name_end + memchr::memmem::find(window, &anchor)? + anchor.len();
+    let id_at = after + 8;
+    let setting = if wide {
+        u32::try_from(u64_at(buf, id_at)?).ok()?;
+        id_at + 8
+    } else {
+        id_at + 4
+    };
+    match buf.get(setting)? {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+/// The levels inside other elements: objects keyed by an id (`01 00 00 00` and the `u64`) whose block has the owner's id after
+/// eight `ff` where a project level's block has its run of 56.
+fn owned_64(buf: &[u8], ids: &[u32], found: &mut Found) {
+    for at in memchr::memmem::find_iter(buf, &OBJECT_PREFIX) {
+        let id_at = at + OBJECT_PREFIX.len();
+        let Some(id) = u64_at(buf, id_at).and_then(|v| u32::try_from(v).ok()).filter(|&id| declared(ids, id)) else { continue };
+        let chars = u32_at(buf, id_at + NAME_AFTER_OWNER - 4).unwrap_or(0) as usize;
+        let sentinel = buf.get(id_at + 8..id_at + 16);
+        let owner = u64_at(buf, id_at + 16);
+        if (1..=MAX_NAME_CHARS).contains(&chars)
+            && sentinel.is_some_and(|run| run.iter().all(|&b| b == 0xff))
+            && owner.is_some_and(|o| o != 0 && o < u64::from(u32::MAX))
+        {
+            found.owned.insert(id);
+        }
+    }
+}
+
+/// What one pass over a project's partitions finds: the inventory, and the records of the categories asked for.
+pub(crate) struct Survey {
+    pub release: u32,
+    pub tags: Tags,
+    /// The ElementIds the element table declares, sorted.
+    pub ids: Vec<u32>,
+    pub inventory: Inventory,
+    /// Every copy of every record of the categories asked for (an edited element is in several partitions).
+    pub records: Vec<Record>,
+    /// Every type's record, of every category.
+    pub types: Vec<TypeRecord>,
+}
+
+/// The categories whose object-styles material a layer may take: walls, floors, roofs and ceilings.
+const CATEGORY_MATERIAL_CATEGORIES: [i64; 4] = [-2_000_011, -2_000_032, -2_000_035, -2_000_038];
+
+/// What the second pass finds.
+pub(crate) struct Gathered {
+    pub data: Data,
+    /// The name of each material whose name was read once and is its alone.
+    pub materials: BTreeMap<u32, String>,
+    /// The material the object styles give a category, where they give one: what a layer with no material of its own is made of.
+    pub category: BTreeMap<i64, u32>,
+    /// The name of each family and family type, with its category (2024 and later), as its newest partition holds it.
+    pub names: BTreeMap<u32, (String, Option<i64>)>,
+    /// The bottom, in feet, of the columns whose geometry node corrects their record box.
+    pub column_bottoms: BTreeMap<u32, f64>,
+    /// The number and the name of each room.
+    pub rooms: BTreeMap<u32, (String, String)>,
+}
+
+/// What the second pass is asked for.
+#[derive(Default)]
+pub(crate) struct Wants {
+    /// The elements whose data is kept.
+    pub data: BTreeSet<u32>,
+    /// The ids of the materials.
+    pub materials: BTreeSet<u32>,
+    /// The columns, with their record boxes.
+    pub columns: BTreeMap<u32, [f64; 6]>,
+    /// The rooms.
+    pub rooms: BTreeSet<u32>,
 }
 
 impl crate::Revit {
@@ -499,6 +404,84 @@ impl crate::Revit {
     /// Needs the file's release to be one the record forms are known for ([`RELEASES`]); a release outside it is an error,
     /// not a guess.
     pub fn inventory(&mut self) -> Result<Inventory> {
+        Ok(self.survey(&|_| false)?.inventory)
+    }
+
+    /// The data of the `wanted` elements, every copy, and the names of the project's materials: a second pass over the
+    /// partitions, for what the records name.
+    pub(crate) fn gather(&mut self, release: u32, tags: &Tags, ids: &[u32], wants: &Wants) -> Result<Gathered> {
+        let names: Vec<String> = self.stream_names().into_iter().filter(|n| n.starts_with("Partitions/")).map(String::from).collect();
+        let wide = release >= 2024;
+        // Up to 2023 a material the object does not name gives itself a name in its own data.
+        let (material_ids, columns) = (&wants.materials, &wants.columns);
+        let mut wanted = wants.data.clone();
+        if !wide {
+            wanted.extend(material_ids);
+        }
+        let wanted = &wanted;
+        let mut data = Data::new();
+        let mut materials: BTreeMap<u32, Option<String>> = BTreeMap::new();
+        let mut styled: BTreeMap<i64, BTreeSet<u64>> = BTreeMap::new();
+        let mut named = Latest::default();
+        let mut nodes = BTreeMap::new();
+        let mut room_names = Latest::default();
+        for name in names {
+            let number = name.rsplit('/').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
+            let buf = self.inflate_all(&name)?.bytes;
+            element_data(&buf, tags, wide, wanted, number, &mut data);
+            material_names(&buf, tags, wide, ids, &mut materials);
+            category_materials(&buf, tags, release, &CATEGORY_MATERIAL_CATEGORIES, &mut styled);
+            column_nodes(&buf, columns, &mut nodes);
+            room_entries(&buf, wide, &wants.rooms, number, &mut room_names);
+            let mut entries = Vec::new();
+            if wide {
+                entries_64(&buf, ids, &mut entries);
+            } else {
+                entries_32(&buf, ids, &mut entries);
+            }
+            for e in entries {
+                named.offer(e.id, number, (e.name, e.category));
+            }
+        }
+        if !wide {
+            let header = tags.data_header();
+            for &id in material_ids {
+                if materials.get(&id).is_some_and(Option::is_some) {
+                    continue;
+                }
+                if let Some((name, _)) = data.get(&id).and_then(|c| newest(c, |b| first_name(b, &header, release))) {
+                    materials.insert(id, Some(name));
+                }
+            }
+        }
+        // A name two materials would share is misread for at least one of them.
+        let mut uses: BTreeMap<&str, usize> = BTreeMap::new();
+        for name in materials.values().flatten() {
+            *uses.entry(name.as_str()).or_default() += 1;
+        }
+        let materials: BTreeMap<u32, String> =
+            materials.iter().filter_map(|(id, n)| Some((*id, n.clone()?))).filter(|(_, n)| uses.get(n.as_str()) == Some(&1)).collect();
+        // A category's material: the one value written, a named material.
+        let category: BTreeMap<i64, u32> = styled
+            .into_iter()
+            .filter_map(|(c, values)| {
+                let [v] = values.into_iter().collect::<Vec<u64>>()[..] else { return None };
+                let id = u32::try_from(v).ok().filter(|&id| id != 0 && id != u32::MAX && materials.contains_key(&id))?;
+                Some((c, id))
+            })
+            .collect();
+        Ok(Gathered {
+            data,
+            materials,
+            category,
+            names: named.into_values(),
+            column_bottoms: column_bottoms(nodes, columns),
+            rooms: room_names.into_values(),
+        })
+    }
+
+    /// [`Revit::inventory`], and the records of the categories `keep` says yes to.
+    pub(crate) fn survey(&mut self, keep: &dyn Fn(i64) -> bool) -> Result<Survey> {
         let release = self.basic_file_info()?.release;
         if !RELEASES.contains(&release) {
             return Err(Error::Format(format!(
@@ -518,22 +501,34 @@ impl crate::Revit {
         let mut elements: BTreeMap<(i64, u32), (u16, bool)> = BTreeMap::new();
         let mut level_records: BTreeMap<u32, bool> = BTreeMap::new();
         let mut named: BTreeMap<u32, (u32, Block)> = BTreeMap::new();
+        let mut owned: BTreeSet<u32> = BTreeSet::new();
         let mut records = 0;
+        let (mut kept, mut types) = (Vec::new(), Vec::new());
         for name in names {
             // One partition at a time: it is inflated, read and dropped.
             let number = name.rsplit('/').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
             let buf = self.inflate_all(&name)?.bytes;
             let mut found = Found::default();
+            let mut seen = |r: Record| {
+                found.element(r.category, r.id, r.class_tag, r.placed);
+                if keep(r.category) {
+                    kept.push(r);
+                }
+            };
             if wide {
-                scan_64(&buf, &tags, &ids, &mut found);
+                records_64(&buf, &tags, &ids, number, &mut seen);
+                types_64(&buf, &tags, &ids, number, &mut |t| types.push(t));
                 levels_64(&buf, &tags, release, &ids, &mut found);
+                owned_64(&buf, &ids, &mut found);
             } else {
-                scan_32(&buf, &tags, &ids, &mut found);
+                records_32(&buf, &tags, &ids, number, &mut seen);
+                types_32(&buf, &tags, &ids, number, &mut |t| types.push(t));
                 levels_32(&buf, &tags, release, &ids, &mut found);
             }
             blocks(&buf, &tags, &ids, wide, &mut found);
             drop(buf);
             records += found.records;
+            owned.extend(found.owned);
             for ((category, id), (class_tag, placed)) in found.elements {
                 let e = elements.entry((category, id)).or_insert((class_tag, false));
                 e.1 |= placed;
@@ -551,14 +546,16 @@ impl crate::Revit {
                 }
             }
         }
+        // A level inside another element is no project level, however its block reads.
+        owned.retain(|id| level_records.contains_key(id));
         let mut levels: Vec<Level> = level_records
             .iter()
-            .filter(|&(_, &placed)| placed)
+            .filter(|&(id, &placed)| placed && !owned.contains(id))
             .filter_map(|(id, _)| named.get(id))
-            .map(|(_, b)| Level { id: b.id, name: b.name.clone(), elevation_feet: b.elevation_feet })
+            .map(|(_, b)| Level { id: b.id, name: b.name.clone(), elevation_feet: b.elevation_feet, building_story: b.building_story })
             .collect();
         levels.sort_by(|a, b| a.elevation_feet.total_cmp(&b.elevation_feet).then(a.id.cmp(&b.id)));
-        let placed_levels: BTreeSet<u32> = level_records.iter().filter(|&(_, &p)| p).map(|(&id, _)| id).collect();
+        let placed_levels: BTreeSet<u32> = level_records.iter().filter(|&(id, &p)| p && !owned.contains(id)).map(|(&id, _)| id).collect();
         let unread_levels = placed_levels.len() - levels.len();
         for (&id, &placed) in &level_records {
             let e = elements.entry((OST_LEVELS, id)).or_insert((0, false));
@@ -566,6 +563,8 @@ impl crate::Revit {
         }
         let elements =
             elements.into_iter().map(|((category, id), (class_tag, placed))| Element { category, id, class_tag, placed }).collect();
-        Ok(Inventory { declared: ids.len(), records, elements, levels, unread_levels })
+        let inventory =
+            Inventory { declared: ids.len(), records, elements, levels, unread_levels, owned_levels: owned.into_iter().collect() };
+        Ok(Survey { release, tags, ids, inventory, records: kept, types })
     }
 }

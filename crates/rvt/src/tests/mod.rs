@@ -8,6 +8,42 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
+/// Imports `rounds` damaged copies of a synthetic project (one to eight bytes changed, one in seven cut short) and hands each
+/// import that comes back to `check`, after checking it passes the model's rules: none may panic.
+pub(super) fn sweep(
+    p: &crate::project_fixture::Project,
+    seed: u64,
+    rounds: usize,
+    check: impl Fn(&bimcraft_core::import::Imported, usize),
+) {
+    let bytes = p.partition_bytes();
+    let mut seed = seed;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..rounds {
+        let mut bad = bytes.clone();
+        for _ in 0..1 + next() % 8 {
+            let at = (next() % bad.len() as u64) as usize;
+            bad[at] = match next() % 4 {
+                0 => 0xff,
+                1 => 0,
+                _ => next() as u8,
+            };
+        }
+        if round % 7 == 0 {
+            bad.truncate(bad.len() - (next() % 400) as usize);
+        }
+        if let Ok(i) = crate::import(&p.file_from(&bad), "x") {
+            assert!(i.model.check().is_ok(), "round {round}");
+            check(&i, round);
+        }
+    }
+}
+
 /// The commit of rvt-rs the code was ported from; the headers and NOTICE name it.
 const RVT_RS_COMMIT: &str = "b6086d41b9758fd9b92f42f0a47b8345b9c58056";
 
@@ -96,8 +132,19 @@ fn the_fence_is_written_into_the_policy_documents() {
     }
 }
 
+mod columns;
+mod decoders;
+mod floors;
+mod import;
 mod inventory;
 mod metadata;
+mod openings;
+mod records;
+mod roofs;
+mod rooms;
+mod rvt_rs;
+mod sketch;
+mod walls;
 
 // ---------- the container ----------
 
@@ -467,9 +514,9 @@ fn a_file_cut_short_anywhere_is_an_error_or_a_smaller_file_never_a_panic() {
 
 // ---------- real files ----------
 
-/// The sample files, when `BIMCRAFT_RVT_SAMPLES` names a folder of them (each in a folder of its own is fine). Autodesk's
-/// files are never committed, so these tests skip without it.
-fn samples() -> Vec<PathBuf> {
+/// The sample files, when `BIMCRAFT_RVT_SAMPLES` names folders of them (several are parted like a `PATH`, each file may be in a
+/// folder of its own). Autodesk's files are never committed, so these tests skip without it.
+fn all_samples() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
@@ -481,16 +528,28 @@ fn samples() -> Vec<PathBuf> {
             }
         }
     }
-    let Some(dir) = std::env::var_os("BIMCRAFT_RVT_SAMPLES") else { return Vec::new() };
+    let Some(dirs) = std::env::var_os("BIMCRAFT_RVT_SAMPLES") else { return Vec::new() };
     let mut out = Vec::new();
-    walk(Path::new(&dir), &mut out);
+    for dir in std::env::split_paths(&dirs) {
+        walk(&dir, &mut out);
+    }
     out.sort();
     out
 }
 
+/// The samples named `file`, wherever they are.
+fn samples_of(file: &str) -> Vec<PathBuf> {
+    all_samples().into_iter().filter(|p| p.file_name().is_some_and(|n| n == file)).collect()
+}
+
+/// Autodesk's structural basic sample project of releases 2023 to 2026, which the first tests pin.
+fn samples() -> Vec<PathBuf> {
+    samples_of("rstbasicsampleproject.rvt")
+}
+
 #[test]
 fn every_sample_opens_and_every_gzip_stream_inflates_with_a_matching_trailer() {
-    for path in samples() {
+    for path in all_samples() {
         let r = &mut Revit::open(&path, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         for name in ["BasicFileInfo", "Formats/Latest", "Global/ElemTable", "Global/Latest"] {
             assert!(r.stream_len(name).is_some(), "{}: no {name}", path.display());

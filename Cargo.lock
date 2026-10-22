@@ -460,6 +460,7 @@ dependencies = [
 name = "bimcraft-rvt"
 version = "0.6.0"
 dependencies = [
+ "bimcraft-core",
  "cfb",
  "flate2",
  "memchr",
