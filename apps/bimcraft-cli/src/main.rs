@@ -167,12 +167,13 @@ mod tests {
             Lev { story: Some(true), ..Lev::new(10, "Level 1", 0.0) },
             Lev { story: Some(false), owner: Some(4321), ..Lev::new(12, "Inside a family", 4.0) },
         ];
-        let path = revit_file("house.rvt", &p.file());
+        // Its own name: another test writes a house.rvt of its own in the same folder, at the same time.
+        let path = revit_file("info.rvt", &p.file());
         let info: Value = serde_json::from_str(&cli_out(&["info", &path]).unwrap()).unwrap();
         assert_eq!(info["revit"]["release"], 2024);
         assert_eq!(info["revit"]["worksharing"], "Not enabled");
         assert_eq!(info["saved_by"], "jdoe");
-        assert!(info["saved_to"].as_str().unwrap().ends_with("house.rvt"));
+        assert!(info["saved_to"].as_str().unwrap().ends_with("house.rvt"), "the path the file says it was saved to");
         assert_eq!(info["elements"]["levels"][0]["name"], "Level 1");
         assert_eq!(info["elements"]["levels"][1]["elevation"], 3000.0, "millimetres");
         assert_eq!(info["elements"]["levels"][0]["building_story"], true);
