@@ -69,6 +69,17 @@ pub(crate) fn kind<T>(map: &mut BTreeMap<String, T>, base: &str, same: impl Fn(&
     }
 }
 
+/// What an entry of `Import::from` says (`Wall 423099`, `Structural column 12`, `Level 'Roof'`): its kind in lower case, and the Revit
+/// id or, for a level, which has a name and no id, the name as written.
+pub(crate) fn origin(from: &str) -> Option<(String, Result<u32, &str>)> {
+    if let Some((kind, n)) = from.rsplit_once(' ')
+        && let Ok(n) = n.parse::<u32>()
+    {
+        return Some((kind.to_lowercase(), Ok(n)));
+    }
+    from.split_once(' ').map(|(kind, what)| (kind.to_lowercase(), Err(what)))
+}
+
 /// What the import holds while it reads: the model, what was left out, and what each element was in the file.
 pub(crate) struct Import {
     pub model: Model,
@@ -99,14 +110,10 @@ impl Import {
     /// was made, so it is `wall`, 423099), or for a level, which has a name and no id, a note of its own.
     fn dropped(&mut self, id: Id, why: &str) {
         let from = self.from.get(&id).cloned().unwrap_or_default();
-        if let Some((kind, n)) = from.rsplit_once(' ')
-            && let Ok(n) = n.parse::<u32>()
-        {
-            self.left_out(&kind.to_lowercase(), n, why);
-        } else if let Some((kind, what)) = from.split_once(' ') {
-            self.skipped.push(format!("1 {} left out, {why} ({what})", kind.to_lowercase()));
-        } else {
-            self.skipped.push(format!("1 element left out, {why}"));
+        match origin(&from) {
+            Some((kind, Ok(n))) => self.left_out(&kind, n, why),
+            Some((kind, Err(what))) => self.skipped.push(format!("1 {kind} left out, {why} ({what})")),
+            None => self.skipped.push(format!("1 element left out, {why}")),
         }
     }
 

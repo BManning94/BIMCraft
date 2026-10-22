@@ -47,13 +47,13 @@ pub(crate) struct Report {
     file: String,
     schema: String,
     /// What came in: the model's category and how many, the most first.
-    counts: Vec<(String, usize)>,
+    pub(crate) counts: Vec<(String, usize)>,
     notes: Vec<String>,
     pub(crate) open: bool,
 }
 
 /// A note with its element ids split off: `2 walls left out, why (ids 7, 9)` is the text and `ids 7, 9`.
-fn split_ids(note: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_ids(note: &str) -> (&str, Option<&str>) {
     match note.strip_suffix(')').and_then(|n| n.rsplit_once(" (")) {
         Some((what, ids)) if ids.starts_with("ids ") => (what, Some(ids)),
         _ => (note, None),

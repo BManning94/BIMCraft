@@ -336,6 +336,45 @@ fn counting_what_a_note_says_was_left_out() {
     assert_eq!(count_left_out("3 levels with no name or elevation the reader can find (its block is missing or damaged)"), None);
     assert_eq!(count_left_out("many walls left out, whatever"), None, "no count is no count");
     assert_eq!(count_left_out(""), None);
+    assert_eq!(count_left_out("2 windows: the one left of the door was narrowed, to fit (ids 3)"), None, "`left` is not `left out`");
+}
+
+#[test]
+fn a_note_is_its_text_and_its_ids_and_a_note_without_ids_is_all_text() {
+    use crate::revit::split_ids;
+    assert_eq!(split_ids("2 walls left out, no layers (ids 7, 9)"), ("2 walls left out, no layers", Some("ids 7, 9")));
+    assert_eq!(split_ids("1 window: narrowed to fit (the big one)"), ("1 window: narrowed to fit (the big one)", None));
+    assert_eq!(split_ids("the file has no levels"), ("the file has no levels", None));
+    assert_eq!(split_ids("5 doors (ids 1, …)"), ("5 doors", Some("ids 1, …")), "a list that goes on");
+}
+
+#[test]
+fn what_came_in_is_listed_the_most_numerous_first() {
+    let mut r = rig(|| Ok(survey(&[])));
+    r.open("/projects/house.rvt");
+    r.done();
+    let counts = r.h.state().revit_report.as_ref().unwrap().counts.clone();
+    let levels = r.h.state().session.model.levels().len();
+    assert_eq!(counts.first(), Some(&("level".to_string(), levels)), "{counts:?}");
+    assert!(counts.windows(2).all(|w| w[0].1 >= w[1].1), "{counts:?}");
+}
+
+#[test]
+fn a_long_report_scrolls_inside_the_window_and_leaves_its_close_button_on_screen() {
+    let notes: Vec<String> =
+        (0..120).map(|k| format!("1 door left out, door {k} and door {} overlap in wall 34 (ids {})", k + 1, 1000 + k)).collect();
+    let mut r = rig(move || {
+        let mut i = survey(&[]);
+        i.skipped = notes.clone();
+        Ok(i)
+    });
+    r.open("/projects/house.rvt");
+    r.done();
+    r.h.run();
+    r.h.run();
+    let close = r.h.get_by_label("Close").rect();
+    assert!(close.bottom() <= r.h.ctx.content_rect().bottom(), "Close at {close:?} in a window {:?}", r.h.ctx.content_rect());
+    assert!(r.h.query_by_label_contains("Left out: 120").is_some());
 }
 
 #[test]

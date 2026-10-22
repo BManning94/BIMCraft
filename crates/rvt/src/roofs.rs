@@ -16,7 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use bimcraft_core::geom::P2;
-use bimcraft_core::model::{Element, Extrusion, MAX_POINTS, Roof, RoofType};
+use bimcraft_core::model::{Element, Extrusion, Roof, RoofType};
 
 use crate::curves::first_line;
 use crate::data::newest;
@@ -41,6 +41,9 @@ pub(crate) fn wanted(f: &Facts, out: &mut BTreeSet<u32>) {
 
 /// One foot in a micron's tolerance, and a millimetre: how close the corners of what is read must be to the record's box.
 const FEET_MM: f64 = 1.0 / 304.8;
+
+/// The most lines a roof's profile has: its chain is found by comparing them in pairs, so a hostile file's thousands are not tried.
+const MAX_LINES: usize = 256;
 
 pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
     let sketches = sketch_lines(f);
@@ -107,7 +110,7 @@ fn extruded(
     type_named: impl FnOnce(&mut Import, u32, &LayeredType) -> String,
 ) -> Result<(), String> {
     let lines = sketches.get(&r.id).ok_or("it has no sketch lines")?;
-    if lines.len() >= MAX_POINTS {
+    if lines.len() > MAX_LINES {
         return Err(format!("its profile has {} lines", lines.len()));
     }
     let mut ends = Vec::new();
@@ -116,7 +119,12 @@ fn extruded(
         let line = line.ok_or("its profile has a line that is not a straight one the reader can read (an arc, or no curve in its data)")?;
         ends.push((line.start(), line.end()));
     }
-    let chain = chain(&ends).ok_or("its profile's lines do not make one open chain")?;
+    let mut chain = chain(&ends).ok_or("its profile's lines do not make one open chain")?;
+    // It runs one way whatever order and direction its lines are listed in: east, or north where it runs square to that.
+    let (dx, dy) = (chain[chain.len() - 1][0] - chain[0][0], chain[chain.len() - 1][1] - chain[0][1]);
+    if dx < -1e-6 || (dx.abs() <= 1e-6 && dy < 0.0) {
+        chain.reverse();
+    }
     let (first, last) = (chain[0], chain[chain.len() - 1]);
     let run = (last[0] - first[0]).hypot(last[1] - first[1]);
     if run < FEET_MM {

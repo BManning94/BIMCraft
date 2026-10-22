@@ -298,3 +298,53 @@ fn a_mutation_sweep_over_a_roof_by_extrusion_never_panics_and_what_comes_in_chec
         super::sweep(&p, 0x1a2b_3c4d_5e6f_7081 ^ u64::from(release), 800, |i, round| assert!(roofs(i).len() <= 1, "round {round}"));
     }
 }
+
+#[test]
+fn the_lines_of_a_profile_make_the_same_roof_in_whatever_order_and_direction_the_file_lists_them() {
+    // One slope of 0.5 in six pieces, so that its underside is its top moved down 0.25 * sqrt(1.25) ft whatever the order.
+    let pieces: Vec<((f64, f64), (f64, f64))> =
+        (0..6).map(|k| ((4.0 * k as f64, 12.0 + 2.0 * k as f64), (4.0 * (k + 1) as f64, 14.0 + 2.0 * k as f64))).collect();
+    let drop = 0.25 * 1.25f64.sqrt();
+    let build = |order: &[(usize, bool)]| {
+        let mut p = with_roof_type(2024);
+        p.recs.push(Rec {
+            class_tag: crate::project_fixture::EXTRUSION_ROOF,
+            ..Rec::new(100, ROOFS).at([0.0, 0.0, 12.0 - drop, 30.0, 24.0, 24.0], &[10, 530, 100])
+        });
+        for (n, &(k, reversed)) in order.iter().enumerate() {
+            let (a, b) = pieces[k];
+            let (a, b) = if reversed { (b, a) } else { (a, b) };
+            profile_line(&mut p, 100, 200 + n as u32, 10.0, a, b);
+        }
+        let i = import(&p);
+        let [r] = roofs(&i)[..] else { panic!("{order:?}: {:?}", i.skipped) };
+        r.extrusion.clone().unwrap()
+    };
+    let ordered = build(&[(0, false), (1, false), (2, false), (3, false), (4, false), (5, false)]);
+    assert_eq!(ordered.profile.len(), 7);
+    assert!(
+        (ordered.profile[6].0 - 24.0 * 304.8).abs() < 0.01 && (ordered.profile[6].1 - 12.0 * 304.8).abs() < 0.01,
+        "{:?}",
+        ordered.profile
+    );
+    // The middle first, then pieces added at its head (by either end) and at its tail (by either end), and one more at each end.
+    let scrambled = build(&[(2, false), (1, true), (3, true), (0, false), (4, false), (5, true)]);
+    assert_eq!(scrambled, ordered);
+    let scrambled = build(&[(3, true), (4, false), (2, false), (5, true), (1, true), (0, true)]);
+    assert_eq!(scrambled, ordered);
+}
+
+#[test]
+fn a_profile_of_more_lines_than_a_roof_may_have_points_is_left_out_with_that_said() {
+    let mut p = with_roof_type(2024);
+    p.recs.push(Rec {
+        class_tag: crate::project_fixture::EXTRUSION_ROOF,
+        ..Rec::new(100, ROOFS).at([0.0, 0.0, 12.0 - 0.25 * 1.25f64.sqrt(), 30.0, 300.0, 12.0 + 300.0 * 0.5], &[10, 530, 100])
+    });
+    for k in 0..300u32 {
+        profile_line(&mut p, 100, 1000 + k, 10.0, (f64::from(k), 12.0 + 0.5 * f64::from(k)), (f64::from(k + 1), 12.5 + 0.5 * f64::from(k)));
+    }
+    let i = import(&p);
+    assert!(roofs(&i).is_empty());
+    assert!(i.skipped.iter().any(|s| s.starts_with("1 roof left out, its profile has 300 lines")), "{:?}", i.skipped);
+}

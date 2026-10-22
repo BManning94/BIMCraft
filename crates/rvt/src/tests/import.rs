@@ -132,3 +132,14 @@ fn the_levels_that_have_no_name_are_counted_in_the_singular_or_the_plural() {
     assert!(said(1).starts_with("1 level left out, no name"), "{}", said(1));
     assert!(said(2).starts_with("2 levels left out, no name"), "{}", said(2));
 }
+
+#[test]
+fn what_an_element_was_in_the_file_is_told_as_its_kind_and_its_id() {
+    use crate::import::origin;
+    assert_eq!(origin("Wall 423099"), Some(("wall".to_string(), Ok(423099))));
+    assert_eq!(origin("Structural column 12"), Some(("structural column".to_string(), Ok(12))), "a kind of two words");
+    assert_eq!(origin("Level 'Far away'"), Some(("level".to_string(), Err("'Far away'"))));
+    assert_eq!(origin("Level 'Roof 2'"), Some(("level".to_string(), Err("'Roof 2'"))), "a level's name may end in a number");
+    assert_eq!(origin("Wall"), None);
+    assert_eq!(origin(""), None);
+}
