@@ -559,3 +559,6 @@ pub const RST_COLUMNS: [(u32, [f64; 6]); 30] = [
     (1436907, [6995.4, -3201.6, -1200.0, 7128.4, -2998.6, 2439.0]),
     (1467946, [13030.2, -3693.3, -594.0, 13093.7, -3629.8, 2199.0]),
 ];
+
+/// The one roof by footprint of the architectural sample (the other is by extrusion).
+pub const RAC_ROOFS: [Sketched; 1] = [Sketched { id: 724430, storey: 2700.0, bottom: 2200.0, top: 2538.0, area: 70.788 }];

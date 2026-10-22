@@ -101,6 +101,8 @@ pub(crate) struct Tags {
     pub physical_param_set: Option<u16>,
     /// `PatternHelper`: frames a string that names a material.
     pub pattern_helper: Option<u16>,
+    /// `ProfileRoof`: a roof by footprint.
+    pub profile_roof: Option<u16>,
 }
 
 impl Tags {
@@ -120,6 +122,7 @@ impl Tags {
             material: schema.tag("Material"),
             physical_param_set: schema.tag("PhysicalParamSet"),
             pattern_helper: schema.tag("PatternHelper"),
+            profile_roof: schema.tag("ProfileRoof"),
         })
     }
 
@@ -372,19 +375,28 @@ pub(crate) fn records_32(buf: &[u8], tags: &Tags, ids: &[u32], partition: u32, k
 }
 
 /// The box-less records of a 2024 and later partition: the last six bytes of the marker at `+0x50`, the prologue constant at
-/// `+0x0c`, and a slot list at `+0x56` that holds the record's own id.
+/// `+0x0c`, and a slot list at `+0x56` that holds the record's own id. A frame with no id of its own (the second prologue) sits
+/// inside another record, takes its id, carries no prologue constant, and its slot list must name that id.
 pub(crate) fn types_64(buf: &[u8], tags: &Tags, ids: &[u32], partition: u32, keep: &mut dyn FnMut(TypeRecord)) {
     let marker = tags.marker();
+    let spans = chain(buf, &marker);
     let constant = u32::from(tags.parents.wrapping_sub(12));
     for hit in memchr::memmem::find_iter(buf, &marker[2..]) {
         let Some(f) = hit.checked_sub(MARKER_AT) else { continue };
-        if u32_at(buf, f + PROLOGUE_AT) != Some(constant) || u16_at(buf, f + 0x10) != Some(0) {
+        if u16_at(buf, f + 0x10) != Some(0) {
             continue;
         }
         let Some(category) = u64_at(buf, f + CATEGORY_AT).map(|v| v as i64).filter(|&c| in_band(c)) else { continue };
         let kind = u64_at(buf, f + KIND_AT).map_or(0, |v| v as u32);
-        let id = u64_at(buf, f).and_then(|v| u32::try_from(v).ok()).filter(|&id| declared(ids, id));
-        let Some(id) = id else { continue };
+        let raw = u64_at(buf, f).unwrap_or(0);
+        let id = if no_id(raw) {
+            enclosing(&spans, f).and_then(|s| u32::try_from(s.id).ok())
+        } else if u32_at(buf, f + PROLOGUE_AT) == Some(constant) {
+            Some(raw as u32)
+        } else {
+            None
+        };
+        let Some(id) = id.filter(|&id| declared(ids, id)) else { continue };
         let count = u32_at(buf, f + TYPE_SLOTS_AT).map_or(0, |c| c as usize);
         let slots = (1..=MAX_REFERENCES)
             .contains(&count)

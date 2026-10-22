@@ -436,3 +436,21 @@ fn a_real_architectural_file_damaged_in_its_partition_is_an_error_or_fewer_walls
         }
     }
 }
+
+#[test]
+fn a_large_real_architectural_model_imports_without_trouble_and_what_comes_in_checks_out() {
+    // Snowdon Towers (architectural, 2024): about 1,100 walls, 29,957 records and 442 MB of partition.
+    for path in super::samples_of("snowdon-towers-sample-architectural.rvt") {
+        let i = crate::import_path(&path, "x").unwrap();
+        assert!(i.model.check().is_ok());
+        let count = |category: &str| i.model.elements.values().filter(|e| e.category() == category).count();
+        assert_eq!(count("level"), 18);
+        assert!(count("wall") > 1000 && count("floor") > 100 && count("door") > 80 && count("column") > 100, "{:?}", i.skipped);
+        // The second-prologue types: nearly every wall names a type.
+        assert!(
+            !i.skipped.iter().any(|s| s.contains("does not name one wall type") && !s.starts_with("1 wall ") && !s.starts_with("2 walls ")),
+            "{:?}",
+            i.skipped
+        );
+    }
+}

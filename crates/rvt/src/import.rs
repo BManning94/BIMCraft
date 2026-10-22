@@ -16,7 +16,7 @@ use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 use crate::inventory::{Inventory, Survey, Wants};
 use crate::records::{Record, TypeRecord};
 use crate::{Limits, Revit};
-use crate::{columns, floors, openings, walls};
+use crate::{columns, floors, openings, roofs, rooms, walls};
 
 /// `OST_Materials`.
 pub(crate) const OST_MATERIALS: i64 = -2_000_700;
@@ -175,7 +175,7 @@ fn has_volume(r: &Record) -> bool {
 }
 
 /// The categories whose records the first pass keeps.
-const CATEGORIES: [i64; 8] = [
+const CATEGORIES: [i64; 10] = [
     walls::OST_WALLS,
     floors::OST_FLOORS,
     floors::OST_CEILINGS,
@@ -184,6 +184,8 @@ const CATEGORIES: [i64; 8] = [
     openings::OST_WINDOWS,
     columns::OST_COLUMNS,
     columns::OST_STRUCTURAL_COLUMNS,
+    rooms::OST_ROOMS,
+    roofs::OST_ROOFS,
 ];
 
 /// Reads the Revit project in `bytes` into a model named after its title (or `name`).
@@ -229,13 +231,17 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     let mut wants = Wants { materials: facts.materials.clone(), ..Wants::default() };
     walls::wanted(&facts, &mut wants.data);
     floors::wanted(&facts, &mut wants.data);
+    roofs::wanted(&facts, &mut wants.data);
     openings::wanted(&facts, &mut wants.data);
     columns::wanted(&facts, &mut wants);
+    rooms::wanted(&facts, &mut wants);
     let gathered = revit.gather(release, &facts.tags, &facts.ids, &wants).map_err(e)?;
     walls::import(&mut cx, &facts, &gathered);
     floors::import(&mut cx, &facts, &gathered);
+    roofs::import(&mut cx, &facts, &gathered);
     openings::import(&mut cx, &facts, &gathered);
     columns::import(&mut cx, &facts, &gathered);
+    rooms::import(&mut cx, &facts, &gathered);
     let from = cx.from.clone();
     finish(cx, format!("Revit {release}")).map(|i| (i, from))
 }

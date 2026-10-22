@@ -119,3 +119,21 @@ fn types_and_materials_have_records_without_a_box_that_name_themselves() {
         assert!(types.is_empty(), "{what}");
     }
 }
+
+#[test]
+fn a_type_record_without_an_id_of_its_own_takes_the_id_of_the_record_it_sits_in() {
+    // Most types sit in the documents of the families a project loads, in the body of another record (the second prologue).
+    let mut p = Project::new(2024);
+    p.types = vec![TypeRec { inside: true, ..TypeRec::new(500, WALLS) }, TypeRec::new(501, WALLS)];
+    let (_, types) = survey(&p);
+    let mut got: Vec<(u32, i64)> = types.iter().map(|t| (t.id, t.category)).collect();
+    got.sort();
+    assert_eq!(got, [(500, WALLS), (501, WALLS)], "{types:?}");
+    // The slot list of a frame inside a record must name that record's id.
+    let bytes = p.partition_bytes();
+    let list = memchr::memmem::find(&bytes, &[&2u32.to_le_bytes()[..], &7u64.to_le_bytes(), &500u64.to_le_bytes()].concat()).unwrap();
+    let mut bad = bytes.clone();
+    bad[list + 12..list + 20].copy_from_slice(&999u64.to_le_bytes());
+    let s = Revit::from_bytes(p.file_from(&bad), Limits::default()).unwrap().survey(&|_| true).unwrap();
+    assert_eq!(s.types.iter().map(|t| t.id).collect::<Vec<_>>(), [501]);
+}

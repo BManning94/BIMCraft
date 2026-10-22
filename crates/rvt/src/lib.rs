@@ -26,6 +26,8 @@ pub mod preview;
 #[cfg(any(test, feature = "testing"))]
 pub mod project_fixture;
 pub mod records;
+mod roofs;
+mod rooms;
 pub mod schema;
 mod sketch;
 pub mod types;

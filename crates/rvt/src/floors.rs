@@ -91,27 +91,29 @@ pub(crate) fn level_of(r: &Record, elevations: &BTreeMap<u32, f64>, z: f64) -> O
 }
 
 /// What a floor and a ceiling have in common: a sketched boundary, a layered type and a level.
-struct Sketched {
-    pieces: Vec<Piece>,
-    type_name: String,
-    level: bimcraft_core::model::Id,
-    /// How far above its level the box's top (bottom, for a ceiling) is.
-    offset: f64,
+pub(crate) struct Sketched {
+    pub pieces: Vec<Piece>,
+    pub type_name: String,
+    pub level: bimcraft_core::model::Id,
+    /// How far above its level the box's top (bottom, for a ceiling or a roof) is.
+    pub offset: f64,
 }
 
 /// Which sketched element is read: its category, and whether its level and offset are those of the box's top (a floor) or of its
 /// bottom (a ceiling's underside).
 #[derive(Clone, Copy)]
-struct Which {
-    category: i64,
-    at_top: bool,
+pub(crate) struct Which {
+    pub category: i64,
+    pub at_top: bool,
 }
 
 const FLOOR: Which = Which { category: OST_FLOORS, at_top: true };
 const CEILING: Which = Which { category: OST_CEILINGS, at_top: false };
+/// A roof: its underside is the bottom of its box, as a ceiling's.
+pub(crate) const ROOF: Which = Which { category: crate::roofs::OST_ROOFS, at_top: false };
 
 /// Reads a floor or a ceiling `r`: its sketch, its type (made by `type_named`, once for each) and its level.
-fn sketched(
+pub(crate) fn sketched(
     cx: &mut Import,
     f: &Facts,
     g: &Gathered,
@@ -122,7 +124,11 @@ fn sketched(
 ) -> Result<Sketched, String> {
     let Which { category, at_top } = which;
     let types = f.types.get(&category).cloned().unwrap_or_default();
-    let what = if category == OST_FLOORS { "floor" } else { "ceiling" };
+    let what = match category {
+        OST_FLOORS => "floor",
+        OST_CEILINGS => "ceiling",
+        _ => "roof",
+    };
     let lines = sketches.get(&r.id).ok_or("it has no sketch lines")?;
     let pieces = regions(lines, g).ok_or("its sketch lines do not close into a boundary")?;
     let tid = unique_type(&r.refs, &types).ok_or_else(|| format!("its record does not name one {what} type"))?;

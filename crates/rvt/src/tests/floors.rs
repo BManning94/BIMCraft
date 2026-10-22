@@ -33,7 +33,7 @@ fn ceilings(i: &Imported) -> Vec<&Ceiling> {
 }
 
 /// A project with a floor type (a 0.5 ft slab: 152.4 mm) and a ceiling type (0.25 ft).
-fn project(release: u32) -> Project {
+pub(super) fn project(release: u32) -> Project {
     let mut p = base(release);
     p.types.push(TypeRec::new(510, FLOORS));
     let mut payload = name_bytes("Slab");
@@ -60,7 +60,7 @@ fn line(p: &mut Project, owner: u32, id: u32, a: (f64, f64), b: (f64, f64), z: f
 }
 
 /// The sketch of a rectangle `[x0, y0, x1, y1]` as four lines with ids from `first`.
-fn rectangle(p: &mut Project, owner: u32, first: u32, r: [f64; 4], z: f64, data: bool) {
+pub(super) fn rectangle(p: &mut Project, owner: u32, first: u32, r: [f64; 4], z: f64, data: bool) {
     let [x0, y0, x1, y1] = r;
     for (k, (a, b)) in [((x0, y0), (x1, y0)), ((x1, y0), (x1, y1)), ((x1, y1), (x0, y1)), ((x0, y1), (x0, y0))].into_iter().enumerate() {
         line(p, owner, first + k as u32, a, b, z, data);

@@ -15,6 +15,7 @@ pub const REGIONS: u16 = 17;
 pub const MATERIAL: u16 = 18;
 pub const PHYSICAL: u16 = 19;
 pub const PATTERN: u16 = 20;
+pub const PROFILE_ROOF: u16 = 21;
 /// The tag a name is framed by in the fixture's type data (any tag but `ffff` will do).
 pub const NAME_TAG: u16 = 0x1002;
 
@@ -70,11 +71,13 @@ pub struct TypeRec {
     pub id: u32,
     pub category: i64,
     pub kind: u32,
+    /// From 2024: the type's frame has no id of its own and sits in the body of a chain record of its id (the second prologue).
+    pub inside: bool,
 }
 
 impl TypeRec {
     pub fn new(id: u32, category: i64) -> Self {
-        Self { id, category, kind: KIND_TYPE }
+        Self { id, category, kind: KIND_TYPE, inside: false }
     }
 }
 
@@ -131,6 +134,8 @@ pub struct Project {
     pub data: Vec<Block>,
     pub mats: Vec<Mat>,
     pub names: Vec<NameEntry>,
+    /// A room's object: its id, number and name.
+    pub room_names: Vec<(u32, String, String)>,
     /// Geometry nodes of columns: the id and the two boxes (feet) at 96 and 48 bytes before it.
     pub nodes: Vec<(u32, [f64; 6], [f64; 6])>,
     /// Ids the element table declares beyond the ones above.
@@ -152,6 +157,7 @@ impl Project {
             mats: Vec::new(),
             names: Vec::new(),
             nodes: Vec::new(),
+            room_names: Vec::new(),
             extra_ids: Vec::new(),
             members: 1,
             saved_by: String::new(),
@@ -210,6 +216,9 @@ impl Project {
         for n in &self.names {
             blocks.extend_from_slice(&name_entry(n, self.wide()));
         }
+        for (id, number, name) in &self.room_names {
+            blocks.extend_from_slice(&room_object(*id, number, name, self.wide()));
+        }
         for (id, first, second) in &self.nodes {
             blocks.extend_from_slice(&[0x13; 5]);
             blocks.extend_from_slice(&bbox(first));
@@ -233,6 +242,7 @@ impl Project {
         ids.extend(self.types.iter().map(|t| t.id));
         ids.extend(self.mats.iter().map(|m| m.id));
         ids.extend(self.names.iter().map(|n| n.id));
+        ids.extend(self.room_names.iter().map(|r| r.0));
         ids.extend(&self.extra_ids);
         // A table of one record fits both record sizes; a real one holds thousands of ids.
         ids.extend(900_001..900_006);
@@ -269,6 +279,7 @@ impl Project {
             Class { name: "Material", fields: &["m_name"], base: None },
             Class { name: "PhysicalParamSet", fields: &["m_set"], base: None },
             Class { name: "PatternHelper", fields: &["m_pattern"], base: None },
+            Class { name: "ProfileRoof", fields: &["m_sketch"], base: None },
         ])
     }
 
@@ -464,19 +475,32 @@ fn name_block(l: &Lev, wide: bool) -> Vec<u8> {
 
 /// A box-less record of 2024 and later: a level's frame, with the type's kind and a slot list holding its own id.
 fn type64(t: &TypeRec) -> Vec<u8> {
+    if t.inside {
+        // A chain record of the type's id, with the type's frame, without an id of its own, in its body.
+        let host = Rec { placed: false, ..Rec::new(t.id, t.category) };
+        let mut body = vec![0x33; 10];
+        body.extend_from_slice(&type_frame64(0, t));
+        return record64(t.id.into(), &host, &body);
+    }
+    let mut f = type_frame64(t.id.into(), t);
+    let size = f.len() as u32;
+    f[8..12].copy_from_slice(&size.to_le_bytes());
+    f.extend_from_slice(&[0; 8]);
+    f.extend_from_slice(&0u32.to_le_bytes());
+    f.extend_from_slice(&size.to_le_bytes());
+    f
+}
+
+/// The frame of a box-less record of 2024 and later, as far as its slot list (which names the type itself).
+fn type_frame64(raw_id: u64, t: &TypeRec) -> Vec<u8> {
     let r = Rec { placed: true, ..Rec::new(t.id, t.category) };
-    let mut f = frame64(t.id.into(), &r);
+    let mut f = frame64(raw_id, &r);
     f.truncate(0x50);
     f[0x42..0x46].copy_from_slice(&t.kind.to_le_bytes());
     f.extend_from_slice(&marker()[2..]); // +0x50
     f.extend_from_slice(&2u32.to_le_bytes()); // +0x56 the slot list: another element's id and its own
     f.extend_from_slice(&7u64.to_le_bytes());
     f.extend_from_slice(&u64::from(t.id).to_le_bytes());
-    let size = f.len() as u32;
-    f[8..12].copy_from_slice(&size.to_le_bytes());
-    f.extend_from_slice(&[0; 8]);
-    f.extend_from_slice(&0u32.to_le_bytes());
-    f.extend_from_slice(&size.to_le_bytes());
     f
 }
 
@@ -620,4 +644,27 @@ fn name_entry(n: &NameEntry, wide: bool) -> Vec<u8> {
 pub fn transform_bytes(angle: f64, origin: [f64; 3]) -> Vec<u8> {
     let (sin, cos) = angle.sin_cos();
     [cos, -sin, 0.0, sin, cos, 0.0, 0.0, 0.0, 1.0, origin[0], origin[1], origin[2]].iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// A room's object: `01 00 00 00`, its id, some bytes, then the number and the name as parameter entries.
+fn room_object(id: u32, number: &str, name: &str, wide: bool) -> Vec<u8> {
+    let mut f = vec![0x62; 3];
+    f.extend_from_slice(&[1, 0, 0, 0]);
+    let (number_tag, name_tag) = if wide {
+        f.extend_from_slice(&u64::from(id).to_le_bytes());
+        ((-1_006_901i64).to_le_bytes().to_vec(), (-1_006_900i64).to_le_bytes().to_vec())
+    } else {
+        f.extend_from_slice(&id.to_le_bytes());
+        ((-1_006_901i32).to_le_bytes().to_vec(), (-1_006_900i32).to_le_bytes().to_vec())
+    };
+    f.extend_from_slice(&[0x71; 40]);
+    let text = |s: &str| {
+        [&(s.encode_utf16().count() as u32).to_le_bytes()[..], &s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>()].concat()
+    };
+    f.extend_from_slice(&number_tag);
+    f.extend_from_slice(&text(number));
+    f.extend_from_slice(&name_tag);
+    f.extend_from_slice(&text(name));
+    f.extend_from_slice(&[0x72; 20]);
+    f
 }

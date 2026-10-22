@@ -104,6 +104,8 @@ mod inventory;
 mod metadata;
 mod openings;
 mod records;
+mod roofs;
+mod rooms;
 mod rvt_rs;
 mod walls;
 

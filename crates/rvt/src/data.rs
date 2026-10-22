@@ -21,6 +21,11 @@
 //! `ff` ×8. An id whose copies disagree has no name, and nor has a name that two
 //! materials would share: Revit keeps material names unique, so one of them is misread.
 //!
+//! A room's number and name are parameter entries in the room's object (`01 00 00 00` and its id, a `u32` up to 2023 and a `u64`
+//! after): the first `ROOM_NUMBER` (-1006901), a counted UTF-16 string and, right after it, `ROOM_NAME` (-1006900) and another
+//! (the parameter ids as wide as the release's ElementIds), within 0x400 bytes of the id. An empty text is a count of 0. The
+//! newest partition's copy decides, even where it is empty.
+//!
 //! A column's record box can start at 0.0 while the column starts higher: the column's geometry node holds the truer box. The node
 //! is the column's `u64` id, `u64 3` and `u64 -1`, preceded by two boxes of six `f64` 96 and 48 bytes before the id; the second
 //! holds Revit's z-range, and the plan extents of both equal the record's.
@@ -32,6 +37,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::names::Latest;
 use crate::records::{Tags, declared, f64_at, u32_at, u64_at};
 
 /// One copy of an element's data: the number of the partition it is in, and the bytes from just past its id to the next
@@ -173,6 +179,45 @@ pub(crate) fn column_bottoms(nodes: BTreeMap<u32, Vec<Node>>, targets: &BTreeMap
             bottoms.iter().all(|b| (b - first).abs() < NODE_TOLERANCE).then_some((id, first))
         })
         .collect()
+}
+
+const ROOM_NUMBER: i64 = -1_006_901;
+const ROOM_NAME: i64 = -1_006_900;
+const ROOM_WINDOW: usize = 0x400;
+
+fn counted(buf: &[u8], at: usize, limit: usize) -> Option<(String, usize)> {
+    let n = usize::try_from(u32_at(buf, at)?).ok().filter(|&n| n <= limit)?;
+    let bytes = buf.get(at + 4..at + 4 + 2 * n)?;
+    let text = String::from_utf16(&bytes.as_chunks::<2>().0.iter().map(|u| u16::from_le_bytes(*u)).collect::<Vec<_>>()).ok()?;
+    (!text.chars().any(char::is_control)).then_some((text, at + 4 + 2 * n))
+}
+
+/// The number and name of each room of `rooms` in a partition.
+pub(crate) fn room_entries(buf: &[u8], wide: bool, rooms: &BTreeSet<u32>, partition: u32, out: &mut Latest<(String, String)>) {
+    if rooms.is_empty() {
+        return;
+    }
+    let (id_len, number, name) = if wide {
+        (8, ROOM_NUMBER.to_le_bytes().to_vec(), ROOM_NAME.to_le_bytes().to_vec())
+    } else {
+        (4, (ROOM_NUMBER as i32).to_le_bytes().to_vec(), (ROOM_NAME as i32).to_le_bytes().to_vec())
+    };
+    for hit in memchr::memmem::find_iter(buf, &[1u8, 0, 0, 0]) {
+        let id = if wide { u64_at(buf, hit + 4).and_then(|v| u32::try_from(v).ok()) } else { u32_at(buf, hit + 4) };
+        let Some(id) = id.filter(|id| rooms.contains(id)) else { continue };
+        let start = hit + 4 + id_len;
+        let Some(window) = buf.get(start..(start + ROOM_WINDOW).min(buf.len())) else { continue };
+        let pair = memchr::memmem::find_iter(window, &number).find_map(|at| {
+            let at = start + at;
+            let (n, after) = counted(buf, at + number.len(), 64)?;
+            (buf.get(after..after + name.len())? == &name[..]).then_some(())?;
+            let (m, _) = counted(buf, after + name.len(), 256)?;
+            Some((n, m))
+        });
+        if let Some(pair) = pair {
+            out.offer(id, partition, pair);
+        }
+    }
 }
 
 const NAME_WINDOW: usize = 0x1000;
