@@ -16,7 +16,7 @@ use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 use crate::inventory::{Inventory, Survey};
 use crate::records::{Record, TypeRecord};
 use crate::{Limits, Revit};
-use crate::{floors, walls};
+use crate::{floors, openings, walls};
 
 /// `OST_Materials`.
 pub(crate) const OST_MATERIALS: i64 = -2_000_700;
@@ -77,6 +77,9 @@ pub(crate) struct Import {
     pub from: HashMap<Id, String>,
     /// The model's level for each Revit level.
     pub levels: HashMap<u32, Id>,
+    /// The model's wall for each Revit wall made, and the walls left out for having no layers (curtain walls): hosts of doors.
+    pub walls: HashMap<u32, Id>,
+    pub curtain: BTreeSet<u32>,
     /// What was left out or noted, by (left out, kind, reason): the ids it concerned. Told as one line each in the end.
     groups: BTreeMap<(bool, String, String), Vec<u32>>,
 }
@@ -93,7 +96,9 @@ impl Import {
     }
 
     fn tell(&mut self) {
-        for ((left, kind, reason), ids) in std::mem::take(&mut self.groups) {
+        for ((left, kind, reason), mut ids) in std::mem::take(&mut self.groups) {
+            ids.sort_unstable();
+            ids.dedup();
             let list: Vec<String> = ids.iter().take(8).map(u32::to_string).collect();
             let more = if ids.len() > list.len() { ", …" } else { "" };
             let n = ids.len();
@@ -118,6 +123,8 @@ pub(crate) struct Facts {
     pub types: BTreeMap<i64, BTreeSet<u32>>,
     /// The ids of the materials.
     pub materials: BTreeSet<u32>,
+    /// The ids of the family symbols (types of components, doors and windows) of each category, which have a box but are not placed.
+    pub symbols: BTreeMap<i64, BTreeSet<u32>>,
     /// Each project level's elevation in feet, by Revit id.
     pub elevations: BTreeMap<u32, f64>,
 }
@@ -125,6 +132,10 @@ pub(crate) struct Facts {
 impl Facts {
     fn of(s: Survey) -> (Facts, Inventory) {
         let mut current: BTreeMap<u32, Record> = BTreeMap::new();
+        let mut symbols: BTreeMap<i64, BTreeSet<u32>> = BTreeMap::new();
+        for r in s.records.iter().filter(|r| !r.placed) {
+            symbols.entry(r.category).or_default().insert(r.id);
+        }
         for r in s.records.into_iter().filter(|r| r.placed && (has_volume(r) || r.category == floors::OST_SKETCH_LINES)) {
             // The copy with the greatest height is the element's whole body; a tie goes to the newest.
             let key = |r: &Record| (r.extent()[2].to_bits(), r.partition, r.offset);
@@ -142,7 +153,7 @@ impl Facts {
             }
         }
         let elevations = s.inventory.levels.iter().map(|l| (l.id, l.elevation_feet)).collect();
-        (Facts { release: s.release, tags: s.tags, ids: s.ids, current, types, materials, elevations }, s.inventory)
+        (Facts { release: s.release, tags: s.tags, ids: s.ids, current, types, materials, symbols, elevations }, s.inventory)
     }
 
     /// The current records of a category.
@@ -157,7 +168,8 @@ fn has_volume(r: &Record) -> bool {
 }
 
 /// The categories whose records the first pass keeps.
-const CATEGORIES: [i64; 4] = [walls::OST_WALLS, floors::OST_FLOORS, floors::OST_CEILINGS, floors::OST_SKETCH_LINES];
+const CATEGORIES: [i64; 6] =
+    [walls::OST_WALLS, floors::OST_FLOORS, floors::OST_CEILINGS, floors::OST_SKETCH_LINES, openings::OST_DOORS, openings::OST_WINDOWS];
 
 /// Reads the Revit project in `bytes` into a model named after its title (or `name`).
 pub fn import(bytes: &[u8], name: &str) -> Result<Imported, String> {
@@ -187,16 +199,26 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     let mut m = Model::new(&clip(title.as_deref().unwrap_or(name)));
     m.elements.clear();
     m.next_id = 1;
-    let mut cx = Import { model: m, skipped: Vec::new(), from: HashMap::new(), levels: HashMap::new(), groups: BTreeMap::new() };
+    let mut cx = Import {
+        model: m,
+        skipped: Vec::new(),
+        from: HashMap::new(),
+        levels: HashMap::new(),
+        walls: HashMap::new(),
+        curtain: BTreeSet::new(),
+        groups: BTreeMap::new(),
+    };
     let release = survey.release;
     let (facts, inv) = Facts::of(survey);
     levels(&mut cx, &inv);
     let mut wanted = BTreeSet::new();
     walls::wanted(&facts, &mut wanted);
     floors::wanted(&facts, &mut wanted);
+    openings::wanted(&facts, &mut wanted);
     let gathered = revit.gather(release, &facts.tags, &facts.ids, &wanted, &facts.materials).map_err(e)?;
     walls::import(&mut cx, &facts, &gathered);
     floors::import(&mut cx, &facts, &gathered);
+    openings::import(&mut cx, &facts, &gathered);
     let from = cx.from.clone();
     finish(cx, format!("Revit {release}")).map(|i| (i, from))
 }

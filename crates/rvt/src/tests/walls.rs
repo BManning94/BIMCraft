@@ -10,6 +10,12 @@ pub(super) fn import(p: &Project) -> Imported {
     crate::import(&p.file(), "house").unwrap()
 }
 
+/// The import, and what each element made was in the file.
+pub(super) fn import_with_origins(p: &Project) -> (Imported, std::collections::HashMap<Id, String>) {
+    let mut r = crate::Revit::from_bytes(p.file(), crate::Limits::default()).unwrap();
+    crate::import::build(&mut r, "house").unwrap()
+}
+
 pub(super) fn walls(i: &Imported) -> Vec<(Id, &Wall)> {
     i.model
         .elements

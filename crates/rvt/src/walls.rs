@@ -228,11 +228,19 @@ pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
             Ok((wall, note)) => {
                 let id: Id = cx.model.insert(Element::Wall(wall));
                 cx.from.insert(id, format!("Wall {}", r.id));
+                cx.walls.insert(r.id, id);
                 if !note.is_empty() {
                     cx.note("wall", r.id, "the data does not say which side is the exterior: kept as drawn");
                 }
             }
-            Err((id, why)) => cx.left_out("wall", id, &why),
+            Err((id, why)) => {
+                // A wall whose type has no compound layers is a curtain wall (or the like): BIMCraft has no element for it, and a
+                // door set in it is set in no wall.
+                if why.contains("no layers") {
+                    cx.curtain.insert(id);
+                }
+                cx.left_out("wall", id, &why)
+            }
         }
     }
 }

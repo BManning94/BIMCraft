@@ -85,6 +85,14 @@ pub struct Block {
     pub payload: Vec<u8>,
 }
 
+/// A family or family type's name entry, with the category it is of.
+#[derive(Clone, Debug)]
+pub struct NameEntry {
+    pub id: u32,
+    pub name: String,
+    pub category: i64,
+}
+
 /// A material object, which names itself.
 #[derive(Clone, Debug)]
 pub struct Mat {
@@ -122,6 +130,7 @@ pub struct Project {
     pub types: Vec<TypeRec>,
     pub data: Vec<Block>,
     pub mats: Vec<Mat>,
+    pub names: Vec<NameEntry>,
     /// Ids the element table declares beyond the ones above.
     pub extra_ids: Vec<u32>,
     /// How many gzip members the partition's bytes are cut into (a record can run across two).
@@ -139,6 +148,7 @@ impl Project {
             types: Vec::new(),
             data: Vec::new(),
             mats: Vec::new(),
+            names: Vec::new(),
             extra_ids: Vec::new(),
             members: 1,
             saved_by: String::new(),
@@ -194,6 +204,9 @@ impl Project {
         for m in &self.mats {
             blocks.extend_from_slice(&material_object(m, self.wide()));
         }
+        for n in &self.names {
+            blocks.extend_from_slice(&name_entry(n, self.wide()));
+        }
         for l in self.levels.iter().filter(|l| l.named) {
             blocks.extend_from_slice(&name_block(l, self.wide()));
         }
@@ -208,6 +221,7 @@ impl Project {
         ids.extend(self.levels.iter().map(|l| l.id));
         ids.extend(self.types.iter().map(|t| t.id));
         ids.extend(self.mats.iter().map(|m| m.id));
+        ids.extend(self.names.iter().map(|n| n.id));
         ids.extend(&self.extra_ids);
         // A table of one record fits both record sizes; a real one holds thousands of ids.
         ids.extend(900_001..900_006);
@@ -568,5 +582,25 @@ pub fn layers_bytes(layers: &[(f64, Option<u32>, u32)], release: u32) -> Vec<u8>
         }
         f.extend_from_slice(&r);
     }
+    f
+}
+
+/// A name entry: from 2024 the id, a counted name and the category; before, `01 00 00 00`, the id and a counted name.
+fn name_entry(n: &NameEntry, wide: bool) -> Vec<u8> {
+    let mut f = vec![0x42; 3];
+    let units: Vec<u8> = n.name.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let count = (n.name.encode_utf16().count() as u32).to_le_bytes();
+    if wide {
+        f.extend_from_slice(&u64::from(n.id).to_le_bytes());
+        f.extend_from_slice(&count);
+        f.extend_from_slice(&units);
+        f.extend_from_slice(&n.category.to_le_bytes());
+    } else {
+        f.extend_from_slice(&[1, 0, 0, 0]);
+        f.extend_from_slice(&n.id.to_le_bytes());
+        f.extend_from_slice(&count);
+        f.extend_from_slice(&units);
+    }
+    f.extend_from_slice(&[0x24; 3]);
     f
 }

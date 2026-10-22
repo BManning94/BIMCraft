@@ -480,3 +480,41 @@ pub const RST_FLOORS: [Sketched; 5] = [
     Sketched { id: 1210630, storey: -550.0, bottom: -594.0, top: -550.0, area: 90.071 },
     Sketched { id: 1211070, storey: -550.0, bottom: -694.0, top: -594.0, area: 89.871 },
 ];
+
+/// One door or window of rvt-rs's export that has a host: the wall it is set in and the box of the hole it cuts (x min, y min,
+/// z min, x max, y max, z max).
+pub struct Opening {
+    pub id: u32,
+    pub host: u32,
+    pub door: bool,
+    pub cut: [f64; 6],
+}
+
+pub const RAC_OPENINGS: [Opening; 26] = [
+    Opening { id: 422466, host: 422243, door: true, cut: [8961.9, 1137.4, 0.0, 9921.9, 1339.4, 2180.0] },
+    Opening { id: 425292, host: 424922, door: true, cut: [8961.9, -826.7, 0.0, 9921.9, -661.6, 2180.0] },
+    Opening { id: 430997, host: 430064, door: true, cut: [8920.9, 1298.4, 3000.0, 9880.9, 1418.4, 5180.0] },
+    Opening { id: 431064, host: 430064, door: true, cut: [1160.9, 1298.4, 3000.0, 2120.9, 1418.4, 5180.0] },
+    Opening { id: 431144, host: 430412, door: true, cut: [6941.9, -3181.6, 3000.0, 7061.9, -2221.6, 5180.0] },
+    Opening { id: 431198, host: 430318, door: true, cut: [4061.9, -341.6, 3000.0, 4181.9, 618.4, 5180.0] },
+    Opening { id: 457479, host: 428745, door: false, cut: [-3485.1, -3403.6, 2990.0, -1891.1, -3201.6, 5700.0] },
+    Opening { id: 457534, host: 428745, door: false, cut: [2514.9, -3403.6, 2990.0, 4108.9, -3201.6, 5700.0] },
+    Opening { id: 457542, host: 428745, door: false, cut: [8353.9, -3403.6, 2990.0, 9947.9, -3201.6, 5700.0] },
+    Opening { id: 485432, host: 428588, door: false, cut: [-3485.1, 2798.4, 2990.0, -1891.1, 3000.4, 5700.0] },
+    Opening { id: 485679, host: 429964, door: true, cut: [1001.9, 1818.4, 3000.0, 1121.9, 2778.4, 5180.0] },
+    Opening { id: 498006, host: 428588, door: false, cut: [4014.9, 2798.4, 2990.0, 5608.9, 3000.4, 5700.0] },
+    Opening { id: 505974, host: 430859, door: true, cut: [-1438.1, -2501.6, 3000.0, -1318.1, -611.6, 5027.0] },
+    Opening { id: 554383, host: 428588, door: false, cut: [5514.9, 2798.4, 2990.0, 7108.9, 3000.4, 5700.0] },
+    Opening { id: 706288, host: 428745, door: false, cut: [-985.1, -3403.6, 2990.0, 608.9, -3201.6, 5700.0] },
+    Opening { id: 735853, host: 849032, door: false, cut: [6859.9, -7748.6, -560.0, 7061.9, -6154.6, 2150.0] },
+    Opening { id: 736152, host: 849032, door: false, cut: [6859.9, -9248.6, -560.0, 7061.9, -7654.6, 2150.0] },
+    Opening { id: 736223, host: 849032, door: false, cut: [6859.9, -10748.6, -560.0, 7061.9, -9154.6, 2150.0] },
+    Opening { id: 736330, host: 849032, door: false, cut: [6859.9, -12248.6, -560.0, 7061.9, -10654.6, 2150.0] },
+    Opening { id: 744522, host: 427092, door: false, cut: [13061.9, -7714.6, -560.0, 13263.9, -6188.6, 2150.0] },
+    Opening { id: 744523, host: 427092, door: false, cut: [13061.9, -9214.6, -560.0, 13263.9, -7688.6, 2150.0] },
+    Opening { id: 744524, host: 427092, door: false, cut: [13061.9, -10714.6, -560.0, 13263.9, -9188.6, 2150.0] },
+    Opening { id: 744525, host: 427092, door: false, cut: [13061.9, -12214.6, -560.0, 13263.9, -10688.6, 2150.0] },
+    Opening { id: 906937, host: 422243, door: true, cut: [5994.9, 1137.4, 0.0, 7086.9, 1339.4, 2210.0] },
+    Opening { id: 939962, host: 430064, door: true, cut: [5511.8, 1298.4, 3000.0, 7401.8, 1418.4, 5027.0] },
+    Opening { id: 940221, host: 430064, door: true, cut: [3336.9, 1298.4, 3000.0, 5226.9, 1418.4, 5027.0] },
+];

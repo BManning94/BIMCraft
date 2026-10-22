@@ -101,6 +101,7 @@ mod floors;
 mod import;
 mod inventory;
 mod metadata;
+mod openings;
 mod records;
 mod rvt_rs;
 mod walls;

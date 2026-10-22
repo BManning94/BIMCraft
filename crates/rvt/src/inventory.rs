@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::data::{Data, category_materials, element_data, material_names, newest};
 use crate::error::{Error, Result};
+use crate::names::{Latest, entries_32, entries_64};
 use crate::records::{
     CATEGORY_AT, CONTAINER_AT, HEADER_TAG_AFTER_ID, KIND_AT, KIND_PLACED, MARKER_AT, NO_CONTAINER, Record, Tags, TypeRecord, chain,
     declared, enclosing, f64_at, no_id, records_32, records_64, types_32, types_64, u16_at, u32_at, u64_at,
@@ -376,6 +377,8 @@ pub(crate) struct Gathered {
     pub materials: BTreeMap<u32, String>,
     /// The material the object styles give a category, where they give one: what a layer with no material of its own is made of.
     pub category: BTreeMap<i64, u32>,
+    /// The name of each family and family type, with its category (2024 and later), as its newest partition holds it.
+    pub names: BTreeMap<u32, (String, Option<i64>)>,
 }
 
 impl crate::Revit {
@@ -408,12 +411,22 @@ impl crate::Revit {
         let mut data = Data::new();
         let mut materials: BTreeMap<u32, Option<String>> = BTreeMap::new();
         let mut styled: BTreeMap<i64, BTreeSet<u64>> = BTreeMap::new();
+        let mut named = Latest::default();
         for name in names {
             let number = name.rsplit('/').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
             let buf = self.inflate_all(&name)?.bytes;
             element_data(&buf, tags, wide, wanted, number, &mut data);
             material_names(&buf, tags, wide, ids, &mut materials);
             category_materials(&buf, tags, release, &CATEGORY_MATERIAL_CATEGORIES, &mut styled);
+            let mut entries = Vec::new();
+            if wide {
+                entries_64(&buf, ids, &mut entries);
+            } else {
+                entries_32(&buf, ids, &mut entries);
+            }
+            for e in entries {
+                named.offer(e.id, number, (e.name, e.category));
+            }
         }
         if !wide {
             let header = tags.data_header();
@@ -442,7 +455,7 @@ impl crate::Revit {
                 Some((c, id))
             })
             .collect();
-        Ok(Gathered { data, materials, category })
+        Ok(Gathered { data, materials, category, names: named.into_values() })
     }
 
     /// [`Revit::inventory`], and the records of the categories `keep` says yes to.

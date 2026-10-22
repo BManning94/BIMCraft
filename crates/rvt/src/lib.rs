@@ -18,6 +18,8 @@ pub mod gzip;
 mod import;
 pub mod info;
 pub mod inventory;
+mod names;
+mod openings;
 pub mod preview;
 #[cfg(any(test, feature = "testing"))]
 pub mod project_fixture;

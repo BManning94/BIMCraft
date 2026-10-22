@@ -1,0 +1,301 @@
+//! Doors and windows: the wall that holds them, where along it, how wide and how high.
+
+use super::walls::{WALLS, base, import, straight, walls};
+use crate::project_fixture::{Block, NameEntry, Project, Rec, line_bytes, orientation_bytes};
+use bimcraft_core::import::Imported;
+use bimcraft_core::model::{Element, Id, Opening};
+
+const DOORS: i64 = -2_000_023;
+const WINDOWS: i64 = -2_000_014;
+
+fn openings(i: &Imported) -> Vec<(Id, bool, &Opening)> {
+    i.model
+        .elements
+        .iter()
+        .filter_map(|(&id, e)| match e {
+            Element::Door(o) => Some((id, true, o)),
+            Element::Window(o) => Some((id, false, o)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A project with the wall of `straight` (id 100, east along y = 0 from 0 to 20 ft, 10 ft tall) and a door symbol 600 and a
+/// window symbol 601, each named.
+fn project(release: u32) -> Project {
+    let mut p = base(release);
+    straight(&mut p, 100, false);
+    p.recs.push(Rec { placed: false, ..Rec::new(600, DOORS) });
+    p.recs.push(Rec { placed: false, ..Rec::new(601, WINDOWS) });
+    p.names = vec![
+        NameEntry { id: 600, name: "Single-Flush".into(), category: DOORS },
+        NameEntry { id: 601, name: "Fixed".into(), category: WINDOWS },
+    ];
+    p
+}
+
+/// A door (3 ft wide, 7 ft tall, from the floor) centred `at` ft along the wall, listing `refs` besides its symbol.
+fn door(p: &mut Project, id: u32, at: f64, refs: &[u64]) {
+    let mut all = refs.to_vec();
+    all.extend([600, u64::from(id)]);
+    p.recs.push(Rec::new(id, DOORS).at([at - 1.5, -0.4, 0.0, at + 1.5, 1.2, 7.0], &all));
+}
+
+#[test]
+fn a_door_and_a_window_come_in_set_in_their_wall_with_the_size_and_height_of_their_boxes() {
+    for release in [2019, 2023, 2024, 2026] {
+        let mut p = project(release);
+        door(&mut p, 200, 5.0, &[100]);
+        p.recs.push(Rec::new(201, WINDOWS).at([11.0, -0.4, 3.0, 15.0, 0.4, 7.0], &[100, 601, 201]));
+        let i = import(&p);
+        let ops = openings(&i);
+        assert_eq!(ops.len(), 2, "Revit {release}: {:?}", i.skipped);
+        let (_, is_door, d) = ops.iter().find(|(_, door, _)| *door).copied().unwrap();
+        assert!(is_door);
+        assert_eq!((d.offset, d.sill, d.type_name.as_str()), (1524.0, 0.0, "Single-Flush"), "Revit {release}");
+        assert_eq!((i.model.types.door["Single-Flush"].width, i.model.types.door["Single-Flush"].height), (914.4, 2133.6));
+        let (_, _, w) = ops.iter().find(|(_, door, _)| !*door).copied().unwrap();
+        assert_eq!((w.offset, w.sill, w.type_name.as_str()), (3962.4, 914.4, "Fixed"));
+        assert_eq!((i.model.types.window["Fixed"].width, i.model.types.window["Fixed"].height), (1219.2, 1219.2));
+        assert!(w.host == d.host && !d.flip_facing && !d.flip_hand && d.family.is_none());
+        assert_eq!(i.skipped, Vec::<String>::new(), "Revit {release}");
+    }
+}
+
+#[test]
+fn an_opening_is_measured_from_the_start_of_a_wall_whichever_way_it_runs() {
+    // The wall turned round (its exterior on the right), then standing north: the offset is from where its line starts.
+    let mut p = base(2024);
+    p.recs.push(Rec::new(100, WALLS).at([-0.4, 0.0, 0.0, 0.4, 20.0, 10.0], &[10, 11, 500, 100]));
+    let mut payload = line_bytes(0.0, 20.0, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    payload.extend(orientation_bytes(0, 1, true, true));
+    p.data.push(Block { id: 100, payload });
+    p.recs.push(Rec { placed: false, ..Rec::new(600, DOORS) });
+    p.recs.push(Rec::new(200, DOORS).at([-0.4, 3.5, 0.0, 1.2, 6.5, 7.0], &[100, 600, 200]));
+    let i = import(&p);
+    let [(_, w)] = walls(&i)[..] else { panic!() };
+    assert_eq!((w.start.1, w.end.1), (6096.0, 0.0), "the wall runs south: its exterior is on the right");
+    let [(_, _, d)] = openings(&i)[..] else { panic!("{:?}", i.skipped) };
+    assert_eq!(d.offset, 6096.0 - 1524.0, "5 ft from where the line starts, which is the north end");
+}
+
+#[test]
+fn the_host_is_the_nearest_wall_below_an_openings_id_then_the_nearest_above_and_never_a_curtain_wall() {
+    let wall_at = |p: &mut Project, id: u32, y: f64, type_id: u64| {
+        p.recs.push(Rec::new(id, WALLS).at([0.0, y - 0.4, 0.0, 20.0, y + 0.4, 10.0], &[10, 11, type_id, u64::from(id)]));
+        let mut b = line_bytes(0.0, 20.0, [0.0, y, 0.0], [1.0, 0.0, 0.0]);
+        b.extend(orientation_bytes(0, 1, false, true));
+        p.data.push(Block { id, payload: b });
+    };
+    let mut p = project(2024);
+    wall_at(&mut p, 80, 20.0, 500);
+    wall_at(&mut p, 300, 30.0, 500);
+    // A curtain wall: its type has no layers.
+    p.types.push(crate::project_fixture::TypeRec::new(502, WALLS));
+    wall_at(&mut p, 90, 40.0, 502);
+    // Door 200 names walls 80 and 100, both below it: the nearest below is 100. Door 250 names only wall 300, above it.
+    door(&mut p, 200, 5.0, &[80, 100]);
+    p.recs.push(Rec::new(250, DOORS).at([3.5, 29.6, 0.0, 6.5, 31.2, 7.0], &[300, 600, 250]));
+    // Door 95 names the curtain wall 90 (below it) and wall 100 (above it): the curtain wall is no host. Door 410 names only it.
+    door(&mut p, 95, 9.0, &[90, 100]);
+    p.recs.push(Rec::new(410, DOORS).at([3.5, 40.0, 0.0, 6.5, 41.2, 7.0], &[90, 600, 410]));
+    let (i, from) = super::walls::import_with_origins(&p);
+    let host =
+        |door: u32| openings(&i).into_iter().find(|(m, _, _)| from[m] == format!("Door {door}")).map(|(_, _, o)| from[&o.host].clone());
+    assert_eq!(host(200).as_deref(), Some("Wall 100"), "{:?}", i.skipped);
+    assert_eq!(host(250).as_deref(), Some("Wall 300"));
+    assert_eq!(host(95).as_deref(), Some("Wall 100"));
+    assert_eq!(host(410), None);
+    assert!(i.skipped.iter().any(|s| s.contains("curtain wall") && s.contains("410")), "{:?}", i.skipped);
+}
+
+#[test]
+fn an_opening_in_a_wall_at_an_angle_or_a_curved_one_or_with_no_wall_is_left_out_with_the_reason() {
+    let mut p = project(2024);
+    // A wall at an angle (3-4-5) and a door in it.
+    p.recs.push(Rec::new(150, WALLS).at([0.0, 5.0, 0.0, 12.0, 14.0, 10.0], &[10, 11, 500, 150]));
+    p.data.push(Block {
+        id: 150,
+        payload: {
+            let mut b = line_bytes(0.0, 15.0, [0.0, 5.0, 0.0], [0.8, 0.6, 0.0]);
+            b.extend(orientation_bytes(0, 1, false, true));
+            b
+        },
+    });
+    p.recs.push(Rec::new(210, DOORS).at([4.0, 8.0, 0.0, 7.0, 10.0, 7.0], &[150, 600, 210]));
+    // A door that names no wall, and one that names a wall that was left out (its type has no layers... here no data).
+    p.recs.push(Rec::new(220, DOORS).at([4.0, -0.4, 0.0, 7.0, 0.4, 7.0], &[600, 220]));
+    p.recs.push(Rec::new(130, WALLS).at([0.0, 50.0, 0.0, 20.0, 51.0, 10.0], &[10, 11, 500, 130]));
+    p.recs.push(Rec::new(230, DOORS).at([4.0, 50.0, 0.0, 7.0, 51.0, 7.0], &[130, 600, 230]));
+    let i = import(&p);
+    assert!(openings(&i).is_empty(), "{:?}", i.skipped);
+    let said = |what: &str| i.skipped.iter().find(|s| s.contains(what)).cloned().unwrap_or_default();
+    assert!(said("runs at an angle").contains("210"), "{:?}", i.skipped);
+    assert!(said("names no wall").contains("220"));
+    assert!(said("was left out").contains("230"));
+    // A curved wall.
+    let mut q = project(2024);
+    q.recs[0].bbox = [0.0, -10.4, 0.0, 10.4, 10.4, 10.0];
+    q.data[1].payload = {
+        let mut b = crate::project_fixture::arc_bytes([0.0, 1.5], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], 10.0, [0.0; 3]);
+        b.extend(orientation_bytes(0, 1, false, true));
+        b
+    };
+    door(&mut q, 200, 5.0, &[100]);
+    let i = import(&q);
+    assert!(openings(&i).is_empty() && i.skipped.iter().any(|s| s.contains("curved")), "{:?}", i.skipped);
+}
+
+#[test]
+fn neighbours_that_overlap_a_little_are_narrowed_to_fit_and_ones_that_overlap_much_are_not() {
+    let mut p = project(2024);
+    // Two 4 ft windows overlapping by 0.2 ft (6.1 mm of 1219.2: a few percent).
+    for (id, at) in [(201, 5.0), (202, 8.8)] {
+        p.recs.push(Rec::new(id, WINDOWS).at([at - 2.0, -0.4, 3.0, at + 2.0, 0.4, 7.0], &[100, 601, u64::from(id)]));
+    }
+    let i = import(&p);
+    let ops = openings(&i);
+    assert_eq!(ops.len(), 2, "{:?}", i.skipped);
+    let spans: Vec<(f64, f64)> = {
+        let mut v: Vec<(f64, f64)> = ops
+            .iter()
+            .map(|(_, _, o)| {
+                let w = i.model.types.window[&o.type_name].width;
+                (o.offset - w / 2.0, o.offset + w / 2.0)
+            })
+            .collect();
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        v
+    };
+    assert!((spans[0].1 - spans[1].0).abs() < 1e-6, "they meet: {spans:?}");
+    assert!((spans[0].0 - (5.0 - 2.0) * 304.8).abs() < 1e-6 && (spans[1].1 - (8.8 + 2.0) * 304.8).abs() < 1e-6, "the outer edges stay");
+    assert!(i.skipped.iter().any(|s| s.contains("2 openings") && s.contains("narrowed to fit")), "{:?}", i.skipped);
+    // Overlapping by 2 ft is not a few percent: one of them goes, and the import says why.
+    let mut q = project(2024);
+    for (id, at) in [(201, 5.0), (202, 7.0)] {
+        q.recs.push(Rec::new(id, WINDOWS).at([at - 2.0, -0.4, 3.0, at + 2.0, 0.4, 7.0], &[100, 601, u64::from(id)]));
+    }
+    let i = import(&q);
+    assert_eq!(openings(&i).len(), 1);
+    assert!(i.skipped.iter().any(|s| s.contains("overlap in wall")), "{:?}", i.skipped);
+}
+
+#[test]
+fn an_opening_that_does_not_fit_its_wall_is_dropped_by_the_models_rules_and_the_others_stay() {
+    let mut p = project(2024);
+    door(&mut p, 200, 5.0, &[100]);
+    door(&mut p, 201, -0.5, &[100]); // half of it before the wall starts
+    p.recs.push(Rec::new(202, WINDOWS).at([10.0, -0.4, 9.0, 12.0, 0.4, 12.0], &[100, 601, 202])); // above its wall's top
+    let i = import(&p);
+    assert_eq!(openings(&i).len(), 1, "{:?}", i.skipped);
+    assert!(i.skipped.iter().any(|s| s.contains("Door") && s.contains("doesn't fit wall")), "{:?}", i.skipped);
+    assert!(i.skipped.iter().any(|s| s.contains("Window") && s.contains("height")), "{:?}", i.skipped);
+}
+
+#[test]
+fn types_are_named_by_their_name_entries_and_told_apart_by_size() {
+    for release in [2019, 2023, 2024] {
+        let mut p = project(release);
+        door(&mut p, 200, 5.0, &[100]);
+        // The same type, a wider door: BIMCraft's type has one size.
+        p.recs.push(Rec::new(201, DOORS).at([9.0, -0.4, 0.0, 13.0, 1.2, 7.0], &[100, 600, 201]));
+        // No name entry for its symbol: a name of its own.
+        p.recs.push(Rec { placed: false, ..Rec::new(602, DOORS) });
+        p.recs.push(Rec::new(202, DOORS).at([15.0, -0.4, 0.0, 18.0, 1.2, 7.0], &[100, 602, 202]));
+        // A name entry of another category does not name a door's type (2024 and later keep the category).
+        let i = import(&p);
+        // (A new project has door types of its own; the import leaves them be, as the IFC import does.)
+        let mut names: Vec<&str> =
+            i.model.types.door.keys().map(String::as_str).filter(|n| n.starts_with("Imported") || n.starts_with("Single-Flush")).collect();
+        names.sort();
+        assert_eq!(names, ["Imported door", "Single-Flush", "Single-Flush (2)"], "Revit {release}: {:?}", i.skipped);
+        assert_eq!(i.model.types.door["Single-Flush (2)"].width, 1219.2);
+    }
+    let mut p = project(2024);
+    p.names[0].category = WINDOWS;
+    door(&mut p, 200, 5.0, &[100]);
+    assert!(import(&p).model.types.door.contains_key("Imported door"));
+}
+
+#[test]
+fn the_doors_and_windows_of_the_architectural_sample_are_those_of_rvt_rss_export_with_a_host() {
+    use super::rvt_rs::RAC_OPENINGS;
+    for path in super::samples_of("racbasicsampleproject.rvt") {
+        let (i, from) = crate::import_path_with_origins(&path, "x").unwrap();
+        let mut missing = Vec::new();
+        let mut fitted = 0;
+        for theirs in &RAC_OPENINGS {
+            let label = if theirs.door { "Door" } else { "Window" };
+            let Some((_, _, o)) = openings(&i).into_iter().find(|(m, _, _)| from[m] == format!("{label} {}", theirs.id)) else {
+                missing.push(theirs.id);
+                continue;
+            };
+            assert!(!o.type_name.starts_with("Imported"), "{label} {}: its type is named in the file", theirs.id);
+            let host = i.model.wall(o.host).unwrap();
+            assert_eq!(from[&o.host], format!("Wall {}", theirs.host), "{label} {}", theirs.id);
+            let t = if theirs.door { i.model.types.door[&o.type_name] } else { i.model.types.window[&o.type_name] };
+            let along_x = (host.end.1 - host.start.1).abs() < 0.01;
+            let (lo, hi) = if along_x { (theirs.cut[0], theirs.cut[3]) } else { (theirs.cut[1], theirs.cut[4]) };
+            let (from_start, sign) = if along_x {
+                (host.start.0, (host.end.0 - host.start.0).signum())
+            } else {
+                (host.start.1, (host.end.1 - host.start.1).signum())
+            };
+            let mine = (from_start + sign * (o.offset - t.width / 2.0), from_start + sign * (o.offset + t.width / 2.0));
+            let (mine_lo, mine_hi) = (mine.0.min(mine.1), mine.0.max(mine.1));
+            // Within what fitting a neighbour may take (a tenth of the width) and, for the rest, to the hole's edge.
+            assert!(
+                (mine_lo - lo).abs() <= 0.1 * (hi - lo) && (mine_hi - hi).abs() <= 0.1 * (hi - lo),
+                "{label} {}: {mine_lo}..{mine_hi} against {lo}..{hi}",
+                theirs.id
+            );
+            fitted += usize::from((mine_lo - lo).abs() > 0.2 || (mine_hi - hi).abs() > 0.2);
+            let base = i.model.own_base(host);
+            assert!(
+                (base + o.sill - theirs.cut[2]).abs() < 0.2 && (base + o.sill + t.height - theirs.cut[5]).abs() < 0.2,
+                "{label} {}: z",
+                theirs.id
+            );
+        }
+        // 26 with a host: 25 are set in the wall; the one that is not hangs 1 m out of the wall its list names (906937).
+        assert_eq!(missing, [906937], "{}: {:?}", path.display(), i.skipped);
+        assert_eq!(fitted, 10, "ten windows are narrowed to fit their neighbours");
+        assert_eq!(openings(&i).len(), 25);
+    }
+}
+
+#[test]
+fn a_mutation_sweep_over_a_project_with_openings_never_panics_and_what_comes_in_checks_out() {
+    for release in [2019, 2024] {
+        let mut p = project(release);
+        door(&mut p, 200, 5.0, &[100]);
+        p.recs.push(Rec::new(201, WINDOWS).at([11.0, -0.4, 3.0, 15.0, 0.4, 7.0], &[100, 601, 201]));
+        p.members = 3;
+        let bytes = p.partition_bytes();
+        let mut seed = 0x2468_ace0_1357_9bdfu64 ^ u64::from(release);
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for round in 0..800 {
+            let mut bad = bytes.clone();
+            for _ in 0..1 + next() % 8 {
+                let at = (next() % bad.len() as u64) as usize;
+                bad[at] = match next() % 4 {
+                    0 => 0xff,
+                    1 => 0,
+                    _ => next() as u8,
+                };
+            }
+            if round % 7 == 0 {
+                bad.truncate(bad.len() - (next() % 400) as usize);
+            }
+            if let Ok(i) = crate::import(&p.file_from(&bad), "x") {
+                assert!(i.model.check().is_ok(), "round {round}");
+                assert!(openings(&i).len() <= 2, "round {round}");
+            }
+        }
+    }
+}
