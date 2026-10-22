@@ -125,6 +125,20 @@ impl Lev {
     }
 }
 
+/// Where a material's object keeps its name.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NameStyle {
+    /// After the class tag: two zero words, a count and the text.
+    #[default]
+    Own,
+    /// Framed by `ff ff ff ff` and the tag of `PatternHelper` (2024 and later).
+    PatternFramed,
+    /// After the built-in parameter `-1001203` and four zero bytes.
+    ParamEntry,
+    /// Closed by eight zero bytes, an ElementId and `ff` times eight (2024 and later).
+    Closed,
+}
+
 #[derive(Clone, Debug)]
 pub struct Project {
     pub release: u32,
@@ -144,6 +158,10 @@ pub struct Project {
     pub members: usize,
     /// The name the file records for its last save (`Username`).
     pub saved_by: String,
+    /// Where the materials' objects keep their names.
+    pub name_style: NameStyle,
+    /// What the object styles say a category's material is (the category and the material's id): written once for each.
+    pub category_materials: Vec<(i64, u32)>,
 }
 
 impl Project {
@@ -161,6 +179,8 @@ impl Project {
             extra_ids: Vec::new(),
             members: 1,
             saved_by: String::new(),
+            name_style: NameStyle::default(),
+            category_materials: Vec::new(),
         }
     }
 
@@ -211,7 +231,10 @@ impl Project {
             blocks.extend_from_slice(&data_block(b, self.wide()));
         }
         for m in &self.mats {
-            blocks.extend_from_slice(&material_object(m, self.wide()));
+            blocks.extend_from_slice(&material_object(m, self.wide(), self.name_style));
+        }
+        for &(category, material) in &self.category_materials {
+            blocks.extend_from_slice(&category_material(category, material, self.release));
         }
         for n in &self.names {
             blocks.extend_from_slice(&name_entry(n, self.wide()));
@@ -529,12 +552,47 @@ fn data_block(b: &Block, wide: bool) -> Vec<u8> {
     f
 }
 
-/// A material object: `01 00 00 00`, its id, the class tag at the fixed distance, two zero words and its name.
-fn material_object(m: &Mat, wide: bool) -> Vec<u8> {
+/// What the object styles hold for a category's material: from 2024 (and only in 2024) the category's id, an unset id, `01 00 00 00`,
+/// another unset id and the material; before, the `i32` id, `ff` times four, a word of 1, a 1, the frame of `PatternHelper`, eight
+/// bytes, `i32 -3000010` and the material.
+fn category_material(category: i64, material: u32, release: u32) -> Vec<u8> {
+    let mut f = vec![0x14; 3];
+    if release >= 2024 {
+        f.extend_from_slice(&category.to_le_bytes());
+        f.extend_from_slice(&[0xff; 8]);
+        f.extend_from_slice(&[1, 0, 0, 0]);
+        f.extend_from_slice(&[0xff; 8]);
+        f.extend_from_slice(&u64::from(material).to_le_bytes());
+    } else {
+        f.extend_from_slice(&(category as i32).to_le_bytes());
+        f.extend_from_slice(&[0xff; 4]);
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(&1u32.to_le_bytes());
+        f.extend_from_slice(&[0xff; 4]);
+        f.extend_from_slice(&PATTERN.to_le_bytes());
+        f.extend_from_slice(&[0x15; 8]);
+        f.extend_from_slice(&(-3_000_010i32).to_le_bytes());
+        f.extend_from_slice(&material.to_le_bytes());
+    }
+    f.extend_from_slice(&[0x16; 3]);
+    f
+}
+
+/// A material object: `01 00 00 00`, its id, the class tag at the fixed distance and its name, where `style` puts it.
+fn material_object(m: &Mat, wide: bool, style: NameStyle) -> Vec<u8> {
     let mut f = vec![0x55; 3];
     f.extend_from_slice(&[1, 0, 0, 0]);
     let units: Vec<u8> = m.name.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let name = [&[0u8; 8][..], &(m.name.encode_utf16().count() as u32).to_le_bytes(), &units, &[0x66; 40]].concat();
+    let count = (m.name.encode_utf16().count() as u32).to_le_bytes();
+    let name = match style {
+        NameStyle::Own => [&[0u8; 8][..], &count, &units, &[0x66; 40]].concat(),
+        NameStyle::PatternFramed => [&[0x66u8; 16][..], &[0xff; 4], &PATTERN.to_le_bytes(), &count, &units, &[0x66; 40]].concat(),
+        NameStyle::ParamEntry => {
+            let parameter = if wide { (-1_001_203i64).to_le_bytes().to_vec() } else { (-1_001_203i32).to_le_bytes().to_vec() };
+            [&[0x66u8; 16][..], &parameter, &[0; 4], &count, &units, &[0x66; 40]].concat()
+        }
+        NameStyle::Closed => [&[0x66u8; 16][..], &count, &units, &[0; 8], &u64::from(m.id).to_le_bytes(), &[0xff; 8], &[0x66; 40]].concat(),
+    };
     if wide {
         f.extend_from_slice(&u64::from(m.id).to_le_bytes());
         f.extend_from_slice(&[0x31; 0x47 - 8]);

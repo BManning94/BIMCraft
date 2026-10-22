@@ -324,6 +324,13 @@ fn neighbours_that_overlap_by_more_than_a_tenth_of_the_narrower_are_not_fitted_w
     let i = import(&p);
     assert_eq!(openings(&i).len(), 1, "{:?}", i.skipped);
     assert!(!i.skipped.iter().any(|s| s.contains("narrowed")), "{:?}", i.skipped);
+    // The narrower first: a 2 ft window from 10 ft and a 4 ft one from 11.7, overlapping by the same 0.3 ft.
+    let mut r = project(2024);
+    r.recs.push(Rec::new(200, WINDOWS).at([10.0, -0.4, 3.0, 12.0, 0.4, 7.0], &[100, 601, 200]));
+    r.recs.push(Rec::new(201, WINDOWS).at([11.7, -0.4, 3.0, 15.7, 0.4, 7.0], &[100, 601, 201]));
+    let i = import(&r);
+    assert_eq!(openings(&i).len(), 1, "{:?}", i.skipped);
+    assert!(!i.skipped.iter().any(|s| s.contains("narrowed")), "{:?}", i.skipped);
     // Half a tenth of the narrower is fitted: each gives up half.
     let mut q = project(2024);
     q.recs.push(Rec::new(200, WINDOWS).at([10.0, -0.4, 3.0, 14.0, 0.4, 7.0], &[100, 601, 200]));

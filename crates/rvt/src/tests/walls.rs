@@ -570,3 +570,49 @@ fn a_layer_list_is_a_types_only_when_it_is_framed() {
         assert!(walls(&i).is_empty() && i.skipped.iter().any(|s| s.contains("no layers")), "{:?}", i.skipped);
     }
 }
+
+#[test]
+fn a_materials_name_is_read_by_each_of_the_rules_and_a_rule_only_where_its_release_writes_it() {
+    use crate::project_fixture::NameStyle;
+    let layers = |release: u32, style: NameStyle| {
+        let mut p = base(release);
+        p.name_style = style;
+        straight(&mut p, 100, false);
+        let i = import(&p);
+        let t = &i.model.types.wall["Brick wall"];
+        (t.layers[0].material.clone(), t.layers[1].material.clone())
+    };
+    let named = ("Brick".to_string(), "Concrete".to_string());
+    let none = (String::new(), String::new());
+    for (release, style, want) in [
+        (2024, NameStyle::PatternFramed, &named),
+        (2024, NameStyle::ParamEntry, &named),
+        (2024, NameStyle::Closed, &named),
+        (2023, NameStyle::ParamEntry, &named),
+        (2019, NameStyle::ParamEntry, &named),
+        (2023, NameStyle::PatternFramed, &none),
+        (2023, NameStyle::Closed, &none),
+    ] {
+        assert_eq!(&layers(release, style), want, "Revit {release}, {style:?}");
+    }
+}
+
+#[test]
+fn a_layer_with_no_material_takes_its_categorys_from_the_object_styles_up_to_2024_when_one_value_is_written() {
+    let layer_material = |release: u32, written: &[(i64, u32)]| {
+        let mut p = base(release);
+        let mut payload = name_bytes("Brick wall");
+        payload.extend(layers_bytes(&[(0.25, None, 4), (0.5, Some(701), 1)], release));
+        p.data[0].payload = payload;
+        p.category_materials = written.to_vec();
+        straight(&mut p, 100, false);
+        import(&p).model.types.wall["Brick wall"].layers[0].material.clone()
+    };
+    for (release, want) in [(2019, "Brick"), (2023, "Brick"), (2024, "Brick"), (2025, ""), (2026, "")] {
+        assert_eq!(layer_material(release, &[(-2_000_011, 700)]), want, "Revit {release}");
+    }
+    // Two values for the category, or one for another: none.
+    assert_eq!(layer_material(2024, &[(-2_000_011, 700), (-2_000_011, 701)]), "");
+    assert_eq!(layer_material(2024, &[(-2_000_032, 700)]), "");
+    assert_eq!(layer_material(2023, &[(-2_000_011, 700), (-2_000_011, 701)]), "");
+}

@@ -188,3 +188,20 @@ fn a_room_whose_middle_is_inside_a_core_standing_free_has_its_point_at_the_neare
     let got = (r.point.0 - 10.0 * 304.8).hypot(r.point.1 - 5.0 * 304.8);
     assert!((got - near).abs() < 1e-6, "the point {:?} is {got} from the middle, the nearest grid point is {near}", r.point);
 }
+
+#[test]
+fn a_room_whose_only_free_grid_points_are_in_the_last_row_or_the_last_column_is_still_found() {
+    // A 20 by 30 ft room with a core nearly as big, standing free: the 9 by 9 grid over the room's box has points outside the core
+    // only in the last row (the core's top edge is under it) or in the last column. The core's region is further than 600 mm from the
+    // box on a side, so the room is not the core's.
+    for (core, free_at) in [([1.0, 1.0, 19.0, 25.5], (10.0, 28.2)), ([1.0, 1.0, 17.5, 29.0], (18.7, 15.0))] {
+        let mut p = base(2024);
+        enclose(&mut p, 100, [0.0, 0.0, 20.0, 30.0]);
+        enclose(&mut p, 110, core);
+        room(&mut p, 300, "1", "Hall", [0.2, 0.2, 0.0, 19.8, 29.8, 8.0]);
+        let i = import(&p);
+        let [r] = rooms(&i)[..] else { panic!("core {core:?}: {:?}", i.skipped) };
+        let (x, y) = (r.point.0 / 304.8, r.point.1 / 304.8);
+        assert!((x - free_at.0).abs() < 0.05 && (y - free_at.1).abs() < 0.05, "core {core:?}: the point is ({x}, {y}), not {free_at:?}");
+    }
+}

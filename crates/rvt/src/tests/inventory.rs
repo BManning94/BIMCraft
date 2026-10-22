@@ -526,3 +526,41 @@ fn a_real_file_damaged_in_its_partition_is_an_error_or_a_smaller_inventory_never
     }
     eprintln!("{ok} read, {failed} refused");
 }
+
+#[test]
+fn a_level_record_whose_flag_marker_or_header_is_damaged_is_no_record() {
+    for release in [2023, 2024] {
+        let mut p = Project::new(release);
+        p.levels = vec![Lev::new(10, "Level 1", 0.0)];
+        let bytes = p.partition_bytes();
+        let records = |bytes: &[u8]| {
+            let inv = Revit::from_bytes(p.file_from(bytes), Limits::default()).unwrap().inventory().unwrap();
+            inv.counts().iter().find(|c| c.category == OST_LEVELS).map_or(0, |c| c.elements)
+        };
+        assert_eq!(records(&bytes), 1, "Revit {release}");
+        let hit = memchr::memmem::find(&bytes, &OST_LEVELS.to_le_bytes()).unwrap();
+        // From 2024 the flag is a `u16` 2 bytes before the category and the marker 0x3e after it; before, the header's tag is 6 bytes
+        // before it and the marker 38 after.
+        let damaged = if release >= 2024 { [hit - 2, hit + 0x3e] } else { [hit - 6, hit + 38] };
+        for at in damaged {
+            let mut bad = bytes.clone();
+            bad[at] ^= 0x55;
+            assert_eq!(records(&bad), 0, "Revit {release}, byte {at}");
+        }
+    }
+}
+
+#[test]
+fn a_building_story_setting_may_come_some_bytes_after_the_levels_name() {
+    for release in [2023, 2024] {
+        let p = storeys(release);
+        let mut bytes = p.partition_bytes();
+        let (unset, _) = if release >= 2024 { (8, 8) } else { (4, 4) };
+        let anchor = [vec![0xff; unset], vec![0, 1]].concat();
+        let at = memchr::memmem::find(&bytes, &anchor).unwrap();
+        bytes.splice(at..at, [0x44u8; 7]);
+        let inv = Revit::from_bytes(p.file_from(&bytes), Limits::default()).unwrap().inventory().unwrap();
+        let seen: Vec<Option<bool>> = inv.levels.iter().map(|l| l.building_story).collect();
+        assert_eq!(seen, [Some(false), Some(true), None], "Revit {release}");
+    }
+}

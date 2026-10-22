@@ -14,7 +14,7 @@ fn polygon(points: &[(f64, f64)]) -> Vec<Edge> {
 
 #[test]
 fn three_curves_close_a_triangle_at_any_scale_and_two_do_not_close_anything() {
-    for scale in [1.0, 0.001, 1000.0] {
+    for scale in [1.0, 1e-5, 1000.0] {
         let pieces = from_edges(&polygon(&[(0.0, 0.0), (10.0 * scale, 0.0), (0.0, 10.0 * scale)])).expect("a triangle");
         assert_eq!(pieces.len(), 1);
         assert_eq!(pieces[0].outer.len(), 3, "scale {scale}");
@@ -65,7 +65,7 @@ fn a_sketch_holds_up_to_the_most_curves_it_is_read_from() {
 }
 
 #[test]
-fn an_arc_that_sweeps_more_than_a_full_turn_is_no_curve_of_a_sketch() {
+fn an_arc_that_turns_more_than_a_full_turn_is_no_curve_of_a_sketch() {
     // The frame is turned (x north, y west) so that its arc is not also a line that fits the box: the line it would read as
     // starts at (0, 1) and runs west, out of the box.
     let bbox = [0.0, 0.0, 0.0, 10.0, 10.0, 0.0];
