@@ -134,3 +134,29 @@ fn the_rooms_of_the_architectural_sample_have_rvt_rss_numbers_and_names() {
         assert!(i.skipped.iter().any(|s| s.contains("5 rooms left out") && s.contains("do not enclose")), "{:?}", i.skipped);
     }
 }
+
+#[test]
+fn a_mutation_sweep_over_a_project_of_rooms_never_panics_and_what_comes_in_checks_out() {
+    for release in [2019, 2024] {
+        let mut p = walled(release);
+        room(&mut p, 300, "101", "Kitchen", [0.2, 0.2, 0.0, 19.8, 9.8, 8.0]);
+        room(&mut p, 301, "102", "Hall", [0.2, 0.2, 0.0, 9.8, 9.8, 8.0]);
+        p.members = 3;
+        super::sweep(&p, 0x2468_ace0_1357_9bdf ^ u64::from(release), 800, |i, round| assert!(rooms(i).len() <= 2, "round {round}"));
+    }
+}
+
+#[test]
+fn a_value_far_beyond_revits_limits_is_damage_and_never_reaches_the_geometry() {
+    // One wall of the enclosure starts a googol of feet away: a length the reader does not take, so the wall has no line, and the room
+    // (with only three walls) is left out. Nothing may panic on the way: the room's point is found among the walls made.
+    let mut p = walled(2024);
+    p.data.retain(|b| b.id != 100);
+    let mut b = line_bytes(0.0, 1e300, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+    b.extend(orientation_bytes(0, 1, false, true));
+    p.data.push(Block { id: 100, payload: b });
+    room(&mut p, 300, "101", "Kitchen", [0.2, 0.2, 0.0, 19.8, 9.8, 8.0]);
+    let i = import(&p);
+    assert_eq!(super::walls::walls(&i).len(), 3, "{:?}", i.skipped);
+    assert!(rooms(&i).is_empty() && i.skipped.iter().any(|s| s.contains("no location line") && s.contains("100")), "{:?}", i.skipped);
+}

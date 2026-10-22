@@ -41,14 +41,14 @@ impl BoundedLine {
     }
 }
 
-/// The values of a curve record, `n` of them after the tag, all finite.
+/// The values of a curve record, `n` of them after the tag, all finite and within [`crate::records::MAX_FEET`].
 fn values<const N: usize>(buf: &[u8], at: usize) -> Option<[f64; N]> {
     if buf.get(at..at.checked_add(4)?)? != TAG {
         return None;
     }
     let mut out = [0.0; N];
     for (i, v) in out.iter_mut().enumerate() {
-        *v = f64_at(buf, at + 4 + 8 * i).filter(|x| x.is_finite())?;
+        *v = f64_at(buf, at + 4 + 8 * i).filter(|x| x.is_finite() && x.abs() <= crate::records::MAX_FEET)?;
     }
     Some(out)
 }

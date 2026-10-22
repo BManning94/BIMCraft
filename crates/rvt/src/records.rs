@@ -49,6 +49,11 @@ pub(crate) const NO_CONTAINER: u64 = u64::MAX;
 /// The most slots a reference list may hold.
 const MAX_REFERENCES: usize = 1024;
 
+/// The furthest a length may be from zero, in feet, for the reader to take it as a length. Revit's working limit is 20 miles
+/// (105,600 ft) from the origin, so a finite value beyond this is damage; it is also far inside the model's own limit once in millimetres, which
+/// keeps a hostile number out of the geometry the importer asks of the model before it is checked.
+pub(crate) const MAX_FEET: f64 = 3.0e5;
+
 /// A record chain's header and trailer lengths.
 const CHAIN_HEADER: usize = 16;
 const CHAIN_TRAILER: usize = 16;
@@ -259,7 +264,7 @@ fn finite_box(buf: &[u8], at: usize) -> Option<[f64; 6]> {
     let mut b = [0.0f64; 6];
     for (i, v) in b.iter_mut().enumerate() {
         match f64_at(buf, at + i * 8) {
-            Some(x) if x.is_finite() => *v = x,
+            Some(x) if x.is_finite() && x.abs() <= MAX_FEET => *v = x,
             _ => return None,
         }
     }

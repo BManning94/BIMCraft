@@ -88,3 +88,16 @@ fn the_roof_by_footprint_of_the_architectural_sample_is_that_of_rvt_rss_export()
         assert!(i.skipped.iter().any(|s| s.contains("1 roof left out") && s.contains("243274")), "{:?}", i.skipped);
     }
 }
+
+#[test]
+fn a_mutation_sweep_over_a_project_of_roofs_never_panics_and_what_comes_in_checks_out() {
+    for release in [2019, 2024] {
+        let mut p = with_roof_type(release);
+        roof(&mut p, 100, PROFILE_ROOF, [0.0, 0.0, 12.0, 20.0, 10.0, 12.25]);
+        rectangle(&mut p, 100, 200, [0.0, 0.0, 20.0, 10.0], 3.0, release >= 2024);
+        rectangle(&mut p, 100, 210, [5.0, 3.0, 9.0, 7.0], 3.0, release >= 2024);
+        roof(&mut p, 101, 100, [0.0, 0.0, 12.0, 20.0, 10.0, 15.0]);
+        p.members = 3;
+        super::sweep(&p, 0x0f1e_2d3c_4b5a_6978 ^ u64::from(release), 800, |i, round| assert!(roofs(i).len() <= 2, "round {round}"));
+    }
+}

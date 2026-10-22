@@ -132,7 +132,7 @@ const PLAN_TOLERANCE: f64 = 1e-6;
 fn node_box(buf: &[u8], at: usize) -> Option<[f64; 6]> {
     let mut out = [0.0; 6];
     for (i, v) in out.iter_mut().enumerate() {
-        *v = f64_at(buf, at.checked_add(i * 8)?).filter(|v| v.is_finite() && v.abs() < 1e5)?;
+        *v = f64_at(buf, at.checked_add(i * 8)?).filter(|v| v.is_finite() && v.abs() <= crate::records::MAX_FEET)?;
     }
     (out[3] > out[0] && out[4] > out[1] && out[5] > out[2]).then_some(out)
 }

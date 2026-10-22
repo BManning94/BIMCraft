@@ -8,6 +8,42 @@ fn read(path: &str) -> String {
     std::fs::read_to_string(root().join(path)).unwrap_or_else(|e| panic!("{path}: {e}"))
 }
 
+/// Imports `rounds` damaged copies of a synthetic project (one to eight bytes changed, one in seven cut short) and hands each
+/// import that comes back to `check`, after checking it passes the model's rules: none may panic.
+pub(super) fn sweep(
+    p: &crate::project_fixture::Project,
+    seed: u64,
+    rounds: usize,
+    check: impl Fn(&bimcraft_core::import::Imported, usize),
+) {
+    let bytes = p.partition_bytes();
+    let mut seed = seed;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for round in 0..rounds {
+        let mut bad = bytes.clone();
+        for _ in 0..1 + next() % 8 {
+            let at = (next() % bad.len() as u64) as usize;
+            bad[at] = match next() % 4 {
+                0 => 0xff,
+                1 => 0,
+                _ => next() as u8,
+            };
+        }
+        if round % 7 == 0 {
+            bad.truncate(bad.len() - (next() % 400) as usize);
+        }
+        if let Ok(i) = crate::import(&p.file_from(&bad), "x") {
+            assert!(i.model.check().is_ok(), "round {round}");
+            check(&i, round);
+        }
+    }
+}
+
 /// The commit of rvt-rs the code was ported from; the headers and NOTICE name it.
 const RVT_RS_COMMIT: &str = "b6086d41b9758fd9b92f42f0a47b8345b9c58056";
 

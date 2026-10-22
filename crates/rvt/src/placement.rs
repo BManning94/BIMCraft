@@ -57,7 +57,7 @@ pub fn transform(data: &[u8]) -> Option<Transform> {
     (0..end.saturating_sub(96)).find_map(|at| {
         let rows = rotation_at(data, at)?;
         let origin = [f64_at(data, at + 72)?, f64_at(data, at + 80)?, f64_at(data, at + 88)?];
-        if !origin.iter().all(|v| v.is_finite()) {
+        if !origin.iter().all(|v| v.is_finite() && v.abs() <= crate::records::MAX_FEET) {
             return None;
         }
         let column = |j: usize| [rows[0][j], rows[1][j], rows[2][j]];
