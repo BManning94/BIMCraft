@@ -67,6 +67,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "MSI=$msi"
 
+      # Installs the MSI to a folder of the user's choosing, upgrades it with a rebuild (another product code, the same
+      # upgrade code) and removes it: the folder has to survive the upgrade, as it must when an update runs the installer.
+      - name: Install elsewhere
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $rebuilt = "$env:RUNNER_TEMP\rebuilt.msi"
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" build packaging/windows/bimcraft.wxs -arch x64 -ext WixToolset.UI.wixext -d Version=$version -d BinDir=target\x86_64-pc-windows-msvc\release -o $rebuilt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          packaging/windows/check-install.ps1 -Msi $env:MSI -Upgrade $rebuilt
+
       - uses: actions/upload-artifact@v4
         with:
           name: bimcraft-windows-x64

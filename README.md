@@ -572,11 +572,12 @@ IFC is the way in and out, and `.rvt` files will come in through Autodesk's own 
 |---|---|
 | x64 (64-bit Intel/AMD) | `bimcraft-<ver>-windows-x64.msi` |
 
-The installer is a short setup wizard. It puts BIMCraft and `bimcraft-cli` in Program Files for every user, adds BIMCraft
-to the Start menu, asks whether to put it on the desktop too, opens `.bimcraft` projects in it, and offers it under Open
-with for `.ifc` files. It needs no Visual C++ runtime, and a newer version upgrades an older one, keeping the desktop
-shortcut as it was. For a silent install with a desktop shortcut: `msiexec /i bimcraft-<ver>-windows-x64.msi /qn
-DESKTOPSHORTCUT=1`. It isn't code-signed yet, so Windows SmartScreen asks before it runs: More info, then Run anyway.
+The installer is a short setup wizard. It puts BIMCraft and `bimcraft-cli` for every user in `Program Files\BIMCraft`, or in
+the folder you pick on its folder page (Change, on any drive), adds BIMCraft to the Start menu, asks whether to put it on the
+desktop too, opens `.bimcraft` projects in it, and offers it under Open with for `.ifc` files. It needs no Visual C++
+runtime, and a newer version upgrades an older one, keeping the folder and the desktop shortcut as they were. For a silent
+install with a desktop shortcut, in a folder of your own: `msiexec /i bimcraft-<ver>-windows-x64.msi /qn DESKTOPSHORTCUT=1
+INSTALLFOLDER="D:\Apps\BIMCraft"`. It isn't code-signed yet, so Windows SmartScreen asks before it runs: More info, then Run anyway.
 
 ### Linux
 
@@ -637,7 +638,8 @@ favorites, in your own configuration folder (`%APPDATA%\BIMCraft`, `~/Library/Ap
 `$XDG_CONFIG_HOME/bimcraft`, else `~/.config/bimcraft`; `BIMCRAFT_FAVORITES` moves both), not in a project. Setting the environment variable `BIMCRAFT_NO_UPDATE_CHECK` (to anything but empty)
 keeps the app from making any request, and hides the menu items. `bimcraft-cli` and the MCP server never check for anything.
 
-**Windows.** Update now works for the copy the installer put in `Program Files\BIMCraft`. It downloads
+**Windows.** Update now works for the copy the installer put in `Program Files\BIMCraft`; a copy in a folder you picked is
+told of the new version with a Download button, and the new installer offers that folder again. It downloads
 `bimcraft-<ver>-windows-x64.msi` from the release into a new folder in your temp folder and checks it. Restart and install
 then asks to save any unsaved changes, closes BIMCraft, and hands over to a copy of itself that waits for BIMCraft to be
 gone, checks the file once more, runs Windows' own `msiexec` on it while holding the file open, so that nothing can change it
