@@ -232,6 +232,35 @@ impl BimApp {
         }
     }
 
+    /// What of the selection the active view hides: the elements hidden one by one, and the categories hidden whole. Only
+    /// Reveal Hidden Elements lets anything hidden be picked, so this is what Unhide Element and Unhide Category offer.
+    pub(crate) fn hidden_selection(&self) -> (Vec<Id>, Vec<&'static str>) {
+        let (m, g) = (&self.session.model, self.graphics_shown());
+        let (mut elements, mut categories) = (Vec::new(), BTreeSet::new());
+        for (id, e) in self.selection.iter().filter_map(|id| Some((*id, m.elements.get(id)?))) {
+            if g.elements.get(&m.guid(id)).is_some_and(|o| o.hidden) {
+                elements.push(id);
+            }
+            if g.hides(e.category()) {
+                categories.insert(e.category());
+            }
+        }
+        (elements, categories.into_iter().collect())
+    }
+
+    /// Unhide Element (EU) and Unhide Category (VU): what the selection hides in the view comes back. It stays selected.
+    pub(crate) fn unhide_selection(&mut self, category: bool) {
+        let Some(view) = self.graphic_view() else { return };
+        let (elements, categories) = self.hidden_selection();
+        if if category { categories.is_empty() } else { elements.is_empty() } {
+            let text = t("Nothing selected is hidden in this view. Reveal Hidden Elements (RH) draws what is, to select it.");
+            self.status = Status { text: text.to_string(), error: false };
+            return;
+        }
+        let p = if category { json!({"view": view, "show": categories}) } else { json!({"view": view, "show_elements": elements}) };
+        self.run("graphics", p);
+    }
+
     /// The Visibility/Graphics dialog, while it's open.
     pub(crate) fn graphics_window(&mut self, ctx: &Context) {
         let Some(mut d) = self.vg_dialog.take() else { return };

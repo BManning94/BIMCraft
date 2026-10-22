@@ -1691,6 +1691,23 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["Transparency", "Transparência", "Transparencia"],
     ["Unhide Elements", "Reexibir elementos", "Mostrar elementos"],
+    ["Unhide Element", "Reexibir elemento", "Mostrar elemento"],
+    ["Unhide Category", "Reexibir categoria", "Mostrar categoría"],
+    [
+        "Unhide Element (EU): bring back the selected elements this view hides",
+        "Reexibir elemento (EU): traz de volta os elementos selecionados que esta vista oculta",
+        "Mostrar elemento (EU): devuelve los elementos seleccionados que esta vista oculta",
+    ],
+    [
+        "Unhide Category (VU): bring back every category the selection is of that this view hides",
+        "Reexibir categoria (VU): traz de volta cada categoria da seleção que esta vista oculta",
+        "Mostrar categoría (VU): devuelve cada categoría de la selección que esta vista oculta",
+    ],
+    [
+        "Nothing selected is hidden in this view. Reveal Hidden Elements (RH) draws what is, to select it.",
+        "Nada do que está selecionado está oculto nesta vista. Revelar elementos ocultos (RH) desenha o que está, para selecioná-lo.",
+        "Nada de lo seleccionado está oculto en esta vista. Revelar elementos ocultos (RH) dibuja lo que lo está, para seleccionarlo.",
+    ],
     ["View Template", "Modelo de vista", "Plantilla de vista"],
     ["View Templates", "Modelos de vista", "Plantillas de vista"],
     [

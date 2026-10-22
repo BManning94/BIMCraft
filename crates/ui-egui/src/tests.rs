@@ -3673,6 +3673,48 @@ fn reveal_hidden_elements_shows_what_the_view_hides_for_good_and_apply_makes_a_h
 }
 
 #[test]
+fn unhide_element_and_unhide_category_bring_back_what_the_selection_hides_while_revealing() {
+    let mut h = app(BOX);
+    let walls = ids(&h, "wall");
+    // A wall hidden for good can't be picked, and offers nothing to unhide.
+    click(&mut h, P2(4000.0, 0.0));
+    shortcut(&mut h, "EH");
+    assert!(h.query_by_label("Unhide Element").is_none());
+    // Revealing draws it in magenta, and it can be picked: its panel then offers Unhide Element, not Unhide Category (its
+    // category isn't hidden).
+    shortcut(&mut h, "RH");
+    click(&mut h, P2(4000.0, 0.0));
+    assert_eq!(h.state().selection, [walls[0]]);
+    assert!(h.query_by_label("Unhide Element").is_some() && h.query_by_label("Unhide Category").is_none());
+    press(&mut h, "Unhide Element");
+    assert!(plan_graphics(&h, 100000).elements.is_empty(), "no entry for what's visible and plain");
+    assert_eq!(h.state().selection, [walls[0]], "it stays selected: it is still there");
+    assert!(h.query_by_label("Unhide Element").is_none(), "nothing the selection hides is left");
+    // EU on a selection that hides something unhides it, with no dialog; hidden again, and picked, then EU does it too.
+    click(&mut h, P2(8000.0, 3000.0));
+    shortcut(&mut h, "EH");
+    click(&mut h, P2(8000.0, 3000.0));
+    shortcut(&mut h, "EU");
+    assert!(plan_graphics(&h, 100000).elements.is_empty());
+    assert!(h.query_by_label("Visibility/Graphics Overrides for Level 1").is_none(), "the dialog stays shut");
+    // A category hidden whole: Unhide Category (VU) brings back all its elements.
+    shortcut(&mut h, "VH");
+    assert!(plan_graphics(&h, 100000).hides("wall"));
+    click(&mut h, P2(0.0, 3000.0));
+    assert!(h.query_by_label("Unhide Category").is_some());
+    press(&mut h, "Unhide Category");
+    assert!(!plan_graphics(&h, 100000).hides("wall"));
+    shortcut(&mut h, "VH");
+    click(&mut h, P2(0.0, 3000.0));
+    shortcut(&mut h, "VU");
+    assert!(!plan_graphics(&h, 100000).hides("wall"));
+    // With nothing the selection hides, VU says so and changes nothing.
+    shortcut(&mut h, "VU");
+    assert!(h.state().status.text.contains("Reveal Hidden Elements"), "{:?}", h.state().status);
+    key(&mut h, Key::Escape);
+}
+
+#[test]
 fn hide_element_hide_category_and_the_elements_tab_work_on_the_selection() {
     let mut h = app(BOX);
     let walls = ids(&h, "wall");

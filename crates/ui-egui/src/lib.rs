@@ -239,7 +239,7 @@ type Buttons<'a> = &'a [(Icon, &'a str, &'a str, Option<Tool>, bool)];
 
 /// The desktop's own two-letter shortcuts, which [`BimApp::shortcut`] takes before the commands'
 /// aliases, and what Keyboard Shortcuts (KS) calls them.
-const SHORTCUTS: [(&str, &str); 42] = [
+const SHORTCUTS: [(&str, &str); 43] = [
     ("MD", "Modify"),
     ("SB", "Floor: Structural"),
     ("MM", "Mirror Pick Axis"),
@@ -273,6 +273,7 @@ const SHORTCUTS: [(&str, &str); 42] = [
     ("HR", "Reset Temporary Hide/Isolate"),
     ("RH", "Reveal Hidden Elements"),
     ("EU", "Unhide Elements"),
+    ("VU", "Unhide Category"),
     ("EO", "Override Graphics by Element"),
     ("FT", "Filters"),
     ("VT", "View Templates"),
@@ -1208,8 +1209,17 @@ impl BimApp {
                 }
                 return true;
             }
+            // What the selection hides comes back; with nothing of it hidden, the list of what the view hides.
             "EU" => {
-                self.open_graphics(3);
+                if self.hidden_selection().0.is_empty() {
+                    self.open_graphics(3);
+                } else {
+                    self.unhide_selection(false);
+                }
+                return true;
+            }
+            "VU" => {
+                self.unhide_selection(true);
                 return true;
             }
             "EO" => {
@@ -2451,6 +2461,20 @@ impl BimApp {
                 let tip = "Override Graphics by Element (EO): draw the selected elements their own way in this view";
                 if big_button(ui, Icon::Visibility, "Override Graphics", false, tip).clicked() {
                     self.override_selection();
+                }
+                // What can be picked while hidden is what Reveal Hidden Elements draws: its selection can be brought back.
+                let (elements, categories) = self.hidden_selection();
+                if !elements.is_empty() {
+                    let tip = "Unhide Element (EU): bring back the selected elements this view hides";
+                    if big_button(ui, Icon::Visibility, "Unhide Element", false, tip).clicked() {
+                        self.unhide_selection(false);
+                    }
+                }
+                if !categories.is_empty() {
+                    let tip = "Unhide Category (VU): bring back every category the selection is of that this view hides";
+                    if big_button(ui, Icon::Visibility, "Unhide Category", false, tip).clicked() {
+                        self.unhide_selection(true);
+                    }
                 }
             });
         }
