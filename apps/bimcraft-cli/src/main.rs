@@ -13,12 +13,12 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "USAGE:
   bimcraft-cli run [FILE] [--sample] [--cmd 'ID {json}']… [--script FILE]… [--save PATH]…
-      Open FILE (a .bimcraft project, or an .ifc file to import) or start empty, then in order: build the sample house, run
+      Open FILE (a .bimcraft project, or an .ifc or Revit .rvt file to import) or start empty, then in order: build the sample house, run
       commands and scripts (one `ID {json}` per line), save. --save writes by extension:
       .bimcraft (the project), .ifc (IFC4), .svg or .png (the lowest level's plan).
   bimcraft-cli info FILE         levels, element counts, types and warnings of a project or an IFC file; of a Revit .rvt or
                                  .rfa file, its release, last save, levels and element counts by category
-  bimcraft-cli convert IN OUT    a project or an IFC file to .ifc, .svg, .png or .bimcraft
+  bimcraft-cli convert IN OUT    a project, an IFC file or a Revit .rvt file to .ifc, .svg, .png or .bimcraft
   bimcraft-cli commands          every command and its parameters
   bimcraft-cli mcp               an MCP server on stdio, for agents
   bimcraft-cli --version         the release";
@@ -47,7 +47,7 @@ fn cli(args: &[String], out: &mut impl Write) -> Result<(), String> {
                     }
                     "--save" => vec![s.execute("save", &json!({ "path": value()? }))?],
                     flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`\n\n{USAGE}")),
-                    file if revit::is_revit(file) => return Err(format!("{file}: {}", revit::NOT_YET)),
+                    file if revit::is_revit(file) => vec![revit::open(&mut s, file)?],
                     file => vec![s.execute("open", &json!({ "path": file }))?],
                 };
                 for r in results.iter().filter(|r| !r.is_null()) {
@@ -61,9 +61,12 @@ fn cli(args: &[String], out: &mut impl Write) -> Result<(), String> {
             s.execute("open", &json!({ "path": file }))?;
             print_pretty(out, &s.execute("inspect", &json!({}))?)
         }
-        [cmd, from, _] if cmd == "convert" && revit::is_revit(from) => Err(format!("{from}: {}", revit::NOT_YET)),
         [cmd, from, to] if cmd == "convert" => {
-            s.execute("open", &json!({ "path": from }))?;
+            if revit::is_revit(from) {
+                revit::open(&mut s, from)?;
+            } else {
+                s.execute("open", &json!({ "path": from }))?;
+            }
             print(out, &s.execute("save", &json!({ "path": to }))?)
         }
         [cmd] if cmd == "commands" => print_pretty(out, &catalog()),
@@ -182,13 +185,44 @@ mod tests {
         assert_eq!(cat(-2_000_240).unwrap()["elements"], 3, "the levels are elements too");
         assert!(cat(-2_009_999).unwrap()["name"].is_null(), "a category with no known name has none");
         assert_eq!(info["elements"]["total"], 7);
-        // Nothing makes a project of it: run and convert say so and write nothing.
-        let out = format!("{path}.bimcraft");
-        for args in [vec!["run", &path], vec!["convert", &path, &out]] {
-            let e = cli_out(&args).unwrap_err();
-            assert!(e.contains("Revit file") && !std::path::Path::new(&out).exists(), "{e}");
+        // The saver's name and the path stay out of everything but the report: the project of the same file has neither.
+        let mut opened = Vec::new();
+        cli(&["run".into(), path.clone(), "--save".into(), format!("{path}.bimcraft")], &mut opened).unwrap();
+        let project = std::fs::read_to_string(format!("{path}.bimcraft")).unwrap();
+        assert!(!project.contains("jdoe") && !project.contains(&path), "the saver's name or the path got into the project");
+    }
+
+    #[cfg(feature = "rvt")]
+    #[test]
+    fn run_and_convert_open_a_revit_file_and_save_it_as_a_project_or_ifc() {
+        let path = revit::tests::house("house.rvt");
+        let (project, ifc, converted) = (format!("{path}.bimcraft"), format!("{path}.ifc"), format!("{path}-converted.ifc"));
+        let out = cli_out(&["run", &path, "--cmd", r#"elements {"category": "wall"}"#, "--save", &project, "--save", &ifc]).unwrap();
+        let lines: Vec<Value> = out.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!((lines[0]["format"].as_str(), lines[0]["name"].as_str()), (Some("Revit 2024"), Some("house")), "{out}");
+        assert_eq!(lines[0]["elements"], json!({"level": 2, "wall": 1}));
+        assert_eq!(lines[0]["skipped"], json!([]));
+        assert_eq!(lines[1]["elements"][0]["end"], json!([6096.0, 0.0]), "20 ft in millimetres");
+        assert!(std::fs::read_to_string(&ifc).unwrap().contains("IFCWALL("));
+        // What was saved opens again as a project of its own.
+        let info: Value = serde_json::from_str(&cli_out(&["info", &project]).unwrap()).unwrap();
+        assert_eq!(info["counts"], json!({"level": 2, "wall": 1}));
+        cli_out(&["convert", &path, &converted]).unwrap();
+        assert!(std::fs::read_to_string(&converted).unwrap().contains("IFCWALL("));
+        for f in [project, ifc, converted] {
+            let _ = std::fs::remove_file(f);
         }
-        // The saver's name and the path stay out of everything but the report.
+    }
+
+    #[cfg(feature = "rvt")]
+    #[test]
+    fn a_revit_file_that_does_not_open_is_an_error_that_names_it_and_saves_nothing() {
+        let fake = revit_file("fake.rvt", b"this is not a Revit file at all");
+        let out = format!("{fake}.ifc");
+        for args in [vec!["run", "--sample", &fake], vec!["convert", &fake, &out]] {
+            let e = cli_out(&args).unwrap_err();
+            assert!(e.contains("fake.rvt") && e.contains("Compound File"), "{e}");
+        }
         assert!(!std::path::Path::new(&out).exists());
     }
 
@@ -212,7 +246,10 @@ mod tests {
 
     #[cfg(not(feature = "rvt"))]
     #[test]
-    fn a_build_without_revit_support_says_so() {
-        assert!(cli_out(&["info", "x.rvt"]).unwrap_err().contains("without Revit support"));
+    fn a_build_without_revit_support_says_so_and_how_to_get_it() {
+        for args in [vec!["info", "x.rvt"], vec!["run", "x.rvt"], vec!["convert", "x.rvt", "y.ifc"]] {
+            let e = cli_out(&args).unwrap_err();
+            assert!(e.contains("without Revit support") && e.contains("`rvt` feature"), "{e}");
+        }
     }
 }
