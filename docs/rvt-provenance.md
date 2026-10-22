@@ -90,7 +90,7 @@ Its README's legal claims were not copied and are not relied on.
 | `schema.rs` | `Formats/Latest`: the list of classes with tag, base, version and field count | Ported in part from rvt-rs `src/formats.rs` (`schema_classes`, the grammar reader) at `b6086d4`, changed (class list only, bounds-checked, nesting capped). The grammar is credited by rvt-rs to STE1200 (Discussion #112), whose basis was not checked |
 | `elem_table.rs` | the ElementIds `Global/ElemTable` declares, in the 28-byte or 40-byte record layout | Ported in part from rvt-rs `src/elem_table.rs` at `b6086d4`, changed (ids only, no 12-byte fallback, all counts and offsets checked). rvt-rs credits the frame to STE1200, measured by puzzbobb on 30 files |
 | `inventory.rs` | the elements of a project by `BuiltInCategory` (placed instances told from the rest), and its levels with names, elevations, Building Story setting and the levels that sit inside other elements | Ported in part from rvt-rs `src/partition_element_records.rs`, `src/partition_element_records_2023.rs` and `src/partition_level_records.rs` (including `building_story_after` and `owned_level_ids`) at `b6086d4`, changed (marker always from the file's schema, bounds-checked offsets, only id, category, class and placed kept, no bounding boxes or reference lists). The category ids are Autodesk's published `BuiltInCategory` constants; the names are rvt-rs's, measured in Revit's own IFC export of sample files |
-| `records.rs` | the records of a partition: each element's id, category, class, box and its two reference lists, and the box-less records of types and materials, in both record forms | Ported in part from rvt-rs `src/partition_element_records.rs`, `src/partition_element_records_2023.rs` and `src/partition_type_records.rs` at `b6086d4`, changed (every tag from the file's schema, records handed to a callback, one function per form, bounds-checked) |
+| `records.rs` | the records of a partition: each element's id, category, class, box and its two reference lists, and the box-less records of types and materials, in both record forms | Ported in part from rvt-rs `src/partition_element_records.rs`, `src/partition_element_records_2023.rs` and `src/partition_type_records.rs` at `b6086d4`, changed (every tag from the file's schema, records handed to a callback, one function per form, bounds-checked, every length within `MAX_FEET` (3e5 ft) of zero: BIMCraft's own bound, since Revit's working limit is 20 miles from the origin) |
 | `curves.rs` | the bounded line and the arc in an element's data: a wall's location line | Ported in part from rvt-rs `src/partition_beam_axes.rs` at `b6086d4` (RE-49, RE-75), changed (only the record readers; every read bounds-checked) |
 | `data.rs` | an element's serialised data (header, id, bytes to the next header), the newest copy, a material's name, a category's material in the object styles | Ported in part from rvt-rs `src/partition_names.rs`, `src/partition_beam_axes.rs` (`scan_first_records`) and `src/partition_materials.rs` at `b6086d4` (RE-58, RE-91, RE-111, RE-115, RE-116, RE-125, and `src/partition_column_nodes.rs` for a column's geometry node, RE-173), changed (the header and the frame tags from the file's schema; every copy kept with its partition) |
 | `types.rs` | a type's name and layers, a wall's orientation, the one type a record names | Ported in part from rvt-rs `src/partition_compound_structure.rs`, `src/partition_names.rs` and `src/partition_type_records.rs` at `b6086d4` (RE-28, RE-53, RE-54, RE-111, RE-112), changed (frame tags from the schema, a name only in the type's own data) |
@@ -195,6 +195,7 @@ Part 2 added these, downloaded on 2026-10-21 from the same host (HTTP 200, no si
 |---|---|---|---|---|
 | 2024 | `racbasicsampleproject.rvt` (architectural basic sample) | https://revit.downloads.autodesk.com/download/2024RVT_RTM/Docs/InProd/racbasicsampleproject.rvt | 19722240 | `bb62c161b7991f0c5ec76605d3d9d0407e04001a2e4e6acac1c7fc32fd45ee55` |
 | 2025 | `racbasicsampleproject.rvt` | https://revit.downloads.autodesk.com/download/2025RVT_RTM/Docs/InProd/racbasicsampleproject.rvt | 19750912 | `41f1893a62d974edbe19f6077f7b75d0b662fff8c6ed167576e7ff568d3d4293` |
+| 2023 | `racbasicsampleproject.rvt` (downloaded on 2026-10-22, the same way) | https://revit.downloads.autodesk.com/download/2023RVT_RTM/Docs/InProd/racbasicsampleproject.rvt | 18898944 | `94f98cc1a38f4f6c4799d62076dbdb14590543f9737863411ba68069a840df89` |
 | 2024 | `Snowdon Towers Sample Architectural.rvt` | https://revit.downloads.autodesk.com/download/2024RVT_RTM/Docs/InProd/Samples/Snowdon%20Towers%20Sample%20Architectural.rvt | 94691328 | `33271010919acb2a0d0d040851393a511d86ea7fd9a1f4c054797ae03e5e44a1` |
 | 2024 | `Snowdon Towers Sample Structural.rvt` | https://revit.downloads.autodesk.com/download/2024RVT_RTM/Docs/InProd/Samples/Snowdon%20Towers%20Sample%20Structural.rvt | 28057600 | `6dc833f9fe9fa702607265f2e3d581a6d2a928ea56133db8225c9b5e0f79a44f` |
 
@@ -216,7 +217,41 @@ is equal on all four files: 5,851 records, 45 categories of element records with
 instances in each (and the levels as a 46th category here: 10 elements, 9 placed), the same nine levels with the same names
 and elevations, and the same number of declared ElementIds. 5,861 elements in all, 5,591 of them placed.
 
+### The elements (part 2)
+
+rvt-rs's own IFC export (`rvt-ifc`, built from the pinned commit with its own target directory, read with IfcOpenShell and shapely;
+a measuring stick, never a dependency) of the architectural basic sample (2024) against what `bimcraft-rvt` imports. The numbers
+are pinned in `crates/rvt/src/tests/rvt_rs.rs` (numbers only, no Autodesk strings), and the real-file tests compare them. The 2023
+file of the same model imports to the same project as the 2024 one (rvt-rs draws a 2023 wall as its box, so its 2023 export cannot
+stand in for the comparison there).
+
+| Kind | In the file | Imported | Agreement with rvt-rs |
+|---|---|---|---|
+| Levels | 6 (+2 not placed) | 6 | names and elevations equal |
+| Walls | 56 | 47 (9 curtain walls left out) | bottom, top and storey to 0.1 mm; the line down the middle of the body to 0.2 mm; the exterior's side 47 of 47; every layer's thickness and material name 47 of 47; the union of the footprints 67.72 m2 against 67.88 m2 (BIMCraft mitres a join where rvt-rs butts it, so a wall's own box differs by up to 0.5 m) |
+| Floors, ceilings | 8, 2 | 8, 2 | storey, top and bottom to 0.1 mm, areas to 0.005 m2 for all ten |
+| Doors, windows | 16 (+15 symbols), 17 | 10, 15 | the host wall the same for all 25; centre, width, bottom and top to 0.2 mm (except ten windows rvt-rs cuts overlapping a neighbour by up to 94 mm, which BIMCraft refuses, so the pair is narrowed and the notes say so); the type name equal for 25 of 25 |
+| Columns | 3 (and 30 on the structural sample, 2024 to 2026) | 3 (30) | plan, size and bottom to 0.2 mm (rvt-rs's body is the record box cut by the walls it joins); the top where no slab was cut from it; the 2024 and later bottom of one column corrected from its geometry node |
+| Roofs | 2 | 1 (the one by footprint) | storey, bottom, top and net area to 0.1 mm and 0.005 m2; the other is by extrusion and is listed |
+| Rooms | 14 | 9 (5 open to curtain walls or room separation lines, listed) | numbers and names equal for the nine |
+
+BIMCraft's own IFC export of the imported 2024 sample (`bimcraft-cli run x.rvt --save out.ifc`), read back by IfcOpenShell:
+`express_rules=True` gives no statement, and all 47 walls, 8 slabs, 2 coverings, 10 doors, 15 windows, 3 columns, 1 roof and 9 spaces
+build a shape. The slab volumes equal rvt-rs's for the eight floors (rvt-rs's other three `IfcSlab` are two foundation pads and a
+stair landing, which are not read), the columns' and coverings' totals are equal (10.900 m3 and 7.715 m3), and the walls come to
+237.3 m3 against 232.2 m3 (the joins). Read back by BIMCraft's own IFC importer, the file gives the same counts with nothing
+skipped. The same holds for the structural sample (2023 to 2026) and the Snowdon Towers architectural file (1,062 walls, 161 floors,
+118 columns, 104 doors, 61 ceilings, 32 windows, 18 levels, 7 rooms; no validation statement, every product builds a shape).
+
 ## Not verified
 
 - Whether any of this is lawful, or allowed by Autodesk's terms (see the risk, above).
-- Anything about releases other than the four samples, and nothing about files that are not Autodesk's own sample projects.
+- Anything about releases other than the samples (2023 to 2026, and the two Snowdon Towers files of 2024), and nothing about files
+  that are not Autodesk's own sample projects. Releases 2015 to 2022 and 2027 are decoded by the same rules and tested only on
+  synthetic files; the same goes for a workshared file, a linked model and a file that has passed through several saves.
+- The element readers have not been compared with rvt-rs on anything but the basic samples; Snowdon Towers (1,062 walls) was
+  imported, validated and looked at, and its numbers were not set against an export.
+- What no sample sets: a roof slope (rvt-rs's RE-56 is not ported), an angled or curved wall that hosts an opening (left out), a
+  door's swing and hand, a column's section shape (round, L, I, tube: the box is imported), a sloped or stepped floor (left out),
+  curtain walls and their doors (left out), groups, stairs, railings, and a wall's join list (RE-127).
+- The desktop does not open a Revit file yet.
