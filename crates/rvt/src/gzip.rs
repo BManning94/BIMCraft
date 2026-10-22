@@ -1,9 +1,12 @@
 // Portions of this file are ported from rvt-rs (https://github.com/DrunkOnJava/rvt-rs), Apache-2.0,
 // Copyright 2026 Griffin Long, at commit b6086d41b9758fd9b92f42f0a47b8345b9c58056: src/compression.rs (the gzip header
-// parse, the stored-page constants and which streams are paged, the bounded inflate loop, finding members by their magic).
+// parse, the list of paged streams, the bounded inflate loop, finding members by their magic).
 // Changed: rewritten for BIMCraft with no panics and no anyhow, page stripping done in place, members found by walking
 // from the end of the last one instead of inflating every magic hit, the inflate limit applied to a whole stream, and the
 // trailer checked against the data (rvt-rs does not read it).
+// Not ported: the page size and the data in a page. They are observed in the sample files (see `PAGE_STORED`). rvt-rs has the
+// same numbers, credited there to a third party; they were derived before rvt-rs's were read (docs/rvt-provenance.md says
+// what that does and does not show).
 //! Revit's gzip streams.
 //!
 //! A stream of a Revit file is gzip members behind a prefix: a `Global/*` stream has eight bytes and then one member,
@@ -21,15 +24,31 @@ use flate2::{Crc, read::DeflateDecoder};
 
 pub const MAGIC: [u8; 3] = [0x1f, 0x8b, 0x08];
 
+// Observed, not ported. In the four sample projects (`rstbasicsampleproject.rvt`, releases 2023 to 2026) the gzip members of
+// every stream longer than 64,896 bytes verify (CRC-32 and length) only once the last 353 bytes of each 65,249-byte page are
+// removed, pages counted from byte 0 of the stream (the eight-byte prefix of a `Global/*` stream included): 1,664 members in
+// 36 streams, 388 runs. How: in the first member of each sample's partition that zlib rejects, every cut of 1 to 4,096 bytes
+// at every offset up to the byte it rejects was tried, and exactly one fits (353 bytes at stream offset 130,145). Then every
+// failing member of each partition was cut: the runs end at multiples of one period, and 65,249 is the only period up to the
+// smallest distance between two cuts that does not also cut members that verify as stored (71 and 919, its factors, do).
+// Moving the size, the data or the start by one byte breaks hundreds of members (`a_wrong_page_layout_breaks_the_real_files`).
+// The evidence and its limits are in docs/rvt-provenance.md, "The stored-page constants".
 /// Bytes a full page takes in the container.
 pub const PAGE_STORED: usize = 65_249;
-/// Bytes of data in a full page; the other 353 are a trailer.
+/// Bytes of data in a full page; the other 353 are a run that belongs to no gzip member.
 pub const PAGE_PAYLOAD: usize = 64_896;
 
 /// How far into a stream the first member is looked for.
 const FIRST_MEMBER_WITHIN: usize = 256;
 
 /// Whether the container stores this stream in pages: the partitions, the schema and the `Global` streams that hold gzip.
+///
+/// The list is rvt-rs's. The sample bytes confirm it for the five streams that are longer than a page in some sample
+/// (`Partitions/NN`, `Formats/Latest`, `Global/ContentDocuments`, `Global/Latest`, and `Global/ElemTable` from 2024, which
+/// are cut by the page numbers or do not verify). `Global/DocumentIncrementTable`, `Global/History` and
+/// `Global/PartitionTable` are under 18 KB in all four, so stripping them removes nothing and the samples cannot say whether
+/// a longer one would be paged; neither can they say it of `Contents`, `BasicFileInfo`, `TransmissionData` and
+/// `ProjectInformation`, which are under 4.1 KB and not listed.
 pub fn is_paged(stream: &str) -> bool {
     if let Some(rest) = stream.strip_prefix("Partitions/") {
         return !rest.is_empty() && !rest.contains('/');
@@ -46,7 +65,9 @@ pub fn is_paged(stream: &str) -> bool {
     )
 }
 
-/// Removes each full page's trailer, in place. A last page shorter than a full one is kept whole.
+/// Removes each full page's trailer, in place. A last page shorter than a full one is kept whole. No sample ends inside the
+/// last 352 bytes of a page, where a stream that was cut off would keep part of a run; a writer that finishes its runs
+/// cannot leave one, so this is a choice about damaged files and not an observation.
 pub fn strip_pages(mut data: Vec<u8>) -> Vec<u8> {
     let full = data.len() / PAGE_STORED;
     for page in 1..full {
