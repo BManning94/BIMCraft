@@ -271,7 +271,7 @@ fn types_with_one_name_and_different_layers_are_told_apart() {
 
 #[test]
 fn the_walls_of_the_architectural_sample_are_those_of_rvt_rss_export_of_the_same_file() {
-    use super::rvt_rs_walls::RAC_WALLS;
+    use super::rvt_rs::RAC_WALLS;
     for path in super::samples_of("racbasicsampleproject.rvt") {
         let (i, from) = crate::import_path_with_origins(&path, "x").unwrap();
         let at = |id: u32| walls(&i).into_iter().find(|(m, _)| from[m] == format!("Wall {id}"));

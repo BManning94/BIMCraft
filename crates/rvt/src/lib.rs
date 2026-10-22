@@ -13,6 +13,7 @@ pub mod elem_table;
 mod error;
 #[cfg(any(test, feature = "testing"))]
 pub mod fixture;
+mod floors;
 pub mod gzip;
 mod import;
 pub mod info;
@@ -22,6 +23,7 @@ pub mod preview;
 pub mod project_fixture;
 pub mod records;
 pub mod schema;
+mod sketch;
 pub mod types;
 mod walls;
 

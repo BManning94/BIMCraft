@@ -1,4 +1,4 @@
-//! What rvt-rs (at b6086d4) writes for the walls of Autodesk's architectural basic sample project of Revit 2024 and 2025 (the
+//! What rvt-rs (at b6086d4) writes for the walls, floors and ceilings of Autodesk's architectural basic sample project of Revit 2024 and 2025 (the
 //! walls of the two files are the same), in its IFC export of the file, read with IfcOpenShell. A measuring stick: these
 //! numbers are all this crate keeps of the export. Lengths are millimetres.
 //!
@@ -444,4 +444,39 @@ pub const RAC_WALLS: [Wall; 47] = [
         exterior: [0, 1],
         layers: &[10.0, 20.0, 220.0, 20.0, 10.0],
     },
+];
+
+/// One floor or ceiling of rvt-rs's export, and the area of its footprint in square metres.
+pub struct Sketched {
+    pub id: u32,
+    pub storey: f64,
+    pub bottom: f64,
+    pub top: f64,
+    pub area: f64,
+}
+
+pub const RAC_FLOORS: [Sketched; 8] = [
+    Sketched { id: 176804, storey: 0.0, bottom: -150.0, top: 0.0, area: 105.906 },
+    Sketched { id: 418183, storey: 3000.0, bottom: 2700.0, top: 3000.0, area: 100.493 },
+    Sketched { id: 495352, storey: 0.0, bottom: -425.0, top: 0.0, area: 38.460 },
+    Sketched { id: 512683, storey: -550.0, bottom: -797.0, top: -550.0, area: 74.221 },
+    Sketched { id: 549031, storey: 3000.0, bottom: 2700.0, top: 3000.0, area: 9.000 },
+    Sketched { id: 550255, storey: -550.0, bottom: -700.0, top: -550.0, area: 18.003 },
+    Sketched { id: 647908, storey: 0.0, bottom: -825.0, top: -600.0, area: 70.080 },
+    Sketched { id: 764691, storey: 3000.0, bottom: 2775.0, top: 3000.0, area: 26.169 },
+];
+
+pub const RAC_CEILINGS: [Sketched; 2] = [
+    Sketched { id: 697612, storey: 0.0, bottom: 2700.0, top: 2750.0, area: 83.511 },
+    Sketched { id: 704053, storey: -550.0, bottom: 2150.0, top: 2200.0, area: 70.788 },
+];
+
+/// The five floors of the structural basic sample project (the same at every release): their bottom and top, as rvt-rs's
+/// export of the 2024 file has them, and the area of their footprints.
+pub const RST_FLOORS: [Sketched; 5] = [
+    Sketched { id: 495352, storey: 0.0, bottom: -550.0, top: 0.0, area: 38.460 },
+    Sketched { id: 647908, storey: 0.0, bottom: -1050.0, top: -600.0, area: 70.074 },
+    Sketched { id: 1206619, storey: 0.0, bottom: -550.0, top: 0.0, area: 105.316 },
+    Sketched { id: 1210630, storey: -550.0, bottom: -594.0, top: -550.0, area: 90.071 },
+    Sketched { id: 1211070, storey: -550.0, bottom: -694.0, top: -594.0, area: 89.871 },
 ];

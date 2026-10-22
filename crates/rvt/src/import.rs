@@ -15,8 +15,8 @@ use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 
 use crate::inventory::{Inventory, Survey};
 use crate::records::{Record, TypeRecord};
-use crate::walls;
 use crate::{Limits, Revit};
+use crate::{floors, walls};
 
 /// `OST_Materials`.
 pub(crate) const OST_MATERIALS: i64 = -2_000_700;
@@ -125,7 +125,7 @@ pub(crate) struct Facts {
 impl Facts {
     fn of(s: Survey) -> (Facts, Inventory) {
         let mut current: BTreeMap<u32, Record> = BTreeMap::new();
-        for r in s.records.into_iter().filter(|r| r.placed && has_volume(r)) {
+        for r in s.records.into_iter().filter(|r| r.placed && (has_volume(r) || r.category == floors::OST_SKETCH_LINES)) {
             // The copy with the greatest height is the element's whole body; a tie goes to the newest.
             let key = |r: &Record| (r.extent()[2].to_bits(), r.partition, r.offset);
             if current.get(&r.id).is_none_or(|held| key(held) < key(&r)) {
@@ -157,7 +157,7 @@ fn has_volume(r: &Record) -> bool {
 }
 
 /// The categories whose records the first pass keeps.
-const CATEGORIES: [i64; 1] = [walls::OST_WALLS];
+const CATEGORIES: [i64; 4] = [walls::OST_WALLS, floors::OST_FLOORS, floors::OST_CEILINGS, floors::OST_SKETCH_LINES];
 
 /// Reads the Revit project in `bytes` into a model named after its title (or `name`).
 pub fn import(bytes: &[u8], name: &str) -> Result<Imported, String> {
@@ -193,8 +193,10 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     levels(&mut cx, &inv);
     let mut wanted = BTreeSet::new();
     walls::wanted(&facts, &mut wanted);
+    floors::wanted(&facts, &mut wanted);
     let gathered = revit.gather(release, &facts.tags, &facts.ids, &wanted, &facts.materials).map_err(e)?;
     walls::import(&mut cx, &facts, &gathered);
+    floors::import(&mut cx, &facts, &gathered);
     let from = cx.from.clone();
     finish(cx, format!("Revit {release}")).map(|i| (i, from))
 }

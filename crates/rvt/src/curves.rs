@@ -107,6 +107,11 @@ pub fn arc_at(buf: &[u8], at: usize) -> Option<BoundedArc> {
     if u64_at(buf, at.checked_sub(8)?)? != 1 {
         return None;
     }
+    arc_values_at(buf, at)
+}
+
+/// The record at `at` read as an arc whatever the word before it: a sketch line's arc is not marked.
+pub fn arc_values_at(buf: &[u8], at: usize) -> Option<BoundedArc> {
     let [start_angle, end_angle, xx, xy, xz, yx, yy, yz, radius, cx, cy, cz] = values::<12>(buf, at)?;
     let (x_axis, y_axis) = ([xx, xy, xz], [yx, yy, yz]);
     (unit(x_axis) && unit(y_axis) && (xx * yx + xy * yy + xz * yz).abs() <= 1e-9 && radius > 0.0 && start_angle < end_angle)
