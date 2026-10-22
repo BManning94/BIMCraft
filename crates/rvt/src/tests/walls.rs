@@ -27,8 +27,9 @@ pub(super) fn walls(i: &Imported) -> Vec<(Id, &Wall)> {
         .collect()
 }
 
-pub(super) fn level_named(i: &Imported, name: &str) -> Id {
-    i.model.levels().into_iter().find(|(_, l)| l.name == name).map(|(id, _)| id).unwrap()
+/// The GUID of the level named `name`: what an element's `level` holds.
+pub(super) fn level_named(i: &Imported, name: &str) -> bimcraft_core::ids::Guid {
+    i.model.levels().into_iter().find(|(_, l)| l.name == name).map(|(id, _)| i.model.guid(id)).unwrap()
 }
 
 /// Two levels (0 and 10 ft), two materials, a two-layer wall type (a 0.25 ft brick finish over 0.5 ft of concrete) and no wall.

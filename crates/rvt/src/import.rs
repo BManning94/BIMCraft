@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use bimcraft_core::geom::P2;
+use bimcraft_core::ids::Guid;
 use bimcraft_core::import::Imported;
 use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 
@@ -87,7 +88,7 @@ pub(crate) struct Import {
     /// Each element made, and what it was in the file (`Wall 423099`), for the notes that say why one was dropped.
     pub from: HashMap<Id, String>,
     /// The model's level for each Revit level.
-    pub levels: HashMap<u32, Id>,
+    pub levels: HashMap<u32, Guid>,
     /// The model's wall for each Revit wall made, and the walls left out for having no layers (curtain walls): hosts of doors.
     pub walls: HashMap<u32, Id>,
     pub curtain: BTreeSet<u32>,
@@ -275,7 +276,7 @@ fn levels(cx: &mut Import, inv: &Inventory) {
         let name = fresh(&mut taken, &l.name);
         let id = cx.model.insert(Element::Level(Level::new(name, mm(l.elevation_feet))));
         cx.from.insert(id, format!("Level '{}'", l.name));
-        cx.levels.insert(l.id, id);
+        cx.levels.insert(l.id, cx.model.guid(id));
     }
     if inv.levels.is_empty() {
         let name = fresh(&mut taken, "Level 1");
@@ -307,12 +308,13 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
         let id = culprit(&error).filter(|id| cx.from.contains_key(id)).ok_or_else(|| error.clone())?;
         let why = error.split_once(": ").map_or(error.as_str(), |(_, why)| why);
         dropped.push((id, why.to_string()));
+        let gone = m.guid(id);
         m.elements.remove(&id);
         let hosted: Vec<Id> = m
             .elements
             .iter()
             .filter_map(|(k, x)| match x {
-                Element::Door(o) | Element::Window(o) if o.host == id => Some(*k),
+                Element::Door(o) | Element::Window(o) if o.host == gone => Some(*k),
                 _ => None,
             })
             .collect();

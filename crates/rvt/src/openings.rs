@@ -170,7 +170,7 @@ pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
         let opening = Opening {
             type_name,
             family: None,
-            host: p.host,
+            host: cx.model.guid(p.host),
             offset,
             sill: p.sill,
             mark: String::new(),

@@ -94,7 +94,7 @@ pub(crate) fn level_of(r: &Record, elevations: &BTreeMap<u32, f64>, z: f64) -> O
 pub(crate) struct Sketched {
     pub pieces: Vec<Piece>,
     pub type_name: String,
-    pub level: bimcraft_core::model::Id,
+    pub level: bimcraft_core::ids::Guid,
     /// How far above its level the box's top (bottom, for a ceiling or a roof) is.
     pub offset: f64,
 }

@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use bimcraft_core::geom::{self, P2};
-use bimcraft_core::model::{Element, Id, Model, Room};
+use bimcraft_core::model::{Element, Model, Room};
 
 use crate::import::{Facts, Import, clip, point};
 use crate::inventory::{Gathered, Wants};
@@ -29,7 +29,7 @@ pub(crate) fn wanted(f: &Facts, out: &mut Wants) {
 }
 
 /// A point of `room`'s box in plan that the walls of `level` enclose in a region as big as the box, the nearest to its middle.
-fn point_in(model: &Model, level: Id, r: &Record) -> Option<P2> {
+fn point_in(model: &Model, level: bimcraft_core::ids::Guid, r: &Record) -> Option<P2> {
     let (lo, hi) = (point(r.bbox[0], r.bbox[1]), point(r.bbox[3], r.bbox[4]));
     let middle = P2((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0);
     let mut candidates: Vec<P2> = (0..GRID * GRID)

@@ -16,10 +16,10 @@ use crate::language::Language;
 use crate::massing;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
-    Facing, Floor, FloorType, Grid, Id, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass, Model,
-    NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, ProjectParameter, RAMP_SLOPE, RAMP_WIDTH, RISER,
-    Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair, TOL,
-    TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    Facing, Floor, FloorType, Grid, Guid, Id, Key, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass,
+    Model, NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, ProjectParameter, RAMP_SLOPE, RAMP_WIDTH,
+    RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair,
+    TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::paint;
 use crate::phasing;
@@ -49,6 +49,19 @@ pub static ALL: &[Command] = &[
         new,
     ),
     other("open", "Open", "{path} a .bimcraft project", open),
+    edit(
+        "insert",
+        "Insert from File",
+        &[],
+        "{path, ids?: [id, …]} elements of another project (.bimcraft or .ifc) brought into this one: those `ids` names \
+         (their ids there), else all of them, and what they point at that this project hasn't (a level they stand on is \
+         this project's of the same name, where it has one). Each keeps its id unless this project has that id, and its GUID \
+         unless this project has that GUID: then it's a copy, with a GUID of its own (the same file inserted into itself is \
+         copied whole). What they point at among themselves follows them. A name or a number taken here gets ` 2`, ` 3`…; \
+         types, families, materials and parameters this project hasn't come by name. Returns `ids` {there: here}, \
+         `copies`, `library`, `left_out`",
+        insert_from,
+    ),
     other(
         "save",
         "Save",
@@ -804,9 +817,27 @@ pub static ALL: &[Command] = &[
         undoable: false,
     },
     other(
+        "select_by_id",
+        "Select by ID",
+        "{text} the elements a list names, each by its id, its GUID (dashes and braces or not) or its IFC GlobalId, \
+         separated by spaces, commas, semicolons or lines: `ids` found, each once in the order named, `missing` (what named \
+         none), and `plan` and `extent` ([[x, y], [x, y]] mm), the level's plan that shows them and where; it selects nothing \
+         itself, a front end does",
+        select_by_id,
+    ),
+    other(
+        "ids_of",
+        "IDs of Selection",
+        "{ids: [id or GUID, …]} what names each element: its `id`, its `guid`, its `ifc` GlobalId, its `category` and its \
+         `name` (or type, number, mark)",
+        ids_of,
+    ),
+    other(
         "elements",
         "Elements",
-        "{category?, level?, limit?, offset?} elements with ids, fields and derived values (length, height, area_m2…)",
+        "{category?, level?, limit?, offset?} elements with their `id` (six digits, what commands take) and `guid` (made once, \
+         never changed), fields and derived values (length, height, area_m2…); what an element points at (its level, host, \
+         view…) it holds by GUID. Wherever a command takes an element, its id or its GUID will do",
         elements,
     ),
 ];
@@ -880,9 +911,15 @@ fn string(c: &str, p: &Value, key: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// `ids` [id, …], or one `id`: elements of the model, each once, in the order given.
+/// An element of `m` by its id, or its GUID.
+fn element_id(c: &str, m: &Model, v: &Value) -> Result<Id, String> {
+    let g = serde_json::from_value::<Guid>(v.clone()).map_err(|_| bad(c, format!("{v} is not an element id or GUID")))?;
+    m.elements.id(g).ok_or_else(|| bad(c, format!("no element {g}")))
+}
+
+/// `ids` [id, …], or one `id`: elements of the model, by id or GUID, each once, in the order given.
 fn ids_param(c: &str, m: &Model, p: &Value) -> Result<Vec<Id>, String> {
-    let as_id = |v: &Value| v.as_u64().ok_or_else(|| bad(c, format!("{v} is not an element id")));
+    let as_id = |v: &Value| element_id(c, m, v);
     let ids: Vec<Id> = match (p.get("ids"), p.get("id")) {
         (Some(Value::Array(a)), _) if a.len() <= MAX_POINTS => a.iter().map(as_id).collect::<Result<_, _>>()?,
         (Some(Value::Array(_)), _) => return Err(bad(c, format!("`ids` lists more than {MAX_POINTS} elements"))),
@@ -896,10 +933,13 @@ fn ids_param(c: &str, m: &Model, p: &Value) -> Result<Vec<Id>, String> {
     Ok(ids.into_iter().filter(|id| seen.insert(*id)).collect())
 }
 
-fn id_opt(c: &str, p: &Value, key: &str) -> Result<Option<Id>, String> {
+/// `key`, an element by its id or its GUID, if given: as its GUID, or as the id given until the model resolves it.
+fn id_opt(c: &str, p: &Value, key: &str) -> Result<Option<Guid>, String> {
     match p.get(key) {
         v if absent(v) => Ok(None),
-        Some(v) => v.as_u64().map(Some).ok_or_else(|| bad(c, format!("`{key}` must be an element id, got {v}"))),
+        Some(v) => {
+            serde_json::from_value(v.clone()).map(Some).map_err(|_| bad(c, format!("`{key}` must be an element id or GUID, got {v}")))
+        }
         None => Ok(None),
     }
 }
@@ -914,34 +954,45 @@ fn count_opt(c: &str, p: &Value, key: &str, default: usize) -> Result<usize, Str
     }
 }
 
-/// `level` by id or name; the lowest level when not given.
-fn level_param(c: &str, m: &Model, p: &Value, key: &str) -> Result<Id, String> {
+/// `level` by name, id or GUID, as its GUID; the lowest level when not given.
+fn level_param(c: &str, m: &Model, p: &Value, key: &str) -> Result<Guid, String> {
     let levels = m.levels();
-    match p.get(key) {
-        v if absent(v) => levels.first().map(|(id, _)| *id).ok_or_else(|| bad(c, "the model has no levels")),
-        Some(Value::String(n)) => levels.iter().find(|(_, l)| l.name == *n).map(|(id, _)| *id).ok_or_else(|| {
-            let names: Vec<&str> = levels.iter().map(|(_, l)| l.name.as_str()).collect();
-            bad(c, format!("no level named `{n}` (there are: {})", names.join(", ")))
-        }),
-        Some(v) => v.as_u64().filter(|&id| m.level(id).is_some()).ok_or_else(|| bad(c, format!("`{key}`: {v} is not a level"))),
-        None => Err(bad(c, "the model has no levels")),
-    }
+    let id = match p.get(key) {
+        v if absent(v) => levels.first().map(|(id, _)| *id).ok_or_else(|| bad(c, "the model has no levels"))?,
+        Some(Value::String(n)) if Guid::parse(n).is_none() => {
+            levels.iter().find(|(_, l)| l.name == *n).map(|(id, _)| *id).ok_or_else(|| {
+                let names: Vec<&str> = levels.iter().map(|(_, l)| l.name.as_str()).collect();
+                bad(c, format!("no level named `{n}` (there are: {})", names.join(", ")))
+            })?
+        }
+        Some(v) => serde_json::from_value::<Guid>(v.clone())
+            .ok()
+            .and_then(|g| m.elements.id(g))
+            .filter(|&id| m.level(id).is_some())
+            .ok_or_else(|| bad(c, format!("`{key}`: {v} is not a level")))?,
+        None => return Err(bad(c, "the model has no levels")),
+    };
+    Ok(m.guid(id))
 }
 
-/// `view` by name or id: a level's plan, a section, an elevation, a schedule or a 3D view, or with
-/// `sheets` a sheet by its number; when not given, the plan of `level` (the lowest by default).
+/// `view` by name, id or GUID: a level's plan, a section, an elevation, a schedule or a 3D view, or with `sheets` a sheet
+/// by its number; when not given, the plan of `level` (the lowest by default).
 fn view_param(c: &str, m: &Model, p: &Value, sheets: bool) -> Result<Id, String> {
+    let plan = || level_param(c, m, p, "level").map(|g| m.elements.id(g).unwrap_or_default());
     match p.get("view") {
-        v if absent(v) => level_param(c, m, p, "level"),
-        Some(Value::String(n)) => m
+        v if absent(v) => plan(),
+        Some(Value::String(n)) if Guid::parse(n).is_none() => m
             .elements
             .iter()
             .find_map(|(id, e)| {
                 (m.view_name(*id) == Some(n.as_str()) || sheets && matches!(e, Element::Sheet(sh) if sh.number == *n)).then_some(*id)
             })
             .ok_or_else(|| bad(c, format!("no view named `{n}`"))),
-        Some(v) => v.as_u64().filter(|id| m.elements.contains_key(id)).ok_or_else(|| bad(c, format!("`view`: {v} is not a view"))),
-        None => level_param(c, m, p, "level"),
+        Some(v) => serde_json::from_value::<Guid>(v.clone())
+            .ok()
+            .and_then(|g| m.elements.id(g))
+            .ok_or_else(|| bad(c, format!("`view`: {v} is not a view"))),
+        None => plan(),
     }
 }
 
@@ -985,8 +1036,8 @@ fn hundredth(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }
 
-fn level_name(m: &Model, id: Id) -> String {
-    m.level(id).map_or_else(|| format!("level {id}"), |l| l.name.clone())
+fn level_name(m: &Model, id: impl Key) -> String {
+    m.level(id).map_or_else(|| format!("level {}", m.shown(id)), |l| l.name.clone())
 }
 
 /// How far along a wall's location line the point nearest `p` lies, in mm.
@@ -1001,10 +1052,10 @@ fn off_centre(m: &Model, w: &Wall, p: P2) -> f64 {
 
 /// The wall a plan of `level` cuts nearest `at`, within its half thickness plus 100 mm of its centre
 /// line, and how far along it `at` lies.
-fn wall_at(m: &Model, level: Id, at: P2) -> Option<(Id, f64)> {
+fn wall_at(m: &Model, level: impl Key, at: P2) -> Option<(Guid, f64)> {
     m.elements
-        .iter()
-        .filter_map(|(&id, e)| match e {
+        .with_guids()
+        .filter_map(|(_, id, e)| match e {
             Element::Wall(w) if m.cut_by(w, level) => Some((id, w, off_centre(m, w, at))),
             _ => None,
         })
@@ -1018,7 +1069,8 @@ fn wall_at(m: &Model, level: Id, at: P2) -> Option<(Id, f64)> {
 /// its courtyards, clockwise from their south-west corners: the loops of those walls standing free
 /// inside it, joined to none of the outer walls, with no room in them and in no other loop. A loop
 /// joined to the outer walls, or with a room in it, is rooms.
-pub fn floor_outline(m: &Model, level: Id) -> Option<(Vec<P2>, Vec<Vec<P2>>)> {
+pub fn floor_outline(m: &Model, level: impl Key) -> Option<(Vec<P2>, Vec<Vec<P2>>)> {
+    let level = m.guid(level);
     // Each piece's outline, clockwise, the largest first.
     let mut pieces: Vec<Vec<P2>> = geom::faces(&m.bounding_lines(level), TOL).into_iter().filter(|f| geom::area(f) < -TOL * TOL).collect();
     pieces.sort_by(|a, b| geom::area(a).total_cmp(&geom::area(b)));
@@ -1079,11 +1131,12 @@ fn next_grid_name(m: &Model) -> String {
     }
 }
 
-/// An element as agents read it: its fields plus `id` and derived values.
+/// An element as agents read it: its fields (what it points at by GUID) plus its `id`, its `guid` and derived values.
 pub fn element_json(m: &Model, id: Id) -> Value {
-    let Some(e) = m.elements.get(&id) else { return Value::Null };
+    let Some(e) = m.elements.get(id) else { return Value::Null };
     let mut extra = Map::new();
     extra.insert("id".into(), json!(id));
+    extra.insert("guid".into(), json!(m.guid(id)));
     match e {
         Element::Wall(w) => {
             let axis = Axis::of(w);
@@ -1179,7 +1232,7 @@ pub fn element_json(m: &Model, id: Id) -> Value {
         Element::Sheet(sh) => {
             extra.insert("paper".into(), json!(paper(&sh.size)));
             let on: Vec<Id> =
-                m.elements.iter().filter(|(_, e)| matches!(e, Element::Viewport(v) if v.sheet == id)).map(|(id, _)| *id).collect();
+                m.elements.iter().filter(|(_, e)| matches!(e, Element::Viewport(v) if m.same(v.sheet, id))).map(|(id, _)| *id).collect();
             extra.insert("viewports".into(), json!(on));
         }
         Element::Viewport(v) => {
@@ -1310,7 +1363,7 @@ fn open(s: &mut Session, p: &Value) -> R {
         return Ok(reply);
     }
     let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
-    let mut m: Model = serde_json::from_str(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
+    let mut m = Model::from_json(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
     m.adopt_materials();
     // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
     let mut renamed = BTreeMap::new();
@@ -1337,6 +1390,51 @@ fn open(s: &mut Session, p: &Value) -> R {
         reply["renamed"] = json!(renamed);
     }
     Ok(reply)
+}
+
+fn select_by_id(s: &mut Session, p: &Value) -> R {
+    let c = "select_by_id";
+    let text = match p.get("text") {
+        Some(Value::String(t)) => t.clone(),
+        Some(Value::Array(a)) if a.len() <= crate::inquiry::MAX_NAMES => {
+            a.iter().map(|v| v.as_str().map_or_else(|| v.to_string(), String::from)).collect::<Vec<_>>().join(" ")
+        }
+        _ => return Err(bad(c, "`text`, the ids, GUIDs or IFC GlobalIds to find, is required")),
+    };
+    let found = crate::inquiry::find(&s.model, &text);
+    let shown = crate::inquiry::shown(&s.model, &found.ids);
+    Ok(json!({
+        "ids": found.ids,
+        "missing": found.missing,
+        "plan": shown.map(|(level, _)| level),
+        "extent": shown.map(|(_, [lo, hi])| [micron(lo), micron(hi)]),
+    }))
+}
+
+fn ids_of(s: &mut Session, p: &Value) -> R {
+    let ids = ids_param("ids_of", &s.model, p)?;
+    let rows: Vec<Value> = ids
+        .iter()
+        .filter_map(|id| crate::inquiry::names(&s.model, *id))
+        .map(|n| json!({"id": n.id, "guid": n.guid, "ifc": n.ifc, "category": n.category, "name": n.name}))
+        .collect();
+    Ok(json!({"elements": rows}))
+}
+
+fn insert_from(s: &mut Session, p: &Value) -> R {
+    let c = "insert";
+    let path = string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?;
+    // Read as `open` reads it, in a session of its own.
+    let mut other = Session::new();
+    open(&mut other, &json!({"path": path})).map_err(|e| bad(c, e.trim_start_matches("open: ")))?;
+    let ids: Vec<Id> = match p.get("ids") {
+        v if absent(v) => Vec::new(),
+        Some(_) => ids_param(c, &other.model, p)?,
+        None => Vec::new(),
+    };
+    let made = crate::insert::insert(s.model_mut(), &other.model, &ids).map_err(|e| bad(c, e))?;
+    let there: BTreeMap<String, Id> = made.ids.iter().map(|(a, b)| (a.to_string(), *b)).collect();
+    Ok(json!({"ids": there, "copies": made.copies, "library": made.library, "left_out": made.left_out}))
 }
 
 fn save(s: &mut Session, p: &Value) -> R {
@@ -1494,7 +1592,7 @@ fn schedule(s: &mut Session, p: &Value) -> R {
     let builtin = schedule::builtin(name.as_deref(), cat.as_deref());
     let found = name.as_deref().and_then(|n| schedule::named(m, n)).or_else(|| builtin.and_then(|(_, n)| schedule::named(m, n)));
     let mut sc = match (found, builtin, &name, &cat) {
-        (Some(id), ..) => match m.elements.get(&id) {
+        (Some(id), ..) => match m.elements.get(id) {
             Some(Element::Schedule(sc)) => sc.clone(),
             _ => return Err(bad(c, format!("element {id} isn't a schedule"))),
         },
@@ -1593,7 +1691,7 @@ fn drawn_category(c: &str, given: &str) -> Result<String, String> {
 }
 
 /// A list of element ids, as `key` gives them: elements of the model that views draw.
-fn drawn_elements(c: &str, m: &Model, p: &Value, key: &str) -> Result<Vec<Id>, String> {
+fn drawn_elements(c: &str, m: &Model, p: &Value, key: &str) -> Result<Vec<Guid>, String> {
     let list = match p.get(key) {
         v if absent(v) => return Ok(Vec::new()),
         Some(Value::Array(a)) if a.len() <= graphics::MAX_ENTRIES => a,
@@ -1601,16 +1699,22 @@ fn drawn_elements(c: &str, m: &Model, p: &Value, key: &str) -> Result<Vec<Id>, S
         None => return Ok(Vec::new()),
     };
     list.iter()
-        .map(|v| v.as_u64().ok_or_else(|| bad(c, format!("`{key}`: {v} is not an element id"))).and_then(|id| drawn_element(c, m, id)))
+        .map(|v| {
+            serde_json::from_value::<Guid>(v.clone())
+                .map_err(|_| bad(c, format!("`{key}`: {v} is not an element id or GUID")))
+                .and_then(|id| drawn_element(c, m, id))
+        })
         .collect()
 }
 
-/// `id` if it's an element views draw.
-fn drawn_element(c: &str, m: &Model, id: Id) -> Result<Id, String> {
-    match m.elements.get(&id) {
+/// `id`'s GUID if it's an element views draw.
+fn drawn_element(c: &str, m: &Model, id: impl Key) -> Result<Guid, String> {
+    match m.elements.get(id) {
         None => Err(bad(c, format!("no element {id}"))),
-        Some(e) if !graphics::drawn(e.category()) => Err(bad(c, format!("element {id} is a {}, and views don't draw those", e.category()))),
-        Some(_) => Ok(id),
+        Some(e) if !graphics::drawn(e.category()) => {
+            Err(bad(c, format!("element {} is a {}, and views don't draw those", m.shown(id), e.category())))
+        }
+        Some(_) => Ok(m.guid(id)),
     }
 }
 
@@ -1703,12 +1807,12 @@ fn edit_graphics(c: &str, m: &Model, p: &Value, g: &mut Graphics, of_template: b
         v if absent(v) => {}
         Some(Value::Object(o)) if o.len() <= graphics::MAX_ENTRIES => {
             for (key, patch) in o {
-                let id = key.parse::<Id>().map_err(|_| bad(c, format!("`elements`: `{key}` is not an element id")))?;
+                let id = Guid::parse(key).ok_or_else(|| bad(c, format!("`elements`: `{key}` is not an element id or GUID")))?;
                 let id = drawn_element(c, m, id)?;
                 let over = if patch.is_null() {
                     Override::default()
                 } else {
-                    merged_override(c, &format!("element {id}"), g.elements.get(&id), patch)?
+                    merged_override(c, &format!("element {}", m.shown(id)), g.elements.get(&id), patch)?
                 };
                 if over.is_empty() {
                     g.elements.remove(&id)
@@ -1820,9 +1924,9 @@ fn view_graphics(s: &mut Session, p: &Value) -> R {
         g.template.as_ref().and_then(|n| m.view_templates.get(n)).map(|t| t.controls.iter().copied().collect()).unwrap_or_default();
     reply["view"] = json!(view);
     reply["name"] = json!(view.and_then(|v| m.view_name(v)).unwrap_or("{3D}"));
-    reply["hidden_elements"] =
-        json!(g.elements.iter().filter(|(id, o)| o.hidden && m.elements.contains_key(id)).map(|(id, _)| *id).collect::<Vec<_>>());
-    reply["elements"] = json!(g.elements);
+    // Elements by their ids, as the command takes them.
+    reply["hidden_elements"] = json!(g.elements.iter().filter(|(_, o)| o.hidden).filter_map(|(g, _)| m.elements.id(g)).collect::<Vec<_>>());
+    reply["elements"] = json!(g.elements.iter().filter_map(|(g, o)| Some((m.elements.id(g)?.to_string(), o))).collect::<BTreeMap<_, _>>());
     reply["template"] = json!(g.template);
     reply["controlled"] = json!(controlled);
     Ok(reply)
@@ -1834,8 +1938,8 @@ fn known_names(names: &[&str]) -> String {
 }
 
 /// View `view`'s graphics, set.
-fn set_graphics(m: &mut Model, view: Id, g: Graphics) {
-    if let Some(slot) = m.elements.get_mut(&view).and_then(graphics::graphics_mut) {
+fn set_graphics(m: &mut Model, view: impl Key, g: Graphics) {
+    if let Some(slot) = m.elements.get_mut(view).and_then(graphics::graphics_mut) {
         *slot = g;
     }
 }
@@ -1904,7 +2008,7 @@ fn view_template(s: &mut Session, p: &Value) -> R {
             style: resolved.style,
             ..Graphics::default()
         };
-        t.view_range = match m.elements.get(&view) {
+        t.view_range = match m.elements.get(view) {
             Some(Element::Level(_)) => Some(m.view_range_of(view)),
             _ => None,
         };
@@ -2258,7 +2362,7 @@ fn design_options(s: &mut Session, p: &Value) -> R {
         let deleted = if gone.is_empty() { json!([]) } else { delete_elements(s, &gone)? };
         let m = s.model_mut();
         for id in kept {
-            if let Some(params) = m.elements.get_mut(&id).and_then(Element::params_mut) {
+            if let Some(params) = m.elements.get_mut(id).and_then(Element::params_mut) {
                 params.remove(phasing::OPTION);
             }
         }
@@ -2480,10 +2584,10 @@ fn flip(s: &mut Session, p: &Value) -> R {
         return Err(bad(c, format!("{} {id} isn't a wall", m.elements.get(id).map_or("element", Element::category))));
     }
     let m = s.model_mut();
-    let lengths: BTreeMap<Id, f64> = ids.iter().filter_map(|id| Some((*id, Axis::of(m.wall(*id)?).length()))).collect();
+    let lengths: BTreeMap<Guid, f64> = ids.iter().filter_map(|id| Some((m.guid(*id), Axis::of(m.wall(*id)?).length()))).collect();
     for (id, e) in m.elements.iter_mut() {
         match e {
-            Element::Wall(w) if lengths.contains_key(id) => {
+            Element::Wall(w) if ids.contains(id) => {
                 std::mem::swap(&mut w.start, &mut w.end);
                 w.arc = -w.arc + 0.0;
             }
@@ -2494,11 +2598,11 @@ fn flip(s: &mut Session, p: &Value) -> R {
             _ => {}
         }
     }
-    let hosts: BTreeMap<Id, Id> = m
+    let hosts: BTreeMap<Guid, Guid> = m
         .elements
-        .iter()
-        .filter_map(|(id, e)| match e {
-            Element::Door(o) | Element::Window(o) => Some((*id, o.host)),
+        .with_guids()
+        .filter_map(|(_, id, e)| match e {
+            Element::Door(o) | Element::Window(o) => Some((id, o.host)),
             _ => None,
         })
         .collect();
@@ -2527,7 +2631,7 @@ fn window(s: &mut Session, p: &Value) -> R {
 
 fn opening(s: &mut Session, p: &Value, is_door: bool) -> R {
     let o = build_opening(&s.model, p, is_door)?;
-    let (host, offset, mark) = (o.host, o.offset, o.mark.clone());
+    let (host, offset, mark) = (s.model.elements.id(o.host), o.offset, o.mark.clone());
     let id = s.model_mut().insert(if is_door { Element::Door(o) } else { Element::Window(o) });
     Ok(json!({"id": id, "host": host, "offset": offset, "mark": mark}))
 }
@@ -2567,7 +2671,7 @@ fn build_opening(m: &Model, p: &Value, is_door: bool) -> Result<Opening, String>
     let (host, along_at) = match id_opt(c, p, "wall")? {
         Some(h) => {
             let w = m.wall(h).ok_or_else(|| bad(c, format!("{h} is not a wall")))?;
-            (h, at.map_or(w.start.dist(w.end) / 2.0, |a| along(w, a)))
+            (m.guid(h), at.map_or(w.start.dist(w.end) / 2.0, |a| along(w, a)))
         }
         None => {
             let at = at.ok_or_else(|| bad(c, "give `at` [x, y] on a wall, or `wall` with `offset`"))?;
@@ -2731,10 +2835,10 @@ fn mass(s: &mut Session, p: &Value) -> R {
 
 /// The mass `mass` names.
 fn mass_of(c: &str, m: &Model, p: &Value) -> Result<(Id, Mass), String> {
-    let id = id_opt(c, p, "mass")?.ok_or_else(|| bad(c, "`mass`, the id of a mass, is required"))?;
-    match m.elements.get(&id) {
-        Some(Element::Mass(ms)) => Ok((id, ms.clone())),
-        _ => Err(bad(c, format!("{id} isn't a mass"))),
+    let mass = id_opt(c, p, "mass")?.ok_or_else(|| bad(c, "`mass`, the id of a mass, is required"))?;
+    match (m.elements.id(mass), m.elements.get(mass)) {
+        (Some(id), Some(Element::Mass(ms))) => Ok((id, ms.clone())),
+        _ => Err(bad(c, format!("{mass} isn't a mass"))),
     }
 }
 
@@ -2772,13 +2876,13 @@ fn mass_floors(s: &mut Session, p: &Value) -> R {
     let kind = string(c, p, "type")?;
     let (mut ids, mut made, mut updated, mut stale, mut removed) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (mass, ms) in &masses {
-        let held = massing::floors_of(&s.model, *mass);
+        let held = massing::floors_of(&s.model, s.model.guid(*mass));
         let slices = s.model.mass_slices(ms);
         let levels: Vec<Id> = slices.iter().map(|(level, _, _)| *level).collect();
         for &(level, z, _) in &slices {
             // The outline of the mass at the level: its footprint, or between that and its top outline if it's lofted.
             let ring = s.model.mass_outline(ms, z);
-            let Some(&(f, _)) = held.iter().find(|(_, l)| *l == level) else {
+            let Some(&(f, _)) = held.iter().find(|(_, l)| s.model.same(*l, level)) else {
                 let made_one = floor(s, &passing(p, &["type"], json!({"boundary": ring, "level": level})))?;
                 for id in mark(s, &made_one["id"], massing::FLOOR, json!({"mass": mass, "level": level})) {
                     made.push(id);
@@ -2788,15 +2892,16 @@ fn mass_floors(s: &mut Session, p: &Value) -> R {
             };
             ids.push(f);
             // A floor that already has the outline (and the type) is left alone, so a second run is no undo step.
-            if let Some(Element::Floor(fl)) = s.model.elements.get(&f)
+            if let Some(Element::Floor(fl)) = s.model.elements.get(f)
                 && (fl.boundary != ring || kind.as_ref().is_some_and(|k| *k != fl.type_name))
-                && let Some(Element::Floor(fl)) = s.model_mut().elements.get_mut(&f)
+                && let Some(Element::Floor(fl)) = s.model_mut().elements.get_mut(f)
             {
                 fl.boundary = ring;
                 fl.type_name = kind.clone().unwrap_or_else(|| fl.type_name.clone());
                 updated.push(f);
             }
         }
+        let levels: Vec<Guid> = levels.into_iter().map(|l| s.model.guid(l)).collect();
         for (f, _) in held.into_iter().filter(|(_, l)| !levels.contains(l)) {
             if prune { removed.push(f) } else { stale.push(f) }
         }
@@ -2892,7 +2997,7 @@ fn update_by_face(s: &mut Session, p: &Value) -> R {
         (false, Some(_)) => return Err(bad(c, "give `ids` or `mass`, not both")),
         (true, Some(mass)) => {
             mass_of(c, m, p)?;
-            made_by_face().filter(|(_, (of, _))| *of == mass).map(|(id, _)| id).collect()
+            made_by_face().filter(|(_, (of, _))| m.same(*of, mass)).map(|(id, _)| id).collect()
         }
         (false, None) => {
             let ids = ids_param(c, m, p)?;
@@ -2911,10 +3016,10 @@ fn update_by_face(s: &mut Session, p: &Value) -> R {
     }
     let (mut changed, mut same, mut gone) = (Vec::new(), Vec::new(), Vec::new());
     for id in ids {
-        let Some((e, (mass, face))) = m.elements.get(&id).and_then(|e| Some((e, massing::face_of(e)?))) else { continue };
+        let Some((e, (mass, face))) = m.elements.get(id).and_then(|e| Some((e, massing::face_of(e)?))) else { continue };
         let mut now = e.clone();
-        match m.elements.get(&mass) {
-            Some(Element::Mass(ms)) => match massing::follow(&mut now, ms, mass, face) {
+        match m.elements.get(mass) {
+            Some(Element::Mass(ms)) => match massing::follow(&mut now, ms, m.elements.id(mass).unwrap_or_default(), face) {
                 Ok(()) if now == *e => same.push(id),
                 Ok(()) => changed.push((id, now)),
                 Err(why) => gone.push(format!("{} {id} {why}", e.category())),
@@ -2964,13 +3069,13 @@ fn room(s: &mut Session, p: &Value) -> R {
 
 /// Of the lines a plan of `level` shows that `keep` takes (walls' faces, centre lines and ends,
 /// doors' and windows' centres and jambs, grids), the nearest `p`, within 100 mm.
-fn reference_near(m: &Model, level: Id, p: P2, keep: impl Fn(Line) -> bool) -> Option<Reference> {
-    let cut = |w: Id| m.wall(w).is_some_and(|w| m.cut_by(w, level));
+fn reference_near(m: &Model, level: impl Key, p: P2, keep: impl Fn(Line) -> bool) -> Option<Reference> {
+    let cut = |w: Option<&Wall>| w.is_some_and(|w| m.cut_by(w, level));
     m.elements
         .iter()
-        .filter(|(id, e)| match e {
-            Element::Wall(_) => cut(**id),
-            Element::Door(o) | Element::Window(o) => cut(o.host),
+        .filter(|(_, e)| match e {
+            Element::Wall(w) => cut(Some(w)),
+            Element::Door(o) | Element::Window(o) => cut(m.wall(o.host)),
             Element::Grid(_) => true,
             _ => false,
         })
@@ -2981,11 +3086,12 @@ fn reference_near(m: &Model, level: Id, p: P2, keep: impl Fn(Line) -> bool) -> O
 }
 
 /// The round column on `level` whose edge passes nearest `p`, within 100 mm.
-fn arc_near(m: &Model, level: Id, p: P2) -> Option<Reference> {
+fn arc_near(m: &Model, level: impl Key, p: P2) -> Option<Reference> {
+    let level = m.guid(level);
     m.elements
-        .iter()
-        .filter(|(_, e)| e.column().is_some_and(|col| col.level == level))
-        .filter_map(|(&id, _)| {
+        .with_guids()
+        .filter(|(_, _, e)| e.column().is_some_and(|col| col.level == level))
+        .filter_map(|(_, id, _)| {
             let r = Reference { id, face: Face::Centre };
             let (c, radius) = m.reference_arc(&r).ok()?;
             Some((r, (p.dist(c) - radius).abs()))
@@ -3042,7 +3148,7 @@ fn tag(s: &mut Session, p: &Value) -> R {
         let level = level_param(c, m, p, "level")?;
         let of = string(c, p, "category")?.map(|s| category(&s));
         let kind = of.clone().unwrap_or_else(|| "door and window".into());
-        let tagged: BTreeSet<Id> = m
+        let tagged: BTreeSet<Guid> = m
             .elements
             .values()
             .filter_map(|e| match e {
@@ -3057,7 +3163,7 @@ fn tag(s: &mut Session, p: &Value) -> R {
             .iter()
             .filter(|(id, e)| {
                 of.as_deref().map_or(matches!(e, Element::Door(_) | Element::Window(_)), |cat| e.category() == cat)
-                    && !tagged.contains(id)
+                    && !tagged.contains(&m.guid(*id))
                     && m.level_of(e) == Some(level)
                     && look.shows(**id)
             })
@@ -3072,7 +3178,7 @@ fn tag(s: &mut Session, p: &Value) -> R {
     };
     let tags: Vec<Tag> = hosts
         .iter()
-        .map(|&host| Tag { host, offset: offset.unwrap_or_else(|| m.tag_offset(host)), leader, label: label.clone() })
+        .map(|&host| Tag { host: m.guid(host), offset: offset.unwrap_or_else(|| m.tag_offset(host)), leader, label: label.clone() })
         .collect();
     let m = s.model_mut();
     let ids: Vec<Id> = tags.into_iter().map(|t| m.insert(Element::Tag(t))).collect();
@@ -3086,7 +3192,7 @@ fn text_note(s: &mut Session, p: &Value) -> R {
     let at = point_req(c, p, "at")?;
     let view = view_param(c, m, p, true)?;
     let n = Note {
-        view,
+        view: m.guid(view),
         at,
         text,
         size: num(c, p, "size")?.unwrap_or(NOTE_SIZE),
@@ -3104,21 +3210,22 @@ fn spot(s: &mut Session, p: &Value) -> R {
     let view = view_param(c, m, p, false)?;
     let host = match (id_opt(c, p, "host")?, m.level(view)) {
         (Some(h), _) => Some(h),
-        (None, Some(_)) => Some(m.spot_host(view, at).ok_or_else(|| {
+        (None, Some(_)) => Some(m.guid(m.spot_host(view, at).ok_or_else(|| {
             let place = format!("[{}, {}] on {}", at.0, at.1, level_name(m, view));
             bad(c, format!("nothing to read at {place}; place it on a floor, a roof, a stair, a wall or a column"))
-        })?),
+        })?)),
         (None, None) => None,
     };
-    let sp = Spot { view, at, host };
+    let sp = Spot { view: m.guid(view), at, host };
     let elevation = m.spot_value(&sp).map(hundredth);
+    let host = host.and_then(|h| m.elements.id(h));
     let id = s.model_mut().insert(Element::Spot(sp));
     Ok(json!({"id": id, "elevation": elevation, "host": host}))
 }
 
 /// The top of something standing on `level`: up to the next level, or `height` mm tall, or up to
 /// `top_level`; and that height.
-fn top_param(c: &str, m: &Model, p: &Value, level: Id) -> Result<(Option<Id>, f64), String> {
+fn top_param(c: &str, m: &Model, p: &Value, level: impl Key) -> Result<(Option<Guid>, f64), String> {
     let height = num(c, p, "height")?;
     let top_level = match p.get("top_level") {
         v if absent(v) => height.is_none().then(|| m.level_above(level)).flatten(),
@@ -3349,19 +3456,20 @@ fn stair(s: &mut Session, p: &Value) -> R {
 }
 
 /// With `railings`, a railing of the default type down each side of stair or ramp `id`: their ids.
-fn sides(c: &str, s: &mut Session, p: &Value, id: Id, level: Id) -> Result<Vec<Id>, String> {
+fn sides(c: &str, s: &mut Session, p: &Value, id: Id, level: Guid) -> Result<Vec<Id>, String> {
     if !flag(c, p, "railings")? {
         return Ok(Vec::new());
     }
     let type_name = s.model.default_type("railing").map(String::from).ok_or_else(|| bad(c, "the model has no railing types"))?;
     let m = s.model_mut();
+    let host = m.guid(id);
     let railing = |side| Railing {
         params: Default::default(),
         type_name: type_name.clone(),
         level,
         path: Vec::new(),
         base_offset: 0.0,
-        host: Some(id),
+        host: Some(host),
         side: Some(side),
     };
     Ok([Side::Left, Side::Right].into_iter().map(|side| m.insert(Element::Railing(railing(side)))).collect())
@@ -3408,7 +3516,7 @@ fn railing(s: &mut Session, p: &Value) -> R {
     let made: Vec<Railing> = match id_opt(c, p, "host")? {
         // Along a stair's or a ramp's sides.
         Some(host) => {
-            let level = m.elements.get(&host).and_then(|e| m.level_of(e)).ok_or_else(|| bad(c, format!("no stair or ramp {host}")))?;
+            let level = m.elements.get(host).and_then(|e| m.level_of(e)).ok_or_else(|| bad(c, format!("no stair or ramp {host}")))?;
             let sides = match string(c, p, "side")?.as_deref() {
                 None => vec![Side::Left, Side::Right],
                 Some("left") => vec![Side::Left],
@@ -3433,7 +3541,7 @@ fn roof(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let levels = m.levels();
     let level = if absent(p.get("level")) {
-        levels.get(1).or(levels.first()).map(|(id, _)| *id).ok_or_else(|| bad(c, "the model has no levels"))?
+        levels.get(1).or(levels.first()).map(|(id, _)| m.guid(*id)).ok_or_else(|| bad(c, "the model has no levels"))?
     } else {
         level_param(c, m, p, "level")?
     };
@@ -3472,7 +3580,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
     let c = "dormer";
     let m = &s.model;
     let host = id_opt(c, p, "host")?.ok_or_else(|| bad(c, "`host`, the roof it stands on, is required"))?;
-    let hr = match m.elements.get(&host) {
+    let hr = match m.elements.get(host) {
         Some(Element::Roof(r)) if r.join.is_none() => r.clone(),
         _ => return Err(bad(c, format!("{host} isn't a roof that joins none"))),
     };
@@ -3528,6 +3636,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
         join: Some(host),
         extrusion: None,
     }));
+    let roof_guid = model.guid(roof);
     let wall = |start: P2, end: P2| {
         Element::Wall(Wall {
             params: Default::default(),
@@ -3540,7 +3649,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
             base_offset,
             arc: 0.0,
             location: Location::Centre,
-            attach_top: Some(roof),
+            attach_top: Some(roof_guid),
             attach_base: Some(host),
         })
     };
@@ -3549,7 +3658,7 @@ fn dormer(s: &mut Session, p: &Value) -> R {
     // The host open inside its walls, up to where its top meets the dormer's underside.
     let (a, inner) = (w / 2.0 - f, |x: f64| (height + (w / 2.0 - x.abs()) * tan) / tan_h);
     let hole = [(a, f), (a, inner(a)), (0.0, inner(0.0)), (-a, inner(a)), (-a, f)].map(|(x, y)| micron(at + n * x + u * y)).to_vec();
-    if let Some(Element::Roof(r)) = model.elements.get_mut(&host) {
+    if let Some(Element::Roof(r)) = model.elements.get_mut(host) {
         r.openings.push(hole);
     }
     let window = match string(c, p, "window")? {
@@ -3576,7 +3685,7 @@ fn shaped<T: serde::de::DeserializeOwned>(c: &str, p: &Value, key: &str, shape: 
 /// `floor_outline` finds in those walls, `overhang` mm past their faces into each, clockwise; each
 /// ring from its south-west corner. Over a courtyard too small to stay open past the overhang, the
 /// roof runs on, as it does over rooms.
-pub fn roof_footprint(m: &Model, level: Id, overhang: f64) -> Result<(Vec<P2>, Vec<Vec<P2>>), String> {
+pub fn roof_footprint(m: &Model, level: impl Key, overhang: f64) -> Result<(Vec<P2>, Vec<Vec<P2>>), String> {
     let below = m.levels().into_iter().rev().find(|(_, l)| l.elevation < m.elevation(level) - TOL).map(|(id, _)| id);
     let below = below.ok_or_else(|| format!("{} has no level below to roof over; give `boundary`", level_name(m, level)))?;
     let (outline, loops) =
@@ -3689,7 +3798,7 @@ fn crop(s: &mut Session, p: &Value) -> R {
             _ => return Err(bad(c, "`region` is two corners, [[x, y], [x, y]]")),
         },
     };
-    match m.elements.get(&view) {
+    match m.elements.get(view) {
         Some(Element::Level(l)) => {
             let crop = match region {
                 Some(r) => r,
@@ -3701,7 +3810,7 @@ fn crop(s: &mut Session, p: &Value) -> R {
                     Some([micron(lo - P2(1000.0, 1000.0)), micron(hi + P2(1000.0, 1000.0))])
                 }
             };
-            if let Some(Element::Level(l)) = s.model_mut().elements.get_mut(&view) {
+            if let Some(Element::Level(l)) = s.model_mut().elements.get_mut(view) {
                 l.crop = crop;
             }
             Ok(json!({"view": view, "crop": crop}))
@@ -3727,19 +3836,20 @@ fn crop(s: &mut Session, p: &Value) -> R {
             }
             let crop = v.crop;
             let m = s.model_mut();
-            if let Some(Element::Section(old) | Element::Elevation(old)) = m.elements.get_mut(&view) {
+            let guid = m.guid(view);
+            if let Some(Element::Section(old) | Element::Elevation(old)) = m.elements.get_mut(view) {
                 *old = v;
             }
             // What's noted in the view keeps its spot over the model.
             for e in m.elements.values_mut() {
                 match e {
-                    Element::Text(n) if n.view == view => {
+                    Element::Text(n) if n.view == guid => {
                         n.at.0 -= shift;
                         if let Some(l) = &mut n.leader {
                             l.0 -= shift;
                         }
                     }
-                    Element::Spot(sp) if sp.view == view => sp.at.0 -= shift,
+                    Element::Spot(sp) if sp.view == guid => sp.at.0 -= shift,
                     _ => {}
                 }
             }
@@ -3752,14 +3862,14 @@ fn crop(s: &mut Session, p: &Value) -> R {
 /// The plan, section or elevation `p` names, the views that have a scale and a detail level.
 fn scaled_view(c: &str, m: &Model, p: &Value) -> Result<Id, String> {
     let view = view_param(c, m, p, false)?;
-    match m.elements.get(&view) {
+    match m.elements.get(view) {
         Some(Element::Level(_) | Element::Section(_) | Element::Elevation(_)) => Ok(view),
         _ => Err(bad(c, format!("{} isn't a plan, a section or an elevation; only those have one", view_title(m, view)))),
     }
 }
 
 /// View `view`'s graphics changed by `f`, when it makes a difference: the model stays as it was otherwise, so no undo step.
-fn change_graphics(s: &mut Session, view: Id, f: impl Fn(&mut Graphics)) {
+fn change_graphics(s: &mut Session, view: impl Key, f: impl Fn(&mut Graphics)) {
     let mut g = graphics::graphics_of(&s.model, view).cloned().unwrap_or_default();
     let was = g.clone();
     f(&mut g);
@@ -3808,7 +3918,7 @@ fn style_param(c: &str, p: &Value, key: &str) -> Result<Option<graphics::VisualS
 }
 
 /// An error unless view `view` may set what `group` holds: its template, if it controls that, sets it.
-fn own_to_set(c: &str, m: &Model, view: Id, group: Group, what: &str) -> Result<(), String> {
+fn own_to_set(c: &str, m: &Model, view: impl Key, group: Group, what: &str) -> Result<(), String> {
     match graphics::graphics_of(m, view).and_then(|g| g.controlled_by(m, group)) {
         Some(t) => {
             Err(bad(c, format!("its {what} follow view template `{t}`; change the template, or `template: null` to stop following it")))
@@ -3879,11 +3989,11 @@ fn view_detail(s: &mut Session, p: &Value) -> R {
 }
 
 /// What to call element `id` in a message: a view's or a sheet's name, else its category and id.
-fn view_title(m: &Model, id: Id) -> String {
+fn view_title(m: &Model, id: impl Key) -> String {
     match (m.view_name(id), m.sheet(id)) {
         (Some(n), _) => n.to_string(),
         (_, Some(sh)) => format!("sheet {}", sh.number),
-        _ => format!("{} {id}", m.elements.get(&id).map_or("element", Element::category)),
+        _ => format!("{} {}", m.elements.get(id).map_or("element", Element::category), m.shown(id)),
     }
 }
 
@@ -3947,8 +4057,9 @@ fn place(s: &mut Session, p: &Value) -> R {
                 }
             }
         },
-        Some(v) => v
-            .as_u64()
+        Some(v) => serde_json::from_value::<Guid>(v.clone())
+            .ok()
+            .and_then(|g| m.elements.id(g))
             .filter(|id| m.view_name(*id).is_some())
             .ok_or_else(|| bad(c, format!("`view`: {v} is not a plan, a section, an elevation, a schedule or a 3D view")))?,
         None => return Err(bad(c, "`view`, a level's, section's, elevation's, schedule's or 3D view's name or id, is required")),
@@ -3956,6 +4067,7 @@ fn place(s: &mut Session, p: &Value) -> R {
     // The view's own scale, unless told another; 1 : 100 for a view with none.
     let scale = scale.or_else(|| graphics::graphics_of(&s.model, view).and_then(|g| g.resolved(&s.model).scale)).unwrap_or(100.0);
     let at = at.unwrap_or_else(|| sheet::spot(&s.model, sheet, view, scale));
+    let (sheet, view) = (s.model.guid(sheet), s.model.guid(view));
     let id = s.model_mut().insert(Element::Viewport(Viewport { sheet, view, at, scale }));
     Ok(json!({"id": id, "at": at}))
 }
@@ -4109,7 +4221,7 @@ fn paint(s: &mut Session, p: &Value) -> R {
     }
     let m = s.model_mut();
     for &id in &ids {
-        let e = m.elements.get_mut(&id).ok_or_else(|| bad(c, format!("no element {id}")))?;
+        let e = m.elements.get_mut(id).ok_or_else(|| bad(c, format!("no element {id}")))?;
         let (category, faces) = (e.category(), paint::faces(e.category()));
         let Some(params) = e.params_mut().filter(|_| !faces.is_empty()) else {
             return Err(bad(c, format!("{category} {id} has no face to paint")));
@@ -4680,7 +4792,7 @@ fn modify(s: &mut Session, p: &Value) -> R {
     let ids = ids_param(c, m, p)?;
     let (mut edited, mut rescaled) = (Vec::new(), Vec::new());
     for &id in &ids {
-        let e = m.elements.get(&id).ok_or_else(|| bad(c, format!("no element {id}")))?;
+        let e = m.elements.get(id).ok_or_else(|| bad(c, format!("no element {id}")))?;
         let mut v = serde_json::to_value(e).map_err(|e| bad(c, e))?;
         let obj = v.as_object_mut().ok_or_else(|| bad(c, format!("element {id} can't be edited")))?;
         for (k, val) in fields {
@@ -4718,7 +4830,7 @@ fn modify(s: &mut Session, p: &Value) -> R {
             if (k - 1.0).abs() > 1e-12 {
                 for (oid, oe) in &m.elements {
                     if let Element::Door(o) | Element::Window(o) = oe
-                        && o.host == id
+                        && m.same(o.host, id)
                     {
                         let mut o = o.clone();
                         o.offset *= k;
@@ -4781,7 +4893,8 @@ struct Motion<'a> {
 /// only along its wall, by a translation, else only with its wall.
 fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> Result<Element, String> {
     let f = mo.map;
-    let mut e = m.elements.get(&id).cloned().ok_or_else(|| bad(c, format!("no element {id}")))?;
+    let within = |g: Guid| m.elements.id(g).is_some_and(|i| with.contains(&i));
+    let mut e = m.elements.get(id).cloned().ok_or_else(|| bad(c, format!("no element {id}")))?;
     let category = e.category();
     match &mut e {
         Element::Level(_) => return Err(bad(c, format!("level {id} has no place in plan; change its elevation, or add a level"))),
@@ -4814,7 +4927,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
         }
         Element::Railing(rl) => match rl.host {
             // Its stair's or ramp's, mirrored, its sides swap.
-            Some(h) if with.contains(&h) => {
+            Some(h) if within(h) => {
                 if mo.mirror {
                     rl.side = rl.side.map(other_side);
                 }
@@ -4865,7 +4978,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
             }
         }
         Element::Room(r) => r.point = f(r.point),
-        Element::Door(o) | Element::Window(o) if !with.contains(&o.host) => match (mo.slide, m.wall(o.host)) {
+        Element::Door(o) | Element::Window(o) if !within(o.host) => match (mo.slide, m.wall(o.host)) {
             (Some(by), Some(w)) => o.offset += by.dot((w.end - w.start).unit()),
             _ => return Err(bad(c, format!("{category} {id} turns and mirrors only with its wall; select the wall too"))),
         },
@@ -4909,9 +5022,9 @@ fn tag_heads(m: &Model, ids: &[Id], mo: &Motion) -> Vec<(Id, P2)> {
 
 /// Tag `id`, its head put at `head` whatever its door or window did.
 fn place_tag(m: &mut Model, id: Id, head: P2) {
-    let Some(Element::Tag(t)) = m.elements.get(&id) else { return };
+    let Some(Element::Tag(t)) = m.elements.get(id) else { return };
     let Some(a) = m.anchor(t.host) else { return };
-    if let Some(Element::Tag(t)) = m.elements.get_mut(&id) {
+    if let Some(Element::Tag(t)) = m.elements.get_mut(id) {
         t.offset = micron(head - a);
     }
 }
@@ -4923,9 +5036,10 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
     let m = &s.model;
     let f = mo.map;
     let moving: BTreeSet<Id> = ids.iter().copied().collect();
+    let moving_guids: BTreeSet<Guid> = ids.iter().map(|id| m.guid(*id)).collect();
     let heads = tag_heads(m, ids, mo);
     // Doors and windows of walls taken whole ride along.
-    let carried = |host: &Id| moving.contains(host) && end.is_none();
+    let carried = |host: Guid| moving_guids.contains(&host) && end.is_none();
     let mut walls: BTreeMap<Id, Wall> = BTreeMap::new();
     let mut others: Vec<(Id, Element)> = Vec::new();
     for &id in ids {
@@ -4938,7 +5052,7 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
                 }
                 walls.insert(id, w);
             }
-            Element::Door(o) | Element::Window(o) if moving.contains(&o.host) => {}
+            Element::Door(o) | Element::Window(o) if moving_guids.contains(&o.host) => {}
             e => others.push((id, e)),
         }
     }
@@ -4995,15 +5109,16 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
     // Doors and windows in walls that changed keep their place, or go with their wall.
     for (&id, e) in &m.elements {
         let (Element::Door(o) | Element::Window(o)) = e else { continue };
-        let (Some(before), Some(after)) = (old(&o.host), walls.get(&o.host)) else { continue };
-        let along = carried(&o.host) || moving.contains(&id);
+        let Some(host) = m.elements.id(o.host) else { continue };
+        let (Some(before), Some(after)) = (old(&host), walls.get(&host)) else { continue };
+        let along = carried(o.host) || moving.contains(&id);
         let spot = Axis::of(before).at(o.offset, 0.0);
         let at = if along { f(spot) } else { spot };
         let mut o = o.clone();
         let (axis, straight) = (Axis::of(after), after.arc == 0.0);
         o.offset = if straight { (at - after.start).dot(axis.tangent(0.0)) } else { axis.project(at).0 };
         // Its mirror image runs back the other way: the door hangs on the other jamb, toward the same side.
-        if mo.mirror && carried(&o.host) {
+        if mo.mirror && carried(o.host) {
             o.flip_hand = !o.flip_hand;
         }
         others.retain(|(other, _)| *other != id);
@@ -5026,15 +5141,15 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
     // Dimensions keep to the same lines of mirrored walls, which run the other way: their starts
     // and ends swap, and their doors' and windows' jambs.
     if mo.mirror && end.is_none() {
-        let hosts: BTreeMap<Id, Id> = m
+        let hosts: BTreeMap<Guid, Guid> = m
             .elements
-            .iter()
-            .filter_map(|(id, e)| match e {
-                Element::Door(o) | Element::Window(o) => Some((*id, o.host)),
+            .with_guids()
+            .filter_map(|(_, id, e)| match e {
+                Element::Door(o) | Element::Window(o) => Some((id, o.host)),
                 _ => None,
             })
             .collect();
-        let turned = |id: &Id| moving.contains(id) || hosts.get(id).is_some_and(|h| moving.contains(h));
+        let turned = |id: &Guid| moving_guids.contains(id) || hosts.get(id).is_some_and(|h| moving_guids.contains(h));
         for e in m.elements.values_mut() {
             if let Element::Dimension(d) = e {
                 d.refs.iter_mut().filter(|r| turned(&r.id)).for_each(|r| r.face = r.face.mirrored());
@@ -5052,6 +5167,7 @@ fn relocate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion, end: Option<bool>
 fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
     let m = &s.model;
     let copying: BTreeSet<Id> = ids.iter().copied().collect();
+    let copying_guids: BTreeSet<Guid> = ids.iter().map(|id| m.guid(*id)).collect();
     let heads: BTreeMap<Id, P2> = tag_heads(m, ids, mo).into_iter().collect();
     let mut copies = Vec::new();
     // Dimensions and tags, copied last: they may refer to copies.
@@ -5059,8 +5175,8 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
     for &id in ids {
         match transformed(c, m, id, mo, &copying)? {
             // A copied wall brings its doors and windows, a stair or a ramp its railings; see below.
-            Element::Door(o) | Element::Window(o) if copying.contains(&o.host) => {}
-            Element::Railing(Railing { host: Some(h), .. }) if copying.contains(&h) => {}
+            Element::Door(o) | Element::Window(o) if copying_guids.contains(&o.host) => {}
+            Element::Railing(Railing { host: Some(h), .. }) if copying_guids.contains(&h) => {}
             e @ (Element::Dimension(_) | Element::Tag(_) | Element::Spot(_)) => notes.push((id, e)),
             e => copies.push((id, e)),
         }
@@ -5069,8 +5185,8 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
         .elements
         .iter()
         .filter(|(_, e)| match e {
-            Element::Door(o) | Element::Window(o) => copying.contains(&o.host),
-            Element::Railing(r) => r.host.is_some_and(|h| copying.contains(&h)),
+            Element::Door(o) | Element::Window(o) => copying_guids.contains(&o.host),
+            Element::Railing(r) => r.host.is_some_and(|h| copying_guids.contains(&h)),
             _ => false,
         })
         .map(|(&id, e)| {
@@ -5119,7 +5235,7 @@ fn duplicate(c: &str, s: &mut Session, ids: &[Id], mo: &Motion) -> R {
             massing::detach(params);
         }
         let id = m.insert(e);
-        hosts.insert(from, id);
+        hosts.insert(m.guid(from), m.guid(id));
         made.push(id);
     }
     // Copied walls attached to roofs or floors copied with them attach to the copies.
@@ -5257,6 +5373,7 @@ fn split(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let id = id_opt(c, p, "id")?.ok_or_else(|| bad(c, "`id`, a wall, is required"))?;
     let w = m.wall(id).cloned().ok_or_else(|| bad(c, format!("{id} is not a wall")))?;
+    let id = m.elements.id(id).unwrap_or_default();
     let at = point_req(c, p, "at")?;
     if off_centre(m, &w, at) > m.thickness(&w) / 2.0 + 100.0 {
         return Err(bad(c, format!("[{}, {}] isn't on wall {id}", at.0, at.1)));
@@ -5273,7 +5390,7 @@ fn split(s: &mut Session, p: &Value) -> R {
     let mut later = Vec::new();
     for (&oid, e) in &m.elements {
         let (Element::Door(o) | Element::Window(o)) = e else { continue };
-        if o.host != id {
+        if !m.same(o.host, id) {
             continue;
         }
         let half = m.opening_type(e).map_or(0.0, |t| t.width / 2.0);
@@ -5296,9 +5413,10 @@ fn split(s: &mut Session, p: &Value) -> R {
     let m = s.model_mut();
     m.elements.insert(id, Element::Wall(first));
     let new = m.insert(Element::Wall(second));
+    let host = m.guid(new);
     for oid in later {
-        if let Some(Element::Door(o) | Element::Window(o)) = m.elements.get_mut(&oid) {
-            o.host = new;
+        if let Some(Element::Door(o) | Element::Window(o)) = m.elements.get_mut(oid) {
+            o.host = host;
             o.offset -= along;
         }
     }
@@ -5308,13 +5426,14 @@ fn split(s: &mut Session, p: &Value) -> R {
 fn delete(s: &mut Session, p: &Value) -> R {
     let c = "delete";
     let m = &s.model;
-    let mut gone: BTreeSet<Id> = ids_param(c, m, p)?.into_iter().collect();
+    let ids = ids_param(c, m, p)?;
+    let mut gone: BTreeSet<Guid> = ids.iter().map(|id| m.guid(*id)).collect();
     // What hangs on what goes, goes: a wall's doors and windows, and their tags.
     loop {
-        let hosted: Vec<Id> = m
+        let hosted: Vec<Guid> = m
             .elements
-            .iter()
-            .filter(|(id, e)| {
+            .with_guids()
+            .filter(|(_, id, e)| {
                 !gone.contains(id)
                     && match e {
                         Element::Door(o) | Element::Window(o) => gone.contains(&o.host),
@@ -5327,7 +5446,7 @@ fn delete(s: &mut Session, p: &Value) -> R {
                         _ => false,
                     }
             })
-            .map(|(id, _)| *id)
+            .map(|(_, id, _)| id)
             .collect();
         if hosted.is_empty() {
             break;
@@ -5336,20 +5455,21 @@ fn delete(s: &mut Session, p: &Value) -> R {
     }
     // A dimension loses the references that go; left with fewer than two, it goes too.
     let mut kept = Vec::new();
-    for (&id, e) in &m.elements {
+    for (id, guid, e) in m.elements.with_guids() {
         if let Element::Dimension(d) = e
-            && !gone.contains(&id)
+            && !gone.contains(&guid)
             && d.refs.iter().any(|r| gone.contains(&r.id))
         {
             let mut d = d.clone();
             d.refs.retain(|r| !gone.contains(&r.id));
             if d.refs.len() < 2 {
-                gone.insert(id);
+                gone.insert(guid);
             } else {
                 kept.push((id, d));
             }
         }
     }
+    let deleted: Vec<Id> = m.elements.with_guids().filter(|(_, g, _)| gone.contains(g)).map(|(id, ..)| id).collect();
     let m = s.model_mut();
     for id in &gone {
         m.elements.remove(id);
@@ -5376,7 +5496,7 @@ fn delete(s: &mut Session, p: &Value) -> R {
             }
         }
     }
-    Ok(json!({"deleted": gone}))
+    Ok(json!({"deleted": deleted}))
 }
 
 // ---------- reading ----------

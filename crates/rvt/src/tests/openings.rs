@@ -101,7 +101,7 @@ fn the_host_is_the_nearest_wall_below_an_openings_id_then_the_nearest_above_and_
     p.recs.push(Rec::new(410, DOORS).at([3.5, 40.0, 0.0, 6.5, 41.2, 7.0], &[90, 600, 410]));
     let (i, from) = super::walls::import_with_origins(&p);
     let host =
-        |door: u32| openings(&i).into_iter().find(|(m, _, _)| from[m] == format!("Door {door}")).map(|(_, _, o)| from[&o.host].clone());
+        |door: u32| openings(&i).into_iter().find(|(m, _, _)| from[m] == format!("Door {door}")).map(|(_, _, o)| from[&i.model.elements.id(o.host).unwrap()].clone());
     assert_eq!(host(200).as_deref(), Some("Wall 100"), "{:?}", i.skipped);
     assert_eq!(host(250).as_deref(), Some("Wall 300"));
     assert_eq!(host(95).as_deref(), Some("Wall 100"));
@@ -253,7 +253,7 @@ fn the_doors_and_windows_of_the_architectural_sample_are_those_of_rvt_rss_export
             };
             assert!(!o.type_name.starts_with("Imported"), "{label} {}: its type is named in the file", theirs.id);
             let host = i.model.wall(o.host).unwrap();
-            assert_eq!(from[&o.host], format!("Wall {}", theirs.host), "{label} {}", theirs.id);
+            assert_eq!(from[&i.model.elements.id(o.host).unwrap()], format!("Wall {}", theirs.host), "{label} {}", theirs.id);
             let t = if theirs.door { i.model.types.door[&o.type_name] } else { i.model.types.window[&o.type_name] };
             let along_x = (host.end.1 - host.start.1).abs() < 0.01;
             let (lo, hi) = if along_x { (theirs.cut[0], theirs.cut[3]) } else { (theirs.cut[1], theirs.cut[4]) };
