@@ -78,10 +78,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           packaging/windows/check-install.ps1 -Msi $env:MSI -Upgrade $rebuilt
 
+      # The same programs without an installer, for a PC whose user can't install software. Unzipped and run before it is uploaded.
+      - name: Portable zip
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          packaging/windows/portable.ps1 -Version $version -BinDir target\x86_64-pc-windows-msvc\release
+
       - uses: actions/upload-artifact@v4
         with:
           name: bimcraft-windows-x64
-          path: ${{ env.MSI }}
+          path: |
+            ${{ env.MSI }}
+            ${{ env.PORTABLE }}
 
   linux:
     name: Linux ${{ matrix.arch }}

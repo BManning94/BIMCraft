@@ -1213,7 +1213,7 @@ fn a_panic_in_the_network_is_an_error_not_a_hang() {
 
 /// Every file the release workflow would publish for `version`, by name, each with bytes of its own.
 fn files(version: &str) -> Vec<(String, Vec<u8>)> {
-    let mut names = vec![format!("bimcraft-{version}-windows-x64.msi")];
+    let mut names = vec![format!("bimcraft-{version}-windows-x64.msi"), format!("bimcraft-{version}-windows-x64-portable.zip")];
     for arch in ["x86_64", "aarch64"] {
         for extension in ["AppImage", "AppImage.zsync", "deb", "rpm", "tar.gz"] {
             names.push(format!("bimcraft-{version}-linux-{arch}.{extension}"));
