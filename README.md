@@ -568,9 +568,10 @@ IFC is the way in and out, and `.rvt` files will come in through Autodesk's own 
 
 ### Windows
 
-| Build | Installer |
+| Build | Download |
 |---|---|
-| x64 (64-bit Intel/AMD) | `bimcraft-<ver>-windows-x64.msi` |
+| x64 (64-bit Intel/AMD), installer | `bimcraft-<ver>-windows-x64.msi` |
+| x64, no installer: unzip and run | `bimcraft-<ver>-windows-x64-portable.zip` |
 
 The installer is a short setup wizard. It puts BIMCraft and `bimcraft-cli` for every user in `Program Files\BIMCraft`, or in
 the folder you pick on its folder page (Change, on any drive), adds BIMCraft to the Start menu, asks whether to put it on the
@@ -578,6 +579,12 @@ desktop too, opens `.bimcraft` projects in it, and offers it under Open with for
 runtime, and a newer version upgrades an older one, keeping the folder and the desktop shortcut as they were. For a silent
 install with a desktop shortcut, in a folder of your own: `msiexec /i bimcraft-<ver>-windows-x64.msi /qn DESKTOPSHORTCUT=1
 INSTALLFOLDER="D:\Apps\BIMCraft"`. It isn't code-signed yet, so Windows SmartScreen asks before it runs: More info, then Run anyway.
+
+The portable zip is for a PC where you can't install software: unzip it anywhere (a USB stick will do) and run `bimcraft.exe`.
+It holds `bimcraft.exe`, `bimcraft-cli.exe`, the licences and this readme, needs no rights and no Visual C++ runtime, and leaves
+nothing behind but its settings (the favorites, the recent files and `bimcraft.log`) in `%APPDATA%\BIMCraft`. It isn't code-signed
+either. BIMCraft only replaces the installer's copy in Program Files by itself, so a portable copy is told of a newer version
+with a Download button: unzip the new zip over it.
 
 ### Linux
 
