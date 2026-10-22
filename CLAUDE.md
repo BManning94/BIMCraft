@@ -439,3 +439,12 @@ The tools are run by absolute path (`macos::Tools`), so tests point them at shel
 AppImage; the one test that hands a file to the real `hdiutil` is skipped on a Mac, where nobody has seen what that does). Nothing of the macOS side has run on a Mac, and the AppImage side has run only against scripts that stand in for one.
 None of the Windows side runs here: its sequencing is tested with shell scripts for
 msiexec and the app (`tests::unix`), and what can't be tested is UAC, the real upgrade and the Program Files check on a real install.
+
+Startup (`apps/bimcraft/src/startup.rs`). A release build on Windows has no console, so a start that fails must say itself: `bimcraft.log`
+and `graphics.json` sit beside the favorites (`startup::Files::beside`). `startup::begin` runs once the arguments are read (never for
+`--version` or `--help`, which return before it), writes the log's first line and the panic hook, and picks the graphics for this start
+(`Mark`: the choice, and whether the last start finished). A start is marked unfinished until its window has stayed up for `SURVIVE` (15 s)
+or the app is closed the ordinary way (`startup::up`, `closed`); one that dies without a word, as a graphics driver can make it, leaves the
+mark, and the next start takes the next choice on `LADDER` (wgpu's own, Vulkan, DirectX 12, OpenGL: Windows only), keeping the first that
+survives. An error from `run_native` leaves the mark too, is logged, and on Windows shown in a message box (`startup::tell`: its words are
+rows in `WORDS`). `WGPU_BACKEND` set by the user switches all of it off. A new way for the start to fail goes through `startup::note`, not `eprintln!` alone.

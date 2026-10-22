@@ -15,6 +15,7 @@ bimcraft-core = { workspace = true }
 bimcraft-ui-egui = { workspace = true }
 bimcraft-update = { workspace = true }
 eframe = { workspace = true }
+rfd = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

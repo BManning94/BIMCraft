@@ -11,6 +11,8 @@ use bimcraft_core::sample::SAMPLE;
 use bimcraft_ui_egui::{BimApp, Status, lang};
 use serde_json::json;
 
+mod startup;
+
 const USAGE: &str = "USAGE: bimcraft [FILE] [--sample]
   FILE       a .bimcraft project to open, or an .ifc file to import
   --sample   start on the sample house
@@ -61,14 +63,19 @@ fn main() -> ExitCode {
         };
         problem = done.err().or(problem);
     }
+    // From here the window is the point: what stops it is written down and said (`startup`), and a start that dies unseen
+    // makes the next one try other graphics.
+    let favorites = bimcraft_core::favorites::default_path();
+    let files = favorites.as_deref().map(startup::Files::beside);
+    let graphics = startup::begin(files.as_ref(), language);
     // What the arguments built is where the user starts: nothing to undo, nothing unsaved.
     let (model, path) = ((*session.model).clone(), session.path.clone());
     session.reset(model, path);
     let mut app = BimApp::new(session);
     app.lang = language;
     // The recent files sit beside the favorites too; the files the arguments opened are the newest.
-    if let Some(path) = bimcraft_core::favorites::default_path() {
-        app.keep_recent_in(bimcraft_ui_egui::recent::beside(&path));
+    if let Some(path) = &favorites {
+        app.keep_recent_in(bimcraft_ui_egui::recent::beside(path));
         for file in &opened {
             app.note_recent(file);
         }
@@ -85,7 +92,13 @@ fn main() -> ExitCode {
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/app-icon/bimcraft-256.png")) {
         viewport = viewport.with_icon(icon);
     }
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    if let Some(backends) = graphics.backends() {
+        let mut setup = eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle();
+        setup.instance_descriptor.backends = backends;
+        options.wgpu_options.wgpu_setup = eframe::egui_wgpu::WgpuSetup::CreateNew(setup);
+    }
+    let up_files = files.clone();
     // Registered before the window opens, to catch the event that launched the app from Finder, and
     // held until it closes.
     #[cfg(target_os = "macos")]
@@ -94,6 +107,11 @@ fn main() -> ExitCode {
     let start = move |cc: &eframe::CreationContext| -> Result<Box<dyn eframe::App>, _> {
         #[cfg(target_os = "macos")]
         apple_events(&mut app, &cc.egui_ctx, inbox);
+        let adapter = cc.wgpu_render_state.as_ref().map(|state| {
+            let info = state.adapter.get_info();
+            format!("{} ({:?}, driver {} {})", info.name, info.backend, info.driver, info.driver_info)
+        });
+        startup::up(up_files.as_ref(), graphics, adapter.as_deref().unwrap_or("no wgpu adapter"));
         let ctx = cc.egui_ctx.clone();
         // The settings sit beside the favorites, in the folder the core finds for the user's own files.
         let prefs = bimcraft_core::favorites::default_path().map(|path| bimcraft_update::prefs::beside(&path));
@@ -104,9 +122,16 @@ fn main() -> ExitCode {
         Ok(Box::new(app))
     };
     match eframe::run_native("BIMCraft", options, Box::new(start)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => {
+            startup::closed(files.as_ref(), graphics);
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("bimcraft: {e}");
+            if let Some(files) = &files {
+                startup::note(&files.log, &format!("start failed on {} graphics: {e}", graphics.name()));
+            }
+            startup::tell(language, &e.to_string(), files.as_ref());
             ExitCode::FAILURE
         }
     }
