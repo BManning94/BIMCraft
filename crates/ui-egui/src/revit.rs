@@ -5,15 +5,17 @@
 //! lost thread is said in the status box.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
 use bimcraft_core::import::Imported;
-use egui::{Context, Id, Modal, RichText};
+use egui::{Align, Context, Id, Label, Layout, Modal, RichText, ScrollArea};
 
-use crate::lang::{t, tf};
+use crate::lang::{category, t, tf};
+use crate::style::pal;
 use crate::{BimApp, Status};
 
 /// Reads a Revit project into a model, or says why not. It runs on a thread of its own, and may take minutes on a big file.
@@ -39,13 +41,32 @@ pub(crate) struct Job {
     answer: Receiver<Result<Imported, String>>,
 }
 
+/// What a Revit import said about itself, kept for the window to show until another project replaces it: what came in by
+/// category and the importer's notes, which are what was left out and why, and what came in with a caveat.
+pub(crate) struct Report {
+    file: String,
+    schema: String,
+    /// What came in: the model's category and how many, the most first.
+    counts: Vec<(String, usize)>,
+    notes: Vec<String>,
+    pub(crate) open: bool,
+}
+
+/// A note with its element ids split off: `2 walls left out, why (ids 7, 9)` is the text and `ids 7, 9`.
+fn split_ids(note: &str) -> (&str, Option<&str>) {
+    match note.strip_suffix(')').and_then(|n| n.rsplit_once(" (")) {
+        Some((what, ids)) if ids.starts_with("ids ") => (what, Some(ids)),
+        _ => (note, None),
+    }
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map_or_else(|| path.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned())
 }
 
 /// How many elements a note of an import says were left out: `N walls left out, why (ids …)` is N. Notes that say something
 /// else (an element that came in, narrowed or moved) count none.
-pub(crate) fn count_left_out(note: &str) -> Option<usize> {
+pub fn count_left_out(note: &str) -> Option<usize> {
     let (head, _) = note.split_once(", ")?;
     let (n, what) = head.split_once(' ')?;
     what.ends_with(" left out").then(|| n.parse().ok())?
@@ -118,12 +139,22 @@ impl BimApp {
     }
 
     /// A Revit project that came in is the project now: new, unsaved (saving asks for a `.bimcraft` name) and in no list of recent files.
-    fn install_revit(&mut self, _file: &str, imported: Imported) {
+    fn install_revit(&mut self, file: &str, imported: Imported) {
         let elements = imported.model.elements.len();
         let left = imported.skipped.iter().filter_map(|n| count_left_out(n)).sum::<usize>();
+        let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for e in imported.model.elements.values() {
+            *counts.entry(e.category()).or_default() += 1;
+        }
+        let mut counts: Vec<(String, usize)> = counts.into_iter().map(|(c, n)| (c.to_string(), n)).collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let schema = imported.schema;
+        // The report comes up by itself when the import has something to say: nothing pops up over a clean one.
+        let report =
+            Report { file: file.to_string(), schema: schema.clone(), counts, open: !imported.skipped.is_empty(), notes: imported.skipped };
         self.session.reset(imported.model, None);
         self.reopened();
+        self.revit_report = Some(report);
         let count = if elements == 1 { t("1 element").to_string() } else { tf("{} elements", &[&elements.to_string()]) };
         self.status = Status { text: tf("Opened from {}: {}, {} left out.", &[&schema, &count, &left.to_string()]), error: false };
     }
@@ -138,5 +169,73 @@ impl BimApp {
                 ui.label(RichText::new(tf("Opening a Revit file: {}", &[&job.file])).strong());
             });
         });
+    }
+}
+
+impl BimApp {
+    /// The report of the last Revit import, while it is open: what came in, what was left out and why, with the element ids.
+    pub(crate) fn report_window(&mut self, ctx: &Context) {
+        let Some(report) = self.revit_report.as_ref().filter(|r| r.open) else { return };
+        let (left, noted): (Vec<&str>, Vec<&str>) = report.notes.iter().map(String::as_str).partition(|n| count_left_out(n).is_some());
+        let came_in: usize = report.counts.iter().map(|(_, n)| n).sum();
+        let left_out: usize = left.iter().filter_map(|n| count_left_out(n)).sum();
+        let mut close = false;
+        let r = Modal::new(Id::new("revit-report")).show(ctx, |ui| {
+            ui.set_width(560.0);
+            ui.label(RichText::new(t("Revit import report")).heading());
+            ui.label(RichText::new(format!("{} · {}", report.file, report.schema)).color(pal().muted));
+            ui.add_space(6.0);
+            ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                ui.label(RichText::new(tf("Came in: {}", &[&came_in.to_string()])).strong());
+                for (cat, n) in &report.counts {
+                    ui.label(format!("{n} {}", category(cat, *n != 1)));
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(tf("Left out: {}", &[&left_out.to_string()])).strong());
+                if left.is_empty() {
+                    ui.label(t("Nothing was left out."));
+                }
+                for note in left {
+                    note_row(ui, note);
+                }
+                if !noted.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(t("Noted")).strong());
+                    for note in noted {
+                        note_row(ui, note);
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| close = ui.button(t("Close")).clicked());
+        });
+        if (close || r.should_close())
+            && let Some(report) = self.revit_report.as_mut()
+        {
+            report.open = false;
+        }
+    }
+
+    /// File > Revit import report, which is there while the project is the one the report is about.
+    pub(crate) fn report_menu(&mut self, ui: &mut egui::Ui) {
+        if let Some(report) = self.revit_report.as_mut()
+            && ui.button(t("Revit import report")).clicked()
+        {
+            report.open = true;
+        }
+    }
+
+    /// Whether the report is up, which holds the keys as every dialog does.
+    pub(crate) fn report_open(&self) -> bool {
+        self.revit_report.as_ref().is_some_and(|r| r.open)
+    }
+}
+
+/// A note of the import, its element ids under it in the muted ink.
+fn note_row(ui: &mut egui::Ui, note: &str) {
+    let (what, ids) = split_ids(note);
+    ui.add(Label::new(format!("• {what}")).wrap());
+    if let Some(ids) = ids {
+        ui.add(Label::new(RichText::new(ids).small().monospace().color(pal().muted)).wrap());
     }
 }

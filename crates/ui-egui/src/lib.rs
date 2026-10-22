@@ -495,6 +495,8 @@ pub struct BimApp {
     revit_job: Option<revit::Job>,
     /// Files to open at the next frame: the command line's, and what the system asked for while a Revit file was being read.
     opens: Vec<PathBuf>,
+    /// What the last Revit import left out and brought in, for as long as its project is the one open.
+    revit_report: Option<revit::Report>,
 }
 
 /// The Options Bar's Height: up to a level above the plan's `level` (by default the next one up),
@@ -760,6 +762,7 @@ impl BimApp {
             revit: None,
             revit_job: None,
             opens: Vec::new(),
+            revit_report: None,
         }
     }
 
@@ -1038,6 +1041,7 @@ impl BimApp {
             || self.pending.is_some()
             || self.installing()
             || self.importing()
+            || self.report_open()
             // An open menu takes the keys: Esc closes it, not the tool.
             || egui::Popup::is_any_open(ctx)
         {
@@ -1792,6 +1796,7 @@ impl BimApp {
         (fresh.thin, fresh.show_properties, fresh.show_browser, fresh.lang, fresh.snaps) =
             (self.thin, self.show_properties, self.show_browser, self.lang, self.snaps);
         (fresh.updates, fresh.revit) = (self.updates.take(), self.revit.take());
+        fresh.opens = std::mem::take(&mut self.opens);
         (fresh.recent, fresh.recent_path) = (std::mem::take(&mut self.recent), self.recent_path.take());
         *self = fresh;
     }
@@ -1978,6 +1983,7 @@ impl BimApp {
                 self.export("PDF", "pdf");
             }
         });
+        self.report_menu(ui);
         self.update_menu(ui);
         ui.separator();
         if item(ui, "Exit", None) {
@@ -3145,6 +3151,7 @@ impl BimApp {
         self.shortcuts_window(ctx);
         self.installing_box(ctx);
         self.importing_box(ctx);
+        self.report_window(ctx);
         let Some(pending) = self.pending.clone() else { return };
         #[derive(PartialEq)]
         enum Choice {
