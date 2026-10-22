@@ -309,7 +309,7 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
         let why = error.split_once(": ").map_or(error.as_str(), |(_, why)| why);
         dropped.push((id, why.to_string()));
         let gone = m.guid(id);
-        m.elements.remove(&id);
+        m.elements.remove(id);
         let hosted: Vec<Id> = m
             .elements
             .iter()
@@ -320,7 +320,7 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
             .collect();
         for h in hosted {
             dropped.push((h, "its wall was left out".to_string()));
-            m.elements.remove(&h);
+            m.elements.remove(h);
         }
     }
     if !checked {

@@ -1955,7 +1955,7 @@ fn tag(d: &mut Drawing, m: &Model, t: &Tag) {
     };
     d.push(Prim::Fill { rings: vec![ring.clone()], color: PAPER });
     // Openings' marks sit in a box or a hexagon; anything else's label is plain text.
-    if matches!(m.elements.get(&t.host), Some(Element::Door(_) | Element::Window(_))) {
+    if matches!(m.elements.get(t.host), Some(Element::Door(_) | Element::Window(_))) {
         d.push(Prim::Line { pts: ring, width: 1.0, color: INK, dash: None, closed: true });
     }
     d.text(&text, (x, y), 10.0, INK);

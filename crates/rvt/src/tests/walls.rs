@@ -71,8 +71,8 @@ fn a_straight_wall_comes_in_with_its_line_height_levels_type_and_layers() {
         assert_eq!(
             t.layers,
             [
-                Layer { function: Function::Finish, material: "Brick".into(), thickness: 76.2 },
-                Layer { function: Function::Structure, material: "Concrete".into(), thickness: 152.4 },
+                Layer { function: Function::Finish, material: "Brick".into(), thickness: 76.2, ..Layer::default() },
+                Layer { function: Function::Structure, material: "Concrete".into(), thickness: 152.4, ..Layer::default() },
             ]
         );
         assert!(i.model.materials.contains_key("Brick") && i.model.materials.contains_key("Concrete"));

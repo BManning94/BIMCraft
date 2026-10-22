@@ -100,8 +100,12 @@ fn the_host_is_the_nearest_wall_below_an_openings_id_then_the_nearest_above_and_
     door(&mut p, 95, 9.0, &[90, 100]);
     p.recs.push(Rec::new(410, DOORS).at([3.5, 40.0, 0.0, 6.5, 41.2, 7.0], &[90, 600, 410]));
     let (i, from) = super::walls::import_with_origins(&p);
-    let host =
-        |door: u32| openings(&i).into_iter().find(|(m, _, _)| from[m] == format!("Door {door}")).map(|(_, _, o)| from[&i.model.elements.id(o.host).unwrap()].clone());
+    let host = |door: u32| {
+        openings(&i)
+            .into_iter()
+            .find(|(m, _, _)| from[m] == format!("Door {door}"))
+            .map(|(_, _, o)| from[&i.model.elements.id(o.host).unwrap()].clone())
+    };
     assert_eq!(host(200).as_deref(), Some("Wall 100"), "{:?}", i.skipped);
     assert_eq!(host(250).as_deref(), Some("Wall 300"));
     assert_eq!(host(95).as_deref(), Some("Wall 100"));

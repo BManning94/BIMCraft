@@ -165,6 +165,7 @@ pub(crate) fn layered(name: Option<String>, layers: &[CompoundLayer], g: &Gather
                 .cloned()
                 .unwrap_or_default(),
             thickness: mm(l.width_feet),
+            ..Layer::default()
         })
         .collect();
     let thickness = layers.iter().map(|l| l.thickness).sum::<f64>();
