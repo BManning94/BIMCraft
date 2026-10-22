@@ -13,10 +13,10 @@ use bimcraft_core::geom::P2;
 use bimcraft_core::import::Imported;
 use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 
-use crate::inventory::{Inventory, Survey};
+use crate::inventory::{Inventory, Survey, Wants};
 use crate::records::{Record, TypeRecord};
 use crate::{Limits, Revit};
-use crate::{floors, openings, walls};
+use crate::{columns, floors, openings, walls};
 
 /// `OST_Materials`.
 pub(crate) const OST_MATERIALS: i64 = -2_000_700;
@@ -125,6 +125,8 @@ pub(crate) struct Facts {
     pub materials: BTreeSet<u32>,
     /// The ids of the family symbols (types of components, doors and windows) of each category, which have a box but are not placed.
     pub symbols: BTreeMap<i64, BTreeSet<u32>>,
+    /// The box of each family symbol (its envelope in the family's own axes), by id, as its newest record has it.
+    pub symbol_boxes: BTreeMap<u32, [f64; 6]>,
     /// Each project level's elevation in feet, by Revit id.
     pub elevations: BTreeMap<u32, f64>,
 }
@@ -133,9 +135,14 @@ impl Facts {
     fn of(s: Survey) -> (Facts, Inventory) {
         let mut current: BTreeMap<u32, Record> = BTreeMap::new();
         let mut symbols: BTreeMap<i64, BTreeSet<u32>> = BTreeMap::new();
+        let mut symbol_boxes: BTreeMap<u32, ((u32, usize), [f64; 6])> = BTreeMap::new();
         for r in s.records.iter().filter(|r| !r.placed) {
             symbols.entry(r.category).or_default().insert(r.id);
+            if symbol_boxes.get(&r.id).is_none_or(|(held, _)| *held < (r.partition, r.offset)) {
+                symbol_boxes.insert(r.id, ((r.partition, r.offset), r.bbox));
+            }
         }
+        let symbol_boxes = symbol_boxes.into_iter().map(|(id, (_, b))| (id, b)).collect();
         for r in s.records.into_iter().filter(|r| r.placed && (has_volume(r) || r.category == floors::OST_SKETCH_LINES)) {
             // The copy with the greatest height is the element's whole body; a tie goes to the newest.
             let key = |r: &Record| (r.extent()[2].to_bits(), r.partition, r.offset);
@@ -153,7 +160,7 @@ impl Facts {
             }
         }
         let elevations = s.inventory.levels.iter().map(|l| (l.id, l.elevation_feet)).collect();
-        (Facts { release: s.release, tags: s.tags, ids: s.ids, current, types, materials, symbols, elevations }, s.inventory)
+        (Facts { release: s.release, tags: s.tags, ids: s.ids, current, types, materials, symbols, symbol_boxes, elevations }, s.inventory)
     }
 
     /// The current records of a category.
@@ -168,8 +175,16 @@ fn has_volume(r: &Record) -> bool {
 }
 
 /// The categories whose records the first pass keeps.
-const CATEGORIES: [i64; 6] =
-    [walls::OST_WALLS, floors::OST_FLOORS, floors::OST_CEILINGS, floors::OST_SKETCH_LINES, openings::OST_DOORS, openings::OST_WINDOWS];
+const CATEGORIES: [i64; 8] = [
+    walls::OST_WALLS,
+    floors::OST_FLOORS,
+    floors::OST_CEILINGS,
+    floors::OST_SKETCH_LINES,
+    openings::OST_DOORS,
+    openings::OST_WINDOWS,
+    columns::OST_COLUMNS,
+    columns::OST_STRUCTURAL_COLUMNS,
+];
 
 /// Reads the Revit project in `bytes` into a model named after its title (or `name`).
 pub fn import(bytes: &[u8], name: &str) -> Result<Imported, String> {
@@ -211,14 +226,16 @@ pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<
     let release = survey.release;
     let (facts, inv) = Facts::of(survey);
     levels(&mut cx, &inv);
-    let mut wanted = BTreeSet::new();
-    walls::wanted(&facts, &mut wanted);
-    floors::wanted(&facts, &mut wanted);
-    openings::wanted(&facts, &mut wanted);
-    let gathered = revit.gather(release, &facts.tags, &facts.ids, &wanted, &facts.materials).map_err(e)?;
+    let mut wants = Wants { materials: facts.materials.clone(), ..Wants::default() };
+    walls::wanted(&facts, &mut wants.data);
+    floors::wanted(&facts, &mut wants.data);
+    openings::wanted(&facts, &mut wants.data);
+    columns::wanted(&facts, &mut wants);
+    let gathered = revit.gather(release, &facts.tags, &facts.ids, &wants).map_err(e)?;
     walls::import(&mut cx, &facts, &gathered);
     floors::import(&mut cx, &facts, &gathered);
     openings::import(&mut cx, &facts, &gathered);
+    columns::import(&mut cx, &facts, &gathered);
     let from = cx.from.clone();
     finish(cx, format!("Revit {release}")).map(|i| (i, from))
 }

@@ -50,6 +50,30 @@ pub(crate) fn wanted(f: &Facts, out: &mut BTreeSet<u32>) {
     let _ = (f, out);
 }
 
+/// The type of a family instance: the one family symbol of its category its reference list names that has a name entry of the
+/// category, and the name. None where it names none, or two with different names.
+pub(crate) fn symbol_of(r: &Record, symbols: &BTreeSet<u32>, g: &Gathered, category: i64) -> Option<(u32, String)> {
+    let mut named = r
+        .refs
+        .iter()
+        .filter_map(|&v| u32::try_from(v).ok())
+        .filter(|id| *id != r.id && symbols.contains(id))
+        .filter_map(|id| g.names.get(&id).filter(|(_, c)| c.is_none_or(|c| c == category)).map(|(n, _)| (id, n.clone())))
+        .collect::<Vec<_>>();
+    named.sort();
+    named.dedup();
+    let names: BTreeSet<&String> = named.iter().map(|(_, n)| n).collect();
+    match (named.first(), names.len()) {
+        (Some(first), 1) => Some(first.clone()),
+        _ => None,
+    }
+}
+
+/// The name of the type of a family instance ([`symbol_of`]).
+pub(crate) fn symbol_name(r: &Record, symbols: &BTreeSet<u32>, g: &Gathered, category: i64) -> Option<String> {
+    symbol_of(r, symbols, g, category).map(|(_, n)| n)
+}
+
 /// A door or window read from its record, before the hole it makes is fitted among its neighbours'.
 struct Pending {
     id: u32,
@@ -92,20 +116,7 @@ pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
                 let height = micron(mm(r.bbox[5]) - mm(r.bbox[2]));
                 let sill = micron(mm(r.bbox[2]) - cx.model.own_base(&wall));
                 let sill = if (-1.0..0.0).contains(&sill) { 0.0 } else { sill };
-                // Its type is the one family symbol of its category its list names that has a name entry of the category.
-                let named: BTreeSet<&String> = r
-                    .refs
-                    .iter()
-                    .filter_map(|&v| u32::try_from(v).ok())
-                    .filter(|id| *id != r.id && symbols.contains(id))
-                    .filter_map(|id| g.names.get(&id))
-                    .filter(|(_, c)| c.is_none_or(|c| c == category))
-                    .map(|(n, _)| n)
-                    .collect();
-                let name = match named.iter().collect::<Vec<_>>()[..] {
-                    [one] => (*one).clone(),
-                    _ => format!("Imported {label}"),
-                };
+                let name = symbol_name(r, &symbols, g, category).unwrap_or_else(|| format!("Imported {label}"));
                 Ok(Pending {
                     id: r.id,
                     door: label == "door",

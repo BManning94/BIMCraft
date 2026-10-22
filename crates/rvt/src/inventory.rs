@@ -27,7 +27,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::data::{Data, category_materials, element_data, material_names, newest};
+use crate::data::{Data, category_materials, column_bottoms, column_nodes, element_data, material_names, newest};
 use crate::error::{Error, Result};
 use crate::names::{Latest, entries_32, entries_64};
 use crate::records::{
@@ -379,6 +379,19 @@ pub(crate) struct Gathered {
     pub category: BTreeMap<i64, u32>,
     /// The name of each family and family type, with its category (2024 and later), as its newest partition holds it.
     pub names: BTreeMap<u32, (String, Option<i64>)>,
+    /// The bottom, in feet, of the columns whose geometry node corrects their record box.
+    pub column_bottoms: BTreeMap<u32, f64>,
+}
+
+/// What the second pass is asked for.
+#[derive(Default)]
+pub(crate) struct Wants {
+    /// The elements whose data is kept.
+    pub data: BTreeSet<u32>,
+    /// The ids of the materials.
+    pub materials: BTreeSet<u32>,
+    /// The columns, with their record boxes.
+    pub columns: BTreeMap<u32, [f64; 6]>,
 }
 
 impl crate::Revit {
@@ -392,18 +405,12 @@ impl crate::Revit {
 
     /// The data of the `wanted` elements, every copy, and the names of the project's materials: a second pass over the
     /// partitions, for what the records name.
-    pub(crate) fn gather(
-        &mut self,
-        release: u32,
-        tags: &Tags,
-        ids: &[u32],
-        wanted: &BTreeSet<u32>,
-        material_ids: &BTreeSet<u32>,
-    ) -> Result<Gathered> {
+    pub(crate) fn gather(&mut self, release: u32, tags: &Tags, ids: &[u32], wants: &Wants) -> Result<Gathered> {
         let names: Vec<String> = self.stream_names().into_iter().filter(|n| n.starts_with("Partitions/")).map(String::from).collect();
         let wide = release >= 2024;
         // Up to 2023 a material the object does not name gives itself a name in its own data.
-        let mut wanted = wanted.clone();
+        let (material_ids, columns) = (&wants.materials, &wants.columns);
+        let mut wanted = wants.data.clone();
         if !wide {
             wanted.extend(material_ids);
         }
@@ -412,12 +419,14 @@ impl crate::Revit {
         let mut materials: BTreeMap<u32, Option<String>> = BTreeMap::new();
         let mut styled: BTreeMap<i64, BTreeSet<u64>> = BTreeMap::new();
         let mut named = Latest::default();
+        let mut nodes = BTreeMap::new();
         for name in names {
             let number = name.rsplit('/').next().and_then(|n| n.parse::<u32>().ok()).unwrap_or(0);
             let buf = self.inflate_all(&name)?.bytes;
             element_data(&buf, tags, wide, wanted, number, &mut data);
             material_names(&buf, tags, wide, ids, &mut materials);
             category_materials(&buf, tags, release, &CATEGORY_MATERIAL_CATEGORIES, &mut styled);
+            column_nodes(&buf, columns, &mut nodes);
             let mut entries = Vec::new();
             if wide {
                 entries_64(&buf, ids, &mut entries);
@@ -455,7 +464,7 @@ impl crate::Revit {
                 Some((c, id))
             })
             .collect();
-        Ok(Gathered { data, materials, category, names: named.into_values() })
+        Ok(Gathered { data, materials, category, names: named.into_values(), column_bottoms: column_bottoms(nodes, columns) })
     }
 
     /// [`Revit::inventory`], and the records of the categories `keep` says yes to.

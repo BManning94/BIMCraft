@@ -6,6 +6,7 @@
 //! templates, icons, help text) for the project.
 
 pub mod atom;
+mod columns;
 mod container;
 pub mod curves;
 pub mod data;
@@ -20,6 +21,7 @@ pub mod info;
 pub mod inventory;
 mod names;
 mod openings;
+mod placement;
 pub mod preview;
 #[cfg(any(test, feature = "testing"))]
 pub mod project_fixture;

@@ -131,6 +131,8 @@ pub struct Project {
     pub data: Vec<Block>,
     pub mats: Vec<Mat>,
     pub names: Vec<NameEntry>,
+    /// Geometry nodes of columns: the id and the two boxes (feet) at 96 and 48 bytes before it.
+    pub nodes: Vec<(u32, [f64; 6], [f64; 6])>,
     /// Ids the element table declares beyond the ones above.
     pub extra_ids: Vec<u32>,
     /// How many gzip members the partition's bytes are cut into (a record can run across two).
@@ -149,6 +151,7 @@ impl Project {
             data: Vec::new(),
             mats: Vec::new(),
             names: Vec::new(),
+            nodes: Vec::new(),
             extra_ids: Vec::new(),
             members: 1,
             saved_by: String::new(),
@@ -206,6 +209,14 @@ impl Project {
         }
         for n in &self.names {
             blocks.extend_from_slice(&name_entry(n, self.wide()));
+        }
+        for (id, first, second) in &self.nodes {
+            blocks.extend_from_slice(&[0x13; 5]);
+            blocks.extend_from_slice(&bbox(first));
+            blocks.extend_from_slice(&bbox(second));
+            blocks.extend_from_slice(&u64::from(*id).to_le_bytes());
+            blocks.extend_from_slice(&3u64.to_le_bytes());
+            blocks.extend_from_slice(&u64::MAX.to_le_bytes());
         }
         for l in self.levels.iter().filter(|l| l.named) {
             blocks.extend_from_slice(&name_block(l, self.wide()));
@@ -603,4 +614,10 @@ fn name_entry(n: &NameEntry, wide: bool) -> Vec<u8> {
     }
     f.extend_from_slice(&[0x24; 3]);
     f
+}
+
+/// A family instance's placement: the rotation about up by `angle` radians, row by row, and the origin (feet).
+pub fn transform_bytes(angle: f64, origin: [f64; 3]) -> Vec<u8> {
+    let (sin, cos) = angle.sin_cos();
+    [cos, -sin, 0.0, sin, cos, 0.0, 0.0, 0.0, 1.0, origin[0], origin[1], origin[2]].iter().flat_map(|v| v.to_le_bytes()).collect()
 }

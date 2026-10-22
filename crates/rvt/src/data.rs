@@ -21,6 +21,10 @@
 //! `ff` ×8. An id whose copies disagree has no name, and nor has a name that two
 //! materials would share: Revit keeps material names unique, so one of them is misread.
 //!
+//! A column's record box can start at 0.0 while the column starts higher: the column's geometry node holds the truer box. The node
+//! is the column's `u64` id, `u64 3` and `u64 -1`, preceded by two boxes of six `f64` 96 and 48 bytes before the id; the second
+//! holds Revit's z-range, and the plan extents of both equal the record's.
+//!
 //! A layer with no material of its own takes its category's, which the document's object styles hold: the category's id, an
 //! unset id, `01 00 00 00`, another unset id and the material (all `u64`) up to 2024, and from the id's `i32` an unset word,
 //! a 1 or 2, `01 00 00 00`, `ff ff ff ff` and the tag of `PatternHelper`, eight bytes, `i32 -3000010` and the material
@@ -28,7 +32,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::records::{Tags, declared, u32_at, u64_at};
+use crate::records::{Tags, declared, f64_at, u32_at, u64_at};
 
 /// One copy of an element's data: the number of the partition it is in, and the bytes from just past its id to the next
 /// element's header (or the window).
@@ -112,6 +116,63 @@ pub(crate) fn category_materials(buf: &[u8], tags: &Tags, release: u32, categori
             }
         }
     }
+}
+
+/// What follows a column's `u64` id in its geometry node: `u64 3 · u64 -1`.
+const NODE_AFTER_ID: [u8; 16] = [3, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255];
+const NODE_TOLERANCE: f64 = 0.01;
+const PLAN_TOLERANCE: f64 = 1e-6;
+
+fn node_box(buf: &[u8], at: usize) -> Option<[f64; 6]> {
+    let mut out = [0.0; 6];
+    for (i, v) in out.iter_mut().enumerate() {
+        *v = f64_at(buf, at.checked_add(i * 8)?).filter(|v| v.is_finite() && v.abs() < 1e5)?;
+    }
+    (out[3] > out[0] && out[4] > out[1] && out[5] > out[2]).then_some(out)
+}
+
+/// The two boxes of a column's geometry node.
+pub(crate) type Node = ([f64; 6], [f64; 6]);
+
+/// Every geometry node of a column in `targets` in a partition.
+pub(crate) fn column_nodes(buf: &[u8], targets: &BTreeMap<u32, [f64; 6]>, out: &mut BTreeMap<u32, Vec<Node>>) {
+    if targets.is_empty() {
+        return;
+    }
+    for at in memchr::memmem::find_iter(buf, &NODE_AFTER_ID) {
+        let Some(id_at) = at.checked_sub(8).filter(|&a| a >= 96) else { continue };
+        let Some(id) = u64_at(buf, id_at).and_then(|v| u32::try_from(v).ok()).filter(|id| targets.contains_key(id)) else { continue };
+        if let (Some(first), Some(second)) = (node_box(buf, id_at - 96), node_box(buf, id_at - 48)) {
+            out.entry(id).or_default().push((first, second));
+        }
+    }
+}
+
+fn plan_equal(a: &[f64; 6], b: &[f64; 6], tolerance: f64) -> bool {
+    [0, 1, 3, 4].iter().all(|&i| (a[i] - b[i]).abs() < tolerance)
+}
+
+/// The bottom, in feet, of each column that a geometry node gives and agrees on: only for a column whose record box begins
+/// where the node's does not, with the same plan and the same top.
+pub(crate) fn column_bottoms(nodes: BTreeMap<u32, Vec<Node>>, targets: &BTreeMap<u32, [f64; 6]>) -> BTreeMap<u32, f64> {
+    nodes
+        .into_iter()
+        .filter_map(|(id, nodes)| {
+            let record = targets.get(&id)?;
+            let bottoms: Vec<f64> = nodes
+                .iter()
+                .filter(|(first, second)| {
+                    plan_equal(first, second, 1e-9)
+                        && plan_equal(second, record, PLAN_TOLERANCE)
+                        && (second[5] - record[5]).abs() < NODE_TOLERANCE
+                        && (second[2] - record[2]).abs() > NODE_TOLERANCE
+                })
+                .map(|(_, second)| second[2])
+                .collect();
+            let first = *bottoms.first()?;
+            bottoms.iter().all(|b| (b - first).abs() < NODE_TOLERANCE).then_some((id, first))
+        })
+        .collect()
 }
 
 const NAME_WINDOW: usize = 0x1000;
