@@ -591,6 +591,12 @@ runtime, and a newer version upgrades an older one, keeping the folder and the d
 install with a desktop shortcut, in a folder of your own: `msiexec /i bimcraft-<ver>-windows-x64.msi /qn DESKTOPSHORTCUT=1
 INSTALLFOLDER="D:\Apps\BIMCraft"`. It isn't code-signed yet, so Windows SmartScreen asks before it runs: More info, then Run anyway.
 
+If BIMCraft closes on its own at start, or never shows a window: it writes `bimcraft.log` beside your favorites
+(`%APPDATA%\BIMCraft` on Windows) with the version, the graphics it started on and whatever stopped it, and on Windows says
+so in a message box. A start that dies without a word, as a graphics driver can make it do, is noticed at the next start, which
+tries Vulkan, then DirectX 12, then OpenGL, and keeps the first that stays up for 15 seconds. To choose yourself, set the
+environment variable `WGPU_BACKEND` to `vulkan`, `dx12` or `opengl`; BIMCraft then leaves the choice alone.
+
 ### Linux
 
 | Format | x86_64 | aarch64 (64-bit Arm) | Notes |
