@@ -95,6 +95,21 @@ impl Import {
         self.groups.entry((false, kind.to_string(), text.to_string())).or_default().push(id);
     }
 
+    /// Element `id` of the model was made and then taken out again, for `why`: left out, as a Revit element of its kind (`Wall 423099`
+    /// was made, so it is `wall`, 423099), or for a level, which has a name and no id, a note of its own.
+    fn dropped(&mut self, id: Id, why: &str) {
+        let from = self.from.get(&id).cloned().unwrap_or_default();
+        if let Some((kind, n)) = from.rsplit_once(' ')
+            && let Ok(n) = n.parse::<u32>()
+        {
+            self.left_out(&kind.to_lowercase(), n, why);
+        } else if let Some((kind, what)) = from.split_once(' ') {
+            self.skipped.push(format!("1 {} left out, {why} ({what})", kind.to_lowercase()));
+        } else {
+            self.skipped.push(format!("1 element left out, {why}"));
+        }
+    }
+
     fn tell(&mut self) {
         for ((left, kind, reason), mut ids) in std::mem::take(&mut self.groups) {
             ids.sort_unstable();
@@ -261,24 +276,21 @@ fn levels(cx: &mut Import, inv: &Inventory) {
         cx.from.insert(id, "Level 'Level 1'".into());
         cx.skipped.push("the file has no levels the reader can find: the project has one, Level 1, at zero".into());
     }
-    if !inv.owned_levels.is_empty() {
-        let ids: Vec<String> = inv.owned_levels.iter().map(u32::to_string).collect();
-        cx.skipped.push(format!("{} levels sit inside other elements (ids {}): they are not project levels", ids.len(), ids.join(", ")));
+    for id in &inv.owned_levels {
+        cx.left_out("level", *id, "it sits inside other elements, so it is not a project level");
     }
     if inv.unread_levels > 0 {
-        cx.skipped.push(format!(
-            "{} level{} with no name or elevation the reader can find (its block is missing or damaged)",
-            inv.unread_levels,
-            if inv.unread_levels == 1 { "" } else { "s" }
-        ));
+        let n = inv.unread_levels;
+        let plural = if n == 1 { "" } else { "s" };
+        cx.skipped.push(format!("{n} level{plural} left out, no name or elevation the reader can find (its block is missing or damaged)"));
     }
 }
 
 /// What breaks a rule is left out with the rule (a wall takes its doors and windows along), then the model is checked once more.
 fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
-    cx.tell();
     cx.model.adopt_materials();
     let m = &mut cx.model;
+    let mut dropped: Vec<(Id, String)> = Vec::new();
     let mut checked = false;
     for _ in 0..=m.elements.len() {
         let Err(error) = m.check() else {
@@ -287,7 +299,7 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
         };
         let id = culprit(&error).filter(|id| cx.from.contains_key(id)).ok_or_else(|| error.clone())?;
         let why = error.split_once(": ").map_or(error.as_str(), |(_, why)| why);
-        cx.skipped.push(format!("{}: {why}", cx.from.get(&id).cloned().unwrap_or_default()));
+        dropped.push((id, why.to_string()));
         m.elements.remove(&id);
         let hosted: Vec<Id> = m
             .elements
@@ -298,12 +310,16 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
             })
             .collect();
         for h in hosted {
-            cx.skipped.push(format!("{}: its wall was left out", cx.from.get(&h).cloned().unwrap_or_default()));
+            dropped.push((h, "its wall was left out".to_string()));
             m.elements.remove(&h);
         }
     }
     if !checked {
         m.check()?;
     }
+    for (id, why) in dropped {
+        cx.dropped(id, &why);
+    }
+    cx.tell();
     Ok(Imported { model: cx.model, schema, skipped: cx.skipped, moved: None })
 }

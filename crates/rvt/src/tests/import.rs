@@ -53,6 +53,9 @@ fn what_the_inventory_cannot_make_a_level_of_is_listed() {
     assert!(says("1 level") && says("no name"), "{:?}", i.skipped);
     assert!(says("Far away"), "a level past the model's limits is left out with the rule: {:?}", i.skipped);
     assert!(i.model.check().is_ok());
+    // Each is a note that counts: `N kinds left out, why`, which the desktop adds up for its status line.
+    let counted = |kind: &str, what: &str| i.skipped.iter().any(|s| s.starts_with(&format!("1 {kind} left out, ")) && s.contains(what));
+    assert!(counted("level", "inside other elements") && counted("level", "no name") && counted("level", "Far away"), "{:?}", i.skipped);
 }
 
 #[test]
@@ -126,6 +129,6 @@ fn the_levels_that_have_no_name_are_counted_in_the_singular_or_the_plural() {
         }
         import(&p).skipped.into_iter().find(|s| s.contains("no name or elevation")).unwrap_or_default()
     };
-    assert!(said(1).starts_with("1 level with no name"), "{}", said(1));
-    assert!(said(2).starts_with("2 levels with no name"), "{}", said(2));
+    assert!(said(1).starts_with("1 level left out, no name"), "{}", said(1));
+    assert!(said(2).starts_with("2 levels left out, no name"), "{}", said(2));
 }
