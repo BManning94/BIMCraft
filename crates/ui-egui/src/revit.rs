@@ -153,7 +153,10 @@ impl BimApp {
         let report =
             Report { file: file.to_string(), schema: schema.clone(), counts, open: !imported.skipped.is_empty(), notes: imported.skipped };
         self.session.reset(imported.model, None);
+        // Its own recovery copy, as for any new project, and none left for the one it replaces.
+        self.retire_autosave();
         self.reopened();
+        self.autosave_document();
         self.revit_report = Some(report);
         let count = if elements == 1 { t("1 element").to_string() } else { tf("{} elements", &[&elements.to_string()]) };
         self.status = Status { text: tf("Opened from {}: {}, {} left out.", &[&schema, &count, &left.to_string()]), error: false };

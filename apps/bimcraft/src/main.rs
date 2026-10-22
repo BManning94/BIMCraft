@@ -44,6 +44,7 @@ fn main() -> ExitCode {
     let mut opened = Vec::new();
     // A Revit file takes minutes to read, so the window comes up first and reads it (`BimApp::open_later`): the last file wins.
     let mut later = None;
+    let mut failed_project = None;
     for arg in std::env::args().skip(1) {
         let done = match arg.as_str() {
             "-h" | "--help" => {
@@ -72,6 +73,9 @@ fn main() -> ExitCode {
                 done
             }
         };
+        if done.is_err() && !arg.starts_with('-') && !arg.to_ascii_lowercase().ends_with(".ifc") {
+            failed_project = Some(std::path::PathBuf::from(&arg));
+        }
         problem = done.err().or(problem);
     }
     // From here the window is the point: what stops it is written down and said (`startup`), and a start that dies unseen
@@ -123,6 +127,10 @@ fn main() -> ExitCode {
     let (_registration, inbox) = fmv_macos_events::Registration::install();
     // The update check runs on a thread of its own, started once the window exists: it never delays the start.
     let start = move |cc: &eframe::CreationContext| -> Result<Box<dyn eframe::App>, _> {
+        app.enable_autosave(std::env::temp_dir().join("bimcraft-autosave"), &cc.egui_ctx);
+        if let Some(project) = failed_project {
+            app.inspect_recovery(project);
+        }
         #[cfg(target_os = "macos")]
         apple_events(&mut app, &cc.egui_ctx, inbox);
         let adapter = cc.wgpu_render_state.as_ref().map(|state| {
