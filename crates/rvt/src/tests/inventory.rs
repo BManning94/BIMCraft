@@ -485,7 +485,7 @@ fn the_record_chain_of_a_real_partition_has_a_record_for_every_declared_element(
         let schema = r.schema().unwrap();
         let name = r.stream_names().into_iter().find(|n| n.starts_with("Partitions/")).unwrap().to_string();
         let buf = r.inflate_all(&name).unwrap().bytes;
-        let (records, end) = crate::inventory::chain_len(&buf, &schema).unwrap();
+        let (records, end) = crate::records::chain_len(&buf, &schema).unwrap();
         // One record for each ElementId the element table declares, and then the rest of the partition (families' own documents).
         assert_eq!(records, r.element_ids().unwrap().len(), "{}", path.display());
         assert!(end < buf.len(), "{}", path.display());

@@ -96,9 +96,13 @@ fn the_fence_is_written_into_the_policy_documents() {
     }
 }
 
+mod decoders;
 mod import;
 mod inventory;
 mod metadata;
+mod records;
+mod rvt_rs_walls;
+mod walls;
 
 // ---------- the container ----------
 

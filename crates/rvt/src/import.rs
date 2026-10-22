@@ -4,66 +4,199 @@
 //! Lengths in a Revit file are feet and BIMCraft's are millimetres (x east, y north, z up, as Revit's project coordinates).
 //! The reader only maps what the file's records say. Where a geometry is not decoded the element is left out and listed:
 //! BIMCraft's elements are parametric, so an element is made only where a parameter set honestly describes what the file holds.
+//! Two passes read the file: the first finds the records (and so the ids of what to read), the second their data.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
+use bimcraft_core::geom::P2;
 use bimcraft_core::import::Imported;
 use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
 
-use crate::inventory::Inventory;
+use crate::inventory::{Inventory, Survey};
+use crate::records::{Record, TypeRecord};
+use crate::walls;
 use crate::{Limits, Revit};
+
+/// `OST_Materials`.
+pub(crate) const OST_MATERIALS: i64 = -2_000_700;
 
 /// Feet to millimetres, to the micron.
 pub(crate) fn mm(feet: f64) -> f64 {
-    (feet * 304.8 * 1000.0).round() / 1000.0
+    micron(feet * 304.8)
+}
+
+/// A length in millimetres, to the micron.
+pub(crate) fn micron(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+
+/// A point in feet, in the model's millimetres.
+pub(crate) fn point(x: f64, y: f64) -> P2 {
+    P2(mm(x), mm(y))
 }
 
 /// `text` cut to what a name may hold.
-fn clip(text: &str) -> String {
+pub(crate) fn clip(text: &str) -> String {
     text.trim().chars().take(MAX_TEXT).collect()
 }
 
 /// `base`, or `base (2)`, `base (3)`… whichever `taken` does not hold yet; then it does.
-fn fresh(taken: &mut BTreeSet<String>, base: &str) -> String {
+pub(crate) fn fresh(taken: &mut BTreeSet<String>, base: &str) -> String {
     let base = clip(base);
     let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base} ({n})") }).find(|n| !taken.contains(n)).unwrap_or(base);
     taken.insert(name.clone());
     name
 }
 
+/// A type of `map` like `same` says, by `base` or `base (2)`, `base (3)`… made as `new` when there is none.
+pub(crate) fn kind<T>(map: &mut BTreeMap<String, T>, base: &str, same: impl Fn(&T) -> bool, new: T) -> String {
+    let base = clip(base);
+    let mut new = Some(new);
+    let mut n = 1;
+    loop {
+        let name = if n == 1 { base.clone() } else { format!("{base} ({n})") };
+        match map.get(&name) {
+            Some(t) if same(t) => return name,
+            Some(_) => n += 1,
+            None => {
+                if let Some(t) = new.take() {
+                    map.insert(name.clone(), t);
+                }
+                return name;
+            }
+        }
+    }
+}
+
 /// What the import holds while it reads: the model, what was left out, and what each element was in the file.
 pub(crate) struct Import {
     pub model: Model,
     pub skipped: Vec<String>,
-    /// Each element made, and what it was in the file, for the notes that say why one was dropped.
+    /// Each element made, and what it was in the file (`Wall 423099`), for the notes that say why one was dropped.
     pub from: HashMap<Id, String>,
     /// The model's level for each Revit level.
     pub levels: HashMap<u32, Id>,
+    /// What was left out or noted, by (left out, kind, reason): the ids it concerned. Told as one line each in the end.
+    groups: BTreeMap<(bool, String, String), Vec<u32>>,
 }
+
+impl Import {
+    /// A `kind` (`wall`) of Revit id `id` is left out, for `reason`.
+    pub fn left_out(&mut self, kind: &str, id: u32, reason: &str) {
+        self.groups.entry((true, kind.to_string(), reason.to_string())).or_default().push(id);
+    }
+
+    /// Something to say about a `kind` (`wall`) that was made nonetheless.
+    pub fn note(&mut self, kind: &str, id: u32, text: &str) {
+        self.groups.entry((false, kind.to_string(), text.to_string())).or_default().push(id);
+    }
+
+    fn tell(&mut self) {
+        for ((left, kind, reason), ids) in std::mem::take(&mut self.groups) {
+            let list: Vec<String> = ids.iter().take(8).map(u32::to_string).collect();
+            let more = if ids.len() > list.len() { ", …" } else { "" };
+            let n = ids.len();
+            let plural = if n == 1 { "" } else { "s" };
+            self.skipped.push(if left {
+                format!("{n} {kind}{plural} left out, {reason} (ids {}{more})", list.join(", "))
+            } else {
+                format!("{n} {kind}{plural}: {reason} (ids {}{more})", list.join(", "))
+            });
+        }
+    }
+}
+
+/// What the first pass found, arranged for the readers of each kind of element.
+pub(crate) struct Facts {
+    pub release: u32,
+    pub tags: crate::records::Tags,
+    pub ids: Vec<u32>,
+    /// The current copy of each placed element of the categories asked for.
+    pub current: BTreeMap<u32, Record>,
+    /// The ids of the types of each category.
+    pub types: BTreeMap<i64, BTreeSet<u32>>,
+    /// The ids of the materials.
+    pub materials: BTreeSet<u32>,
+    /// Each project level's elevation in feet, by Revit id.
+    pub elevations: BTreeMap<u32, f64>,
+}
+
+impl Facts {
+    fn of(s: Survey) -> (Facts, Inventory) {
+        let mut current: BTreeMap<u32, Record> = BTreeMap::new();
+        for r in s.records.into_iter().filter(|r| r.placed && has_volume(r)) {
+            // The copy with the greatest height is the element's whole body; a tie goes to the newest.
+            let key = |r: &Record| (r.extent()[2].to_bits(), r.partition, r.offset);
+            if current.get(&r.id).is_none_or(|held| key(held) < key(&r)) {
+                current.insert(r.id, r);
+            }
+        }
+        let mut types: BTreeMap<i64, BTreeSet<u32>> = BTreeMap::new();
+        let mut materials = BTreeSet::new();
+        for TypeRecord { id, category, kind, .. } in s.types {
+            if category == OST_MATERIALS {
+                materials.insert(id);
+            } else if kind == crate::records::KIND_TYPE {
+                types.entry(category).or_default().insert(id);
+            }
+        }
+        let elevations = s.inventory.levels.iter().map(|l| (l.id, l.elevation_feet)).collect();
+        (Facts { release: s.release, tags: s.tags, ids: s.ids, current, types, materials, elevations }, s.inventory)
+    }
+
+    /// The current records of a category.
+    pub fn of_category(&self, category: i64) -> impl Iterator<Item = &Record> {
+        self.current.values().filter(move |r| r.category == category)
+    }
+}
+
+/// A placed instance with no volume is a 2D symbol (a drain drawn in plan): it has no body to import.
+fn has_volume(r: &Record) -> bool {
+    r.extent().iter().all(|e| e.is_finite() && *e > 1e-6)
+}
+
+/// The categories whose records the first pass keeps.
+const CATEGORIES: [i64; 1] = [walls::OST_WALLS];
 
 /// Reads the Revit project in `bytes` into a model named after its title (or `name`).
 pub fn import(bytes: &[u8], name: &str) -> Result<Imported, String> {
     let mut revit = Revit::from_bytes(bytes.to_vec(), Limits::default()).map_err(|e| e.to_string())?;
-    build(&mut revit, name)
+    build(&mut revit, name).map(|(i, _)| i)
 }
 
 /// Reads the Revit project at `path`, from disk (a large file is not held in memory twice).
 pub fn import_path(path: &Path, name: &str) -> Result<Imported, String> {
     let mut revit = Revit::open(path, Limits::default()).map_err(|e| e.to_string())?;
+    build(&mut revit, name).map(|(i, _)| i)
+}
+
+/// [`import_path`], and what each element made was in the file (`Wall 423099`): for checking an import against another
+/// reader's export of the same file.
+#[doc(hidden)]
+pub fn import_path_with_origins(path: &Path, name: &str) -> Result<(Imported, HashMap<Id, String>), String> {
+    let mut revit = Revit::open(path, Limits::default()).map_err(|e| e.to_string())?;
     build(&mut revit, name)
 }
 
-fn build(revit: &mut Revit, name: &str) -> Result<Imported, String> {
-    let info = revit.basic_file_info().map_err(|e| e.to_string())?;
-    let inv = revit.inventory().map_err(|e| e.to_string())?;
+/// The import, and what each element made was in the file.
+pub(crate) fn build(revit: &mut Revit, name: &str) -> Result<(Imported, HashMap<Id, String>), String> {
+    let e = |e: crate::Error| e.to_string();
+    let survey = revit.survey(&|c| CATEGORIES.contains(&c)).map_err(e)?;
     let title = revit.document_atom().ok().flatten().and_then(|a| a.title).filter(|t| !t.trim().is_empty());
     let mut m = Model::new(&clip(title.as_deref().unwrap_or(name)));
     m.elements.clear();
     m.next_id = 1;
-    let mut cx = Import { model: m, skipped: Vec::new(), from: HashMap::new(), levels: HashMap::new() };
+    let mut cx = Import { model: m, skipped: Vec::new(), from: HashMap::new(), levels: HashMap::new(), groups: BTreeMap::new() };
+    let release = survey.release;
+    let (facts, inv) = Facts::of(survey);
     levels(&mut cx, &inv);
-    finish(cx, format!("Revit {}", info.release))
+    let mut wanted = BTreeSet::new();
+    walls::wanted(&facts, &mut wanted);
+    let gathered = revit.gather(release, &facts.tags, &facts.ids, &wanted, &facts.materials).map_err(e)?;
+    walls::import(&mut cx, &facts, &gathered);
+    let from = cx.from.clone();
+    finish(cx, format!("Revit {release}")).map(|i| (i, from))
 }
 
 /// The project's levels, lowest first. A level of a name another has takes `(2)`; none at all gives the project one at zero.
@@ -71,7 +204,7 @@ fn levels(cx: &mut Import, inv: &Inventory) {
     let mut taken = BTreeSet::new();
     for l in &inv.levels {
         let name = fresh(&mut taken, &l.name);
-        let id = cx.model.insert(Element::Level(Level::new(name.clone(), mm(l.elevation_feet))));
+        let id = cx.model.insert(Element::Level(Level::new(name, mm(l.elevation_feet))));
         cx.from.insert(id, format!("Level '{}'", l.name));
         cx.levels.insert(l.id, id);
     }
@@ -96,10 +229,15 @@ fn levels(cx: &mut Import, inv: &Inventory) {
 
 /// What breaks a rule is left out with the rule (a wall takes its doors and windows along), then the model is checked once more.
 fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
+    cx.tell();
     cx.model.adopt_materials();
     let m = &mut cx.model;
+    let mut checked = false;
     for _ in 0..=m.elements.len() {
-        let Err(error) = m.check() else { break };
+        let Err(error) = m.check() else {
+            checked = true;
+            break;
+        };
         let id = culprit(&error).filter(|id| cx.from.contains_key(id)).ok_or_else(|| error.clone())?;
         let why = error.split_once(": ").map_or(error.as_str(), |(_, why)| why);
         cx.skipped.push(format!("{}: {why}", cx.from.get(&id).cloned().unwrap_or_default()));
@@ -117,6 +255,8 @@ fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
             m.elements.remove(&h);
         }
     }
-    m.check()?;
+    if !checked {
+        m.check()?;
+    }
     Ok(Imported { model: cx.model, schema, skipped: cx.skipped, moved: None })
 }

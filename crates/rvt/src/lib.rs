@@ -7,6 +7,8 @@
 
 pub mod atom;
 mod container;
+pub mod curves;
+pub mod data;
 pub mod elem_table;
 mod error;
 #[cfg(any(test, feature = "testing"))]
@@ -18,11 +20,14 @@ pub mod inventory;
 pub mod preview;
 #[cfg(any(test, feature = "testing"))]
 pub mod project_fixture;
+pub mod records;
 pub mod schema;
+pub mod types;
+mod walls;
 
 pub use container::{BASIC_FILE_INFO, Limits, Revit};
 pub use error::{Error, Result};
-pub use import::{import, import_path};
+pub use import::{import, import_path, import_path_with_origins};
 
 #[cfg(test)]
 mod tests;
