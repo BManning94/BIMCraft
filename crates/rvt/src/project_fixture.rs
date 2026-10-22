@@ -43,11 +43,15 @@ pub struct Lev {
     pub named: bool,
     /// False leaves out the second copy of the elevation that confirms the first.
     pub confirmed: bool,
+    /// The Building Story setting the block holds, or none for a block with the frame left out.
+    pub story: Option<bool>,
+    /// A level that sits inside another element, which its block names (from 2024 only).
+    pub owner: Option<u32>,
 }
 
 impl Lev {
     pub fn new(id: u32, name: &str, feet: f64) -> Self {
-        Self { id, name: name.to_string(), feet, placed: true, named: true, confirmed: true }
+        Self { id, name: name.to_string(), feet, placed: true, named: true, confirmed: true, story: None, owner: None }
     }
 }
 
@@ -274,7 +278,15 @@ fn level32(l: &Lev) -> Vec<u8> {
 /// The block that names a level and gives its elevation (twice, the second time with the 24 bytes before it).
 fn name_block(l: &Lev, wide: bool) -> Vec<u8> {
     let mut b = vec![0x11; 7];
-    if wide {
+    if let (true, Some(other)) = (wide, l.owner) {
+        // The block of a level inside another element: its id, then eight `ff` and the owner's id where a project level has
+        // an unbroken run of 56.
+        b.extend_from_slice(&[1, 0, 0, 0]);
+        b.extend_from_slice(&u64::from(l.id).to_le_bytes());
+        b.extend_from_slice(&[0xff; 8]);
+        b.extend_from_slice(&u64::from(other).to_le_bytes());
+        b.extend_from_slice(&[0xff; 40]);
+    } else if wide {
         b.extend_from_slice(&u64::from(l.id).to_le_bytes());
         b.extend_from_slice(&[0xff; 56]);
     } else {
@@ -284,6 +296,18 @@ fn name_block(l: &Lev, wide: bool) -> Vec<u8> {
     b.extend_from_slice(&[0, 0, 0]);
     b.extend_from_slice(&(l.name.encode_utf16().count() as u32).to_le_bytes());
     b.extend(l.name.encode_utf16().flat_map(u16::to_le_bytes));
+    if let Some(story) = l.story {
+        // An unset id, `00 01`, a number, the level's id and the setting.
+        b.extend_from_slice(&if wide { vec![0xff; 8] } else { vec![0xff; 4] });
+        b.extend_from_slice(&[0, 1]);
+        b.extend_from_slice(&0.0f64.to_le_bytes());
+        if wide {
+            b.extend_from_slice(&u64::from(l.id).to_le_bytes());
+        } else {
+            b.extend_from_slice(&l.id.to_le_bytes());
+        }
+        b.push(u8::from(story));
+    }
     b.extend_from_slice(&[0x22; 10]);
     b.extend_from_slice(&[5, 0, 0, 0]);
     b.extend_from_slice(&PLANE.to_le_bytes());
@@ -296,6 +320,7 @@ fn name_block(l: &Lev, wide: bool) -> Vec<u8> {
         b.extend_from_slice(&filler[25..]);
         b.extend_from_slice(&feet);
     }
-    b.extend_from_slice(&[0x66; 7]);
+    // Far enough that the next block's setting is not within reach of this one's search.
+    b.extend_from_slice(&[0x66; 0x300]);
     b
 }

@@ -96,6 +96,7 @@ fn the_fence_is_written_into_the_policy_documents() {
     }
 }
 
+mod import;
 mod inventory;
 mod metadata;
 
@@ -426,9 +427,9 @@ fn a_file_cut_short_anywhere_is_an_error_or_a_smaller_file_never_a_panic() {
 
 // ---------- real files ----------
 
-/// The sample files, when `BIMCRAFT_RVT_SAMPLES` names a folder of them (each in a folder of its own is fine). Autodesk's
-/// files are never committed, so these tests skip without it.
-fn samples() -> Vec<PathBuf> {
+/// The sample files, when `BIMCRAFT_RVT_SAMPLES` names folders of them (several are parted like a `PATH`, each file may be in a
+/// folder of its own). Autodesk's files are never committed, so these tests skip without it.
+fn all_samples() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {
@@ -440,16 +441,28 @@ fn samples() -> Vec<PathBuf> {
             }
         }
     }
-    let Some(dir) = std::env::var_os("BIMCRAFT_RVT_SAMPLES") else { return Vec::new() };
+    let Some(dirs) = std::env::var_os("BIMCRAFT_RVT_SAMPLES") else { return Vec::new() };
     let mut out = Vec::new();
-    walk(Path::new(&dir), &mut out);
+    for dir in std::env::split_paths(&dirs) {
+        walk(&dir, &mut out);
+    }
     out.sort();
     out
 }
 
+/// The samples named `file`, wherever they are.
+fn samples_of(file: &str) -> Vec<PathBuf> {
+    all_samples().into_iter().filter(|p| p.file_name().is_some_and(|n| n == file)).collect()
+}
+
+/// Autodesk's structural basic sample project of releases 2023 to 2026, which the first tests pin.
+fn samples() -> Vec<PathBuf> {
+    samples_of("rstbasicsampleproject.rvt")
+}
+
 #[test]
 fn every_sample_opens_and_every_gzip_stream_inflates_with_a_matching_trailer() {
-    for path in samples() {
+    for path in all_samples() {
         let r = &mut Revit::open(&path, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         for name in ["BasicFileInfo", "Formats/Latest", "Global/ElemTable", "Global/Latest"] {
             assert!(r.stream_len(name).is_some(), "{}: no {name}", path.display());

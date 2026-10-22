@@ -178,6 +178,82 @@ fn a_level_rewritten_in_a_later_partition_has_its_newest_name() {
     assert_eq!(level_in(&new, &old), ("Old name".to_string(), 0.0));
 }
 
+/// Three levels: a storey, a level that is not one, and one whose block holds no setting.
+fn storeys(release: u32) -> Project {
+    let mut p = Project::new(release);
+    p.levels = vec![
+        Lev { story: Some(true), ..Lev::new(10, "Level 1", 0.0) },
+        Lev { story: Some(false), ..Lev::new(11, "Top of Footing", -3.0) },
+        Lev::new(12, "Level 2", 10.0),
+    ];
+    p
+}
+
+#[test]
+fn a_levels_building_story_setting_is_read_in_both_record_forms() {
+    for release in [2019, 2023, 2024, 2026] {
+        let inv = open(&storeys(release)).inventory().unwrap();
+        let seen: Vec<(&str, Option<bool>)> = inv.levels.iter().map(|l| (l.name.as_str(), l.building_story)).collect();
+        assert_eq!(seen, [("Top of Footing", Some(false)), ("Level 1", Some(true)), ("Level 2", None)], "Revit {release}");
+    }
+}
+
+#[test]
+fn a_building_story_setting_that_is_not_a_bool_is_no_setting() {
+    for release in [2023, 2024] {
+        let p = storeys(release);
+        let mut bytes = p.partition_bytes();
+        // The setting follows an unset id, `00 01`, a number and the level's id; the first is Level 1's. Make it 2.
+        let (unset, id_len) = if release >= 2024 { (8, 8) } else { (4, 4) };
+        let anchor = [vec![0xff; unset], vec![0, 1]].concat();
+        let at = memchr::memmem::find(&bytes, &anchor).unwrap() + anchor.len() + 8 + id_len;
+        assert_eq!(bytes[at], 1, "Level 1 is a storey");
+        bytes[at] = 2;
+        let inv = Revit::from_bytes(p.file_from(&bytes), Limits::default()).unwrap().inventory().unwrap();
+        let seen: Vec<Option<bool>> = inv.levels.iter().map(|l| l.building_story).collect();
+        assert_eq!(seen, [Some(false), None, None], "Revit {release}");
+    }
+}
+
+#[test]
+fn a_level_inside_another_element_is_no_project_level_and_is_not_unread() {
+    let mut p = storeys(2024);
+    p.levels.push(Lev { owner: Some(4321), ..Lev::new(13, "Inside a family", 5.0) });
+    let inv = open(&p).inventory().unwrap();
+    let names: Vec<&str> = inv.levels.iter().map(|l| l.name.as_str()).collect();
+    assert_eq!(names, ["Top of Footing", "Level 1", "Level 2"]);
+    assert_eq!(inv.owned_levels, [13]);
+    assert_eq!(inv.unread_levels, 0, "an owned level is neither a level nor an unread one");
+    // It is still an element of the project's levels category.
+    assert_eq!(inv.counts().iter().find(|c| c.category == OST_LEVELS).map(|c| c.elements), Some(4));
+    // A level whose block simply is not there is unread, not owned.
+    let mut q = storeys(2024);
+    q.levels.push(Lev { named: false, ..Lev::new(14, "Nameless", 5.0) });
+    let inv = open(&q).inventory().unwrap();
+    assert_eq!((inv.owned_levels.len(), inv.unread_levels), (0, 1));
+    // Up to 2023 no level is measured inside another element: the shape is not looked for.
+    assert!(open(&storeys(2023)).inventory().unwrap().owned_levels.is_empty());
+}
+
+#[test]
+fn an_owner_slot_that_is_not_an_element_id_or_not_filled_is_no_owner() {
+    let mut p = Project::new(2024);
+    p.levels = vec![Lev { owner: Some(4321), ..Lev::new(13, "Inside", 5.0) }];
+    let bytes = p.partition_bytes();
+    let at = memchr::memmem::find(&bytes, &[1, 0, 0, 0, 13, 0, 0, 0]).unwrap() + 4;
+    // The owner's id as 0, one of the eight `ff` gone, the owner's id past a `u32`, and a name of no length.
+    for (range, value, says) in
+        [(16..24, 0u8, "owner 0"), (8..9, 0, "a gap in the sentinel"), (20..21, 1, "owner past u32"), (0x43..0x47, 0, "no name")]
+    {
+        let mut bad = bytes.clone();
+        bad[at + range.start..at + range.end].fill(value);
+        let inv = Revit::from_bytes(p.file_from(&bad), Limits::default()).unwrap().inventory().unwrap();
+        assert!(inv.owned_levels.is_empty(), "{says}");
+    }
+    let inv = open(&p).inventory().unwrap();
+    assert_eq!(inv.owned_levels, [13], "the unmutated block is owned");
+}
+
 #[test]
 fn an_inventory_that_cannot_be_read_is_an_error_that_says_why() {
     let basic = |release| fixture::basic_file_info(&fixture::Basic { release, ..Default::default() });
@@ -344,6 +420,58 @@ fn every_samples_inventory_matches_what_rvt_rs_finds_on_the_same_file() {
         // Every element's class tag names a class of the file's own schema.
         let unknown = inv.elements.iter().filter(|e| e.category != OST_LEVELS && schema.by_tag(e.class_tag).is_none()).count();
         assert_eq!(unknown, 0, "{}", path.display());
+    }
+}
+
+/// A level as (name, elevation in mm, building story setting).
+type Seen = (String, f64, Option<bool>);
+
+/// The levels of a real file, and the ids of those inside other elements.
+fn real_levels(path: &Path) -> (Vec<Seen>, Vec<u32>) {
+    let inv = Revit::open(path, Limits::default()).unwrap().inventory().unwrap();
+    let levels = inv.levels.iter().map(|l| (l.name.clone(), (l.elevation_mm() * 10.0).round() / 10.0, l.building_story)).collect();
+    (levels, inv.owned_levels)
+}
+
+#[test]
+fn the_building_story_settings_and_owned_levels_of_real_files_are_what_rvt_rs_reads() {
+    // Autodesk's architectural basic sample, 2024 and 2025: six levels, every one a storey of rvt-rs's IFC export (names and
+    // elevations equal to that export's IfcBuildingStorey, in metres there).
+    let rac = [
+        ("Foundation", -800.0),
+        ("Level 1 Living Rm.", -550.0),
+        ("Level 1", 0.0),
+        ("Ceiling", 2700.0),
+        ("Level 2", 3000.0),
+        ("Roof Line", 6000.0),
+    ];
+    for path in samples_of("racbasicsampleproject.rvt") {
+        let (levels, owned) = real_levels(&path);
+        let got: Vec<(&str, f64)> = levels.iter().map(|(n, e, _)| (n.as_str(), *e)).collect();
+        assert_eq!(got, rac, "{}", path.display());
+        assert!(levels.iter().all(|l| l.2 == Some(true)) && owned.is_empty(), "{}", path.display());
+    }
+    // The structural basic sample sets Building Story off on all nine levels, in 2023 and 2024 alike.
+    for path in samples() {
+        let (levels, owned) = real_levels(&path);
+        assert!(levels.len() == 9 && levels.iter().all(|l| l.2 == Some(false)) && owned.is_empty(), "{}", path.display());
+    }
+    // Snowdon Towers (2024), where rvt-rs measured it against Revit's own export (RE-51, RE-118): the architectural model has
+    // 18 storeys and two levels inside other elements; the structural one 19 levels, of which seven (Top of Footing and the six
+    // "TOS" ones) are not building stories.
+    for path in samples_of("snowdon-towers-sample-architectural.rvt") {
+        let (levels, owned) = real_levels(&path);
+        assert_eq!((levels.len(), owned), (18, vec![1_981_744, 1_982_117]), "{}", path.display());
+        assert!(levels.iter().all(|l| l.2 == Some(true)));
+        assert_eq!(levels[0].0, "Parking");
+        assert_eq!(levels[17].0, "Parapet 2");
+    }
+    for path in samples_of("snowdon-towers-sample-structural.rvt") {
+        let (levels, owned) = real_levels(&path);
+        assert_eq!((levels.len(), owned.len()), (19, 0), "{}", path.display());
+        let off: Vec<&str> = levels.iter().filter(|l| l.2 == Some(false)).map(|l| l.0.as_str()).collect();
+        assert_eq!(off, ["Top of Footing", "M1 TOS", "L2 TOS", "L3 TOS", "L4 TOS", "L5 TOS", "R2 TOS"], "{}", path.display());
+        assert_eq!(levels.iter().filter(|l| l.2 == Some(true)).count(), 12);
     }
 }
 

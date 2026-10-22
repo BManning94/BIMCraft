@@ -43,8 +43,9 @@ pub fn info(path: &str) -> Result<Value, String> {
                 "total": inv.elements.len(),
                 "placed": inv.elements.iter().filter(|e| e.placed).count(),
                 "categories": categories,
-                "levels": inv.levels.iter().map(|l| json!({"id": l.id, "name": l.name, "elevation": mm(l.elevation_feet)})).collect::<Vec<_>>(),
+                "levels": inv.levels.iter().map(|l| json!({"id": l.id, "name": l.name, "elevation": mm(l.elevation_feet), "building_story": l.building_story})).collect::<Vec<_>>(),
                 "unread_levels": inv.unread_levels,
+                "owned_levels": inv.owned_levels,
             })
         }
         // A family or a release the reader does not know: say why, and still show the rest.

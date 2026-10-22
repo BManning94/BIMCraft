@@ -1,4 +1,4 @@
-//! Reads Autodesk Revit files (`.rvt`, `.rfa`).
+//! Reads Autodesk Revit files (`.rvt`, `.rfa`), and puts a project's elements into a BIMCraft model ([`import`]).
 //!
 //! Revit's format has no public specification, so this crate is fenced: its code is Apache-2.0 only (some of it is
 //! ported from rvt-rs), `bimcraft-core` never depends on it, and every module and format finding names its source in
@@ -12,6 +12,7 @@ mod error;
 #[cfg(any(test, feature = "testing"))]
 pub mod fixture;
 pub mod gzip;
+mod import;
 pub mod info;
 pub mod inventory;
 pub mod preview;
@@ -21,6 +22,7 @@ pub mod schema;
 
 pub use container::{BASIC_FILE_INFO, Limits, Revit};
 pub use error::{Error, Result};
+pub use import::{import, import_path};
 
 #[cfg(test)]
 mod tests;

@@ -159,7 +159,11 @@ mod tests {
         let mut p = Project::new(2024);
         p.saved_by = "jdoe".into();
         p.recs = vec![Rec::new(100, -2_000_011), Rec::new(101, -2_000_011), Rec::new(200, -2_000_023), Rec::new(300, -2_009_999)];
-        p.levels = vec![Lev::new(11, "Level 2", 9.84251968503937), Lev::new(10, "Level 1", 0.0)];
+        p.levels = vec![
+            Lev::new(11, "Level 2", 9.84251968503937),
+            Lev { story: Some(true), ..Lev::new(10, "Level 1", 0.0) },
+            Lev { story: Some(false), owner: Some(4321), ..Lev::new(12, "Inside a family", 4.0) },
+        ];
         let path = revit_file("house.rvt", &p.file());
         let info: Value = serde_json::from_str(&cli_out(&["info", &path]).unwrap()).unwrap();
         assert_eq!(info["revit"]["release"], 2024);
@@ -168,12 +172,16 @@ mod tests {
         assert!(info["saved_to"].as_str().unwrap().ends_with("house.rvt"));
         assert_eq!(info["elements"]["levels"][0]["name"], "Level 1");
         assert_eq!(info["elements"]["levels"][1]["elevation"], 3000.0, "millimetres");
+        assert_eq!(info["elements"]["levels"][0]["building_story"], true);
+        assert!(info["elements"]["levels"][1]["building_story"].is_null(), "a block with no setting says none");
+        assert_eq!(info["elements"]["levels"].as_array().unwrap().len(), 2, "a level inside another element is not one");
+        assert_eq!(info["elements"]["owned_levels"], json!([12]));
         let cat = |id: i64| info["elements"]["categories"].as_array().unwrap().iter().find(|c| c["category"] == id).cloned();
         assert_eq!(cat(-2_000_011).unwrap()["name"], "Walls");
         assert_eq!(cat(-2_000_011).unwrap()["elements"], 2);
-        assert_eq!(cat(-2_000_240).unwrap()["elements"], 2, "the levels are elements too");
+        assert_eq!(cat(-2_000_240).unwrap()["elements"], 3, "the levels are elements too");
         assert!(cat(-2_009_999).unwrap()["name"].is_null(), "a category with no known name has none");
-        assert_eq!(info["elements"]["total"], 6);
+        assert_eq!(info["elements"]["total"], 7);
         // Nothing makes a project of it: run and convert say so and write nothing.
         let out = format!("{path}.bimcraft");
         for args in [vec!["run", &path], vec!["convert", &path, &out]] {

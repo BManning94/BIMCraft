@@ -1,0 +1,122 @@
+//! A Revit file read into a BIMCraft model, the way the IFC importer reads an IFC file: through the model's own builders and
+//! `Model::check`, with a list of what was left out and why.
+//!
+//! Lengths in a Revit file are feet and BIMCraft's are millimetres (x east, y north, z up, as Revit's project coordinates).
+//! The reader only maps what the file's records say. Where a geometry is not decoded the element is left out and listed:
+//! BIMCraft's elements are parametric, so an element is made only where a parameter set honestly describes what the file holds.
+
+use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+
+use bimcraft_core::import::Imported;
+use bimcraft_core::model::{Element, Id, Level, MAX_TEXT, Model, culprit};
+
+use crate::inventory::Inventory;
+use crate::{Limits, Revit};
+
+/// Feet to millimetres, to the micron.
+pub(crate) fn mm(feet: f64) -> f64 {
+    (feet * 304.8 * 1000.0).round() / 1000.0
+}
+
+/// `text` cut to what a name may hold.
+fn clip(text: &str) -> String {
+    text.trim().chars().take(MAX_TEXT).collect()
+}
+
+/// `base`, or `base (2)`, `base (3)`… whichever `taken` does not hold yet; then it does.
+fn fresh(taken: &mut BTreeSet<String>, base: &str) -> String {
+    let base = clip(base);
+    let name = (1..).map(|n| if n == 1 { base.clone() } else { format!("{base} ({n})") }).find(|n| !taken.contains(n)).unwrap_or(base);
+    taken.insert(name.clone());
+    name
+}
+
+/// What the import holds while it reads: the model, what was left out, and what each element was in the file.
+pub(crate) struct Import {
+    pub model: Model,
+    pub skipped: Vec<String>,
+    /// Each element made, and what it was in the file, for the notes that say why one was dropped.
+    pub from: HashMap<Id, String>,
+    /// The model's level for each Revit level.
+    pub levels: HashMap<u32, Id>,
+}
+
+/// Reads the Revit project in `bytes` into a model named after its title (or `name`).
+pub fn import(bytes: &[u8], name: &str) -> Result<Imported, String> {
+    let mut revit = Revit::from_bytes(bytes.to_vec(), Limits::default()).map_err(|e| e.to_string())?;
+    build(&mut revit, name)
+}
+
+/// Reads the Revit project at `path`, from disk (a large file is not held in memory twice).
+pub fn import_path(path: &Path, name: &str) -> Result<Imported, String> {
+    let mut revit = Revit::open(path, Limits::default()).map_err(|e| e.to_string())?;
+    build(&mut revit, name)
+}
+
+fn build(revit: &mut Revit, name: &str) -> Result<Imported, String> {
+    let info = revit.basic_file_info().map_err(|e| e.to_string())?;
+    let inv = revit.inventory().map_err(|e| e.to_string())?;
+    let title = revit.document_atom().ok().flatten().and_then(|a| a.title).filter(|t| !t.trim().is_empty());
+    let mut m = Model::new(&clip(title.as_deref().unwrap_or(name)));
+    m.elements.clear();
+    m.next_id = 1;
+    let mut cx = Import { model: m, skipped: Vec::new(), from: HashMap::new(), levels: HashMap::new() };
+    levels(&mut cx, &inv);
+    finish(cx, format!("Revit {}", info.release))
+}
+
+/// The project's levels, lowest first. A level of a name another has takes `(2)`; none at all gives the project one at zero.
+fn levels(cx: &mut Import, inv: &Inventory) {
+    let mut taken = BTreeSet::new();
+    for l in &inv.levels {
+        let name = fresh(&mut taken, &l.name);
+        let id = cx.model.insert(Element::Level(Level::new(name.clone(), mm(l.elevation_feet))));
+        cx.from.insert(id, format!("Level '{}'", l.name));
+        cx.levels.insert(l.id, id);
+    }
+    if inv.levels.is_empty() {
+        let name = fresh(&mut taken, "Level 1");
+        let id = cx.model.insert(Element::Level(Level::new(name, 0.0)));
+        cx.from.insert(id, "Level 'Level 1'".into());
+        cx.skipped.push("the file has no levels the reader can find: the project has one, Level 1, at zero".into());
+    }
+    if !inv.owned_levels.is_empty() {
+        let ids: Vec<String> = inv.owned_levels.iter().map(u32::to_string).collect();
+        cx.skipped.push(format!("{} levels sit inside other elements (ids {}): they are not project levels", ids.len(), ids.join(", ")));
+    }
+    if inv.unread_levels > 0 {
+        cx.skipped.push(format!(
+            "{} level{} with no name or elevation the reader can find (its block is missing or damaged)",
+            inv.unread_levels,
+            if inv.unread_levels == 1 { "" } else { "s" }
+        ));
+    }
+}
+
+/// What breaks a rule is left out with the rule (a wall takes its doors and windows along), then the model is checked once more.
+fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
+    cx.model.adopt_materials();
+    let m = &mut cx.model;
+    for _ in 0..=m.elements.len() {
+        let Err(error) = m.check() else { break };
+        let id = culprit(&error).filter(|id| cx.from.contains_key(id)).ok_or_else(|| error.clone())?;
+        let why = error.split_once(": ").map_or(error.as_str(), |(_, why)| why);
+        cx.skipped.push(format!("{}: {why}", cx.from.get(&id).cloned().unwrap_or_default()));
+        m.elements.remove(&id);
+        let hosted: Vec<Id> = m
+            .elements
+            .iter()
+            .filter_map(|(k, x)| match x {
+                Element::Door(o) | Element::Window(o) if o.host == id => Some(*k),
+                _ => None,
+            })
+            .collect();
+        for h in hosted {
+            cx.skipped.push(format!("{}: its wall was left out", cx.from.get(&h).cloned().unwrap_or_default()));
+            m.elements.remove(&h);
+        }
+    }
+    m.check()?;
+    Ok(Imported { model: cx.model, schema, skipped: cx.skipped, moved: None })
+}

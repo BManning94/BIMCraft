@@ -5,7 +5,8 @@
 // their name and elevation blocks).
 // Changed: rewritten for BIMCraft; the record marker always comes from the file's own schema, every offset is bounds-checked,
 // only the id, category, class and whether the record is a placed instance are kept (no bounding boxes, no reference
-// lists), the walk over a partition is one function per record form, and Levels inside other elements are not filtered out.
+// lists), the walk over a partition is one function per record form, and a Level's Building Story setting and the Levels that
+// sit inside other elements (RE-51, RE-118) are read from the same blocks.
 //! The element inventory: which elements a project holds, by `BuiltInCategory`, and its levels.
 //!
 //! A partition (`Partitions/NN`) holds one record per element, each opening with a header (the ElementId, the record's size,
@@ -21,7 +22,8 @@
 //!
 //! A Level has no bounding box, so no `Outline` marker: it is found by its category, and its name and elevation are in a
 //! separate block keyed by its ElementId (a run of `ff`, the name as counted UTF-16, then an elevation in feet that appears
-//! twice).
+//! twice). Past the name the block holds Revit's Building Story setting, which says whether the level is a storey. A Level that
+//! sits inside another element has a block whose run of `ff` is broken by that element's id; it is not a project level.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +70,12 @@ const ELEVATION_SEARCH: usize = 2048;
 const ELEVATION_AFTER_MARKER: usize = 55;
 const CONFIRM_LEAD_IN: usize = 24;
 const MAX_ELEVATION_FEET: f64 = 1.0e7;
+/// Where a level's Building Story setting is looked for past its name, and what frames it: an unset id, `00 01`, a number and
+/// the level's own id (`u64` from 2024, `u32` before), then the setting.
+const STORY_WINDOW: usize = 0x200;
+/// Where the level's name starts from the `u64` ElementId of its block, and the `01 00 00 00` that opens an object keyed by one.
+const NAME_AFTER_OWNER: usize = 0x47;
+const OBJECT_PREFIX: [u8; 4] = [1, 0, 0, 0];
 
 /// The releases the record forms are known for (rvt-rs's), of which 2023 to 2026 are checked here on sample files.
 pub const RELEASES: std::ops::RangeInclusive<u32> = 2015..=2027;
@@ -88,6 +96,8 @@ pub struct Level {
     pub id: u32,
     pub name: String,
     pub elevation_feet: f64,
+    /// Revit's Building Story setting, where the block holds it: only a building story is a storey in Revit's own IFC export.
+    pub building_story: Option<bool>,
 }
 
 impl Level {
@@ -115,8 +125,10 @@ pub struct Inventory {
     pub elements: Vec<Element>,
     /// The levels whose name and elevation could be read, by elevation.
     pub levels: Vec<Level>,
-    /// Level elements (placed instances) with no readable name block.
+    /// Level elements (placed instances) with no readable name block, not counting those inside other elements.
     pub unread_levels: usize,
+    /// Level elements whose block names another element that holds them: not project levels, and not in `levels`.
+    pub owned_levels: Vec<u32>,
 }
 
 impl Inventory {
@@ -269,12 +281,15 @@ struct Found {
     elements: BTreeMap<(i64, u32), (u16, bool)>,
     level_records: BTreeMap<u32, bool>,
     blocks: Vec<Block>,
+    /// Declared ids with the block of a level inside another element.
+    owned: BTreeSet<u32>,
 }
 
 struct Block {
     id: u32,
     name: String,
     elevation_feet: f64,
+    building_story: Option<bool>,
 }
 
 impl Found {
@@ -490,7 +505,47 @@ fn block_at(buf: &[u8], tags: &Tags, ids: &[u32], start: usize, id_len: usize, r
     let copy = buf.get(at.checked_sub(CONFIRM_LEAD_IN)?..at + 8)?;
     let later = buf.get(at + 8..(at + 8 + ELEVATION_SEARCH).min(buf.len()))?;
     memchr::memmem::find(later, copy)?;
-    Some(Block { id, name, elevation_feet })
+    Some(Block { id, name, elevation_feet, building_story: building_story_after(buf, end, id_len == 8) })
+}
+
+/// A level's Building Story setting: the byte after the first unset id and `00 01` past its name, a number (0 on most levels)
+/// and the level's own id, 1 for a building story and 0 for a level that is not. None where the frame is not found or the
+/// byte is neither.
+fn building_story_after(buf: &[u8], name_end: usize, wide: bool) -> Option<bool> {
+    let unset: &[u8] = if wide { &[0xff; 8] } else { &[0xff; 4] };
+    let anchor = [unset, &[0, 1][..]].concat();
+    let window = buf.get(name_end..(name_end + STORY_WINDOW).min(buf.len()))?;
+    let after = name_end + memchr::memmem::find(window, &anchor)? + anchor.len();
+    let id_at = after + 8;
+    let setting = if wide {
+        u32::try_from(u64_at(buf, id_at)?).ok()?;
+        id_at + 8
+    } else {
+        id_at + 4
+    };
+    match buf.get(setting)? {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
+}
+
+/// The levels inside other elements: objects keyed by an id (`01 00 00 00` and the `u64`) whose block has the owner's id after
+/// eight `ff` where a project level's block has its run of 56.
+fn owned_64(buf: &[u8], ids: &[u32], found: &mut Found) {
+    for at in memchr::memmem::find_iter(buf, &OBJECT_PREFIX) {
+        let id_at = at + OBJECT_PREFIX.len();
+        let Some(id) = u64_at(buf, id_at).and_then(|v| u32::try_from(v).ok()).filter(|&id| declared(ids, id)) else { continue };
+        let chars = u32_at(buf, id_at + NAME_AFTER_OWNER - 4).unwrap_or(0) as usize;
+        let sentinel = buf.get(id_at + 8..id_at + 16);
+        let owner = u64_at(buf, id_at + 16);
+        if (1..=MAX_NAME_CHARS).contains(&chars)
+            && sentinel.is_some_and(|run| run.iter().all(|&b| b == 0xff))
+            && owner.is_some_and(|o| o != 0 && o < u64::from(u32::MAX))
+        {
+            found.owned.insert(id);
+        }
+    }
 }
 
 impl crate::Revit {
@@ -518,6 +573,7 @@ impl crate::Revit {
         let mut elements: BTreeMap<(i64, u32), (u16, bool)> = BTreeMap::new();
         let mut level_records: BTreeMap<u32, bool> = BTreeMap::new();
         let mut named: BTreeMap<u32, (u32, Block)> = BTreeMap::new();
+        let mut owned: BTreeSet<u32> = BTreeSet::new();
         let mut records = 0;
         for name in names {
             // One partition at a time: it is inflated, read and dropped.
@@ -527,6 +583,7 @@ impl crate::Revit {
             if wide {
                 scan_64(&buf, &tags, &ids, &mut found);
                 levels_64(&buf, &tags, release, &ids, &mut found);
+                owned_64(&buf, &ids, &mut found);
             } else {
                 scan_32(&buf, &tags, &ids, &mut found);
                 levels_32(&buf, &tags, release, &ids, &mut found);
@@ -534,6 +591,7 @@ impl crate::Revit {
             blocks(&buf, &tags, &ids, wide, &mut found);
             drop(buf);
             records += found.records;
+            owned.extend(found.owned);
             for ((category, id), (class_tag, placed)) in found.elements {
                 let e = elements.entry((category, id)).or_insert((class_tag, false));
                 e.1 |= placed;
@@ -551,14 +609,16 @@ impl crate::Revit {
                 }
             }
         }
+        // A level inside another element is no project level, however its block reads.
+        owned.retain(|id| level_records.contains_key(id));
         let mut levels: Vec<Level> = level_records
             .iter()
-            .filter(|&(_, &placed)| placed)
+            .filter(|&(id, &placed)| placed && !owned.contains(id))
             .filter_map(|(id, _)| named.get(id))
-            .map(|(_, b)| Level { id: b.id, name: b.name.clone(), elevation_feet: b.elevation_feet })
+            .map(|(_, b)| Level { id: b.id, name: b.name.clone(), elevation_feet: b.elevation_feet, building_story: b.building_story })
             .collect();
         levels.sort_by(|a, b| a.elevation_feet.total_cmp(&b.elevation_feet).then(a.id.cmp(&b.id)));
-        let placed_levels: BTreeSet<u32> = level_records.iter().filter(|&(_, &p)| p).map(|(&id, _)| id).collect();
+        let placed_levels: BTreeSet<u32> = level_records.iter().filter(|&(id, &p)| p && !owned.contains(id)).map(|(&id, _)| id).collect();
         let unread_levels = placed_levels.len() - levels.len();
         for (&id, &placed) in &level_records {
             let e = elements.entry((OST_LEVELS, id)).or_insert((0, false));
@@ -566,6 +626,6 @@ impl crate::Revit {
         }
         let elements =
             elements.into_iter().map(|((category, id), (class_tag, placed))| Element { category, id, class_tag, placed }).collect();
-        Ok(Inventory { declared: ids.len(), records, elements, levels, unread_levels })
+        Ok(Inventory { declared: ids.len(), records, elements, levels, unread_levels, owned_levels: owned.into_iter().collect() })
     }
 }
