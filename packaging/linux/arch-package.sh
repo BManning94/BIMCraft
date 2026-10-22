@@ -53,7 +53,7 @@ pkgrel=1
 pkgdesc='Open-source building information modeling: plans, sections, 3D, schedules and IFC'
 arch=('@ARCH@')
 url='https://github.com/IPedrax/BIMCraft'
-license=('MIT OR Apache-2.0')
+license=('Apache-2.0')
 # The window and OpenGL are loaded while it runs. Without the X11 libraries a session that isn't Wayland
 # gets no window at all, so they are dependencies (an optional dependency isn't installed with the package).
 depends=('glibc' 'gcc-libs' 'libxkbcommon' 'libxkbcommon-x11' 'libx11' 'libxcursor' 'libxi' 'libxrandr' 'libglvnd'
@@ -73,7 +73,7 @@ package() {
   find "$pkgdir/usr" -type d -exec chmod 0755 {} +
   find "$pkgdir/usr" -type f -perm /111 -exec chmod 0755 {} +
   find "$pkgdir/usr" -type f ! -perm /111 -exec chmod 0644 {} +
-  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" "$pkgdir"/usr/share/doc/bimcraft/LICENSE-*
+  install -Dm644 -t "$pkgdir/usr/share/licenses/$pkgname" "$pkgdir"/usr/share/doc/bimcraft/LICENSE-* "$pkgdir"/usr/share/doc/bimcraft/NOTICE
 }
 PKGBUILD
 

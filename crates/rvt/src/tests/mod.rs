@@ -43,6 +43,24 @@ fn the_crate_is_apache_only_and_carries_the_licence_and_the_notice_apache_asks_f
 }
 
 #[test]
+fn every_package_says_apache_and_ships_the_notice_that_a_build_with_the_reader_owes() {
+    // The root NOTICE is what the packages carry; it must say what the crate's does.
+    assert_eq!(read("NOTICE"), read("crates/rvt/NOTICE"), "the root NOTICE is a copy of the crate's");
+    for (file, wants) in [
+        ("packaging/linux/nfpm.yaml", "license: Apache-2.0"),
+        ("packaging/linux/arch-package.sh", "license=('Apache-2.0')"),
+        ("packaging/linux/io.github.ipedrax.bimcraft.metainfo.xml.in", "<project_license>Apache-2.0</project_license>"),
+        ("packaging/macos/Info.plist.in", "BIMCraft contributors. Apache-2.0."),
+    ] {
+        assert!(read(file).contains(wants), "{file} says what the default build is under: `{wants}`");
+        assert!(!read(file).contains("MIT OR Apache-2.0"), "{file}");
+    }
+    for (file, wants) in [("packaging/env.sh", "LICENSE-APACHE NOTICE"), ("packaging/windows/bimcraft.wxs", "Source=\"NOTICE\"")] {
+        assert!(read(file).contains(wants), "{file} ships the NOTICE");
+    }
+}
+
+#[test]
 fn every_source_file_is_in_the_provenance_document_and_ported_ones_say_where_from() {
     let provenance = read("docs/rvt-provenance.md");
     let dir = root().join("crates/rvt/src");

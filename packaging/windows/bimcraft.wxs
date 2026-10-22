@@ -76,6 +76,9 @@
       <Component Id="LicenceApache" Directory="INSTALLFOLDER">
         <File Id="LicenseApache" Source="LICENSE-APACHE" KeyPath="yes" />
       </Component>
+      <Component Id="NoticeFile" Directory="INSTALLFOLDER">
+        <File Id="Notice" Source="NOTICE" KeyPath="yes" />
+      </Component>
       <!-- A shortcut that isn't advertised needs a registry key path, and in a profile folder (the
            desktop, which per-machine is the Public one) that key must be under HKCU (ICE38, ICE43, ICE57). -->
       <Component Id="DesktopShortcut" Directory="DesktopFolder" Condition="DESKTOPSHORTCUT = &quot;1&quot;">

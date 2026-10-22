@@ -33,7 +33,8 @@ The project owner chose this on 2026-10-21 and accepted the risk below. None of 
 2. **Attribution, as Apache-2.0 asks.** `crates/rvt/LICENSE` is the licence text; `crates/rvt/NOTICE` carries rvt-rs's
    copyright line (Copyright 2026 Griffin Long) and says what was taken; every file with ported code opens with a header that
    names the rvt-rs source file and commit and says it was changed. A build that includes the crate is distributed under
-   Apache-2.0 (the README says so).
+   Apache-2.0: the README says so, every package (deb, rpm, Arch, AppImage, the AppStream metainfo, the Windows installer and the
+   macOS bundle) names Apache-2.0, and each ships the root `NOTICE`, a copy of the crate's that a test keeps equal.
 3. **This document.** Every module and every format finding has a source from the accepted list below.
 4. **Nothing inside an Autodesk file becomes BIMCraft content.** No family, template, icon or help text is bundled, extracted
    or shipped. The reader reads a file the user gives it. Test fixtures are synthetic files written by the tests; Autodesk's
