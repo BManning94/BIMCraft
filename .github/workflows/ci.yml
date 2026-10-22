@@ -1,0 +1,55 @@
+# What a pull request has to pass: the three checks CLAUDE.md asks for before anything is finished, on the three systems the app
+# ships for (the release workflow tests on all three too, but only once a tag is pushed, which is late to find a Windows or macOS break).
+# It runs for pull requests from forks as well, with a read-only token and no secrets: `pull_request`, never `pull_request_target`.
+# A first-time contributor's run waits for a maintainer's approval on GitHub's side (Actions > the run > Approve and run).
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same pull request makes the run before it pointless.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu runner, as the release workflow's Linux job.
+          - { name: Linux, runner: ubuntu-22.04 }
+          - { name: Windows, runner: windows-latest }
+          - { name: macOS, runner: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # The X11, Wayland and GL headers egui's window builds against, as the release workflow installs them.
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+
+      - name: Rust
+        shell: bash
+        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
+
+      # shortcut: no build cache, so each run builds egui and wgpu from scratch (about 15 minutes); add actions/cache when that hurts.
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
