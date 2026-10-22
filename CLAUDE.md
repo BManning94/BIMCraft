@@ -115,7 +115,23 @@ cargo test --workspace
   Wall sides follow the file's flip (set: the exterior is on the right, so start and end swap and an arc's sign changes); an opening's
   host is the nearest wall below its own id in its reference list, else above, and its hole is its box along an axis-parallel wall;
   a column is its box's rectangle (a turned one: its symbol's size and the placement's angle); a floor, ceiling or roof is the loops
-  of its `OST_SketchLines`; a roof only when flat. The notes are part of the product: a change that leaves something out says so.
+  of its `OST_SketchLines`; a roof by footprint only when flat, one by extrusion only where its box confirms it. The notes are part of
+  the product: a change that leaves something out says so.
+
+  Every note of an element left out reads `N kinds left out, why (ids …)` (`Import::left_out`; an element the model's rules drop
+  after it was made goes through `Import::dropped`), because the desktop adds those numbers up for its status line
+  (`revit::count_left_out`); a note about something that came in reads `N kinds: why (ids …)`. A roof by extrusion (class `Roof`) is its
+  sketch lines' chain as the profile of its top, with its type's thickness square to each slope, cut plumb, and it comes in only where
+  the box that makes is the record's box to a millimetre (`roofs::extruded`): rvt-rs does not read it, so the provenance row says it is
+  read from the sample's bytes. The desktop (`crates/ui-egui/src/revit.rs`) never depends on this crate: the window has a hook,
+  `BimApp::revit: Option<Importer>`, which `apps/bimcraft`'s `main` fills when built with the `rvt` feature, so a test never reads a real
+  file and a build without it has no `.rvt` option (`open_extensions`) and says why when given one. `open_revit` reads the file on a thread
+  of its own behind `catch_unwind`; `poll_revit` takes the answer each frame (a refusal, a panic or a lost thread is a status message),
+  `importing_box` holds the window still (keys stand down, `os_requests` queues the files that come meanwhile, the last wins, and Quit is
+  still heard) and `install_revit` makes it a new unsaved project (`Session::reset(model, None)`, `reopened`; never in File > Open Recent)
+  with a `Report` that File > Revit import report shows until another project replaces it (`reopened` drops it). A file named on the
+  command line is `BimApp::open_later`: the window comes up first. Tests give the window a closure for a reader and block it at a gate
+  (`tests/revit.rs`, with `step`, never `run`).
 
 - Packages: `packaging/linux/package.sh` writes the AppImage, deb, rpm and tarball into `dist/release` (build on Ubuntu
   22.04, as CI does, so they run on its glibc and later; riscv64 is cross-built on 24.04, deb, rpm and tarball only, as the

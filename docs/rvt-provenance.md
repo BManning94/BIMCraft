@@ -310,8 +310,8 @@ skipped. The same holds for the structural sample (2023 to 2026) and the Snowdon
   imported, validated and looked at, and its numbers were not set against an export.
 - A roof by extrusion with an arc (a barrel vault), one in a plane at an angle, or one that rises in steps: the one real roof is a gable, and
   nothing else of the kind was seen. A wall of a type with no layers: none of the 51 in the samples (the 9 of the architectural sample, the 42 of
-  Snowdon Towers: storefront, glazing and solar-panel types and one type named `_Not Defined`) holds a width the reader can find, so none comes in
-  as a single layer; each is left out and listed under its type's name. The categories `info` prints as bare ids: no table of Autodesk's
+  Snowdon Towers: storefront, glazing and solar-panel types and one type named `_Not Defined`) holds a width the reader can find (the data of the eight Snowdon types that have any is 350 to 402 bytes, and the only lengths in it are a
+  curtain grid's spacings; the architectural sample's type has no data object at all), so none comes in as a single layer; each is left out and listed under its type's name. The categories `info` prints as bare ids: no table of Autodesk's
   `BuiltInCategory` values was found that could be checked against a file (the published reference lists the names without their numbers, and
   the files hold no `OST_` names), so none was added.
 - What no sample sets: a roof slope (rvt-rs's RE-56 is not ported), an angled or curved wall that hosts an opening (left out), a
