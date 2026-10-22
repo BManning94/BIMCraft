@@ -6,6 +6,7 @@
 //! (plans, the 3D view, schedules), and the tool's prompt in the status bar.
 
 mod canvas;
+mod context;
 mod editor;
 mod favorites;
 mod footer;
@@ -1018,6 +1019,8 @@ impl BimApp {
             || self.show_snaps
             || self.pending.is_some()
             || self.installing()
+            // An open menu takes the keys: Esc closes it, not the tool.
+            || egui::Popup::is_any_open(ctx)
         {
             return;
         }
@@ -1052,7 +1055,7 @@ impl BimApp {
             match (&self.tool, self.typed_length.is_empty()) {
                 (Tool::Railing(_), true) => self.finish_railing(level),
                 (Tool::Mass(_), true) => self.finish_mass(level),
-                (_, true) => self.finish_wall(level, false),
+                (_, true) => self.finish_wall(),
                 (_, false) => self.place_typed(level),
             }
             // A snap override typed was for that point.
@@ -1464,8 +1467,8 @@ impl BimApp {
         }
     }
 
-    /// The Wall tool's Draw panel: lines, or arcs. A chain of lines drawn so far is built, and the
-    /// next wall starts where it ended (an arc not finished yet, where it started).
+    /// The Wall tool's Draw panel: lines, or arcs. The next wall starts where the last one ended
+    /// (an arc not finished yet, where it started).
     fn draw_arc(&mut self, arc: bool) {
         if arc == self.wall_arc {
             return;
@@ -1475,11 +1478,6 @@ impl BimApp {
             Tool::Wall(chain) => chain.last().copied(),
             _ => None,
         };
-        if let Some(level) = self.plan_level()
-            && !self.wall_arc
-        {
-            self.finish_wall(level, false);
-        }
         self.wall_arc = arc;
         if let Tool::Wall(chain) = &mut self.tool {
             *chain = keep.into_iter().collect();
@@ -1579,6 +1577,19 @@ impl BimApp {
         }
     }
 
+    /// Zoom the view on screen by `factor` about its middle.
+    fn zoom_view(&mut self, factor: f64) {
+        match self.sheet {
+            Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) | Sheet::Paper(id) => self.canvas.zoom(id, factor),
+            Sheet::View3D => {
+                if let Some(c) = self.orbit.camera {
+                    self.orbit.camera = Some(c.zoom(factor, (f64::from(c.width) / 2.0, f64::from(c.height) / 2.0)));
+                }
+            }
+            Sheet::Schedule(_) | Sheet::Table(_) => {}
+        }
+    }
+
     fn fit(&mut self) {
         match self.sheet {
             Sheet::Plan(id) | Sheet::Ceiling(id) | Sheet::Section(id) | Sheet::Paper(id) => self.canvas.fit(id),
@@ -1593,7 +1604,7 @@ impl BimApp {
             self.views.push(sheet);
         }
         self.sheet = sheet;
-        self.selection.clear();
+        // The selection is the model's, not the view's: it stays, whatever view comes up.
         self.typed_length.clear();
         self.snap_once = None;
         // A ruler belongs to the view it was laid in.
@@ -2022,7 +2033,7 @@ impl BimApp {
             ui,
             "Build",
             &[
-                (Icon::Wall, "Wall", "Wall (WA): click points; Enter finishes, Esc cancels", Tool::Wall(Vec::new())),
+                (Icon::Wall, "Wall", "Wall (WA): each click builds a wall; Enter or Esc ends the chain", Tool::Wall(Vec::new())),
                 (Icon::Door, "Door", "Door (DR): click a wall", Tool::Door),
                 (Icon::Window, "Window", "Window (WN): click a wall", Tool::Window),
                 (Icon::Column, "Column", "Column (CL): click where it stands", Tool::Column),
@@ -2733,7 +2744,7 @@ impl BimApp {
             Tool::Wall(chain) if chain.is_empty() => "Click to enter the wall's start point.",
             Tool::Wall(chain) if self.wall_arc && chain.len() == 1 => "Click to enter the arc's end point.",
             Tool::Wall(_) if self.wall_arc => "Click a point the arc passes through: it sets the radius. Esc cancels.",
-            Tool::Wall(_) => "Click to enter the next point. Enter finishes, Esc cancels, Shift keeps it square.",
+            Tool::Wall(_) => "Click to build the wall to the next point. Enter or Esc ends the chain, Shift keeps it square.",
             Tool::Attach if self.attach_base => "Pick a roof or a floor: the selected walls' bases stand on it.",
             Tool::Attach => "Pick a roof or a floor: the selected walls' tops follow its underside.",
             Tool::Door => "Click a wall to place the door.",
@@ -3004,8 +3015,13 @@ impl BimApp {
     /// The schedule on screen as a table: its headings, its rows, its totals under a rule.
     fn schedule(&mut self, ui: &mut Ui) {
         let Some((_, sc)) = self.shown_schedule() else { return };
+        // The right-click menu, on the schedule and on each of its cells.
+        let groups = self.context_items();
+        let mut chosen = None;
         Frame::new().fill(pal().surface).inner_margin(16.0).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
+            let ground = ui.interact(ui.max_rect(), ui.id().with("schedule menu"), egui::Sense::click());
+            context::menu(&ground, &groups, &mut chosen);
             let name = self.view_name(self.sheet);
             ui.label(RichText::new(&name).heading());
             ui.add_space(8.0);
@@ -3022,20 +3038,34 @@ impl BimApp {
                         let text = schedule::shown(units, c.kind, v);
                         if v.is_boolean() { t(&text).to_string() } else { text }
                     };
+                    // A row is highlighted while what it lists is selected; a click on it picks that.
+                    let selected: Vec<bool> = table.ids.iter().map(|ids| ids.iter().any(|id| self.selection.contains(id))).collect();
+                    // Striped, as a grid is; the heading is row 0.
+                    let shaded = selected.clone();
+                    let row_color = move |row: usize, style: &egui::Style| match row.checked_sub(1).and_then(|r| shaded.get(r)) {
+                        Some(true) => Some(style.visuals.selection.bg_fill.gamma_multiply(0.5)),
+                        _ => (row % 2 == 1).then_some(style.visuals.faint_bg_color),
+                    };
+                    let mut picked = None;
                     ScrollArea::both().show(ui, |ui| {
-                        Grid::new(("schedule", &sc.name)).striped(true).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
+                        Grid::new(("schedule", &sc.name)).with_row_color(row_color).spacing(vec2(28.0, 6.0)).show(ui, |ui| {
                             for c in &table.columns {
                                 let heading = schedule::Column { heading: t(&c.heading).to_string(), kind: c.kind };
                                 ui.label(RichText::new(schedule::heading(units, &heading)).strong());
                             }
                             ui.end_row();
-                            for row in &table.rows {
+                            for ((row, ids), &selected) in table.rows.iter().zip(&table.ids).zip(&selected) {
                                 for (v, c) in row.iter().zip(&table.columns) {
-                                    if v.is_number() {
-                                        ui.monospace(said(c, v))
-                                    } else {
-                                        ui.label(said(c, v))
-                                    };
+                                    let said = said(c, v);
+                                    let text = RichText::new(&said);
+                                    let text = if v.is_number() { text.monospace() } else { text };
+                                    let r = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+                                    // Selected or not, for screen readers, as a selectable label says.
+                                    r.widget_info(|| WidgetInfo::selected(WidgetType::SelectableLabel, true, selected, &said));
+                                    if r.clicked() {
+                                        picked = Some((ids.clone(), ui.input(|i| i.modifiers)));
+                                    }
+                                    context::menu(&r, &groups, &mut chosen);
                                 }
                                 ui.end_row();
                             }
@@ -3050,9 +3080,15 @@ impl BimApp {
                             }
                         });
                     });
+                    if let Some((ids, mods)) = picked {
+                        self.pick_up(ids, mods);
+                    }
                 }
             }
         });
+        if let Some(action) = chosen {
+            self.act(action);
+        }
     }
 
     fn dialogs(&mut self, ctx: &Context) {

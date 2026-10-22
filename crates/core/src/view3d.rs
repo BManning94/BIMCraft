@@ -28,6 +28,8 @@ pub const ELEVATION: f64 = 30.0;
 pub const MAX_SIDE: u32 = 4096;
 /// Where faces meet.
 pub const EDGE: Rgb = Rgb(48, 48, 48);
+/// What a level's plane is outlined in.
+const DATUM: Rgb = Rgb(60, 100, 150);
 const WALL: Rgb = Rgb(236, 236, 232);
 const SLAB: Rgb = Rgb(214, 214, 210);
 const DOOR: Rgb = Rgb(198, 168, 128);
@@ -201,7 +203,7 @@ impl Solid {
     }
 
     /// Its corners.
-    fn corners(&self) -> Vec<P3> {
+    pub(crate) fn corners(&self) -> Vec<P3> {
         let mut out = Vec::new();
         match self {
             Solid::Box { frame, a, c, z, .. } => {
@@ -759,6 +761,8 @@ pub struct Scene {
     edges: OnceLock<Vec<(usize, [P3; 2])>>,
     /// The masses, which a section's picture leaves out: it outlines where its line cuts them.
     masses: BTreeSet<Id>,
+    /// Each level's plane: its name, and the corners of its extent at its elevation.
+    levels: Vec<(Id, String, [P3; 4])>,
 }
 
 /// How an element's triangles name their faces.
@@ -802,6 +806,21 @@ fn basis(t: &Tri) -> [P3; 2] {
     [across, unit(cross(n, across))]
 }
 
+/// Where a level's name goes in a 3D view: a vertical plane, unseen, past the right end of its
+/// plane's far edges and in line with the one that ends there, lettered with the name. It is where an
+/// elevation marker (an annotation family, later) will stand.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LevelHead {
+    pub level: Id,
+    pub name: String,
+    /// Along its foot, then up its far side: on the level's elevation, and its lettering's height above.
+    pub corners: [P3; 4],
+}
+
+/// How tall a level's name is lettered in 3D, px; and the room round it.
+const HEAD_TEXT: f32 = 11.0;
+const HEAD_PAD: f32 = 3.0;
+
 impl Scene {
     pub fn new(m: &Model) -> Scene {
         let mut tris = Vec::new();
@@ -833,7 +852,17 @@ impl Scene {
         let bases = tris.iter().map(|t| skins.get(t.tex as usize).is_some_and(Option::is_some).then(|| basis(t))).collect();
         let (planes, smooth) = (planes(&tris), corner_normals(&tris));
         let masses = m.elements.iter().filter(|(_, e)| matches!(e, Element::Mass(_))).map(|(id, _)| *id).collect();
-        Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases, masses, edges: OnceLock::new() }
+        let default = std::cell::OnceCell::new();
+        let levels = m
+            .levels()
+            .into_iter()
+            .map(|(id, l)| {
+                let [lo, hi] = l.extent.unwrap_or_else(|| *default.get_or_init(|| m.model_extent()));
+                let z = l.elevation;
+                (id, l.name.clone(), [[lo.0, lo.1, z], [hi.0, lo.1, z], [hi.0, hi.1, z], [lo.0, hi.1, z]])
+            })
+            .collect();
+        Scene { tris, planes, smooth, faces: Arc::new(faces), skins, bases, masses, levels, edges: OnceLock::new() }
     }
 
     /// A view of the whole model from `azimuth` and `elevation` (degrees), fitted into the picture.
@@ -845,14 +874,43 @@ impl Scene {
     pub fn fit_in(&self, azimuth: f64, elevation: f64, width: u32, height: u32, look: &Look) -> Camera {
         let mut cam = Camera { azimuth, elevation: elevation.clamp(-89.0, 89.0), scale: 1.0, target: [0.0; 3], width, height };
         let room = |px: u32| (f64::from(px) - 2.0 * MARGIN).max(1.0);
-        let pts: Vec<P3> = self.tris.iter().filter(|t| look.shows(t.owner)).flat_map(|t| t.p).collect();
+        let solids = self.tris.iter().filter(|t| look.shows(t.owner)).flat_map(|t| t.p);
+        let levels = self.levels.iter().filter(|(id, ..)| look.shows(*id)).flat_map(|(.., c)| *c);
+        let mut pts: Vec<P3> = solids.chain(levels).collect();
         let Some((target, w, h)) = extent(&cam, &pts) else {
             cam.scale = room(width).min(room(height)) / 10_000.0;
             return cam;
         };
         cam.target = target;
         cam.scale = (room(width) / w.max(1000.0)).min(room(height) / h.max(1000.0)).clamp(1e-6, 50.0);
+        // The levels' names take room at the scale that gives: fitted again with their heads.
+        pts.extend(self.level_heads(&cam).into_iter().filter(|h| look.shows(h.level)).flat_map(|h| h.corners));
+        if let Some((target, w, h)) = extent(&cam, &pts) {
+            cam.target = target;
+            cam.scale = (room(width) / w.max(1000.0)).min(room(height) / h.max(1000.0)).clamp(1e-6, 50.0);
+        }
         cam
+    }
+
+    /// Each level's head as `cam` sees it: see [`LevelHead`].
+    pub fn level_heads(&self, cam: &Camera) -> Vec<LevelHead> {
+        let px = 1.0 / cam.scale.max(1e-9);
+        self.levels
+            .iter()
+            .map(|(id, name, c)| {
+                let near = nearest(cam, c);
+                let (far, sides) = (c[(near + 2) % 4], [c[(near + 1) % 4], c[(near + 3) % 4]]);
+                // The far edges' outer ends: the one further right.
+                let end = if cam.project(sides[0]).0 >= cam.project(sides[1]).0 { sides[0] } else { sides[1] };
+                let d = unit(sub(end, far));
+                let (w, h) =
+                    (f64::from(crate::font::width(name, HEAD_TEXT) + 2.0 * HEAD_PAD) * px, f64::from(HEAD_TEXT + 2.0 * HEAD_PAD) * px);
+                let foot = add(end, mul(d, 2.0 * f64::from(HEAD_PAD) * px));
+                let up = [0.0, 0.0, h];
+                let corners = [foot, add(foot, mul(d, w)), add(add(foot, mul(d, w)), up), add(foot, up)];
+                LevelHead { level: *id, name: name.clone(), corners }
+            })
+            .collect()
     }
 
     /// The picture `cam` takes. Elements in `tints` show halfway to their tint, and their edges in it.
@@ -1142,13 +1200,99 @@ impl Scene {
         if through_any {
             hit = hit.iter().zip(&seen).map(|(h, s)| if *s == u32::MAX { *h } else { *s }).collect();
         }
-        Image {
-            width: w as u32,
-            height: h as u32,
-            rgba,
-            hit,
-            owners: self.tris.iter().map(|t| t.owner).collect(),
-            faces: Arc::clone(&self.faces),
+        let mut owners: Vec<Id> = self.tris.iter().map(|t| t.owner).collect();
+        // Over it, each level's plane outlined where nothing nearer hides it (not in a section's picture,
+        // which draws its own), picked as the level.
+        // Unselected, the two edges nearer the camera are left out, as in Revit; selected, all four.
+        // Its head goes past the far edges' right end: its name lettered, all of it picking the level.
+        if clip.is_none() {
+            let slack = 1.5 / cam.scale.max(1e-9);
+            let heads = self.level_heads(cam);
+            for ((id, _, corners), head) in self.levels.iter().zip(&heads).filter(|((id, ..), _)| plain || look.shows(*id)) {
+                let c = tints.get(id).copied().unwrap_or_else(|| look.edge(*id, DATUM));
+                let slot = owners.len() as u32;
+                owners.push(*id);
+                let mut paint = |k: usize| {
+                    if let (Some(px), Some(t)) = (rgba.get_mut(4 * k..4 * k + 3), hit.get_mut(k)) {
+                        px.copy_from_slice(&[c.0, c.1, c.2]);
+                        *t = slot;
+                    }
+                };
+                let near = nearest(cam, corners);
+                for (i, (a, b)) in corners.iter().zip(corners.iter().cycle().skip(1)).enumerate() {
+                    if tints.contains_key(id) || (i != near && (i + 1) % 4 != near) {
+                        outline((cam.project(*a), cam.project(*b)), (w, h), 2, slack, &depth, &mut paint);
+                    }
+                }
+                let [foot, along, ..] = head.corners;
+                let (d, px) = (unit(sub(along, foot)), 1.0 / cam.scale.max(1e-9));
+                let height = f64::from(HEAD_TEXT + 2.0 * HEAD_PAD);
+                let to3 = |(x, y): (f32, f32)| add(add(foot, mul(d, f64::from(x) * px)), [0.0, 0.0, (height - f64::from(y)) * px]);
+                for stroke in crate::font::strokes(&head.name, HEAD_PAD, HEAD_PAD + HEAD_TEXT, HEAD_TEXT) {
+                    for seg in stroke.windows(2) {
+                        if let [a, b] = seg {
+                            outline((cam.project(to3(*a)), cam.project(to3(*b))), (w, h), 1, slack, &depth, &mut paint);
+                        }
+                    }
+                }
+                // The rest of the head picks the level too, unpainted.
+                let ring: Vec<P2> = head.corners.iter().map(|p| cam.project(*p)).map(|(x, y, _)| P2(x, y)).collect();
+                let z = head.corners.iter().map(|p| cam.project(*p).2).sum::<f64>() / 4.0;
+                let (lo, hi) = ring.iter().fold((P2(f64::MAX, f64::MAX), P2(f64::MIN, f64::MIN)), |(lo, hi), q| {
+                    (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1)))
+                });
+                let (x0, x1) = (lo.0.max(0.0).floor() as usize, hi.0.min(w as f64 - 1.0).max(0.0) as usize);
+                let (y0, y1) = (lo.1.max(0.0).floor() as usize, hi.1.min(h as f64 - 1.0).max(0.0) as usize);
+                for py in y0..=y1.min(y0 + 4 * MAX_SIDE as usize) {
+                    for px in x0..=x1.min(x0 + 4 * MAX_SIDE as usize) {
+                        let k = py * w + px;
+                        if geom::contains(&ring, P2(px as f64 + 0.5, py as f64 + 0.5))
+                            && depth.get(k).is_some_and(|d| f64::from(*d) <= z + slack)
+                            && let Some(t) = hit.get_mut(k)
+                        {
+                            *t = slot;
+                        }
+                    }
+                }
+            }
+        }
+        Image { width: w as u32, height: h as u32, rgba, hit, owners, faces: Arc::clone(&self.faces) }
+    }
+}
+
+/// Which of a level plane's `corners` is nearest the camera: the two edges from it are its near ones.
+fn nearest(cam: &Camera, corners: &[P3; 4]) -> usize {
+    (0..4).max_by(|a, b| cam.project(corners[*a]).2.total_cmp(&cam.project(corners[*b]).2)).unwrap_or(0)
+}
+
+/// The pixels of a `w` x `h` picture a line from `a` to `b` (each a pixel and its nearness)
+/// covers, `wide` (1 or 2) px wide, where nothing in `depth` lies more than `slack` mm nearer: each to `paint`.
+fn outline(
+    (a, b): ((f64, f64, f64), (f64, f64, f64)),
+    (w, h): (usize, usize),
+    wide: u8,
+    slack: f64,
+    depth: &[f32],
+    mut paint: impl FnMut(usize),
+) {
+    let steps = (b.0 - a.0).abs().max((b.1 - a.1).abs()).ceil();
+    if !steps.is_finite() || steps > 4.0 * MAX_SIDE as f64 {
+        return;
+    }
+    let steps = steps.max(1.0) as usize;
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        let (x, y, z) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t);
+        let offsets: &[(f64, f64)] = if wide > 1 { &[(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] } else { &[(0.5, 0.5)] };
+        for &(dx, dy) in offsets {
+            let (px, py) = ((x - 0.5 + dx).floor(), (y - 0.5 + dy).floor());
+            if px < 0.0 || py < 0.0 || px >= w as f64 || py >= h as f64 {
+                continue;
+            }
+            let k = py as usize * w + px as usize;
+            if depth.get(k).is_some_and(|d| f64::from(*d) <= z + slack) {
+                paint(k);
+            }
         }
     }
 }
@@ -1253,6 +1397,15 @@ impl Camera {
         (f64::from(self.width) / 2.0 + dot(d, right) * self.scale, f64::from(self.height) / 2.0 - dot(d, up) * self.scale, dot(d, back))
     }
 
+    /// The point at pixel `(x, y)` on the horizontal plane at height `z`; none where the view is
+    /// level with it.
+    pub fn on_plane(&self, at: (f64, f64), z: f64) -> Option<P3> {
+        let (back, ..) = self.axes();
+        let p = self.unproject(at);
+        let t = (z - p[2]) / back[2];
+        (back[2].abs() > 1e-9 && t.is_finite()).then(|| add(p, mul(back, t)))
+    }
+
     /// The model point at pixel `(x, y)` on the plane through the target, square to the view.
     pub fn unproject(&self, (x, y): (f64, f64)) -> P3 {
         let (_, right, up) = self.axes();
@@ -1314,6 +1467,22 @@ impl Image {
     pub fn face(&self, x: f64, y: f64) -> Option<&'static str> {
         let t = *self.hit.get(self.index(x, y)?)?;
         self.faces.get(t as usize).copied().filter(|f| !f.is_empty())
+    }
+
+    /// The elements the picture shows in the box from pixel `a` to `b`: those it shows only
+    /// inside it, or with `crossing`, any of.
+    pub fn in_box(&self, a: (f64, f64), b: (f64, f64), crossing: bool) -> Vec<Id> {
+        let (lo, hi) = ((a.0.min(b.0), a.1.min(b.1)), (a.0.max(b.0), a.1.max(b.1)));
+        // Each element: whether all of it is inside, and whether any of it is.
+        let mut seen: BTreeMap<Id, (bool, bool)> = BTreeMap::new();
+        for (k, t) in self.hit.iter().enumerate() {
+            let Some(&id) = self.owners.get(*t as usize) else { continue };
+            let (x, y) = ((k % self.width as usize) as f64 + 0.5, (k / self.width as usize) as f64 + 0.5);
+            let inside = (lo.0..=hi.0).contains(&x) && (lo.1..=hi.1).contains(&y);
+            let e = seen.entry(id).or_insert((true, false));
+            *e = (e.0 && inside, e.1 || inside);
+        }
+        seen.into_iter().filter(|(_, (all, any))| if crossing { *any } else { *all }).map(|(id, _)| id).collect()
     }
 
     /// Every element the picture shows.
@@ -1541,7 +1710,9 @@ mod tests {
     #[test]
     fn a_curve_shades_smoothly_across_its_facets_and_a_flat_face_in_one_shade() {
         let s = post();
-        let scene = Scene::new(&s.model);
+        let mut scene = Scene::new(&s.model);
+        // Its shading, not the levels' planes.
+        scene.levels.clear();
         let cam = scene.fit(AZIMUTH, ELEVATION, 800, 600);
         let img = scene.render(&cam, &[]);
         // Across its side, edge to edge: no step between neighbours bigger than a level, though it does change.
@@ -1575,7 +1746,8 @@ mod tests {
     fn a_curved_wall_shades_smoothly_along_its_face() {
         let mut s = Session::new();
         s.script(r#"wall {"points": [[0, 0], [4000, 0]], "arc": 180}"#).unwrap();
-        let scene = Scene::new(&s.model);
+        let mut scene = Scene::new(&s.model);
+        scene.levels.clear();
         let cam = scene.fit(AZIMUTH, ELEVATION, 800, 600);
         let img = scene.render(&cam, &[]);
         // Along its face at mid-height, between its ends: the row's pixels that show the wall.

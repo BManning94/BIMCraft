@@ -252,31 +252,35 @@ fn clicking_the_plan_selects_the_element_drawn_nearest_the_cursor() {
 }
 
 #[test]
-fn the_wall_tool_chains_clicks_and_enter_makes_them_one_undo_step() {
+fn each_click_of_the_wall_tool_builds_a_wall_and_the_next_starts_where_it_ends() {
     let mut h = app("");
     tool(&mut h, "Wall");
-    for p in [P2(-3000.0, -3000.0), P2(3000.0, -3000.0), P2(3000.0, 2000.0)] {
-        click(&mut h, p);
-    }
-    assert!(walls(&h).is_empty(), "nothing is built before Enter");
-    key(&mut h, Key::Enter);
+    click(&mut h, P2(-3000.0, -3000.0));
+    assert!(walls(&h).is_empty(), "one point is no wall");
+    click(&mut h, P2(3000.0, -3000.0));
+    assert_eq!(walls(&h), [(P2(-3000.0, -3000.0), P2(3000.0, -3000.0))], "the second click builds it");
+    click(&mut h, P2(3000.0, 2000.0));
     assert_eq!(walls(&h), [(P2(-3000.0, -3000.0), P2(3000.0, -3000.0)), (P2(3000.0, -3000.0), P2(3000.0, 2000.0))]);
-    assert_eq!(h.state().session.history(), ["Wall"]);
-    assert!(matches!(&h.state().tool, Tool::Wall(pts) if pts.is_empty()), "the tool stays on for the next chain");
+    assert_eq!(h.state().session.history(), ["Wall", "Wall"], "each wall its own undo step");
+    key(&mut h, Key::Enter);
+    assert_eq!(walls(&h).len(), 2, "Enter builds nothing more");
+    assert!(matches!(&h.state().tool, Tool::Wall(pts) if pts.is_empty()), "it ends the chain; the tool stays on");
 }
 
 #[test]
-fn escape_drops_the_chain_and_clicking_its_start_closes_it() {
+fn escape_ends_the_chain_keeping_its_walls_and_clicking_its_start_closes_it() {
     let mut h = app("");
     tool(&mut h, "Wall");
     click(&mut h, P2(0.0, 0.0));
     click(&mut h, P2(4000.0, 0.0));
     key(&mut h, Key::Escape);
-    assert!(walls(&h).is_empty());
-    for p in [P2(0.0, 0.0), P2(4000.0, 0.0), P2(4000.0, 3000.0), P2(0.0, 3000.0), P2(0.0, 0.0)] {
+    assert_eq!(walls(&h), [(P2(0.0, 0.0), P2(4000.0, 0.0))], "what was built stays");
+    assert!(matches!(&h.state().tool, Tool::Wall(pts) if pts.is_empty()));
+    for p in [P2(0.0, 0.0), P2(0.0, 3000.0), P2(4000.0, 3000.0), P2(4000.0, 0.0), P2(0.0, 0.0)] {
         click(&mut h, p);
     }
-    assert_eq!(walls(&h).len(), 4, "back on its start, the chain closes");
+    assert_eq!(walls(&h).len(), 5);
+    assert!(matches!(&h.state().tool, Tool::Wall(pts) if pts.is_empty()), "back on its start, the chain closes");
     key(&mut h, Key::Escape);
     assert!(matches!(h.state().tool, Tool::Modify), "Escape with no chain leaves the tool");
 }
@@ -612,6 +616,36 @@ fn the_browser_opens_level_plans_and_schedules() {
     h.run();
     assert_eq!(h.state().sheet, Sheet::Schedule("room"));
     assert!(h.query_by_label("Kitchen").is_some(), "a row of the room schedule");
+}
+
+#[test]
+fn the_selection_stays_as_views_change_and_a_schedule_shows_and_picks_it() {
+    let mut h = app(&format!(
+        "{BOX}\nwall {{\"points\": [[4000,0],[4000,6000]]}}\nroom {{\"point\": [2000, 3000], \"name\": \"Hall\"}}\nroom {{\"point\": [6000, 3000], \"name\": \"Den\"}}"
+    ));
+    let hall = find(&h, |e| matches!(e, Element::Room(r) if r.name == "Hall"));
+    let den = find(&h, |e| matches!(e, Element::Room(r) if r.name == "Den"));
+    click(&mut h, P2(2000.0, 3000.0));
+    assert_eq!(h.state().selection, [hall]);
+    press(&mut h, "Default 3D View");
+    assert_eq!(h.state().selection, [hall], "kept in the 3D view");
+    browse(&mut h, "Room Schedule");
+    assert_eq!(h.state().sheet, Sheet::Schedule("room"));
+    assert_eq!(h.state().selection, [hall], "kept in a schedule");
+    use egui_kittest::kittest::NodeT;
+    let selected = |h: &Harness<BimApp>, name: &str| h.get_by_label(name).accesskit_node().toggled();
+    use egui::accesskit::Toggled;
+    assert_eq!((selected(&h, "Hall"), selected(&h, "Den")), (Some(Toggled::True), Some(Toggled::False)), "its row is highlighted");
+    // A click on a row picks what it lists; Ctrl adds.
+    h.get_by_label("Den").click();
+    h.run();
+    assert_eq!(h.state().selection, [den]);
+    h.get_by_label("Hall").click_modifiers(Modifiers::COMMAND);
+    h.run();
+    assert_eq!(h.state().selection, [den, hall]);
+    topmost(&mut h, "Level 1");
+    assert_eq!(h.state().sheet, Sheet::Plan(1));
+    assert_eq!(h.state().selection, [den, hall], "and back in the plan");
 }
 
 #[test]
@@ -1916,14 +1950,49 @@ fn crop_view_and_its_grips_frame_plans_and_sections() {
     assert!(h.state().selection.is_empty(), "the grip took the drag, not a selection box");
     crop_view(&mut h);
     assert_eq!(field(&h, 1, "crop"), Value::Null);
-    // A section's top, dragged down; its start, dragged along its line: what's on screen stays put.
+    // A section uncropped has no crop region to drag: it shows all there is along its line.
     browse(&mut h, "Section 1");
+    assert_eq!(field(&h, section, "crop"), Value::Null);
+    assert!(bimcraft_core::render::crop_region(&h.state().session.model, section).is_none());
+    // Cropped, its top dragged down; its start, dragged along its line: what's on screen stays put.
+    crop_view(&mut h);
+    assert_eq!(field(&h, section, "crop"), json!([-600.0, 3600.0]));
     drag(&mut h, P2(5000.0, 3600.0), P2(5000.0, 2000.0));
     assert_eq!(field(&h, section, "crop"), json!([-600.0, 2000.0]));
-    let before = h.state().screen(P2(1000.0, 700.0));
-    drag(&mut h, P2(0.0, 700.0), P2(1000.0, 700.0));
-    assert_eq!(field(&h, section, "start"), json!([0.0, 3000.0]));
+    let before = h.state().screen(P2(2000.0, 700.0));
+    drag(&mut h, P2(0.0, 700.0), P2(2000.0, 700.0));
+    assert_eq!(field(&h, section, "start"), json!([1000.0, 3000.0]));
     assert!((h.state().screen(P2(0.0, 700.0)) - before).length() < 1.0);
+    // The west wall now lies before its start: cropped out, nothing is there to pick.
+    let west = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 6000.0)));
+    h.get_by_label("Zoom to Fit").click();
+    h.run();
+    click(&mut h, P2(-1000.0, 1000.0));
+    assert!(h.state().selection.is_empty(), "{:?}", h.state().selection);
+    // Uncropped, the section shows it again, past its line's start.
+    crop_view(&mut h);
+    assert_eq!(field(&h, section, "crop"), Value::Null);
+    h.get_by_label("Zoom to Fit").click();
+    h.run();
+    click(&mut h, P2(-1000.0, 1000.0));
+    assert_eq!(h.state().selection, [west]);
+}
+
+#[test]
+fn a_box_dragged_in_a_section_selects_as_in_a_plan() {
+    let mut h = app(&format!("{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}"));
+    browse(&mut h, "Section 1");
+    let west = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 6000.0)));
+    let north = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(8000.0, 6000.0)));
+    // Left to right: what lies wholly inside, the west wall's cut and not the north wall seen past it.
+    drag(&mut h, P2(600.0, -300.0), P2(1400.0, 3300.0));
+    assert_eq!(h.state().selection, [west]);
+    // Right to left: what it crosses too.
+    key(&mut h, Key::Escape);
+    drag(&mut h, P2(1400.0, 1400.0), P2(600.0, 1600.0));
+    let mut both = vec![west, north];
+    both.sort();
+    assert_eq!(h.state().selection, both);
 }
 
 #[test]
@@ -3023,7 +3092,7 @@ fn a_snap_override_is_used_up_by_a_typed_length_and_by_enter_too() {
     assert_eq!(h.state().snap_once, None, "the typed point was the one");
     shortcut(&mut h, "SE");
     key(&mut h, Key::Enter);
-    assert_eq!(h.state().snap_once, None, "so was the Enter that built the walls");
+    assert_eq!(h.state().snap_once, None, "so was the Enter that ended the chain");
 }
 
 #[test]
@@ -4965,4 +5034,118 @@ mod updates {
             }
         }
     }
+}
+
+/// A right click at a point on screen.
+fn right_click_at(h: &mut Harness<BimApp>, pos: Pos2) {
+    h.hover_at(pos);
+    h.run();
+    for pressed in [true, false] {
+        h.event(Event::PointerButton { pos, button: PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+    }
+    h.run();
+}
+
+/// Which of `labels` a right click at `pos` offers: those the menu it opens adds to the window
+/// (the navigation bar's Zoom to Fit is there anyway).
+fn offered(h: &mut Harness<BimApp>, pos: Pos2, labels: &[&'static str]) -> Vec<&'static str> {
+    let count = |h: &Harness<BimApp>, l: &str| h.query_all_by(|n| n.label().is_some_and(|x| x.starts_with(l))).count();
+    let before: Vec<usize> = labels.iter().map(|l| count(h, l)).collect();
+    right_click_at(h, pos);
+    labels.iter().zip(before).filter(|(l, n)| count(h, l) > *n).map(|(l, _)| *l).collect()
+}
+
+/// The open menu's item `label` (its shortcut beside it): the one drawn last, over the view.
+fn choose_item(h: &mut Harness<BimApp>, label: &str) {
+    h.get_all_by(|n| n.label().is_some_and(|x| x.starts_with(label))).last().unwrap().click();
+    h.run();
+}
+
+const MENU: [&str; 8] = ["Cancel", "Zoom to Fit", "Zoom In", "Home View", "Edit Type", "Select All Instances", "Hide Element", "Delete"];
+
+#[test]
+fn a_right_click_in_a_plan_opens_a_menu_of_what_the_view_and_the_selection_can_do() {
+    let mut h = app(BOX);
+    // Nothing selected: the view's own items, not the selection's.
+    let at = h.state().screen(P2(4000.0, 3000.0));
+    assert_eq!(offered(&mut h, at, &MENU), ["Cancel", "Zoom to Fit", "Zoom In"]);
+    // Zoom In zooms about the view's middle, and the menu closes.
+    let before = h.state().screen(P2(0.0, 0.0));
+    choose_item(&mut h, "Zoom In");
+    assert_ne!(h.state().screen(P2(0.0, 0.0)), before);
+    assert_eq!(h.query_all_by_label("Zoom Out").count(), 1, "the menu closed: only the navigation bar's");
+    // A wall selected: Edit Type opens its type's properties.
+    let south = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    click(&mut h, P2(4000.0, 0.0));
+    assert_eq!(h.state().selection, [south]);
+    let at = h.state().screen(P2(4000.0, 3000.0));
+    assert_eq!(
+        offered(&mut h, at, &MENU),
+        ["Cancel", "Zoom to Fit", "Zoom In", "Edit Type", "Select All Instances", "Hide Element", "Delete"]
+    );
+    choose_item(&mut h, "Edit Type");
+    assert!(h.state().type_dialog.is_some(), "Type Properties is open");
+    assert_eq!(h.state().selection, [south], "a right click leaves the selection as it was");
+}
+
+#[test]
+fn every_view_has_the_right_click_menu() {
+    let mut h = app(&format!(
+        "{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}\nroom {{\"point\": [4000, 3000], \"name\": \"Hall\"}}"
+    ));
+    // The 3D view: Home View among its items.
+    press(&mut h, "Default 3D View");
+    let at = h.state().orbit.rect.center();
+    assert_eq!(offered(&mut h, at, &MENU), ["Cancel", "Zoom to Fit", "Zoom In", "Home View"]);
+    key(&mut h, Key::Escape);
+    // A section.
+    browse(&mut h, "Section 1");
+    let at = h.state().screen(P2(5000.0, 1500.0));
+    assert_eq!(offered(&mut h, at, &MENU), ["Cancel", "Zoom to Fit", "Zoom In"]);
+    key(&mut h, Key::Escape);
+    // A schedule: no zooming; its row's room selected, deleted from the menu.
+    browse(&mut h, "Room Schedule");
+    h.get_by_label("Hall").click();
+    h.run();
+    let at = h.get_by_label("Hall").rect().center();
+    assert_eq!(offered(&mut h, at, &MENU), ["Cancel", "Edit Type", "Select All Instances", "Delete"]);
+    choose_item(&mut h, "Delete");
+    assert!(ids(&h, "room").is_empty());
+}
+
+#[test]
+fn a_selected_levels_ends_are_grips_in_a_section_that_drag_its_extent() {
+    let mut h = app(&format!(
+        "{BOX}\nsection {{\"start\": [-1000, 3000], \"end\": [9000, 3000]}}\nlevel {{\"elevation\": 1500, \"name\": \"Mezzanine\", \"extent\": [[0, 0], [4000, 6000]]}}"
+    ));
+    let mezz = find(&h, |e| matches!(e, Element::Level(l) if l.name == "Mezzanine"));
+    browse(&mut h, "Section 1");
+    click(&mut h, P2(3000.0, 1500.0));
+    assert_eq!(h.state().selection, [mezz]);
+    // Its far end, along the line from 5000 to 7000: the extent's east edge goes 2 m east.
+    drag(&mut h, P2(5000.0, 1500.0), P2(7000.0, 1500.0));
+    assert_eq!(field(&h, mezz, "extent"), json!([[0.0, 0.0], [6000.0, 6000.0]]));
+    assert_eq!(h.state().selection, [mezz], "the grip took the drag, not a selection box");
+    // And its near end back west.
+    drag(&mut h, P2(1000.0, 1500.0), P2(500.0, 1500.0));
+    assert_eq!(field(&h, mezz, "extent"), json!([[-500.0, 0.0], [6000.0, 6000.0]]));
+}
+
+#[test]
+fn a_selected_levels_plane_has_a_grip_on_each_edge_in_3d_that_drags_it() {
+    let mut h = app(&format!("{BOX}\nlevel {{\"elevation\": 9000, \"name\": \"Top\", \"extent\": [[0, 0], [8000, 6000]]}}"));
+    let top = find(&h, |e| matches!(e, Element::Level(l) if l.name == "Top"));
+    press(&mut h, "Default 3D View");
+    // Its far north edge picks it.
+    let at = h.state().screen3([4000.0, 6000.0, 9000.0]);
+    click_at(&mut h, at);
+    assert_eq!(h.state().selection, [top]);
+    let before = h.state().orbit.camera;
+    // The east edge's grip, dragged a metre east on the level's plane.
+    let (a, b) = (h.state().screen3([8000.0, 3000.0, 9000.0]), h.state().screen3([9000.0, 3000.0, 9000.0]));
+    drag_screen(&mut h, a, b, PointerButton::Primary);
+    let extent = field(&h, top, "extent");
+    assert!((extent[1][0].as_f64().unwrap() - 9000.0).abs() <= 10.0, "{extent}");
+    assert_eq!((extent[0].clone(), extent[1][1].clone()), (json!([0.0, 0.0]), json!(6000.0)));
+    assert_eq!(h.state().orbit.camera, before, "the grip took the drag, not the camera");
 }

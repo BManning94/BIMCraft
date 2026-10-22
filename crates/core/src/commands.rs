@@ -58,7 +58,15 @@ pub static ALL: &[Command] = &[
     ),
     other("undo", "Undo", "{}", undo),
     other("redo", "Redo", "{}", redo),
-    edit("level", "Level", &["LL"], "{elevation, name?} a level at an elevation in mm", level),
+    edit(
+        "level",
+        "Level",
+        &["LL"],
+        "{elevation, name?, extent?: [[x,y],[x,y]]} a level at an elevation in mm; `extent`, the rectangle in plan its \
+         plane stretches over (south-west corner, then north-east), where sections, elevations and the 3D view show it \
+         (without one, the model's, a metre past it)",
+        level,
+    ),
     edit("grid", "Grid", &["GR"], "{start: [x,y], end: [x,y], name?} names follow the last grid: 1, 2… or A, B…", grid),
     edit(
         "wall",
@@ -669,7 +677,7 @@ pub static ALL: &[Command] = &[
         "Schedule",
         &[],
         "{name?, category?, fields?, filters?, sort?, grouped?, path?} a schedule view, as Revit's View > Schedules makes one, \
-         and its table: columns, rows and totals (and a .csv file with a path). A new one needs `name` and `category`: rooms, \
+         and its table: columns, rows, the `elements` each row lists, and totals (and a .csv file with a path). A new one needs `name` and `category`: rooms, \
          doors, windows, walls, floors, ceilings, roofs, columns, structural columns, footings, beams, strip footings, components, \
          stairs, ramps, railings or levels; `category` \
          alone reads its own (Room Schedule, Door Schedule, Window Schedule, Wall Schedule, Floor Schedule, Level Schedule, \
@@ -1545,8 +1553,7 @@ fn schedule(s: &mut Session, p: &Value) -> R {
     }
     let columns: Vec<String> = t.columns.iter().map(|col| crate::schedule::heading(Units::Millimetres, col)).collect();
     let available: Vec<String> = crate::schedule::fields(m, &category(&sc.of)).into_iter().map(|(n, _)| n).collect();
-    let mut out =
-        json!({"id": id, "name": sc.name, "category": category(&sc.of), "columns": columns, "rows": t.rows, "available": available});
+    let mut out = json!({"id": id, "name": sc.name, "category": category(&sc.of), "columns": columns, "rows": t.rows, "elements": t.ids, "available": available});
     if let Some(totals) = t.totals {
         out["totals"] = json!(totals);
     }
@@ -2382,7 +2389,14 @@ fn level(s: &mut Session, p: &Value) -> R {
             (taken.len() + 1..).map(|n| format!("{level} {n}")).find(|n| !taken.contains(n.as_str())).unwrap_or_default()
         }
     };
-    let id = s.model_mut().insert(Element::Level(Level::new(name.clone(), elevation)));
+    let extent = match p.get("extent") {
+        v if absent(v) => None,
+        _ => match points(c, p, "extent")?.as_slice() {
+            [a, b] => Some([*a, *b]),
+            _ => return Err(bad(c, "`extent` is two corners, [[x, y], [x, y]]: south-west, then north-east")),
+        },
+    };
+    let id = s.model_mut().insert(Element::Level(Level { extent, ..Level::new(name.clone(), elevation) }));
     Ok(json!({"id": id, "name": name}))
 }
 
@@ -3700,7 +3714,7 @@ fn crop(s: &mut Session, p: &Value) -> R {
                     (v.start, v.end, v.crop, shift) = (micron(v.start + u * a.0), micron(v.start + u * b.0), Some([a.1, b.1]), a.0);
                 }
                 Some(None) => v.crop = None,
-                None => v.crop = render::crop_region(m, view).map(|[lo, hi]| [lo.1, hi.1]),
+                None => v.crop = Some(render::section_heights(m, view)),
             }
             let crop = v.crop;
             let m = s.model_mut();

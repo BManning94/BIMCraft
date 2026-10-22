@@ -72,6 +72,9 @@ pub struct Canvas {
     crop_drag: Option<(Id, usize)>,
     /// A selected wall's end being dragged: the wall, and whether it's its start.
     grip: Option<(Id, bool)>,
+    /// A selected level's end being dragged in a section or an elevation: the level, and whether
+    /// it's its far end.
+    level_grip: Option<(Id, bool)>,
     /// Where the primary button last went down on a view, and when.
     press: Option<(Pos2, f64)>,
     /// The primary button's release this frame: where it went down, and whether it came up within
@@ -96,6 +99,7 @@ impl Default for Canvas {
             cycle: 0,
             crop_drag: None,
             grip: None,
+            level_grip: None,
             press: None,
             lifted: None,
             prior: None,
@@ -208,7 +212,7 @@ impl Canvas {
     }
 
     /// Zoom by `factor` about the middle of the view.
-    fn zoom(&mut self, level: Id, factor: f64) {
+    pub(crate) fn zoom(&mut self, level: Id, factor: f64) {
         if let Some(v) = self.view(level) {
             let mid = self.rect.size() / 2.0;
             self.hold(level, v.mm(mid.into()), mid, v.scale * factor);
@@ -582,20 +586,18 @@ fn start_of(tool: &Tool) -> &[P2] {
     }
 }
 
-/// Where a crop region's edges have their grips: west, east, south and north (in a section: its
-/// start, its end, its bottom and its top).
-fn grips([lo, hi]: [P2; 2]) -> [P2; 4] {
-    let mid = (lo + hi) * 0.5;
-    [P2(lo.0, mid.1), P2(hi.0, mid.1), P2(mid.0, lo.1), P2(mid.0, hi.1)]
-}
-
-/// The region with edge `k` (as [`grips`] orders them) moved to `p`, at least 100 mm across.
-fn regrip([lo, hi]: [P2; 2], k: usize, p: P2) -> [P2; 2] {
-    match k {
-        0 => [P2(p.0.min(hi.0 - 100.0), lo.1), hi],
-        1 => [lo, P2(p.0.max(lo.0 + 100.0), hi.1)],
-        2 => [P2(lo.0, p.1.min(hi.1 - 100.0)), hi],
-        _ => [lo, P2(hi.0, p.1.max(lo.1 + 100.0))],
+/// A selection box from pixel `from` to `q` of a view in `rect`: Revit draws a crossing box (right
+/// to left) dashed, a window box solid.
+fn box_shapes(rect: Rect, from: (f32, f32), q: (f32, f32)) -> Vec<Shape> {
+    let r = Rect::from_two_pos(pos(rect.min, from), pos(rect.min, q));
+    let fill = Shape::rect_filled(r, 0.0, pal().accent.gamma_multiply(0.08));
+    if q.0 < from.0 {
+        let ring = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+        let mut out = vec![fill];
+        out.extend(Shape::dashed_line(&ring, Stroke::new(1.0, pal().accent), 6.0, 4.0));
+        out
+    } else {
+        vec![fill, Shape::rect_stroke(r, 0.0, Stroke::new(1.0, pal().accent), StrokeKind::Middle)]
     }
 }
 
@@ -879,17 +881,7 @@ impl BimApp {
                 let (a, b) = (view.px(from), view.px(from + round(view.mm(q) - from)));
                 ghost(&p, rect.min, &d, &self.selection, &|q| q + vec2(b.0 - a.0, b.1 - a.1));
             }
-            (Some(Drag::Box(from)), Some(q)) => {
-                let r = Rect::from_two_pos(pos(rect.min, from), pos(rect.min, q));
-                p.rect_filled(r, 0.0, pal().accent.gamma_multiply(0.08));
-                // Revit draws a crossing box (right to left) dashed, a window box solid.
-                if q.0 < from.0 {
-                    let ring = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-                    p.extend(Shape::dashed_line(&ring, Stroke::new(1.0, pal().accent), 6.0, 4.0));
-                } else {
-                    p.rect_stroke(r, 0.0, Stroke::new(1.0, pal().accent), StrokeKind::Middle);
-                }
-            }
+            (Some(Drag::Box(from)), Some(q)) => p.extend(box_shapes(rect, from, q)),
             _ => {}
         }
         if let Some(q) = local {
@@ -918,7 +910,42 @@ impl BimApp {
         }
         self.grip_overlay(ui, &model, &view, rect, level, &d);
         self.temporary_dimension(ui, &model, &view, rect);
+        self.context_menu(&response);
         self.nav_bar(ui, rect, level);
+    }
+
+    /// A selection box in a section or an elevation, where nothing moves by dragging (in a plan, a
+    /// drag from an element moves it): any drag with Modify but a crop region's grip's; on release,
+    /// what `inside` finds between its corners (from the left, what's wholly inside; from the right,
+    /// what it crosses too) is picked up. What to paint while it's dragged.
+    pub(crate) fn drag_box(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        rect: Rect,
+        inside: impl Fn((f32, f32), (f32, f32), bool) -> Vec<Id>,
+    ) -> Vec<Shape> {
+        let local = |p: Pos2| (p.x - rect.min.x, p.y - rect.min.y);
+        if response.drag_started_by(PointerButton::Primary)
+            && self.tool == Tool::Modify
+            && self.canvas.crop_drag.is_none()
+            && self.canvas.level_grip.is_none()
+            && let Some(o) = ui.input(|i| i.pointer.press_origin()).map(local)
+        {
+            self.canvas.prior = None;
+            self.canvas.drag = Some(Drag::Box(o));
+        }
+        let at = ui.input(|i| i.pointer.latest_pos()).map(local);
+        if response.drag_stopped()
+            && let (Some(Drag::Box(from)), Some(q)) = (self.canvas.drag.take(), at)
+            && self.finish_drag()
+        {
+            self.pick_up(inside(from, q, q.0 < from.0), click_modifiers(ui));
+        }
+        match (self.canvas.drag, at) {
+            (Some(Drag::Box(from)), Some(q)) => box_shapes(rect, from, q),
+            _ => Vec::new(),
+        }
     }
 
     /// The navigation bar of view `id`, at its top right as in Revit: fit, zoom in, zoom out.
@@ -949,14 +976,14 @@ impl BimApp {
         if modify
             && response.drag_started_by(PointerButton::Primary)
             && let Some(o) = ui.input(|i| i.pointer.press_origin())
-            && let Some(k) = grips(region).iter().position(|g| at(*g).distance(o) <= 8.0)
+            && let Some(k) = geom::edge_grips(region).iter().position(|g| at(*g).distance(o) <= 8.0)
         {
             self.canvas.crop_drag = Some((id, k));
         }
         let held = self.canvas.crop_drag.filter(|(v, _)| *v == id).map(|(_, k)| k);
         let now = ui.input(|i| i.pointer.latest_pos()).map(|q| view.mm((q.x - rect.min.x, q.y - rect.min.y)));
         let shown = match (held, now) {
-            (Some(k), Some(p)) => regrip(region, k, round(p)),
+            (Some(k), Some(p)) => geom::move_edge(region, k, round(p)),
             _ => region,
         };
         if response.drag_stopped()
@@ -975,11 +1002,60 @@ impl BimApp {
         let ring = [lo, P2(hi.0, lo.1), hi, P2(lo.0, hi.1)].map(at).to_vec();
         let mut shapes = vec![Shape::closed_line(ring, Stroke::new(1.0, if held.is_some() { pal().accent } else { pal().muted }))];
         if modify {
-            for g in grips(shown) {
+            for g in geom::edge_grips(shown) {
                 let r = Rect::from_center_size(at(g), vec2(9.0, 9.0));
                 shapes.push(Shape::rect_filled(r, 1.0, pal().surface));
                 shapes.push(Shape::rect_stroke(r, 1.0, Stroke::new(1.5, pal().accent), StrokeKind::Middle));
             }
+        }
+        shapes
+    }
+
+    /// The level selected alone, with Modify, in section or elevation `id` in `rect` through `view`:
+    /// a grip at each end of its line. A drag from one moves that end along the line, and its extent
+    /// with it (`Model::level_extent_along`); on release, `modify`. What to paint over the view.
+    pub(crate) fn level_grips(&mut self, ui: &Ui, response: &Response, rect: Rect, view: &View, id: Id) -> Vec<Shape> {
+        let m = std::sync::Arc::clone(&self.session.model);
+        let level = match self.selection.as_slice() {
+            &[l] if self.tool == Tool::Modify => m.level(l).map(|lv| (l, lv.elevation)),
+            _ => None,
+        };
+        let Some(((level, z), (a, b))) = level.and_then(|(l, z)| Some(((l, z), render::level_ends(&m, l, id)?))) else {
+            self.canvas.level_grip = None;
+            return Vec::new();
+        };
+        let at = |along: f64| pos(rect.min, view.px(P2(along, z)));
+        if response.drag_started_by(PointerButton::Primary)
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
+            && let Some(far) = [(false, a), (true, b)].into_iter().find(|(_, e)| at(*e).distance(o) <= 8.0).map(|(far, _)| far)
+        {
+            self.canvas.level_grip = Some((level, far));
+        }
+        let held = self.canvas.level_grip.filter(|(l, _)| *l == level).map(|(_, far)| far);
+        let now = ui.input(|i| i.pointer.latest_pos()).map(|q| round(view.mm((q.x - rect.min.x, q.y - rect.min.y))).0);
+        let ends = match (held, now) {
+            (Some(true), Some(to)) => (a, to.max(a + 100.0)),
+            (Some(false), Some(to)) => (to.min(b - 100.0), b),
+            _ => (a, b),
+        };
+        if response.drag_stopped()
+            && let (Some(far), Some(to)) = (held, now)
+        {
+            self.canvas.level_grip = None;
+            if !self.canvas.quick()
+                && let Some([lo, hi]) = m.level_extent_along(level, id, far, to)
+            {
+                self.run("modify", json!({"id": level, "extent": [point(lo), point(hi)]}));
+            }
+        }
+        let mut shapes = Vec::new();
+        if held.is_some() {
+            shapes.push(Shape::line_segment([at(ends.0), at(ends.1)], Stroke::new(1.5, pal().accent)));
+        }
+        for e in [ends.0, ends.1] {
+            let r = Rect::from_center_size(at(e), vec2(9.0, 9.0));
+            shapes.push(Shape::rect_filled(r, 1.0, pal().surface));
+            shapes.push(Shape::rect_stroke(r, 1.0, Stroke::new(1.5, pal().accent), StrokeKind::Middle));
         }
         shapes
     }
@@ -1595,16 +1671,21 @@ impl BimApp {
             return self.place_run(level, p);
         }
         match &mut self.tool {
-            Tool::Wall(chain) => match chain.first() {
-                Some(&first) if chain.len() >= 3 && first.dist(p) <= TOL => self.finish_wall(level, true),
-                _ if chain.last().is_some_and(|l| l.dist(p) <= TOL) => {}
-                _ => {
-                    chain.push(p);
-                    // Without Chain, every second click ends a wall.
-                    if !self.chain && chain.len() == 2 {
-                        self.finish_wall(level, false);
+            // A line: each click after the first builds the wall from the one before it.
+            Tool::Wall(chain) => match (chain.first().copied(), chain.last().copied()) {
+                (Some(first), Some(last)) if last.dist(p) > TOL => {
+                    if self.build_walls(level, &[last, p], false, 0.0) {
+                        let Tool::Wall(chain) = &mut self.tool else { return };
+                        // Back on its start, the chain closes; without Chain, every wall stands alone.
+                        if !self.chain || first.dist(p) <= TOL {
+                            chain.clear();
+                        } else {
+                            chain.push(p);
+                        }
                     }
                 }
+                (Some(_), _) => {}
+                (None, _) => chain.push(p),
             },
             Tool::Grid(start) => match start.take() {
                 None => *start = Some(p),
@@ -1665,12 +1746,11 @@ impl BimApp {
         }
     }
 
-    /// Build the wall chain drawn so far: the tool's Enter. An arc not finished yet is dropped.
-    pub(crate) fn finish_wall(&mut self, level: Id, closed: bool) {
-        let Tool::Wall(chain) = &mut self.tool else { return };
-        let chain = std::mem::take(chain);
-        if chain.len() >= 2 && !self.wall_arc {
-            self.build_walls(level, &chain, closed, 0.0);
+    /// End the wall chain, its walls built as it went: the tool's Enter. An arc not finished yet
+    /// is dropped.
+    pub(crate) fn finish_wall(&mut self) {
+        if let Tool::Wall(chain) = &mut self.tool {
+            chain.clear();
         }
     }
 
@@ -2342,7 +2422,9 @@ impl BimApp {
             let delta = sc.screen(next) - sc.screen(*base);
             ghost(&|pt| pt + delta);
         }
-        let mut pts: Vec<Pos2> = chain.iter().map(|pt| sc.screen(*pt)).collect();
+        // A line's walls are built as it goes: only the next one is to come.
+        let built = if matches!(self.tool, Tool::Wall(_)) && !self.wall_arc { chain.len().saturating_sub(1) } else { 0 };
+        let mut pts: Vec<Pos2> = chain.iter().skip(built).map(|pt| sc.screen(*pt)).collect();
         pts.push(sc.screen(next));
         // An arc waiting for its third point: the arc through the cursor.
         if let (true, &[start, end]) = (self.wall_arc && matches!(self.tool, Tool::Wall(_)), chain) {
