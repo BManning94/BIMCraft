@@ -454,3 +454,119 @@ fn a_large_real_architectural_model_imports_without_trouble_and_what_comes_in_ch
         );
     }
 }
+
+/// A wall record and its data, `id` of type `tid`, from `line` (a line or arc record) with the box `bbox` and the refs `refs`.
+pub(super) fn wall_of(p: &mut Project, id: u32, bbox: [f64; 6], refs: &[u64], line: Vec<u8>) {
+    p.recs.push(Rec::new(id, WALLS).at(bbox, refs));
+    let mut payload = line;
+    payload.extend(orientation_bytes(0, 1, false, true));
+    p.data.push(Block { id, payload });
+}
+
+#[test]
+fn two_types_of_one_name_are_one_type_when_their_layers_match_and_two_when_they_do_not() {
+    let mut p = base(2024);
+    // 501 has the same name and layers as 500; 502 the same name and thickness, with the brick and the concrete the other way round.
+    for (tid, outer) in [(501, 700), (502, 701)] {
+        p.types.push(TypeRec::new(tid, WALLS));
+        let mut payload = name_bytes("Brick wall");
+        payload.extend(layers_bytes(&[(0.25, Some(outer), 4), (0.5, Some(701), 1)], 2024));
+        p.data.push(Block { id: tid, payload });
+    }
+    for (k, tid) in [500u64, 501, 502].into_iter().enumerate() {
+        let (id, y) = (100 + k as u32, 5.0 * k as f64);
+        let line = line_bytes(0.0, 20.0, [0.0, y, 0.0], [1.0, 0.0, 0.0]);
+        wall_of(&mut p, id, [0.0, y - 0.4, 0.0, 20.0, y + 0.4, 10.0], &[10, 11, tid, u64::from(id)], line);
+    }
+    let i = import(&p);
+    let names: Vec<&str> = walls(&i).iter().map(|(_, w)| w.type_name.as_str()).collect();
+    assert_eq!(names, ["Brick wall", "Brick wall", "Brick wall (2)"], "{:?}", i.skipped);
+}
+
+#[test]
+fn a_wall_on_an_upper_level_has_its_line_at_that_height_and_a_climbing_line_is_not_a_wall() {
+    let mut p = base(2024);
+    // On level 2 (10 ft up), naming both levels: its base is level 2, which its box starts at.
+    wall_of(&mut p, 100, [0.0, -0.4, 10.0, 20.0, 0.4, 20.0], &[10, 11, 500, 100], line_bytes(0.0, 20.0, [0.0, 0.0, 10.0], [1.0, 0.0, 0.0]));
+    // A line that climbs 16 ft over its 12 ft.
+    wall_of(&mut p, 101, [0.0, -0.4, 0.0, 12.0, 0.4, 10.0], &[10, 11, 500, 101], line_bytes(0.0, 20.0, [0.0, 0.0, 0.0], [0.6, 0.0, 0.8]));
+    let i = import(&p);
+    let [(_, w)] = walls(&i)[..] else { panic!("{:?}", i.skipped) };
+    assert_eq!((w.level, w.base_offset, w.height), (level_named(&i, "Level 2"), 0.0, 3048.0));
+    assert!(i.skipped.iter().any(|s| s.contains("not level") && s.contains("101")), "{:?}", i.skipped);
+}
+
+#[test]
+fn an_arc_is_read_by_its_angles_and_its_axes_wherever_it_starts_and_whichever_way_its_frame_is_turned() {
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    // The frame turned a quarter (x north, y west), counter-clockwise, from 0.5 rad on: from r (-sin a, cos a) to r (-cos a, -sin a).
+    let mut p = base(2024);
+    let arc = arc_bytes([0.5, 0.5 + half_pi], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], 10.0, [0.0, 0.0, 0.0]);
+    wall_of(&mut p, 100, [-10.4, -10.4, 0.0, 10.4, 10.4, 10.0], &[10, 11, 500, 100], arc);
+    // Not in plan: the x axis stands up, or only the y axis does.
+    let up_x = arc_bytes([0.0, half_pi], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0], 10.0, [0.0, 0.0, 0.0]);
+    let up_y = arc_bytes([0.0, half_pi], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], 10.0, [0.0, 0.0, 0.0]);
+    wall_of(&mut p, 101, [-10.4, -10.4, 0.0, 10.4, 10.4, 10.0], &[10, 11, 500, 101], up_x);
+    wall_of(&mut p, 102, [-10.4, -10.4, 0.0, 10.4, 10.4, 10.0], &[10, 11, 500, 102], up_y);
+    let i = import(&p);
+    let [(_, w)] = walls(&i)[..] else { panic!("{:?}", i.skipped) };
+    let (sin, cos) = 0.5f64.sin_cos();
+    let mm = |v: f64| (v * 3048.0 * 1000.0).round() / 1000.0;
+    assert_eq!(((w.start.0, w.start.1), (w.end.0, w.end.1)), ((mm(-sin), mm(cos)), (mm(-cos), mm(-sin))));
+    assert!((w.arc - 90.0).abs() < 1e-6, "{}", w.arc);
+    assert!(i.skipped.iter().any(|s| s.contains("not in plan") && s.contains("101") && s.contains("102")), "{:?}", i.skipped);
+}
+
+#[test]
+fn a_wall_that_names_no_level_stands_on_the_one_below_its_bottom_and_on_none_where_two_tie() {
+    let mut p = base(2024);
+    wall_of(&mut p, 100, [0.0, -0.4, 0.0, 20.0, 0.4, 9.0], &[500, 100], line_bytes(0.0, 20.0, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]));
+    let i = import(&p);
+    assert_eq!(walls(&i)[0].1.level, level_named(&i, "Level 1"), "{:?}", i.skipped);
+    // A second level at the same height: which one is it on?
+    p.levels.push(Lev::new(12, "Level 1b", 0.0));
+    let i = import(&p);
+    assert!(walls(&i).is_empty() && i.skipped.iter().any(|s| s.contains("no level") && s.contains("100")), "{:?}", i.skipped);
+}
+
+#[test]
+fn a_type_whose_layers_have_no_width_is_no_wall_type_and_a_layer_whose_material_is_not_an_id_is_not_a_layer() {
+    for release in [2024, 2026] {
+        let mut p = base(release);
+        // A membrane has no width: a type of nothing else is no wall.
+        p.types.push(TypeRec::new(501, WALLS));
+        let mut payload = name_bytes("Membrane");
+        payload.extend(layers_bytes(&[(0.0, None, 100)], release));
+        p.data.push(Block { id: 501, payload });
+        // A material whose upper half is not zero is no ElementId.
+        p.types.push(TypeRec::new(502, WALLS));
+        let mut payload = name_bytes("Damaged");
+        let mut layers = layers_bytes(&[(0.25, Some(700), 4)], release);
+        layers[22] = 1;
+        payload.extend(layers);
+        p.data.push(Block { id: 502, payload });
+        for (id, tid) in [(100, 501), (101, 502)] {
+            let line = line_bytes(0.0, 20.0, [0.0, 5.0 * f64::from(id - 100), 0.0], [1.0, 0.0, 0.0]);
+            wall_of(&mut p, id, [0.0, -0.4, 0.0, 20.0, 0.4, 10.0], &[10, 11, tid, u64::from(id)], line);
+        }
+        let i = import(&p);
+        assert!(walls(&i).is_empty(), "Revit {release}: {:?}", i.skipped);
+        assert!(i.skipped.iter().any(|s| s.contains("no layers") && s.contains("100") && s.contains("101")), "{:?}", i.skipped);
+    }
+}
+
+#[test]
+fn a_layer_list_is_a_types_only_when_it_is_framed() {
+    // `ff ff ff ff` and another tag, or the right tag with no `ff ff ff ff` before it, frame nothing.
+    for damage in [|l: &mut Vec<u8>| l[4] ^= 0x55, |l: &mut Vec<u8>| l[0..4].fill(0x11)] {
+        let mut p = base(2024);
+        let mut layers = layers_bytes(&[(0.25, Some(700), 4), (0.5, Some(701), 1)], 2024);
+        damage(&mut layers);
+        let mut payload = name_bytes("Brick wall");
+        payload.extend(layers);
+        p.data[0].payload = payload;
+        straight(&mut p, 100, false);
+        let i = import(&p);
+        assert!(walls(&i).is_empty() && i.skipped.iter().any(|s| s.contains("no layers")), "{:?}", i.skipped);
+    }
+}

@@ -143,6 +143,7 @@ mod records;
 mod roofs;
 mod rooms;
 mod rvt_rs;
+mod sketch;
 mod walls;
 
 // ---------- the container ----------

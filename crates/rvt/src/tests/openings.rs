@@ -1,6 +1,6 @@
 //! Doors and windows: the wall that holds them, where along it, how wide and how high.
 
-use super::walls::{WALLS, base, import, straight, walls};
+use super::walls::{WALLS, base, import, straight, wall_of, walls};
 use crate::project_fixture::{Block, NameEntry, Project, Rec, line_bytes, orientation_bytes};
 use bimcraft_core::import::Imported;
 use bimcraft_core::model::{Element, Id, Opening};
@@ -298,4 +298,53 @@ fn a_mutation_sweep_over_a_project_with_openings_never_panics_and_what_comes_in_
             }
         }
     }
+}
+
+#[test]
+fn an_opening_is_measured_along_a_wall_that_starts_away_from_the_origin_in_either_axis() {
+    let mut p = project(2024);
+    // East from (5, 3) to (25, 3), and north from (40, 3) to (40, 23).
+    wall_of(&mut p, 110, [5.0, 2.6, 0.0, 25.0, 3.4, 10.0], &[10, 11, 500, 110], line_bytes(0.0, 20.0, [5.0, 3.0, 0.0], [1.0, 0.0, 0.0]));
+    wall_of(&mut p, 111, [39.6, 3.0, 0.0, 40.4, 23.0, 10.0], &[10, 11, 500, 111], line_bytes(0.0, 20.0, [40.0, 3.0, 0.0], [0.0, 1.0, 0.0]));
+    p.recs.push(Rec::new(210, DOORS).at([10.0, 2.6, 0.0, 13.0, 3.4, 7.0], &[110, 600, 210]));
+    p.recs.push(Rec::new(211, WINDOWS).at([39.6, 8.0, 3.0, 40.4, 12.0, 7.0], &[111, 601, 211]));
+    let i = import(&p);
+    let find = |door: bool| openings(&i).into_iter().find(|(_, d, _)| *d == door).map(|(_, _, o)| o.clone());
+    let (d, w) = (find(true).expect("the door"), find(false).expect("the window"));
+    assert_eq!((d.offset, w.offset), (6.5 * 304.8, 7.0 * 304.8), "{:?}", i.skipped);
+}
+
+#[test]
+fn neighbours_that_overlap_by_more_than_a_tenth_of_the_narrower_are_not_fitted_whatever_the_wider_is() {
+    // A 4 ft window from 10 ft and a 2 ft one from 13.7: 0.3 ft (91 mm) overlap, more than a tenth of the narrower (61 mm) and less
+    // than a tenth of the wider (122 mm). BIMCraft refuses overlapping openings, so one of them is dropped, none narrowed.
+    let mut p = project(2024);
+    p.recs.push(Rec::new(200, WINDOWS).at([10.0, -0.4, 3.0, 14.0, 0.4, 7.0], &[100, 601, 200]));
+    p.recs.push(Rec::new(201, WINDOWS).at([13.7, -0.4, 3.0, 15.7, 0.4, 7.0], &[100, 601, 201]));
+    let i = import(&p);
+    assert_eq!(openings(&i).len(), 1, "{:?}", i.skipped);
+    assert!(!i.skipped.iter().any(|s| s.contains("narrowed")), "{:?}", i.skipped);
+    // Half a tenth of the narrower is fitted: each gives up half.
+    let mut q = project(2024);
+    q.recs.push(Rec::new(200, WINDOWS).at([10.0, -0.4, 3.0, 14.0, 0.4, 7.0], &[100, 601, 200]));
+    q.recs.push(Rec::new(201, WINDOWS).at([13.97, -0.4, 3.0, 15.97, 0.4, 7.0], &[100, 601, 201]));
+    let i = import(&q);
+    assert_eq!(openings(&i).len(), 2, "{:?}", i.skipped);
+    assert!(i.skipped.iter().any(|s| s.contains("narrowed") && s.contains("200") && s.contains("201")), "{:?}", i.skipped);
+}
+
+#[test]
+fn only_a_family_symbol_a_record_names_gives_its_type_and_one_type_serves_every_opening_of_its_size() {
+    let mut p = project(2024);
+    // 777 has a name entry of the doors' category and is no symbol.
+    p.extra_ids.push(777);
+    p.names.push(NameEntry { id: 777, name: "Not a symbol".into(), category: DOORS });
+    door(&mut p, 200, 3.0, &[100, 777]);
+    door(&mut p, 201, 8.0, &[100]);
+    // The same symbol, 2 ft wide: a type of its own.
+    p.recs.push(Rec::new(202, DOORS).at([13.0, -0.4, 0.0, 15.0, 1.2, 7.0], &[100, 600, 202]));
+    let i = import(&p);
+    let mut names: Vec<&str> = openings(&i).iter().map(|(_, _, o)| o.type_name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["Single-Flush", "Single-Flush", "Single-Flush (2)"], "{:?}", i.skipped);
 }

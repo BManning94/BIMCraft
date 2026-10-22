@@ -101,3 +101,26 @@ fn a_mutation_sweep_over_a_project_of_roofs_never_panics_and_what_comes_in_check
         super::sweep(&p, 0x0f1e_2d3c_4b5a_6978 ^ u64::from(release), 800, |i, round| assert!(roofs(i).len() <= 2, "round {round}"));
     }
 }
+
+#[test]
+fn roof_types_of_one_name_are_one_type_when_their_layers_match_and_two_when_they_do_not() {
+    let mut p = with_roof_type(2024);
+    for (tid, material) in [(531, 700), (532, 701)] {
+        p.types.push(TypeRec::new(tid, ROOFS));
+        let mut payload = crate::project_fixture::name_bytes("Warm");
+        payload.extend(crate::project_fixture::layers_bytes(&[(0.25, Some(material), 4)], 2024));
+        p.data.push(crate::project_fixture::Block { id: tid, payload });
+    }
+    for (k, tid) in [530u64, 531, 532].into_iter().enumerate() {
+        let (id, x) = (100 + k as u32, 30.0 * k as f64);
+        p.recs.push(Rec {
+            class_tag: PROFILE_ROOF,
+            ..Rec::new(id, ROOFS).at([x, 0.0, 12.0, x + 20.0, 10.0, 12.25], &[10, tid, u64::from(id)])
+        });
+        rectangle(&mut p, id, 200 + 10 * k as u32, [x, 0.0, x + 20.0, 10.0], 3.0, true);
+    }
+    let i = import(&p);
+    let names: Vec<&str> = roofs(&i).iter().map(|r| r.type_name.as_str()).collect();
+    assert_eq!(names, ["Warm", "Warm", "Warm (2)"], "{:?}", i.skipped);
+    assert!(i.skipped.is_empty(), "a sketch of one loop needs no note: {:?}", i.skipped);
+}

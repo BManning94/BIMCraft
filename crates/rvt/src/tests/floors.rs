@@ -306,3 +306,58 @@ fn a_mutation_sweep_over_a_project_of_floors_never_panics_and_what_comes_in_chec
         }
     }
 }
+
+#[test]
+fn floor_and_ceiling_types_of_one_name_are_one_type_when_their_layers_match_and_two_when_they_do_not() {
+    let mut p = project(2024);
+    // 511 and 521 repeat 510 and 520; 512 and 522 are of the other material.
+    for (tid, category, name, layers) in [
+        (511, FLOORS, "Slab", (0.5, 701)),
+        (512, FLOORS, "Slab", (0.5, 700)),
+        (521, CEILINGS, "Tiles", (0.25, 700)),
+        (522, CEILINGS, "Tiles", (0.25, 701)),
+    ] {
+        p.types.push(TypeRec::new(tid, category));
+        let function = if category == FLOORS { 1 } else { 4 };
+        let mut payload = name_bytes(name);
+        payload.extend(layers_bytes(&[(layers.0, Some(layers.1), function)], 2024));
+        p.data.push(Block { id: tid, payload });
+    }
+    for (k, (category, tid)) in
+        [(FLOORS, 510), (FLOORS, 511), (FLOORS, 512), (CEILINGS, 520), (CEILINGS, 521), (CEILINGS, 522)].into_iter().enumerate()
+    {
+        let (id, x) = (100 + k as u32, 30.0 * k as f64);
+        let (z0, z1) = if category == FLOORS { (-0.5, 0.0) } else { (8.0, 8.25) };
+        let z = if category == FLOORS { 0.0 } else { 8.25 };
+        p.recs.push(Rec::new(id, category).at([x, 0.0, z0, x + 20.0, 10.0, z1], &[10, tid, u64::from(id)]));
+        rectangle(&mut p, id, 200 + 10 * k as u32, [x, 0.0, x + 20.0, 10.0], z, true);
+    }
+    let i = import(&p);
+    let floor_names: Vec<&str> = floors(&i).iter().map(|(_, f)| f.type_name.as_str()).collect();
+    let ceiling_names: Vec<&str> = ceilings(&i).iter().map(|c| c.type_name.as_str()).collect();
+    assert_eq!(floor_names, ["Slab", "Slab", "Slab (2)"], "{:?}", i.skipped);
+    assert_eq!(ceiling_names, ["Tiles", "Tiles", "Tiles (2)"], "{:?}", i.skipped);
+    assert!(i.skipped.is_empty(), "a sketch of one loop needs no note: {:?}", i.skipped);
+}
+
+#[test]
+fn a_floor_is_as_thick_as_its_type_to_within_a_millimetre_and_a_type_of_no_width_is_no_floor_type() {
+    let mut p = project(2024);
+    // Thicker than 152.4 mm by 0.88 mm: a floor; by 1.13 mm: a sloped or stepped one.
+    p.recs.push(Rec::new(100, FLOORS).at([0.0, 0.0, -0.5029, 20.0, 10.0, 0.0], &[10, 510, 100]));
+    rectangle(&mut p, 100, 200, [0.0, 0.0, 20.0, 10.0], 0.0, true);
+    p.recs.push(Rec::new(101, FLOORS).at([0.0, 0.0, -0.5037, 20.0, 10.0, 0.0], &[10, 510, 101]));
+    rectangle(&mut p, 101, 210, [0.0, 0.0, 20.0, 10.0], 0.0, true);
+    // A type that is only a membrane.
+    p.types.push(TypeRec::new(511, FLOORS));
+    let mut payload = name_bytes("Film");
+    payload.extend(layers_bytes(&[(0.0, None, 100)], 2024));
+    p.data.push(Block { id: 511, payload });
+    p.recs.push(Rec::new(102, FLOORS).at([0.0, 0.0, -0.5, 20.0, 10.0, 0.0], &[10, 511, 102]));
+    rectangle(&mut p, 102, 220, [0.0, 0.0, 20.0, 10.0], 0.0, true);
+    let i = import(&p);
+    assert_eq!(floors(&i).len(), 1, "{:?}", i.skipped);
+    let said = |what: &str| i.skipped.iter().find(|s| s.contains(what)).cloned().unwrap_or_default();
+    assert!(said("sloped or stepped").contains("101") && !said("sloped or stepped").contains("100"), "{:?}", i.skipped);
+    assert!(said("no layers").contains("102"), "{:?}", i.skipped);
+}

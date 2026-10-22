@@ -157,3 +157,69 @@ fn the_type_a_record_names_is_the_one_type_of_its_category_in_its_list() {
     assert_eq!(unique_type(&[u64::MAX, 5 + (1 << 32)], &types), None, "an id past a u32 is not one");
     assert_eq!(unique_type(&[], &types), None);
 }
+
+#[test]
+fn an_arc_runs_counter_clockwise_when_its_axes_cross_upward_in_any_turned_frame() {
+    let turned = |x: [f64; 3], y: [f64; 3]| first_arc(&arc_bytes([0.0, 1.0], x, y, 3.0, [0.0; 3])).unwrap().counter_clockwise();
+    assert!(turned([0.0, 1.0, 0.0], [-1.0, 0.0, 0.0]), "x north, y west: counter-clockwise");
+    assert!(!turned([0.0, 1.0, 0.0], [1.0, 0.0, 0.0]), "x north, y east: clockwise");
+    assert!(turned([0.6, 0.8, 0.0], [-0.8, 0.6, 0.0]));
+    assert!(!turned([0.8, 0.6, 0.0], [0.6, -0.8, 0.0]));
+}
+
+/// A placement's twelve numbers: three rows of rotation and the origin.
+fn placement(rows: [[f64; 3]; 3], origin: [f64; 3]) -> Vec<u8> {
+    // The reader looks for the twelve numbers before the last 96 bytes of the data: some more follow, as in a real instance's.
+    rows.iter().flatten().chain(origin.iter()).flat_map(|v| v.to_le_bytes()).chain([0u8; 8]).collect()
+}
+
+#[test]
+fn a_placement_is_a_rotation_of_unit_orthogonal_rows_with_determinant_one_and_may_be_tilted() {
+    use crate::placement::transform;
+    let (s40, c40) = 40f64.to_radians().sin_cos();
+    let (s30, c30) = 30f64.to_radians().sin_cos();
+    // About x by 30 degrees, then about up by 40 degrees: every entry of the first two rows is in play.
+    let tilted = [[c40, -s40 * c30, s40 * s30], [s40, c40 * c30, -c40 * s30], [0.0, s30, c30]];
+    let t = transform(&placement(tilted, [1.0, 2.0, 3.0])).expect("a rotation");
+    assert_eq!(t.origin, [1.0, 2.0, 3.0]);
+    assert!(t.plan_angle().is_none(), "its up axis is not the model's");
+    // The same turned about up alone has a plan angle.
+    let flat = transform(&placement([[c40, -s40, 0.0], [s40, c40, 0.0], [0.0, 0.0, 1.0]], [0.0; 3])).unwrap();
+    assert!((flat.plan_angle().unwrap() - 40f64.to_radians()).abs() < 1e-12);
+    // A reflection (a row negated), rows that are not unit, and rows that are not orthogonal are no placement.
+    let mirrored = [tilted[0], tilted[1], [0.0, -s30, -c30]];
+    assert!(transform(&placement(mirrored, [0.0; 3])).is_none());
+    assert!(transform(&placement([[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], [0.0; 3])).is_none());
+    assert!(transform(&placement([[1.0, 0.0, 0.0], [0.6, 0.8, 0.0], [0.0, 0.0, 1.0]], [0.0; 3])).is_none());
+}
+
+/// A name entry up to 2023: `01 00 00 00`, the id, the length and the UTF-16 name.
+fn entry_32(id: u32, length: u32, name: &str) -> Vec<u8> {
+    let mut f = vec![1, 0, 0, 0];
+    f.extend(id.to_le_bytes());
+    f.extend(length.to_le_bytes());
+    f.extend(name.encode_utf16().flat_map(u16::to_le_bytes));
+    f
+}
+
+#[test]
+fn a_name_entry_up_to_2023_is_of_a_declared_id_has_a_length_in_range_and_a_name_that_prints() {
+    use crate::names::entries_32;
+    let names = |bytes: &[u8]| {
+        let mut out = Vec::new();
+        entries_32(bytes, &[5], &mut out);
+        out.into_iter().map(|e| e.name).collect::<Vec<_>>()
+    };
+    assert_eq!(names(&entry_32(5, 6, "Café ☃")), ["Café ☃"]);
+    assert!(names(&entry_32(6, 6, "Café ☃")).is_empty(), "an id the element table does not declare");
+    assert!(names(&entry_32(5, 0, "")).is_empty(), "no name");
+    assert!(names(&entry_32(5, 129, &"x".repeat(129))).is_empty(), "too long for a name");
+    for bad in ["A\u{1}B", "A\u{e000}B", "A\u{f8ff}B", "A\u{fff0}B", "ß"] {
+        let n = bad.encode_utf16().count() as u32;
+        assert!(names(&entry_32(5, n, bad)).is_empty(), "{bad:?}");
+    }
+    for good in ["Pörta 800", "A\u{ffef}B"] {
+        let n = good.encode_utf16().count() as u32;
+        assert_eq!(names(&entry_32(5, n, good)), [good], "{good:?}");
+    }
+}

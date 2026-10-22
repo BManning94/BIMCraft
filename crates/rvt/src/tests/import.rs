@@ -1,5 +1,6 @@
 //! A Revit file read into a BIMCraft model.
 
+use super::walls::base;
 use crate::project_fixture::{Lev, Project, Rec};
 use bimcraft_core::model::Element;
 
@@ -100,4 +101,31 @@ fn the_levels_of_real_files_come_in_as_the_storeys_of_rvt_rss_ifc_export() {
         assert_eq!(i.model.levels().len(), 18);
         assert!(i.skipped.iter().any(|s| s.contains("2 levels sit inside other elements")), "{:?}", i.skipped);
     }
+}
+
+#[test]
+fn a_note_lists_the_first_eight_ids_and_says_there_are_more_only_when_there_are() {
+    let said = |count: u32| {
+        let mut p = base(2024);
+        p.recs.push(Rec { placed: false, ..Rec::new(650, -2_000_100) });
+        for id in 100..100 + count {
+            p.recs.push(Rec::new(id, -2_000_100).at([0.0, 0.0, 0.0, 1.0, 1.0, 10.0], &[10, 11, 650, u64::from(id)]));
+        }
+        import(&p).skipped.into_iter().find(|s| s.contains("columns")).unwrap_or_default()
+    };
+    assert!(said(8).ends_with("(ids 100, 101, 102, 103, 104, 105, 106, 107)"), "{}", said(8));
+    assert!(said(9).ends_with("(ids 100, 101, 102, 103, 104, 105, 106, 107, …)"), "{}", said(9));
+}
+
+#[test]
+fn the_levels_that_have_no_name_are_counted_in_the_singular_or_the_plural() {
+    let said = |unnamed: usize| {
+        let mut p = base(2024);
+        for k in 0..unnamed {
+            p.levels.push(crate::project_fixture::Lev { named: false, ..crate::project_fixture::Lev::new(20 + k as u32, "x", 30.0) });
+        }
+        import(&p).skipped.into_iter().find(|s| s.contains("no name or elevation")).unwrap_or_default()
+    };
+    assert!(said(1).starts_with("1 level with no name"), "{}", said(1));
+    assert!(said(2).starts_with("2 levels with no name"), "{}", said(2));
 }

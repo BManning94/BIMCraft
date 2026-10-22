@@ -18,25 +18,30 @@ fn rooms(i: &Imported) -> Vec<&Room> {
         .collect()
 }
 
-/// A 20 by 10 ft enclosure of four walls from level 1 to level 2.
-fn walled(release: u32) -> Project {
-    let mut p = base(release);
-    let word = !(2015..=2020).contains(&release);
+/// Four walls round the rectangle `r` (feet), ids from `first`, from level 1 to level 2, the first going east.
+fn enclose(p: &mut Project, first: u32, r: [f64; 4]) {
+    let word = !(2015..=2020).contains(&p.release);
+    let [x0, y0, x1, y1] = r;
     let walls = [
-        (100, [0.0, 0.0], [1.0, 0.0], 20.0),
-        (101, [20.0, 0.0], [0.0, 1.0], 10.0),
-        (102, [20.0, 10.0], [-1.0, 0.0], 20.0),
-        (103, [0.0, 10.0], [0.0, -1.0], 10.0),
+        (first, [x0, y0], [1.0, 0.0], x1 - x0),
+        (first + 1, [x1, y0], [0.0, 1.0], y1 - y0),
+        (first + 2, [x1, y1], [-1.0, 0.0], x1 - x0),
+        (first + 3, [x0, y1], [0.0, -1.0], y1 - y0),
     ];
     for (id, o, d, len) in walls {
-        let (o, d, len): ([f64; 2], [f64; 2], f64) = (o, d, len);
-        let (x0, x1) = (o[0].min(o[0] + d[0] * len) - 0.4, o[0].max(o[0] + d[0] * len) + 0.4);
-        let (y0, y1) = (o[1].min(o[1] + d[1] * len) - 0.4, o[1].max(o[1] + d[1] * len) + 0.4);
-        p.recs.push(Rec::new(id, WALLS).at([x0, y0, 0.0, x1, y1, 10.0], &[10, 11, 500, u64::from(id)]));
+        let (xa, xb) = (o[0].min(o[0] + d[0] * len) - 0.4, o[0].max(o[0] + d[0] * len) + 0.4);
+        let (ya, yb) = (o[1].min(o[1] + d[1] * len) - 0.4, o[1].max(o[1] + d[1] * len) + 0.4);
+        p.recs.push(Rec::new(id, WALLS).at([xa, ya, 0.0, xb, yb, 10.0], &[10, 11, 500, u64::from(id)]));
         let mut b = line_bytes(0.0, len, [o[0], o[1], 0.0], [d[0], d[1], 0.0]);
         b.extend(orientation_bytes(0, 1, false, word));
         p.data.push(Block { id, payload: b });
     }
+}
+
+/// A 20 by 10 ft enclosure of four walls from level 1 to level 2.
+fn walled(release: u32) -> Project {
+    let mut p = base(release);
+    enclose(&mut p, 100, [0.0, 0.0, 20.0, 10.0]);
     p
 }
 
@@ -159,4 +164,27 @@ fn a_value_far_beyond_revits_limits_is_damage_and_never_reaches_the_geometry() {
     let i = import(&p);
     assert_eq!(super::walls::walls(&i).len(), 3, "{:?}", i.skipped);
     assert!(rooms(&i).is_empty() && i.skipped.iter().any(|s| s.contains("no location line") && s.contains("100")), "{:?}", i.skipped);
+}
+
+#[test]
+fn a_room_whose_middle_is_inside_a_core_standing_free_has_its_point_at_the_nearest_grid_point_outside_it() {
+    // A 4 by 4 ft core in the middle of the 20 by 10 ft room: the middle of the box is inside the core, whose region is not the
+    // room's, so the point is the nearest point of the 9 by 9 grid over the box that is outside the core's centre lines (areas are measured there).
+    let mut p = walled(2024);
+    enclose(&mut p, 110, [8.0, 3.0, 12.0, 7.0]);
+    room(&mut p, 300, "101", "Hall", [0.2, 0.2, 0.0, 19.8, 9.8, 8.0]);
+    let i = import(&p);
+    let [r] = rooms(&i)[..] else { panic!("{:?}", i.skipped) };
+    let region = i.model.room_region(r).expect("enclosed");
+    assert!((region.area() - (6096.0 * 3048.0 - 1219.2 * 1219.2)).abs() < 1.0, "the room round the core: {}", region.area());
+    // The grid has its points at a ninth of the box, from half a ninth in; the nearest to the middle outside the core, the first.
+    let (box_x, box_y) = ((0.2 * 304.8, 19.8 * 304.8), (0.2 * 304.8, 9.8 * 304.8));
+    let at = |i: f64, j: f64| (box_x.0 + (box_x.1 - box_x.0) * i / 9.0, box_y.0 + (box_y.1 - box_y.0) * j / 9.0);
+    let near = (0..81)
+        .map(|k| at((k % 9) as f64 + 0.5, (k / 9) as f64 + 0.5))
+        .filter(|(x, y)| !((8.0 * 304.8..12.0 * 304.8).contains(x) && (3.0 * 304.8..7.0 * 304.8).contains(y)))
+        .map(|(x, y)| (x - 10.0 * 304.8).hypot(y - 5.0 * 304.8))
+        .fold(f64::MAX, f64::min);
+    let got = (r.point.0 - 10.0 * 304.8).hypot(r.point.1 - 5.0 * 304.8);
+    assert!((got - near).abs() < 1e-6, "the point {:?} is {got} from the middle, the nearest grid point is {near}", r.point);
 }

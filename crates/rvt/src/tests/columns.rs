@@ -217,3 +217,18 @@ fn a_mutation_sweep_over_a_project_of_columns_never_panics_and_what_comes_in_che
         }
     }
 }
+
+#[test]
+fn column_types_of_one_name_are_one_type_when_their_size_matches_and_two_when_it_does_not() {
+    let mut p = project(2024, STRUCTURAL);
+    // A second symbol of the same name; columns of the first at 2 by 1 ft and 3 by 1 ft, and of the second at 2 by 1 ft.
+    p.recs.push(Rec { placed: false, ..Rec::new(651, STRUCTURAL) });
+    p.names.push(NameEntry { id: 651, name: "Concrete".into(), category: STRUCTURAL });
+    for (id, symbol, x1) in [(100, 650u64, 11.0), (101, 651, 41.0), (102, 650, 71.5)] {
+        let x0 = x1 - if id == 102 { 3.0 } else { 2.0 };
+        p.recs.push(Rec::new(id, STRUCTURAL).at([x0, 4.5, 0.0, x1, 5.5, 10.0], &[10, 11, symbol, u64::from(id)]));
+    }
+    let i = import(&p);
+    let names: Vec<&str> = columns(&i).iter().map(|(_, c)| c.type_name.as_str()).collect();
+    assert_eq!(names, ["Concrete", "Concrete", "Concrete (2)"], "{:?}", i.skipped);
+}
