@@ -102,7 +102,7 @@ mod metadata;
 // ---------- the container ----------
 
 use crate::fixture::{container, global, gzip, paged, partition, stored_gzip, truncated_gzip};
-use crate::gzip::{PAGE_PAYLOAD, PAGE_STORED, strip_pages};
+use crate::gzip::{PAGE_PAYLOAD, PAGE_STORED, inflate_first, inflate_members, strip_pages};
 use crate::{Error, Limits, Revit};
 
 /// A stand-in for BasicFileInfo: the container only needs the stream to be there.
@@ -275,6 +275,47 @@ fn stripping_pages_removes_exactly_each_full_pages_trailer() {
     let short = noise(PAGE_STORED - 1); // a short last page is kept whole
     assert_eq!(strip_pages(short.clone()), short);
     assert_eq!(strip_pages(Vec::new()), Vec::<u8>::new());
+}
+
+/// The layout as the sample files show it, written out apart from `strip_pages` so that a test can ask what other numbers
+/// would do: the byte at offset `o` is data when `o % page < data`. (Unlike `strip_pages` it also drops the part of a run a
+/// cut-off stream ends in.)
+fn pages_removed(stored: &[u8], page: usize, data: usize) -> Vec<u8> {
+    stored.iter().enumerate().filter(|&(o, _)| o % page < data).map(|(_, &b)| b).collect()
+}
+
+#[test]
+fn the_page_boundaries_are_where_the_sample_files_put_them_and_a_neighbouring_number_is_not_good_enough() {
+    // The numbers are written out here, not read from the crate, so a wrong constant cannot take this test with it:
+    // 64,895 is the last byte of data of the first page, 64,896 to 65,248 are its run, 65,249 is data again.
+    let stored: Vec<u8> = (0..3 * 65_249 + 100).map(|o| if o % 65_249 < 64_896 { 1 } else { 0xee }).collect();
+    let data = strip_pages(stored.clone());
+    assert_eq!(data.len(), 3 * 64_896 + 100);
+    assert!(data.iter().all(|&b| b == 1), "a byte of a run was kept, or a byte of data was dropped for one");
+    assert_eq!(data, pages_removed(&stored, 65_249, 64_896));
+    // What each wrong neighbour would leave of the same stream: never the same length.
+    for (page, kept) in [(65_250, 64_896), (65_248, 64_896), (65_249, 64_897), (65_249, 64_895)] {
+        assert_ne!(pages_removed(&stored, page, kept), data, "{page} / {kept} gives the same bytes");
+    }
+}
+
+#[test]
+fn stripping_pages_takes_exactly_353_bytes_from_each_full_page_whatever_the_length() {
+    // Every length around the edges of one to three pages, and the lengths between: nothing panics, `len - 353 * full pages`
+    // bytes come out, and only a stream cut off inside the last 352 bytes of a page keeps part of a run, as documented.
+    for pages in 0..=3usize {
+        for edge in [0, 1, 2, 64_894, 64_895, 64_896, 64_897, 65_247, 65_248] {
+            let len = pages * 65_249 + edge;
+            let stored: Vec<u8> = (0..len).map(|o| if o % 65_249 < 64_896 { 1 } else { 0xee }).collect();
+            let got = strip_pages(stored.clone());
+            assert_eq!(got.len(), len - 353 * pages, "{pages} pages and {edge}");
+            let kept_run = got.iter().filter(|&&b| b == 0xee).count();
+            assert_eq!(kept_run, edge.saturating_sub(64_896), "{pages} pages and {edge}");
+            if edge <= 64_896 {
+                assert_eq!(got, pages_removed(&stored, 65_249, 64_896), "{pages} pages and {edge}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -480,6 +521,54 @@ fn every_sample_opens_and_every_gzip_stream_inflates_with_a_matching_trailer() {
             members += got.members;
         }
         assert!(members > 8, "{}", path.display());
+    }
+}
+
+/// Whether a stream, with its pages stripped some way, still inflates with a matching CRC-32 and length on every member.
+fn verifies(name: &str, stripped: &[u8]) -> bool {
+    let room = 1 << 26;
+    if name.starts_with("Partitions/") {
+        inflate_members(stripped, room).is_ok_and(|got| got.skipped == 0 && got.trailers_ok == got.members)
+    } else {
+        inflate_first(stripped, room).is_ok_and(|got| got.trailers_ok == 1)
+    }
+}
+
+#[test]
+fn a_wrong_page_layout_breaks_the_real_files() {
+    // The numbers of `gzip.rs` are observed, not trusted: with them every member of a real stream verifies, and with any
+    // neighbour (a byte more or less of page, of data, a start shifted by one byte or by the eight-byte prefix of a
+    // `Global/*` stream, or no stripping at all) the streams that cross a page boundary do not. The partition is the long
+    // one (88 to 92 runs), so only the first sample's is tried.
+    let wrong: [(&str, usize, usize, usize); 7] = [
+        ("a byte more per page", 65_250, 64_896, 0),
+        ("a byte less per page", 65_248, 64_896, 0),
+        ("a byte more of data", 65_249, 64_897, 0),
+        ("a byte less of data", 65_249, 64_895, 0),
+        ("pages that start a byte later", 65_249, 64_896, 1),
+        ("pages that start after the 8-byte prefix", 65_249, 64_896, 8),
+        ("no stripping", 65_249, 65_249, 0),
+    ];
+    let mut partition_done = false;
+    for path in samples() {
+        let r = &mut Revit::open(&path, Limits::default()).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        for name in r.stream_names().into_iter().map(String::from).collect::<Vec<_>>() {
+            let partition = name.starts_with("Partitions/");
+            if !(partition || name == "Formats/Latest" || name.starts_with("Global/")) || (partition && partition_done) {
+                continue;
+            }
+            let stored = r.read_stream(&name).unwrap();
+            if stored.len() <= PAGE_PAYLOAD {
+                continue; // under a page, there is no run to strip
+            }
+            assert!(verifies(&name, &strip_pages(stored.clone())), "{} {name}: the observed layout", path.display());
+            for (what, page, data, shift) in wrong {
+                let mut layout = stored[..shift].to_vec();
+                layout.extend(pages_removed(&stored[shift..], page, data));
+                assert!(!verifies(&name, &layout), "{} {name} still verifies with {what}", path.display());
+            }
+            partition_done |= partition;
+        }
     }
 }
 
