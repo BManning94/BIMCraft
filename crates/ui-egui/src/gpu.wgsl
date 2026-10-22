@@ -1,6 +1,6 @@
 // The 3D view on the graphics card: three passes that make the picture the processor's rasterizer makes (core `view3d.rs`).
-//   1. vs_scene / fs_scene: the surfaces into a colour target (shaded, textured, tinted), an id target (the plane a pixel shows
-//      and its element) and a depth target.
+//   1. vs_scene / fs_scene: the surfaces into a colour target (shaded, textured, tinted) and an id target (the plane a pixel
+//      shows, its element and its depth as bits: a depth texture can't be read in GLSL).
 //   2. vs_full / fs_post: an edge wherever the plane changes between a pixel and the one to its right or below it, else the
 //      shaded colour, else the ground.
 //   3. vs_line / fs_line: each level's plane and name as lines, where nothing nearer hides them.
@@ -52,7 +52,6 @@ struct Seg {
 
 @group(1) @binding(0) var scene_color: texture_2d<f32>;
 @group(1) @binding(1) var scene_ids: texture_2d<u32>;
-@group(1) @binding(2) var scene_depth: texture_depth_2d;
 
 // Lit from over the viewer's left shoulder; a face turned away from the light keeps 62%.
 fn lit(n: vec3<f32>) -> f32 {
@@ -140,7 +139,7 @@ fn vs_scene(v: SceneIn) -> SceneOut {
 
 struct SceneTargets {
     @location(0) color: vec4<f32>,
-    @location(1) ids: vec2<u32>,
+    @location(1) ids: vec4<u32>,
 }
 
 @fragment
@@ -156,7 +155,7 @@ fn fs_scene(in: SceneOut, @builtin(front_facing) front: bool) -> SceneTargets {
     }
     var out: SceneTargets;
     out.color = vec4<f32>(shade / 255.0, 1.0);
-    out.ids = in.ids;
+    out.ids = vec4<u32>(in.ids, bitcast<u32>(in.clip.z), 0u);
     return out;
 }
 
@@ -246,7 +245,7 @@ fn vs_line(@builtin(vertex_index) i: u32, @builtin(instance_index) k: u32) -> Li
 
 @fragment
 fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
-    let behind = textureLoad(scene_depth, vec2<i32>(in.clip.xy), 0);
+    let behind = bitcast<f32>(textureLoad(scene_ids, vec2<i32>(in.clip.xy), 0).z);
     if behind > 0.0 && behind > in.depth + g.size.z {
         discard;
     }

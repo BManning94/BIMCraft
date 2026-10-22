@@ -14,7 +14,7 @@ use eframe::egui_wgpu::{RenderState, wgpu};
 use egui::TextureId;
 
 const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const IDS: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Uint;
+const IDS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Uint;
 const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// A vertex is 13 32-bit words (see [`Vertex`]).
 const STRIDE: u64 = 52;
@@ -149,7 +149,14 @@ fn scopes(device: &wgpu::Device) -> [wgpu::ErrorScopeGuard; 2] {
 impl Gpu {
     /// The card egui draws on, if it can draw this view: it needs storage buffers in its shaders, which a few older ones lack.
     pub fn new(state: &RenderState) -> Result<Gpu, String> {
-        let mut gpu = Gpu::from_device(state.device.clone(), state.queue.clone())?;
+        // OpenGL can't read what the shaders need (a depth texture, buffers in a vertex shader), and when it can't wgpu panics in
+        // the shader compiler rather than saying so: the card is for the backends that can.
+        if state.adapter.get_info().backend == wgpu::Backend::Gl {
+            return Err("needs Vulkan, Metal or DirectX 12, and the window is on OpenGL".into());
+        }
+        // Whatever else a driver's compiler stops at, it is a reason, not a crash.
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Gpu::from_device(state.device.clone(), state.queue.clone())));
+        let mut gpu = made.unwrap_or_else(|_| Err("stopped the shader compiler".into()))?;
         gpu.adapter = state.adapter.get_info().name;
         gpu.state = Some(state.clone());
         Ok(gpu)
@@ -158,7 +165,7 @@ impl Gpu {
     /// A card with no window to show it in: a picture is read back, not shown.
     pub fn from_device(device: wgpu::Device, queue: wgpu::Queue) -> Result<Gpu, String> {
         let limits = device.limits();
-        if limits.max_storage_buffers_per_shader_stage < 3 || limits.max_color_attachment_bytes_per_sample < 12 {
+        if limits.max_storage_buffers_per_shader_stage < 3 || limits.max_color_attachment_bytes_per_sample < 20 {
             return Err("it can't read buffers in its shaders".into());
         }
         let guard = scopes(&device);
@@ -192,11 +199,7 @@ impl Gpu {
         };
         let group1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("bimcraft-3d-targets"),
-            entries: &[
-                texture(0, wgpu::TextureSampleType::Float { filterable: false }),
-                texture(1, wgpu::TextureSampleType::Uint),
-                texture(2, wgpu::TextureSampleType::Depth),
-            ],
+            entries: &[texture(0, wgpu::TextureSampleType::Float { filterable: false }), texture(1, wgpu::TextureSampleType::Uint)],
         });
         let layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -502,7 +505,7 @@ impl Gpu {
         let (color, ids, depth) = (
             view(&texture("bimcraft-3d-color", COLOR, render | sampled)),
             view(&texture("bimcraft-3d-ids", IDS, render | sampled)),
-            view(&texture("bimcraft-3d-depth", DEPTH, render | sampled)),
+            view(&texture("bimcraft-3d-depth", DEPTH, render)),
         );
         let picture = texture("bimcraft-3d-picture", COLOR, render | sampled | wgpu::TextureUsages::COPY_SRC);
         let picture_view = view(&picture);
@@ -512,7 +515,6 @@ impl Gpu {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&color) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&ids) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&depth) },
             ],
         });
         if let Some(state) = &self.state {
@@ -532,6 +534,10 @@ impl Gpu {
 pub(crate) fn headless() -> Option<Gpu> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
+    // OpenGL is not the card's (see `Gpu::new`).
+    if adapter.get_info().backend == wgpu::Backend::Gl {
+        return None;
+    }
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
     match Gpu::from_device(device, queue) {
         Ok(gpu) => Some(gpu),

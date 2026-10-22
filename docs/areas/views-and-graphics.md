@@ -39,6 +39,7 @@ definition of a level's lines and head). The desktop's `gpu.rs` and `gpu.wgsl` d
 processor's picture: the surfaces (lit as `picture` lights them, textured as `Sampler::at` looks up, tinted halfway), an edge wherever the
 plane changes between a pixel and the one to its right or below, and the levels' lines where nothing nearer hides them. A change to how
 the processor shades, draws an edge or marks a level goes in the shader too: `the_card_draws_what_the_processor_does` and the core's
-`picking_the_mesh_finds_what_the_cpu_picture_shows` compare them, and skip on a machine with no graphics adapter. The card is made the first time it is wanted (`Card::ready`: compiling its shaders is not a start's cost), and one that can't be made says why on the Performance page.
+`picking_the_mesh_finds_what_the_cpu_picture_shows` compare them, and skip on a machine with no graphics adapter. The card is for Vulkan, Metal and DirectX 12: on OpenGL wgpu panics in the shader compiler for what the shaders read (a depth texture, so depth is kept in the id target; buffers in a vertex shader), so `Gpu::new` refuses it, and puts whatever else a compiler stops at under `catch_unwind`.
+The card is made the first time it is wanted (`Card::ready`: compiling its shaders is not a start's cost), and one that can't be made says why on the Performance page.
 A device error is caught
 in the card's own error scopes, never left to wgpu's handler (which ends the program), and hands the view to the processor for good.
