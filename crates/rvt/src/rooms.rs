@@ -1,0 +1,77 @@
+//! Rooms: a name and a number at a level, and a point inside the walls that enclose them.
+//!
+//! A room's **name** and **number** are parameter entries in its object (see [`crate::data`]); its **level** is read as a wall's
+//! is, from the levels its reference list names. BIMCraft finds a room's boundary from the walls round a point of it, so a room's
+//! **point** is a point of its record's box that the imported walls enclose: the middle of the box if they do, else the nearest
+//! point of a grid over the box that they do. The walls must enclose a region whose box is the room's box to within the walls'
+//! thickness (600 mm), or the room is left out and listed: a room that is open, or whose walls were not imported, has no region
+//! in BIMCraft, and nothing here draws its outline for it.
+
+use std::collections::BTreeSet;
+
+use bimcraft_core::geom::{self, P2};
+use bimcraft_core::model::{Element, Id, Model, Room};
+
+use crate::import::{Facts, Import, clip, point};
+use crate::inventory::{Gathered, Wants};
+use crate::records::Record;
+use crate::walls::constraints;
+
+/// `OST_Rooms`.
+pub(crate) const OST_ROOMS: i64 = -2_000_160;
+/// How far a region's box may differ from the room's, in millimetres.
+const SLACK: f64 = 600.0;
+/// Points tried along each side of the room's box.
+const GRID: usize = 9;
+
+pub(crate) fn wanted(f: &Facts, out: &mut Wants) {
+    out.rooms.extend(f.of_category(OST_ROOMS).map(|r| r.id));
+}
+
+/// A point of `room`'s box in plan that the walls of `level` enclose in a region as big as the box, the nearest to its middle.
+fn point_in(model: &Model, level: Id, r: &Record) -> Option<P2> {
+    let (lo, hi) = (point(r.bbox[0], r.bbox[1]), point(r.bbox[3], r.bbox[4]));
+    let middle = P2((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0);
+    let mut candidates: Vec<P2> = (0..GRID * GRID)
+        .map(|k| {
+            let (i, j) = ((k % GRID) as f64 + 0.5, (k / GRID) as f64 + 0.5);
+            P2(lo.0 + (hi.0 - lo.0) * i / GRID as f64, lo.1 + (hi.1 - lo.1) * j / GRID as f64)
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.dist(middle).total_cmp(&b.dist(middle)));
+    std::iter::once(middle).chain(candidates).find(|p| {
+        let room = Room { level, point: *p, name: String::new(), number: String::new(), params: Default::default() };
+        let Some(region) = model.room_region(&room) else { return false };
+        let (mut a, mut b) = (P2(f64::MAX, f64::MAX), P2(f64::MIN, f64::MIN));
+        for q in &region.outer {
+            (a, b) = (P2(a.0.min(q.0), a.1.min(q.1)), P2(b.0.max(q.0), b.1.max(q.1)));
+        }
+        let near = |x: f64, y: f64| (x - y).abs() <= SLACK;
+        near(a.0, lo.0) && near(a.1, lo.1) && near(b.0, hi.0) && near(b.1, hi.1) && geom::area(&region.outer).abs() > 0.0
+    })
+}
+
+pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
+    let mut seen: BTreeSet<u32> = BTreeSet::new();
+    for r in f.of_category(OST_ROOMS) {
+        if !seen.insert(r.id) {
+            continue;
+        }
+        let made = (|| -> Result<Room, String> {
+            let (base, _) = constraints(r, &f.elevations);
+            let level = base.and_then(|b| cx.levels.get(&b).copied()).ok_or("it stands on no level")?;
+            let point = point_in(&cx.model, level, r)
+                .ok_or("the walls imported do not enclose its box (curtain walls and room separation lines are not imported)")?;
+            let (number, name) = g.rooms.get(&r.id).cloned().unwrap_or_default();
+            let name = if name.trim().is_empty() { "Room".to_string() } else { clip(&name) };
+            Ok(Room { level, point, name, number: clip(&number), params: Default::default() })
+        })();
+        match made {
+            Ok(room) => {
+                let id = cx.model.insert(Element::Room(room));
+                cx.from.insert(id, format!("Room {}", r.id));
+            }
+            Err(why) => cx.left_out("room", r.id, &why),
+        }
+    }
+}

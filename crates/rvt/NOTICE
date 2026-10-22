@@ -1,0 +1,52 @@
+BIMCraft's Revit file reader (bimcraft-rvt)
+Copyright (c) 2026 IPedrax and the BIMCraft contributors
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+==============================================================================
+Code ported from rvt-rs
+==============================================================================
+
+Parts of this crate are ported from rvt-rs, an open reader for Autodesk Revit
+files, https://github.com/DrunkOnJava/rvt-rs, which carries this notice:
+
+    rvt-rs: open reader for Autodesk Revit files
+    Copyright 2026 Griffin Long
+
+    Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The version ported from is commit b6086d41b9758fd9b92f42f0a47b8345b9c58056
+(after the v0.6.1 tag). What was taken, and from which file, is listed module by
+module in docs/rvt-provenance.md. Every source file that holds ported code names
+its rvt-rs source file and that commit in a header, and states that it was
+changed: the code was rewritten for BIMCraft (no panics, explicit size limits,
+no dependencies beyond cfb, flate2 and memchr, a different structure), and the
+format findings it applies were checked again on sample files.
+
+This notice carries only what Apache License 2.0 section 4(d) asks of a
+derivative work: rvt-rs's attribution notices. Its statements about the legal
+basis of reverse engineering are its own and are not repeated here; see
+docs/rvt-provenance.md for how this project states the risk.
+
+==============================================================================
+Trademarks
+==============================================================================
+
+"Autodesk" and "Revit" are registered trademarks of Autodesk, Inc. This project
+is not affiliated with, endorsed by, or sponsored by Autodesk. The names appear
+only to identify the file format this reader parses.
+
+This crate contains no Autodesk source code, object code, SDK components or
+header files, and no content taken from inside an Autodesk file (families,
+templates, icons, help text). It reads a file the user gives it and never
+bundles or extracts assets for the project.
+
+==============================================================================
+Third-party dependencies
+==============================================================================
+
+  cfb      MIT              reads the Compound File (OLE) container
+  flate2   MIT OR Apache-2.0  inflates Revit's gzip streams
+  memchr   Unlicense OR MIT   byte search
+
+See each dependency's own licence for its terms.

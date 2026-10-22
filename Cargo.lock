@@ -428,6 +428,7 @@ name = "bimcraft"
 version = "0.6.1"
 dependencies = [
  "bimcraft-core",
+ "bimcraft-rvt",
  "bimcraft-ui-egui",
  "bimcraft-update",
  "eframe",
@@ -440,6 +441,7 @@ name = "bimcraft-cli"
 version = "0.6.1"
 dependencies = [
  "bimcraft-core",
+ "bimcraft-rvt",
  "serde_json",
 ]
 
@@ -452,6 +454,16 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "zune-jpeg",
+]
+
+[[package]]
+name = "bimcraft-rvt"
+version = "0.6.0"
+dependencies = [
+ "bimcraft-core",
+ "cfb",
+ "flate2",
+ "memchr",
 ]
 
 [[package]]
@@ -635,6 +647,17 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
+]
+
+[[package]]
+name = "cfb"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f13298d9178622b7916ec5d01d470425c04273c8ed07e87b1c38b34c4f4612b"
+dependencies = [
+ "fnv",
+ "uuid",
+ "web-time",
 ]
 
 [[package]]
@@ -1144,6 +1167,12 @@ dependencies = [
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
 ]
+
+[[package]]
+name = "fnv"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
 
 [[package]]
 name = "foldhash"

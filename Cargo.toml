@@ -19,6 +19,8 @@ flate2 = "1"
 zune-jpeg = "0.5"
 bimcraft-ui-egui = { path = "crates/ui-egui" }
 bimcraft-update = { path = "crates/update" }
+# The Revit reader: Apache-2.0 only, so the command line and the desktop take it through an optional feature.
+bimcraft-rvt = { path = "crates/rvt" }
 egui = "0.36"
 eframe = "0.36"
 egui_kittest = "0.36"
@@ -29,6 +31,9 @@ sys-locale = "0.3"
 semver = "1"
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 ring = "0.17"
+# The Revit reader's: Revit's files are Compound Files (OLE), and a byte search that scans the partitions fast.
+cfb = "0.15"
+memchr = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -44,4 +49,14 @@ dbg_macro = "warn"
 
 # The 3D view renders in software: build the core optimised in debug builds too, so it orbits smoothly.
 [profile.dev.package.bimcraft-core]
+opt-level = 2
+
+# The Revit reader inflates and scans tens of megabytes per file, which its real-file tests do over and over.
+[profile.dev.package.bimcraft-rvt]
+opt-level = 2
+[profile.dev.package.miniz_oxide]
+opt-level = 2
+[profile.dev.package.memchr]
+opt-level = 2
+[profile.dev.package.cfb]
 opt-level = 2

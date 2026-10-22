@@ -1,0 +1,22 @@
+[package]
+name = "bimcraft-rvt"
+description = "BIMCraft's reader for Autodesk Revit files (.rvt, .rfa), under the fence in docs/rvt-provenance.md"
+version.workspace = true
+edition.workspace = true
+# Not the workspace's MIT OR Apache-2.0: this crate holds code ported from rvt-rs, which is Apache-2.0.
+license = "Apache-2.0"
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `fixture`, a writer of synthetic Revit-shaped files, for the command line's tests too.
+testing = []
+
+[dependencies]
+# The model a Revit file is read into. The core never depends on this crate, so the fence holds.
+bimcraft-core = { workspace = true }
+cfb = { workspace = true }
+flate2 = { workspace = true }
+memchr = { workspace = true }

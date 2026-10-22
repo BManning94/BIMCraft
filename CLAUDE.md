@@ -16,8 +16,11 @@ and MCP server, and milestone 2, the egui desktop app, are done. What works and 
 - **Validate in one place.** Commands build elements; `Model::check` validates the whole model after each command and the
   engine rolls back when it fails. New rules go there, with an error that says what to fix.
 - **Clean-room.** Never copy Autodesk content: no families (`.rfa`), templates, icons, help text, or anything from inside
-  `.rvt` files. Formats come from public specifications (IFC4 is ISO 16739). Assets are original or openly licensed; the
-  lettering is drawn in code (`font.rs`).
+  `.rvt` files; a reader may read a user's file, it never bundles or extracts assets for the project. Formats come from
+  public specifications (IFC4 is ISO 16739). A format with no public specification (Revit's `.rvt` and `.rfa`) may be read
+  only under the fence in [docs/rvt-provenance.md](docs/rvt-provenance.md): the code is `crates/rvt`, Apache-2.0 only
+  because it holds code ported from rvt-rs, `bimcraft-core` never depends on it, and every module and format finding
+  there names its source. Assets are original or openly licensed; the lettering is drawn in code (`font.rs`).
 - **The core has no UI.** `bimcraft-core` must not depend on a UI toolkit, so front ends stay swappable.
 - **The UI is thin.** `crates/ui-egui` reads `session.model` and changes it only through `Session::execute`, never by editing
   the model. Logic any front end needs (what a plan shows, what's under the cursor) belongs in the core: the canvas draws
@@ -88,6 +91,31 @@ cargo test --workspace
   building written with IfcOpenShell's API. Render what came in and look at it. After touching how phases and design options
   cross (`ifc::PHASING`), do it with a phased sample too: `run --sample --script phased.txt --save p.ifc`, `convert p.ifc
   p.bimcraft`, and compare `phases`, `phase_filters`, `phase_overrides`, `option_sets` and each element's `params` with the project's.
+
+- Revit files: Autodesk's files are never committed. Download sample projects into folders of their own outside the repo (the
+  URLs, sizes and hashes are in [docs/rvt-provenance.md](docs/rvt-provenance.md)), then `BIMCRAFT_RVT_SAMPLES=<folder> cargo test -p
+  bimcraft-rvt` runs the real-file tests (they skip when it is unset; the variable takes several folders, parted like a PATH) and
+  `bimcraft-cli info x.rvt` shows what a file holds. `bimcraft-cli run x.rvt --save /tmp/plan.png` imports one (`--cmd 'render
+  {"view": "{3D}", "path": "/tmp/3d.png"}'` for the 3D view; look at both) and `--save out.ifc` writes it as IFC, which IfcOpenShell
+  validates (`express_rules=True`) and builds shapes of, to compare with rvt-rs's own export. After touching the reader, compare it
+  with rvt-rs built from its own clone and target directory on the same files (a measuring stick, never a dependency), pin what
+  matched in `crates/rvt/src/tests/rvt_rs.rs` as numbers (never Autodesk's strings), extend the mutation sweeps (`tests::sweep` for a
+  new kind of element), and add a row to the provenance document for every module and every format finding. Mutation checks of the
+  reader go on a scratch copy of the workspace with its own target, as the other crates' do.
+
+  The import (`crates/rvt/src/import.rs`) reads a Revit file into a `bimcraft_core` model and says what it left out. `build` runs one
+  survey of the file (`inventory::Survey`: the records of the categories it maps, the type records, the levels), then one reader per
+  kind in this order, because each reads what the one before made: levels, walls, floors and ceilings, roofs, doors and windows
+  (hosted in the walls made), columns, rooms (their point found among the walls made). A reader takes the newest copy of a record
+  across the file's partitions, converts feet to millimetres (`mm`, `micron`), and builds elements the way a command would; it makes
+  no rule of its own. `finish` runs `Model::check` and drops, with the rule's message, whatever fails it (a wall takes its doors along)
+  until the model passes, so what comes back always checks. A reader never invents: what a record does not say, or the reader cannot
+  decode, becomes a line of `Imported::skipped` through `Import::left_out` or `note`, grouped by reason with the ids. Every length it
+  takes is within `records::MAX_FEET` of zero, since the importer asks the model for geometry (a room's region) before the check.
+  Wall sides follow the file's flip (set: the exterior is on the right, so start and end swap and an arc's sign changes); an opening's
+  host is the nearest wall below its own id in its reference list, else above, and its hole is its box along an axis-parallel wall;
+  a column is its box's rectangle (a turned one: its symbol's size and the placement's angle); a floor, ceiling or roof is the loops
+  of its `OST_SketchLines`; a roof only when flat. The notes are part of the product: a change that leaves something out says so.
 
 - Packages: `packaging/linux/package.sh` writes the AppImage, deb, rpm and tarball into `dist/release` (build on Ubuntu
   22.04, as CI does, so they run on its glibc and later; riscv64 is cross-built on 24.04, deb, rpm and tarball only, as the

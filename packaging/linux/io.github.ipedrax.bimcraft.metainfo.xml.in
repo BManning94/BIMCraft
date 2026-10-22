@@ -3,7 +3,7 @@
 <component type="desktop-application">
   <id>io.github.ipedrax.bimcraft</id>
   <metadata_license>CC0-1.0</metadata_license>
-  <project_license>MIT OR Apache-2.0</project_license>
+  <project_license>Apache-2.0</project_license>
   <name>BIMCraft</name>
   <summary>Model buildings and draw them</summary>
   <developer id="io.github.ipedrax">

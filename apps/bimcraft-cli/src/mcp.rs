@@ -69,7 +69,7 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"view": {"type": ["string", "integer"]}, "ceiling": {"type": "boolean"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "azimuth": {"type": "number"}, "elevation": {"type": "number"}}}},
         {"name": "new_model", "description": "Start an empty project with Level 1 and Level 2.",
          "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}}}},
-        {"name": "open", "description": "Open a .bimcraft project, or import an .ifc file (IFC2x3 or IFC4, from Revit or any BIM tool): its storeys, straight and curved walls with their doors and windows, floors (level or sloped) and ceilings, with their holes, rooms, columns, grids, stairs and ramps of straight runs with landings, railings, shafts and roofs (flat, sloping all round over any footprint with gable ends, courtyards and openings, or one profile swept across) come in measured from their geometry; the reply lists what was left out and why.",
+        {"name": "open", "description": "Open a .bimcraft project, import a Revit .rvt file (read directly, no Revit needed: its levels, walls, floors, ceilings, doors and windows, columns, rooms and flat roofs come in, and the reply lists what was left out and why), or import an .ifc file (IFC2x3 or IFC4, from Revit or any BIM tool): its storeys, straight and curved walls with their doors and windows, floors (level or sloped) and ceilings, with their holes, rooms, columns, grids, stairs and ramps of straight runs with landings, railings, shafts and roofs (flat, sloping all round over any footprint with gable ends, courtyards and openings, or one profile swept across) come in measured from their geometry; the reply lists what was left out and why.",
          "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}},
         {"name": "save", "description": "Save to .bimcraft (the project), or export by extension: .ifc (IFC4 for other BIM tools), .svg or .png (the lowest level's plan), .pdf (every sheet, a page each).",
          "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}}
@@ -193,6 +193,9 @@ impl Server {
             "query_elements" => s.execute("elements", &args),
             "schedule" => s.execute("schedule", &args),
             "new_model" => s.execute("new", &args),
+            "open" if args["path"].as_str().is_some_and(crate::revit::is_revit) => {
+                crate::revit::open(s, args["path"].as_str().unwrap_or_default())
+            }
             "open" => s.execute("open", &args),
             "save" => s.execute("save", &args),
             "render" => {
@@ -288,6 +291,31 @@ mod tests {
         tool(&mut s, "save", json!({ "path": path }));
         assert!(std::fs::read_to_string(&path).unwrap().contains("IFCSPACE("));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(feature = "rvt")]
+    #[test]
+    fn open_imports_a_revit_file_through_the_same_importer_as_the_command_line() {
+        let path = crate::revit::tests::house("mcp.rvt");
+        let mut s = Server::new();
+        let reply = tool(&mut s, "open", json!({ "path": path }));
+        assert_eq!((reply["format"].as_str(), reply["elements"].clone()), (Some("Revit 2024"), json!({"level": 2, "wall": 1})));
+        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"], json!({"level": 2, "wall": 1}));
+        // A file that is not Revit's is a tool error that names it, and the model stays as it was.
+        let fake = std::env::temp_dir().join(format!("bimcraft-mcp-{}-fake.rvt", std::process::id()));
+        std::fs::write(&fake, b"not a Revit file").unwrap();
+        let r = call(&mut s, 11, "tools/call", json!({"name": "open", "arguments": {"path": fake}}));
+        assert!(r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().unwrap().contains("fake.rvt"), "{r}");
+        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"], json!({"level": 2, "wall": 1}));
+        let _ = std::fs::remove_file(fake);
+    }
+
+    #[cfg(not(feature = "rvt"))]
+    #[test]
+    fn open_of_a_revit_file_in_a_build_without_revit_support_is_a_tool_error_that_says_so() {
+        let mut s = Server::new();
+        let r = call(&mut s, 1, "tools/call", json!({"name": "open", "arguments": {"path": "x.rvt"}}));
+        assert!(r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().unwrap().contains("without Revit support"));
     }
 
     #[test]

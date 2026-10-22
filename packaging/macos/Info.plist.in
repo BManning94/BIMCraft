@@ -42,7 +42,7 @@
   <key>NSRequiresAquaSystemAppearance</key>
   <false/>
   <key>NSHumanReadableCopyright</key>
-  <string>Copyright © 2026 IPedrax and the BIMCraft contributors. MIT OR Apache-2.0.</string>
+  <string>Copyright © 2026 IPedrax and the BIMCraft contributors. Apache-2.0.</string>
 
   <!-- A .bimcraft project is BIMCraft's own type; IFC is buildingSMART's, declared here in case
        nothing on the Mac declares it. -->

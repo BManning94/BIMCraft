@@ -45,10 +45,11 @@ warn() {
   if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::$*"; else echo "warning: $*" >&2; fi
 }
 
-# The readme and the licences, into a package's directory.
+# The readme, the licences and the notice (a build that includes the Revit reader is Apache-2.0, which asks for it), into a
+# package's directory.
 copy_docs() {
   local dest="$1" f
-  for f in README.md LICENSE-MIT LICENSE-APACHE; do
+  for f in README.md LICENSE-MIT LICENSE-APACHE NOTICE; do
     cp "$ROOT/$f" "$dest/"
   done
 }
