@@ -3,16 +3,17 @@
 // A release build on Windows is a window, not a console program: no console opens behind it.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use bimcraft_core::engine::Session;
 use bimcraft_core::sample::SAMPLE;
+use bimcraft_ui_egui::revit::{Importer, is_revit};
 use bimcraft_ui_egui::{BimApp, Status, lang};
 use serde_json::json;
 
 const USAGE: &str = "USAGE: bimcraft [FILE] [--sample]
-  FILE       a .bimcraft project to open, or an .ifc file to import
+  FILE       a .bimcraft project to open, or an .ifc or .rvt (Revit) file to import
   --sample   start on the sample house
   --version  the release
 
@@ -36,6 +37,8 @@ fn main() -> ExitCode {
     }
     let mut problem = None;
     let mut opened = Vec::new();
+    // A Revit file takes minutes to read, so the window comes up first and reads it (`BimApp::open_later`): the last file wins.
+    let mut later = None;
     for arg in std::env::args().skip(1) {
         let done = match arg.as_str() {
             "-h" | "--help" => {
@@ -51,7 +54,12 @@ fn main() -> ExitCode {
                 eprintln!("bimcraft: unknown option `{flag}`\n\n{USAGE}");
                 return ExitCode::FAILURE;
             }
+            file if is_revit(Path::new(file)) => {
+                later = Some(PathBuf::from(file));
+                Ok(())
+            }
             file => {
+                later = None;
                 let done = session.execute("open", &json!({ "path": file })).map(|_| ());
                 if done.is_ok() {
                     opened.push(PathBuf::from(file));
@@ -66,6 +74,10 @@ fn main() -> ExitCode {
     session.reset(model, path);
     let mut app = BimApp::new(session);
     app.lang = language;
+    app.revit = revit_reader();
+    if let Some(file) = later {
+        app.open_later(file);
+    }
     // The recent files sit beside the favorites too; the files the arguments opened are the newest.
     if let Some(path) = bimcraft_core::favorites::default_path() {
         app.keep_recent_in(bimcraft_ui_egui::recent::beside(&path));
@@ -112,6 +124,21 @@ fn main() -> ExitCode {
     }
 }
 
+/// The reader of Revit files the window is given: `bimcraft-rvt`'s, which is Apache-2.0 only (docs/rvt-provenance.md) and so sits
+/// behind the `rvt` feature. A build without it hands the window none, which then offers no `.rvt` and says why when given one.
+#[cfg(feature = "rvt")]
+fn revit_reader() -> Option<Importer> {
+    Some(std::sync::Arc::new(|path: &Path| {
+        let stem = path.file_stem().map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
+        bimcraft_rvt::import_path(path, &stem).map_err(|e| e.to_string())
+    }))
+}
+
+#[cfg(not(feature = "rvt"))]
+fn revit_reader() -> Option<Importer> {
+    None
+}
+
 /// Finder, the Dock and Open With hand macOS apps their files, and the Dock its Quit, as Apple events,
 /// not as arguments: the app reads them each frame, and one arriving wakes it.
 #[cfg(target_os = "macos")]
@@ -130,4 +157,25 @@ fn apple_events(app: &mut BimApp, ctx: &eframe::egui::Context, inbox: fmv_macos_
         }
         events
     }));
+}
+
+#[cfg(test)]
+#[cfg(feature = "rvt")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_reader_the_window_is_given_reads_a_revit_project_and_names_it_for_its_file() {
+        let path = std::env::temp_dir().join(format!("bimcraft-desktop-rvt-{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let file = path.join("Barn House.rvt");
+        std::fs::write(&file, bimcraft_rvt::project_fixture::Project::new(2024).file()).unwrap();
+        let read = revit_reader().expect("a build with the feature has a reader");
+        let imported = read(&file).unwrap();
+        assert_eq!((imported.model.name.as_str(), imported.schema.as_str()), ("Barn House", "Revit 2024"));
+        // A file that is not Revit's is refused, in words, not a panic.
+        std::fs::write(&file, b"not a Revit file").unwrap();
+        assert!(read(&file).is_err());
+        let _ = std::fs::remove_dir_all(path);
+    }
 }

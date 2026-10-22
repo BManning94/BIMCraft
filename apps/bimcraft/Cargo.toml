@@ -24,6 +24,10 @@ bimcraft-update = { workspace = true }
 eframe = { workspace = true }
 serde_json = { workspace = true }
 
+[dev-dependencies]
+# Synthetic Revit-shaped files for the test of the reader the window is given.
+bimcraft-rvt = { workspace = true, features = ["testing"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Finder's double-click, Open With and drops on the Dock icon arrive as Apple events, which winit doesn't
 # hand on. Handling them needs Objective-C, so unsafe, which this workspace forbids: this small crate (the

@@ -740,6 +740,18 @@ const WORDS: &[[&str; 3]] = &[
         "Pregunta si guardar, si hay cambios sin guardar; después cierra BIMCraft, instala la actualización y lo abre de nuevo.",
     ],
     ["Installing BIMCraft {}…", "Instalando o BIMCraft {}…", "Instalando BIMCraft {}…"],
+    // Revit files.
+    ["BIMCraft project, IFC or Revit", "Projeto BIMCraft, IFC ou Revit", "Proyecto BIMCraft, IFC o Revit"],
+    [
+        "{}: this build of BIMCraft was made without Revit support (`--no-default-features`); build with the default `rvt` feature to read Revit files",
+        "{}: esta versão do BIMCraft foi feita sem suporte ao Revit (`--no-default-features`); compile com o recurso `rvt`, que vem ativado por padrão, para ler arquivos do Revit",
+        "{}: esta versión de BIMCraft se hizo sin soporte para Revit (`--no-default-features`); compila con la característica `rvt`, activada por defecto, para leer archivos de Revit",
+    ],
+    ["Couldn't open {}: {}", "Não foi possível abrir {}: {}", "No se pudo abrir {}: {}"],
+    ["Opening a Revit file: {}", "Abrindo um arquivo do Revit: {}", "Abriendo un archivo de Revit: {}"],
+    ["Opened from {}: {}, {} left out.", "Aberto do {}: {}, {} sem importar.", "Abierto desde {}: {}, {} sin importar."],
+    ["1 element", "1 elemento", "1 elemento"],
+    ["{} elements", "{} elementos", "{} elementos"],
     ["Check for updates at startup", "Verificar atualizações ao iniciar", "Buscar actualizaciones al iniciar"],
     ["Check for Updates Now", "Verificar atualizações agora", "Buscar actualizaciones ahora"],
     ["BIMCraft {} is up to date.", "O BIMCraft {} está atualizado.", "BIMCraft {} está actualizado."],

@@ -55,9 +55,10 @@ fn only_the_command_line_and_the_desktop_take_the_reader_and_only_through_a_defa
     }
     for manifest in ["apps/bimcraft-cli/Cargo.toml", "apps/bimcraft/Cargo.toml"] {
         let text = read(manifest);
-        // The tests of the command line build synthetic files with the crate's `testing` feature: a dev-dependency.
+        // The tests of the command line and the desktop build synthetic files with the crate's `testing` feature: a dev-dependency.
         let (normal, dev) = text.split_once("[dev-dependencies]").unwrap_or((text.as_str(), ""));
-        assert!(dev.is_empty() || (manifest.contains("cli") && dev.contains("features = [\"testing\"]")), "{manifest}: {dev}");
+        let dev = dev.split("\n[").next().unwrap_or("");
+        assert!(dev.is_empty() || dev.contains("features = [\"testing\"]"), "{manifest}: {dev}");
         let dep = normal.lines().find(|l| l.starts_with("bimcraft-rvt")).unwrap_or_else(|| panic!("{manifest} has no bimcraft-rvt"));
         assert!(dep.contains("optional = true"), "{manifest}: the reader is an optional dependency, `{dep}`");
         assert!(text.contains("default = [\"rvt\"]"), "{manifest}: the `rvt` feature is on by default");

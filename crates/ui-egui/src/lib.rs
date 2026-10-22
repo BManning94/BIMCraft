@@ -18,6 +18,7 @@ mod paper;
 mod phasing;
 mod properties;
 pub mod recent;
+pub mod revit;
 mod section;
 mod structure;
 mod style;
@@ -487,6 +488,13 @@ pub struct BimApp {
     styled: bool,
     /// The updater, which the desktop app attaches: a window starts without one, and so never phones home.
     pub updates: Option<bimcraft_update::Updater>,
+    /// The reader of Revit files, which the desktop app attaches (`bimcraft-rvt` is Apache-2.0 only, so this crate never depends on
+    /// it): a window starts without one, so it offers no `.rvt` and a test never reads a real one.
+    pub revit: Option<revit::Importer>,
+    /// The Revit file being read, on a thread of its own.
+    revit_job: Option<revit::Job>,
+    /// Files to open at the next frame: the command line's, and what the system asked for while a Revit file was being read.
+    opens: Vec<PathBuf>,
 }
 
 /// The Options Bar's Height: up to a level above the plan's `level` (by default the next one up),
@@ -749,6 +757,9 @@ impl BimApp {
             title: String::new(),
             styled: false,
             updates: None,
+            revit: None,
+            revit_job: None,
+            opens: Vec::new(),
         }
     }
 
@@ -893,6 +904,7 @@ impl BimApp {
         lang::set(self.lang);
         self.tidy();
         self.poll_updates(&ctx);
+        self.poll_revit(&ctx);
         self.keys(&ctx);
         self.os_requests(&ctx);
         let view = self.view_title(self.sheet);
@@ -1025,6 +1037,7 @@ impl BimApp {
             || self.show_snaps
             || self.pending.is_some()
             || self.installing()
+            || self.importing()
             // An open menu takes the keys: Esc closes it, not the tool.
             || egui::Popup::is_any_open(ctx)
         {
@@ -1754,6 +1767,9 @@ impl BimApp {
 
     /// Open a project, or import an IFC file and say what came in and what was left out.
     pub(crate) fn open_path(&mut self, path: &Path) -> bool {
+        if revit::is_revit(path) {
+            return self.open_revit(path);
+        }
         let Some(reply) = self.run("open", json!({"path": path.to_string_lossy()})) else {
             self.forget_recent_if_gone(path);
             return false;
@@ -1775,7 +1791,7 @@ impl BimApp {
         fresh.os_events = self.os_events.take();
         (fresh.thin, fresh.show_properties, fresh.show_browser, fresh.lang, fresh.snaps) =
             (self.thin, self.show_properties, self.show_browser, self.lang, self.snaps);
-        fresh.updates = self.updates.take();
+        (fresh.updates, fresh.revit) = (self.updates.take(), self.revit.take());
         (fresh.recent, fresh.recent_path) = (std::mem::take(&mut self.recent), self.recent_path.take());
         *self = fresh;
     }
@@ -1788,12 +1804,19 @@ impl BimApp {
         if self.installing() {
             return;
         }
-        let Some(events) = self.os_events.as_mut().map(|poll| poll()) else { return };
+        let events = self.os_events.as_mut().map(|poll| poll()).unwrap_or_default();
         for event in events {
             match event {
-                OsEvent::Open(path) => self.guard(Pending::OpenPath(path), ctx),
+                OsEvent::Open(path) => self.opens.push(path),
                 OsEvent::Quit => self.guard(Pending::Close, ctx),
             }
+        }
+        // A Revit file being read holds the files that come meanwhile, which are opened in turn once it is over: the last one wins.
+        if !self.importing()
+            && let Some(path) = self.opens.pop()
+        {
+            self.opens.clear();
+            self.guard(Pending::OpenPath(path), ctx);
         }
     }
 
@@ -1814,9 +1837,9 @@ impl BimApp {
                 self.open_path(&path);
             }
             Pending::Open => {
-                // `.revcraft`: projects saved before the name changed.
-                let projects = ["bimcraft", "revcraft", "ifc"];
-                if let Some(path) = rfd::FileDialog::new().add_filter("BIMCraft project or IFC", &projects).pick_file() {
+                let revit = self.revit.is_some();
+                let name = t(if revit { "BIMCraft project, IFC or Revit" } else { "BIMCraft project or IFC" });
+                if let Some(path) = rfd::FileDialog::new().add_filter(name, &revit::open_extensions(revit)).pick_file() {
                     self.open_path(&path);
                 }
             }
@@ -3121,6 +3144,7 @@ impl BimApp {
         self.options_window(ctx);
         self.shortcuts_window(ctx);
         self.installing_box(ctx);
+        self.importing_box(ctx);
         let Some(pending) = self.pending.clone() else { return };
         #[derive(PartialEq)]
         enum Choice {
