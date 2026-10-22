@@ -12,10 +12,11 @@ use bimcraft_core::sample::SAMPLE;
 use serde_json::{Value, json};
 
 const USAGE: &str = "USAGE:
-  bimcraft-cli run [FILE] [--sample] [--cmd 'ID {json}']… [--script FILE]… [--save PATH]…
+  bimcraft-cli run [FILE] [--sample | --highrise] [--cmd 'ID {json}']… [--script FILE]… [--save PATH]…
       Open FILE (a .bimcraft project, or an .ifc or Revit .rvt file to import) or start empty, then in order: build the sample house, run
       commands and scripts (one `ID {json}` per line), save. --save writes by extension:
       .bimcraft (the project), .ifc (IFC4), .svg or .png (the lowest level's plan).
+      --highrise builds an original 20-storey performance sample (about 10,000 elements).
   bimcraft-cli info FILE         levels, element counts, types and warnings of a project or an IFC file; of a Revit .rvt or
                                  .rfa file, its release, last save, levels and element counts by category
   bimcraft-cli convert IN OUT    a project, an IFC file or a Revit .rvt file to .ifc, .svg, .png or .bimcraft
@@ -40,6 +41,7 @@ fn cli(args: &[String], out: &mut impl Write) -> Result<(), String> {
                 let mut value = || rest.next().ok_or_else(|| format!("{arg} needs a value\n\n{USAGE}"));
                 let results = match arg.as_str() {
                     "--sample" => s.script(SAMPLE).map(|_| Vec::new())?,
+                    "--highrise" => vec![s.execute("highrise", &json!({}))?],
                     "--cmd" => s.script(value()?)?,
                     "--script" => {
                         let path = value()?;
@@ -126,6 +128,17 @@ mod tests {
         for p in [project, ifc, png, svg] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn highrise_option_builds_the_shareable_performance_fixture() {
+        let out = cli_out(&["run", "--highrise", "--cmd", "inspect {}"]).unwrap();
+        let reply: Value = serde_json::from_str(out.lines().next().unwrap()).unwrap();
+        assert_eq!(reply["storeys"], 20);
+        assert_eq!(reply["elements"], 9521);
+        let info: Value = serde_json::from_str(out.lines().last().unwrap()).unwrap();
+        assert_eq!(info["counts"]["level"], 21);
+        assert_eq!(info["counts"]["beam"], 2200);
     }
 
     #[test]

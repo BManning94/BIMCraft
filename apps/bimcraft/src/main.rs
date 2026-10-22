@@ -14,9 +14,10 @@ use serde_json::json;
 
 mod startup;
 
-const USAGE: &str = "USAGE: bimcraft [FILE] [--sample]
+const USAGE: &str = "USAGE: bimcraft [FILE] [--sample | --highrise]
   FILE       a .bimcraft project to open, or an .ifc or .rvt (Revit) file to import
   --sample   start on the sample house
+  --highrise start on the original 20-storey performance sample
   --version  the release
 
 It looks for a newer version when it starts (File > Check for updates at startup switches that off).
@@ -56,6 +57,7 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--sample" => session.script(SAMPLE).map(|_| ()),
+            "--highrise" => session.execute("highrise", &json!({})).map(|_| ()),
             flag if flag.starts_with('-') => {
                 eprintln!("bimcraft: unknown option `{flag}`\n\n{USAGE}");
                 return ExitCode::FAILURE;
