@@ -141,8 +141,12 @@ rm -f "$DMG"
 # refuses the app for it (issue 15). A plain copy into a volume carries only what the staging tree has.
 # The image doesn't open its window when mounted: `bless --openfolder` is refused on Apple Silicon.
 retry hdiutil create -srcfolder "$STAGE" -volname BIMCraft -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
-sign "$DMG"
-codesign --verify --strict --verbose=2 "$DMG"
+# Only a real identity signs the image. An ad hoc signature on it makes Gatekeeper refuse to mount a
+# downloaded copy ("Move to Trash"); unsigned, it mounts, and the app inside is still checked below.
+if [ "$IDENTITY" != "-" ]; then
+  sign "$DMG"
+  codesign --verify --strict --verbose=2 "$DMG"
+fi
 
 # What a user gets is the app copied out of the finished image, as Finder and the updater
 # (crates/update/src/macos.rs) copy it: that copy has to verify, not only the staging tree.
