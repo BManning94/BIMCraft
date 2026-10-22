@@ -1083,6 +1083,7 @@ fn a_panic_in_a_hand_over_is_an_error_not_a_hang() {
 }
 
 /// Polls until `done` holds of the updater, or the notes have run out of time. The notes polled on the way, last one first.
+#[cfg(unix)]
 fn until(u: &mut Updater, done: impl Fn(&Updater) -> bool) -> Option<Note> {
     let mut note = None;
     for _ in 0..2000 {
