@@ -34,7 +34,7 @@ function Rows([string]$sql, [int]$columns) {
   $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($sql))
   [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
   while ($rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)) {
-    (1..$columns | ForEach-Object { $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @($_)) }) -join '|'
+    (1..$columns | ForEach-Object { $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @([int]$_)) }) -join '|'
   }
   [void]$view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null)
 }
