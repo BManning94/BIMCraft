@@ -16,6 +16,8 @@ pub const MATERIAL: u16 = 18;
 pub const PHYSICAL: u16 = 19;
 pub const PATTERN: u16 = 20;
 pub const PROFILE_ROOF: u16 = 21;
+/// `Roof`, the class of a roof by extrusion.
+pub const EXTRUSION_ROOF: u16 = 22;
 /// The tag a name is framed by in the fixture's type data (any tag but `ffff` will do).
 pub const NAME_TAG: u16 = 0x1002;
 
@@ -303,6 +305,7 @@ impl Project {
             Class { name: "PhysicalParamSet", fields: &["m_set"], base: None },
             Class { name: "PatternHelper", fields: &["m_pattern"], base: None },
             Class { name: "ProfileRoof", fields: &["m_sketch"], base: None },
+            Class { name: "Roof", fields: &["m_extrusion"], base: None },
         ])
     }
 

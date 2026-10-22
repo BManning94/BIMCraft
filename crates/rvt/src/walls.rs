@@ -171,6 +171,15 @@ pub(crate) fn layered(name: Option<String>, layers: &[CompoundLayer], g: &Gather
     LayeredType { name, layers, thickness: micron(thickness) }
 }
 
+/// Why a wall's type gives no layers, naming the type where its data does: curtain walls, storefronts and the like have none.
+fn no_layers(f: &Facts, g: &Gathered, tid: u32) -> String {
+    let header = f.tags.data_header();
+    match g.data.get(&tid).and_then(|copies| newest(copies, |b| first_name(b, &header, f.release))) {
+        Some((name, _)) => format!("its type '{name}' has no layers the reader can read"),
+        None => "its type has no layers the reader can read".to_string(),
+    }
+}
+
 pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
     let types = f.types.get(&OST_WALLS).cloned().unwrap_or_default();
     let mut read: BTreeMap<u32, Option<LayeredType>> = BTreeMap::new();
@@ -184,7 +193,7 @@ pub(crate) fn import(cx: &mut Import, f: &Facts, g: &Gathered) {
             let flip = newest(copies, |b| wall_orientation(b, f.release)).map(|(o, _)| o.flip);
             let tid = unique_type(&r.refs, &types).ok_or_else(|| who("its record does not name one wall type"))?;
             let typ = read.entry(tid).or_insert_with(|| layered_type(f, g, tid, OST_WALLS));
-            let typ = typ.as_ref().filter(|t| t.thickness > 0.0).ok_or_else(|| who("its type has no layers the reader can read"))?;
+            let typ = typ.as_ref().filter(|t| t.thickness > 0.0).ok_or_else(|| who(&no_layers(f, g, tid)))?;
             let (base, top) = constraints(r, &f.elevations);
             let level = base.and_then(|b| cx.levels.get(&b).copied()).ok_or_else(|| who("it stands on no level"))?;
             let elevation = base.and_then(|b| f.elevations.get(&b).copied()).unwrap_or(0.0);

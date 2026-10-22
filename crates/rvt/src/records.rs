@@ -108,6 +108,8 @@ pub(crate) struct Tags {
     pub pattern_helper: Option<u16>,
     /// `ProfileRoof`: a roof by footprint.
     pub profile_roof: Option<u16>,
+    /// `Roof`: a roof by extrusion.
+    pub roof: Option<u16>,
 }
 
 impl Tags {
@@ -128,6 +130,7 @@ impl Tags {
             physical_param_set: schema.tag("PhysicalParamSet"),
             pattern_helper: schema.tag("PatternHelper"),
             profile_roof: schema.tag("ProfileRoof"),
+            roof: schema.tag("Roof"),
         })
     }
 

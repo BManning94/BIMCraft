@@ -276,6 +276,25 @@ fn types_with_one_name_and_different_layers_are_told_apart() {
 }
 
 #[test]
+fn walls_left_out_for_their_types_having_no_layers_are_grouped_by_the_type_named() {
+    let mut p = base(2024);
+    straight(&mut p, 100, false);
+    // A type that holds a name and no layers (a storefront), under two walls, and one that holds nothing at all.
+    p.types.push(TypeRec::new(503, WALLS));
+    p.types.push(TypeRec::new(504, WALLS));
+    p.data.push(Block { id: 503, payload: name_bytes("Storefront") });
+    for (id, ty, y) in [(101, 503, 5.0), (102, 503, 8.0), (103, 504, 10.0)] {
+        p.recs.push(Rec::new(id, WALLS).at([0.0, y - 0.4, 0.0, 10.0, y + 0.4, 10.0], &[10, 11, ty, u64::from(id)]));
+        p.data.push(Block { id, payload: line_bytes(0.0, 10.0, [0.0, y, 0.0], [1.0, 0.0, 0.0]) });
+    }
+    let i = import(&p);
+    assert_eq!(walls(&i).len(), 1, "{:?}", i.skipped);
+    let said = |what: &str| i.skipped.iter().find(|s| s.contains(what)).cloned().unwrap_or_default();
+    assert_eq!(said("Storefront"), "2 walls left out, its type 'Storefront' has no layers the reader can read (ids 101, 102)");
+    assert!(i.skipped.contains(&"1 wall left out, its type has no layers the reader can read (ids 103)".to_string()), "{:?}", i.skipped);
+}
+
+#[test]
 fn the_walls_of_the_architectural_sample_are_those_of_rvt_rss_export_of_the_same_file() {
     use super::rvt_rs::RAC_WALLS;
     for path in super::samples_of("racbasicsampleproject.rvt") {
@@ -551,7 +570,9 @@ fn a_type_whose_layers_have_no_width_is_no_wall_type_and_a_layer_whose_material_
         }
         let i = import(&p);
         assert!(walls(&i).is_empty(), "Revit {release}: {:?}", i.skipped);
-        assert!(i.skipped.iter().any(|s| s.contains("no layers") && s.contains("100") && s.contains("101")), "{:?}", i.skipped);
+        for (name, id) in [("Membrane", "ids 100"), ("Damaged", "ids 101")] {
+            assert!(i.skipped.iter().any(|s| s.contains("no layers") && s.contains(name) && s.contains(id)), "{:?}", i.skipped);
+        }
     }
 }
 
