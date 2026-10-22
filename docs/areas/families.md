@@ -1,0 +1,37 @@
+# Families, forms, materials and textures
+
+Moved from the root `CLAUDE.md`, word for word: the root keeps the rules and the map, and this file is read when the area is touched.
+
+A family (`Model::families`, `family.rs`) is parameters, types that set them and forms in its own axes: x along a
+component's angle, y to its left, z up from its base; a form is a profile in a sketch plane (`xy` swept up, `xz` along y,
+`yz` along x), its sizes numbers or formulas, or triangles as a file brings them. A component places a type;
+`Model::component_pieces` are its forms where it stands. Plans draw them from above, a form's edges hidden under a higher
+form of the same component; sections show them beyond their line and never cut them (a `Solid::Mesh` is cut only where its `cut`
+says, as a round run's tube is); the
+3D view takes a form's triangles that share an edge and turn under 20° there as one curved surface, so a curve draws no
+edge between its facets (`view3d::facets`) and shades smoothly across them, each corner lit by the angle-weighted mean of
+its own surface's normals there, so a crease keeps its step (`corner_normals`); IFC writes each form as a closed face set,
+triangles turned out, and reads one family per family name the file gives.
+
+A form is swept, or with an `axis` turned about it (`family::revolve`: `from` to `to` degrees, 32 steps to a turn, the profile to
+one side of the axis); a `void` cuts the solid forms listed before it (`csg::subtract`: convex polygons in binary space
+partitions, built and walked with a worklist rather than recursion and bounded by a `Meter`, so a hostile shape ends in an error;
+a cut piece keeps its uncut outline in plan). A family of category `door` or `window` is hosted: its `Width` and `Height` (English
+names, whatever the project's language) size the wall's opening, `Sill Height` is a window's default sill, its forms are drawn in
+the opening's axes (x along the wall from the middle of the opening, y across it from the wall's middle plane and + toward its
+exterior, z up from the sill) and its formulas read `Wall Thickness`; its `symbols` are the plan lines (a door's swing). An
+`Opening` holds a `family`, or none (one of the project's own types): `Model::opening_dims` gives its size either way
+(`opening_type` returns it by value), its flips are mirrors (`opening_local`), and `Element::family()` is the one way to ask what
+family a component or an opening is of. Sections show a family opening's forms beyond their line and never cut them.
+A material's `texture` (`texture.rs`) is a pattern drawn in code or a picture of `Model::images` (a PNG or JPEG comes in, is kept
+as a PNG of at most 1024 px, its header checked before the decoder makes room for it), laid on a face at its `size` in mm by the
+face's own axes (`view3d::basis`: across is level, up goes up it, east and north where it lies flat), sampled per pixel from the
+depth buffer, in the 3D view alone, from a mip chain. A triangle carries a texture id (one more than its material's place in the
+library); `Scene::new` resolves them. Paint (`paint.rs`) is `{face: material}` in an element's `params` under `Paint`, a reserved
+name: a triangle's face is read from its winding, so every solid emits triangles turned out (`Solid::tris`, `prism`), and
+`Image::face` says which face a pixel is on. Favorites (`favorites.rs`) are a file of the user's own (`default_path`:
+`BIMCRAFT_FAVORITES`, else the configuration folder) with materials and their pictures, families and their materials; they change
+a project only through the `favorite` command (`load` never overwrites without `replace`). The desktop's Family Editor
+(`editor.rs`) edits text (`FormText`, `ParamText`, ...) and changes the project's family only through a `family` command; its
+preview is a scratch `Session` of its own, and it says what's wrong inside the window (the status box, over the view's corner, would lie on its
+buttons).
