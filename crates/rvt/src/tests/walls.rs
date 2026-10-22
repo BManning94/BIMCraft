@@ -616,3 +616,18 @@ fn a_layer_with_no_material_takes_its_categorys_from_the_object_styles_up_to_202
     assert_eq!(layer_material(2024, &[(-2_000_032, 700)]), "");
     assert_eq!(layer_material(2023, &[(-2_000_011, 700), (-2_000_011, 701)]), "");
 }
+
+#[test]
+fn a_material_found_twice_is_named_only_where_its_copies_agree() {
+    let layer = |extra: Option<(u32, &str)>| {
+        let mut p = base(2024);
+        if let Some((id, name)) = extra {
+            p.mats.push(Mat { id, name: name.into() });
+        }
+        straight(&mut p, 100, false);
+        import(&p).model.types.wall["Brick wall"].layers[0].material.clone()
+    };
+    assert_eq!(layer(None), "Brick");
+    assert_eq!(layer(Some((700, "Brick"))), "Brick", "the same name twice");
+    assert_eq!(layer(Some((700, "Clinker"))), "", "two names for one material");
+}
