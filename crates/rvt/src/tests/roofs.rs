@@ -187,38 +187,68 @@ fn profile_line(p: &mut crate::project_fixture::Project, owner: u32, id: u32, pl
     p.data.push(crate::project_fixture::Block { id, payload: line });
 }
 
-/// A gable roof by extrusion over the roof type "Warm" (0.25 ft thick): its top profile in the plane `x = 10`, eaves at 12 ft at
-/// `y = 0` and `y = 20` and the ridge 20 ft up at `y = 10`, swept from `x = 0` to `x = 30`. Its underside is 0.25 ft square to each
-/// slope: 0.25 * sqrt(1 + 0.8^2) ft under the top, down the plumb ends, and its box is 11.68 ft to 20 ft tall.
-fn gable(release: u32) -> crate::project_fixture::Project {
+/// Where the line through `p` along `d` meets the line through `q` along `e`.
+fn meet(p: (f64, f64), d: (f64, f64), q: (f64, f64), e: (f64, f64)) -> (f64, f64) {
+    let k = ((q.0 - p.0) * e.1 - (q.1 - p.1) * e.0) / (d.0 * e.1 - d.1 * e.0);
+    (p.0 + k * d.0, p.1 + k * d.1)
+}
+
+/// The underside of the profile `a`, `ridge`, `b` (along y, up z: feet) as a roof `thickness` thick square to each slope has it, worked
+/// out the other way round from the reader: each slope's line moved down square to itself, the two met, and the eaves cut plumb.
+fn underside(a: (f64, f64), ridge: (f64, f64), b: (f64, f64), thickness: f64) -> [(f64, f64); 3] {
+    let shifted = |p: (f64, f64), q: (f64, f64)| {
+        let (dy, dz) = (q.0 - p.0, q.1 - p.1);
+        let l = dy.hypot(dz);
+        // Square to the slope and down: (dz, -dy) when it runs toward +y.
+        let (ny, nz) = (dz / l * thickness, -dy / l * thickness);
+        ((p.0 + ny, p.1 + nz), (dy, dz))
+    };
+    let (pa, da) = shifted(a, ridge);
+    let (pb, db) = shifted(ridge, b);
+    let top = meet(pa, da, pb, db);
+    let at = |p: (f64, f64), d: (f64, f64), y: f64| (y, p.1 + d.1 / d.0 * (y - p.0));
+    [at(pa, da, a.0), top, at(pb, db, b.0)]
+}
+
+/// A roof by extrusion over the roof type "Warm" (0.25 ft thick): its top profile in the plane `x = 10`, an eave at 12 ft at `y = 0`,
+/// the ridge 20 ft up at `y = 10` and the other eave `eave_b` ft up at `y = 20`, swept from `x = 0` to `x = 30`. Its box is what its
+/// underside and its top make.
+fn gable(release: u32, eave_b: f64) -> crate::project_fixture::Project {
     let mut p = with_roof_type(release);
-    let drop = 0.25 * (1.0f64 + 0.8 * 0.8).sqrt();
+    let low = underside((0.0, 12.0), (10.0, 20.0), (20.0, eave_b), 0.25).iter().map(|u| u.1).fold(f64::INFINITY, f64::min);
     p.recs.push(Rec {
         class_tag: crate::project_fixture::EXTRUSION_ROOF,
-        ..Rec::new(100, ROOFS).at([0.0, 0.0, 12.0 - drop, 30.0, 20.0, 20.0], &[10, 530, 100])
+        ..Rec::new(100, ROOFS).at([0.0, 0.0, low, 30.0, 20.0, 20.0], &[10, 530, 100])
     });
     profile_line(&mut p, 100, 200, 10.0, (0.0, 12.0), (10.0, 20.0));
-    profile_line(&mut p, 100, 201, 10.0, (20.0, 12.0), (10.0, 20.0));
+    profile_line(&mut p, 100, 201, 10.0, (20.0, eave_b), (10.0, 20.0));
     p
 }
 
 #[test]
 fn a_roof_by_extrusion_comes_in_as_its_profile_swept_across_with_its_type_square_to_each_slope() {
-    for release in [2024, 2026] {
-        let i = import(&gable(release));
+    // Slopes of 0.8 and 0.6 (the other is 0.8 both ways): where the two undersides meet is not under the ridge.
+    for (release, eave_b) in [(2024, 14.0), (2026, 14.0), (2024, 12.0)] {
+        let i = import(&gable(release, eave_b));
         let [r] = roofs(&i)[..] else { panic!("Revit {release}: {:?}", i.skipped) };
         let x = r.extrusion.as_ref().expect("an extrusion roof");
-        let drop = 0.25 * (1.0f64 + 0.8 * 0.8).sqrt() * 304.8;
+        let ft = 304.8;
+        let under = underside((0.0, 12.0), (10.0, 20.0), (20.0, eave_b), 0.25);
+        let low = under.iter().map(|u| u.1).fold(f64::INFINITY, f64::min);
         assert_eq!(x.line, [P2(3048.0, 0.0), P2(3048.0, 6096.0)], "along y in the plane x = 10 ft");
         assert_eq!(
             (x.from, x.to),
             (-6096.0, 3048.0),
             "to its left, which is west: x = 30 ft is 20 ft to the right of the plane, x = 0 is 10 to the left"
         );
-        let heights: Vec<f64> = x.profile.iter().map(|p| p.1).collect();
-        assert_eq!(x.profile.iter().map(|p| p.0).collect::<Vec<_>>(), [0.0, 3048.0, 6096.0]);
-        assert_eq!(heights, [0.0, 2438.4, 0.0], "its underside rises 8 ft from each eave to the ridge, as its top does");
-        assert!((r.offset - (3657.6 - drop)).abs() < 0.01, "its underside's eave is the bottom of its box: {}", r.offset);
+        assert_eq!(x.profile.len(), 3);
+        for (got, want) in x.profile.iter().zip(under) {
+            assert!(
+                (got.0 - want.0 * ft).abs() < 0.01 && (got.1 - (want.1 - low) * ft).abs() < 0.01,
+                "{got:?} against {want:?} over {low}"
+            );
+        }
+        assert!((r.offset - low * ft).abs() < 0.01, "its underside's lowest point is the bottom of its box: {}", r.offset);
         assert_eq!((r.level, r.type_name.as_str()), (level_named(&i, "Level 1"), "Warm"));
         assert!(r.boundary.is_empty() && r.courtyards.is_empty());
         assert!(i.model.check().is_ok());
@@ -234,16 +264,16 @@ fn a_roof_by_extrusion_the_reader_cannot_check_against_its_box_is_left_out_with_
         i.skipped.iter().find(|s| s.contains(what)).cloned().unwrap_or_else(|| panic!("`{what}` in {:?}", i.skipped))
     };
     // Its box is a foot lower than its profile and type make it: its thickness is not what the reader assumed.
-    let mut p = gable(2024);
+    let mut p = gable(2024, 12.0);
     p.recs.iter_mut().find(|r| r.id == 100).unwrap().bbox[2] -= 1.0;
     assert!(said(&p, "box").starts_with("1 roof left out, its box"), "ids 100");
     // A profile line that is an arc.
-    let mut p = gable(2024);
+    let mut p = gable(2024, 12.0);
     let arc = crate::project_fixture::arc_bytes([0.0, 1.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], 10.0, [10.0, 0.0, 12.0]);
     p.data.iter_mut().find(|b| b.id == 200).unwrap().payload = arc;
     said(&p, "straight");
     // A profile in a plane that is not square to an axis (here at 45 degrees): the box says nothing of how far it is swept.
-    let mut p = gable(2024);
+    let mut p = gable(2024, 12.0);
     for (id, from, to) in [(200, [0.0, 0.0, 12.0], [7.0, 7.0, 20.0]), (201, [14.0, 14.0, 12.0], [7.0, 7.0, 20.0])] {
         let d: [f64; 3] = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
@@ -251,7 +281,7 @@ fn a_roof_by_extrusion_the_reader_cannot_check_against_its_box_is_left_out_with_
     }
     said(&p, "axis");
     // Two lines that do not meet.
-    let mut p = gable(2024);
+    let mut p = gable(2024, 12.0);
     p.data.iter_mut().find(|b| b.id == 201).unwrap().payload = {
         // The second slope ends a foot above where the first does.
         let len = (10.0f64 * 10.0 + 8.0 * 8.0).sqrt();
@@ -263,7 +293,7 @@ fn a_roof_by_extrusion_the_reader_cannot_check_against_its_box_is_left_out_with_
 #[test]
 fn a_mutation_sweep_over_a_roof_by_extrusion_never_panics_and_what_comes_in_checks_out() {
     for release in [2024, 2026] {
-        let mut p = gable(release);
+        let mut p = gable(release, 12.0);
         p.members = 3;
         super::sweep(&p, 0x1a2b_3c4d_5e6f_7081 ^ u64::from(release), 800, |i, round| assert!(roofs(i).len() <= 1, "round {round}"));
     }

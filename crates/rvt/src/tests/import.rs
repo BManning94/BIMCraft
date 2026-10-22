@@ -102,7 +102,7 @@ fn the_levels_of_real_files_come_in_as_the_storeys_of_rvt_rss_ifc_export() {
     for path in super::samples_of("snowdon-towers-sample-architectural.rvt") {
         let i = crate::import_path(&path, "x").unwrap();
         assert_eq!(i.model.levels().len(), 18);
-        assert!(i.skipped.iter().any(|s| s.contains("2 levels sit inside other elements")), "{:?}", i.skipped);
+        assert!(i.skipped.iter().any(|s| s.contains("2 levels left out") && s.contains("inside other elements")), "{:?}", i.skipped);
     }
 }
 

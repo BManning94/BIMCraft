@@ -337,3 +337,36 @@ fn counting_what_a_note_says_was_left_out() {
     assert_eq!(count_left_out("many walls left out, whatever"), None, "no count is no count");
     assert_eq!(count_left_out(""), None);
 }
+
+#[test]
+fn a_second_file_asked_for_while_one_is_read_is_not_started_and_of_two_at_once_the_last_wins() {
+    let (mut r, release) = gated();
+    assert!(r.h.state_mut().open_path(Path::new("/projects/first.rvt")));
+    assert!(!r.h.state_mut().open_path(Path::new("/projects/second.rvt")), "one at a time, whoever asks");
+    release.send(()).unwrap();
+    r.done();
+    assert_eq!(r.asked.lock().unwrap().len(), 1);
+    // Two asked for in one frame: the first is not read at all.
+    let (mut r, release) = gated();
+    release.send(()).unwrap();
+    r.inbox.borrow_mut().push(OsEvent::Open("/projects/a.rvt".into()));
+    r.inbox.borrow_mut().push(OsEvent::Open("/projects/b.rvt".into()));
+    r.h.step();
+    r.done();
+    assert_eq!(*r.asked.lock().unwrap(), [PathBuf::from("/projects/b.rvt")]);
+}
+
+#[test]
+fn while_the_report_is_up_the_keys_belong_to_it() {
+    let mut r = rig(|| Ok(survey(&NOTES)));
+    r.open("/projects/house.rvt");
+    r.done();
+    r.h.run();
+    assert!(r.h.state().report_open());
+    let model = Arc::clone(&r.h.state().session.model);
+    r.h.key_press_modifiers(Modifiers::COMMAND, Key::N);
+    r.h.step();
+    r.h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+    r.h.step();
+    assert!(Arc::ptr_eq(&model, &r.h.state().session.model) && r.project() == "Survey", "Ctrl+N started a project under the report");
+}
