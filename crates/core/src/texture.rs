@@ -505,6 +505,22 @@ fn pattern(kind: Kind, color: [u8; 3]) -> Arc<Vec<Level>> {
     }
 }
 
+/// A sampler's parts: the tile's size in mm, its turn as `(sin, cos)` and its offset, and each level of its mip chain, the
+/// finest first, as its width, its height and its rows of red, green and blue.
+pub struct Plan<'a> {
+    pub size: [f64; 2],
+    pub turn: (f64, f64),
+    pub offset: [f64; 2],
+    /// Millimetres a pixel of the finest level covers.
+    pub texel: f64,
+    pub levels: Vec<(usize, usize, &'a [u8])>,
+}
+
+/// The level of a mip chain of `count` levels, whose finest pixel covers `texel` mm, that a pixel covering `foot` mm looks up in.
+pub fn level_for(texel: f64, foot: f64, count: usize) -> usize {
+    ((foot / texel).log2().max(0.0).round() as usize).min(count.saturating_sub(1))
+}
+
 /// A texture ready to look up: what colour a point `(u, v)` of a face's plane, in mm, shows.
 #[derive(Clone)]
 pub struct Sampler {
@@ -536,10 +552,25 @@ impl Sampler {
         let (x, y) = (x * self.turn.1 + y * self.turn.0, y * self.turn.1 - x * self.turn.0);
         let (fu, fv) = (x / self.size[0], -y / self.size[1]);
         let (fu, fv) = (fu - fu.floor(), fv - fv.floor());
-        let level = (foot / self.texel).log2().max(0.0).round() as usize;
-        let Some(l) = self.levels.get(level).or(self.levels.last()) else { return Rgb(128, 128, 128) };
+        let Some(l) = self.levels.get(self.level_for(foot)) else { return Rgb(128, 128, 128) };
         let [r, g, b] = l.bilinear(fu, fv);
         Rgb(r.clamp(0.0, 255.0) as u8, g.clamp(0.0, 255.0) as u8, b.clamp(0.0, 255.0) as u8)
+    }
+
+    /// The level of the mip chain a pixel that covers `foot` mm of the face looks up in.
+    pub fn level_for(&self, foot: f64) -> usize {
+        level_for(self.texel, foot, self.levels.len())
+    }
+
+    /// Everything a graphics card needs to look up the colours [`at`](Self::at) does.
+    pub fn plan(&self) -> Plan<'_> {
+        Plan {
+            size: self.size,
+            turn: self.turn,
+            offset: self.offset,
+            texel: self.texel,
+            levels: self.levels.iter().map(|l| (l.w, l.h, l.rgb.as_slice())).collect(),
+        }
     }
 
     /// One tile of it as `side` by `side` pixels of RGB, for a swatch.

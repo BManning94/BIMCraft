@@ -110,13 +110,35 @@ Validation is unchanged; the small edit-time difference is not claimed as an opt
 
 The post-test UI probe at 1280 × 800 measured 2.0 ms idle plan frames (2.3 ms while moving the
 pointer), and 1.4 ms idle 3D frames. However, 3D hover's p95 is 129 ms (maximum 139 ms) because
-crossing into another element invalidates the tinted image. Retained GPU highlighting or reuse
-of raster results is necessary to remove that stall; a 1.4 ms idle median is not 60 Hz orbiting.
+crossing into another element invalidates the tinted image. On the processor that stall remains; on the card a changed
+tint is a 1.3 ms draw (see below), which is the retained GPU highlighting it needed.
 
 An additional 80-storey probe (38,081 elements) measured approximately 27 ms plan regeneration,
 376 ms edits, 380 ms changing-camera frames and 1.23 s scene construction. It ran during the
 correctness sweep, so treat those numbers as a scaling diagnostic, not an idle-machine baseline.
 This exposes the remaining cost of whole-model validation and processing every instance.
+
+## 3D on the graphics card
+
+`view3d::gpu::Mesh` keeps a view's shown triangles for the card (retained geometry, uploaded once for each model), and
+`crates/ui-egui/src/gpu.rs` draws them in three passes: surfaces, edges and ground, then the levels' lines. It is opt-in
+(File > Settings > Performance). Release build on Linux, an NVIDIA GeForce RTX 3060 over Vulkan, the 20-storey tower
+(427,280 triangles, 1,281,840 vertices) at 1920 × 1080 with the camera turning 3° a frame, median of nine:
+
+| Operation | Processor | Card |
+|---|---:|---:|
+| Changed-camera frame | 108.1 ms | 1.3 ms |
+| First frame of a model (builds the mesh, 67 MB upload) | | 62.3 ms |
+| Pick under the cursor, first (builds the hierarchy) | | 124 ms |
+| Pick under the cursor, after | | 0.2 ms |
+| Mesh built from the scene | | 60 ms |
+
+A changed frame is 83 times faster, and a tint changed by hover or selection is another 1.3 ms draw, not a second rasterization.
+`cargo test -p bimcraft-ui-egui --release gpu_speed -- --ignored --nocapture` repeats it. On the sample house at 640 × 480 the card's
+picture differs from the processor's by more than six levels of a channel in 358 of 307,200 pixels (0.12%), all on the level lines,
+which the card draws as quads and the processor as stamped pixels. Picking through the mesh agrees with the processor's picture at every
+sampled pixel. Not measured: integrated cards, macOS and Windows, a model of several million triangles (the mesh holds up to 1.6
+million and falls back to the processor above that).
 
 ## Verification
 
@@ -148,9 +170,9 @@ The measured next priorities are:
 3. Move scene construction and rendering off the UI thread, using immutable snapshots, bounded
    latest-request queues and cancellation of obsolete views. The current parallel renderer still
    waits for its workers on the calling thread.
-4. Use retained GPU geometry for orbit/pan/zoom, with shared picking/depth semantics and a CPU
-   export/reference path. Add viewport culling, level of detail and instancing before pursuing
-   full-size multi-million-triangle scenes.
+4. Retained GPU geometry for orbit/pan/zoom is done for shaded, opaque views (above), with the processor as the
+   reference and the fallback. Still to do on the card: surfaces seen through, hidden line and wireframe, then viewport
+   culling, level of detail and instancing before pursuing full-size multi-million-triangle scenes.
 5. Profile IFC stages and reuse representation/placement decoding. Expand import coverage alongside
    speed work; never count skipped source geometry as a performance improvement.
 6. Introduce dependency-aware validation while retaining a full-check oracle and command rollback.

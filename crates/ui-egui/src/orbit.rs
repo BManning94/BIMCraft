@@ -11,6 +11,7 @@ use bimcraft_core::geom::{self, P2};
 use bimcraft_core::graphics::{Look, VisualStyle};
 use bimcraft_core::model::{Id, Model};
 use bimcraft_core::render::{self, Rgb};
+use bimcraft_core::view3d::gpu::{Hit, Mesh};
 use bimcraft_core::view3d::{AZIMUTH, Camera, ELEVATION, Image, MAX_SIDE, P3, Scene};
 use egui::{
     Align, Color32, ColorImage, Layout, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions, Ui, UiBuilder,
@@ -22,8 +23,27 @@ use crate::canvas::{click_modifiers, color};
 use crate::style::{Icon, pal};
 use crate::{BimApp, Status, Tool, icon_button};
 
-/// What a picture is of: the model, the camera, and the elements tinted.
-type Shot = (Arc<Model>, Camera, Vec<(Id, Rgb)>, bool);
+/// What a picture is of: the model, the camera, the elements tinted, whether the theme is dark, and whether the card drew it.
+type Shot = (Arc<Model>, Camera, Vec<(Id, Rgb)>, bool, bool);
+
+/// A model's mesh for the card, or why the card can't draw it.
+type Meshed = (Arc<Model>, Result<Arc<Mesh>, String>);
+
+/// What picks in the picture on screen: the processor's own picture, or the mesh the card drew it from (with its tints).
+enum Picker {
+    Image(Image),
+    Mesh(Arc<Mesh>, Vec<(Id, Rgb)>),
+}
+
+impl Picker {
+    /// What the picture shows at pixel `(x, y)`, taken through `cam`.
+    fn at(&self, cam: &Camera, x: f64, y: f64) -> Option<Hit> {
+        match self {
+            Picker::Image(i) => Some(Hit { id: i.pick(x, y)?, face: i.face(x, y).unwrap_or("") }),
+            Picker::Mesh(m, tints) => m.pick(cam, tints, x, y),
+        }
+    }
+}
 
 /// The 3D view between frames.
 pub struct Orbit {
@@ -34,10 +54,14 @@ pub struct Orbit {
     ppp: f32,
     /// The scene of the model shown last, in the 3D view or a section's.
     pub(crate) scene: Option<(Arc<Model>, Scene)>,
-    /// The picture on screen, and what it is of.
-    image: Option<Image>,
+    /// What picks in the picture on screen, and what the picture is of.
+    picker: Option<Picker>,
     shown: Option<Shot>,
+    /// The processor's picture as a texture; and whether the card's is the one on screen.
     texture: Option<TextureHandle>,
+    pub(crate) on_card: bool,
+    /// The mesh of the scene shown last, for the card: or why it can't draw it.
+    mesh: Option<Meshed>,
     /// A drag under way: whether it orbits (else it pans), and where the pointer was last.
     drag: Option<(bool, Pos2)>,
     /// The camera as that drag found it, for a drag that turns out a click.
@@ -54,9 +78,11 @@ impl Default for Orbit {
             rect: Rect::ZERO,
             ppp: 1.0,
             scene: None,
-            image: None,
+            picker: None,
             shown: None,
             texture: None,
+            on_card: false,
+            mesh: None,
             drag: None,
             before: None,
             grip: None,
@@ -80,6 +106,14 @@ pub(crate) fn scene_of<'a>(slot: &'a mut Option<(Arc<Model>, Scene)>, model: &Ar
         *slot = None;
     }
     &slot.get_or_insert_with(|| (Arc::clone(model), Scene::new(model))).1
+}
+
+/// The mesh of `scene` for the card, built again when the model changed; or why the card can't draw it.
+fn mesh_of<'a>(slot: &'a mut Option<Meshed>, model: &Arc<Model>, scene: &Scene) -> &'a Result<Arc<Mesh>, String> {
+    if !slot.as_ref().is_some_and(|(m, _)| Arc::ptr_eq(m, model)) {
+        *slot = None;
+    }
+    &slot.get_or_insert_with(|| (Arc::clone(model), Mesh::new(scene, &Look::of_3d(model)).map(Arc::new))).1
 }
 
 impl BimApp {
@@ -203,46 +237,81 @@ impl BimApp {
             }
         }
         o.camera = Some(cam);
-        let pick = |image: &Option<Image>, at: Pos2| {
-            let (x, y) = px(at);
-            image.as_ref().and_then(|i| i.pick(x, y))
+        // On the card when the user asked for it and it can draw what the view shows; else on the processor.
+        let mesh = match self.card.ready().is_some().then(|| mesh_of(&mut o.mesh, &model, scene)) {
+            Some(Ok(mesh)) => Some(Arc::clone(mesh)),
+            _ => None,
         };
-        let hovered = hover.filter(|_| (modify || demolish || paint || unpaint) && o.drag.is_none()).and_then(|at| pick(&o.image, at));
+        // Why not, where the mesh says; a card that failed keeps what it said.
+        if !self.card.failed {
+            let why = (self.card.wanted && mesh.is_none()).then(|| o.mesh.as_ref().and_then(|(_, m)| m.as_ref().err().cloned())).flatten();
+            if self.card.note != why {
+                self.card.note = why;
+            }
+        }
+        let pick = |picker: &Option<Picker>, at: Pos2| {
+            let (x, y) = px(at);
+            picker.as_ref().and_then(|p| p.at(&cam, x, y))
+        };
+        let hovered =
+            hover.filter(|_| (modify || demolish || paint || unpaint) && o.drag.is_none()).and_then(|at| pick(&o.picker, at)).map(|h| h.id);
         let tints: Vec<(Id, Rgb)> = selection
             .iter()
             .map(|id| (*id, rgb(pal().accent)))
             .chain(hovered.filter(|id| !selection.contains(id)).map(|id| (id, rgb(pal().hover))))
             .collect();
         let dark = crate::style::dark();
-        if !matches!(&o.shown, Some((m, c, t, k)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark) {
-            // As the default 3D view says: what it hides, and the colours it draws in.
-            let look = Look::of_3d(&model);
-            let image = scene.render_in(&cam, &tints, &look);
-            // The model shaded as ever, on the theme's ground: only the background is paper white.
-            let ground = color(render::PAPER);
-            let (rgba, _) = image.rgba.as_chunks::<4>();
-            // Hidden line and wireframe are drawn as a section is, dark in the dark theme: paper and ink swap.
-            let lines = look.style() != VisualStyle::Shaded;
-            let pixels = rgba
-                .iter()
-                .map(|&[r, g, b, _]| match [r, g, b] {
-                    _ if lines => color(Rgb(r, g, b)),
-                    [255, 255, 255] => ground,
-                    _ => Color32::from_rgb(r, g, b),
-                })
-                .collect();
-            let pixels = ColorImage { size: [image.width as usize, image.height as usize], pixels, source_size: Default::default() };
-            match &mut o.texture {
-                Some(t) => t.set(pixels, TextureOptions::NEAREST),
-                None => o.texture = Some(ui.ctx().load_texture("view3d", pixels, TextureOptions::NEAREST)),
+        if !matches!(&o.shown, Some((m, c, t, k, g)) if Arc::ptr_eq(m, &model) && *c == cam && *t == tints && *k == dark && *g == mesh.is_some())
+        {
+            // The card's picture, if it makes one; the processor's if not, and if the card fails it for good.
+            let mut drawn = false;
+            if let (Some(mesh), Some(gpu)) = (&mesh, self.card.gpu.as_mut()) {
+                match gpu.draw(mesh, &cam, &tints, rgb(color(render::PAPER))) {
+                    Ok(()) => {
+                        o.picker = Some(Picker::Mesh(Arc::clone(mesh), tints.clone()));
+                        drawn = true;
+                    }
+                    Err(e) => {
+                        self.status = crate::updates::failed(crate::lang::tf(
+                            "The graphics card couldn't draw the 3D view ({}): it is drawn on the processor",
+                            &[&e],
+                        ));
+                        (self.card.gpu, self.card.note) = (None, Some(e));
+                    }
+                }
             }
-            o.image = Some(image);
-            o.shown = Some((Arc::clone(&model), cam, tints, dark));
+            o.on_card = drawn;
+            if !drawn {
+                // As the default 3D view says: what it hides, and the colours it draws in.
+                let look = Look::of_3d(&model);
+                let image = scene.render_in(&cam, &tints, &look);
+                // The model shaded as ever, on the theme's ground: only the background is paper white.
+                let ground = color(render::PAPER);
+                let (rgba, _) = image.rgba.as_chunks::<4>();
+                // Hidden line and wireframe are drawn as a section is, dark in the dark theme: paper and ink swap.
+                let lines = look.style() != VisualStyle::Shaded;
+                let pixels = rgba
+                    .iter()
+                    .map(|&[r, g, b, _]| match [r, g, b] {
+                        _ if lines => color(Rgb(r, g, b)),
+                        [255, 255, 255] => ground,
+                        _ => Color32::from_rgb(r, g, b),
+                    })
+                    .collect();
+                let pixels = ColorImage { size: [image.width as usize, image.height as usize], pixels, source_size: Default::default() };
+                match &mut o.texture {
+                    Some(t) => t.set(pixels, TextureOptions::NEAREST),
+                    None => o.texture = Some(ui.ctx().load_texture("view3d", pixels, TextureOptions::NEAREST)),
+                }
+                o.picker = Some(Picker::Image(image));
+            }
+            o.shown = Some((Arc::clone(&model), cam, tints, dark, drawn));
         }
         let p = ui.painter_at(rect);
         p.rect_filled(rect, 0.0, color(render::PAPER));
-        if let Some(t) = &o.texture {
-            p.image(t.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        let shown = if o.on_card { self.card.gpu.as_ref().and_then(|g| g.texture()) } else { o.texture.as_ref().map(|t| t.id()) };
+        if let Some(id) = shown {
+            p.image(id, rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         // The selected level's grips, and its plane as the held one would leave it.
         if let Some((_, z, extent)) = level {
@@ -260,12 +329,9 @@ impl BimApp {
             }
         }
         let click = response.clicked().then(|| response.interact_pointer_pos()).flatten().or(self.canvas.quick_press());
-        let clicked = click.map(|at| pick(&o.image, at));
+        let clicked = click.map(|at| pick(&o.picker, at).map(|h| h.id));
         // The face of what's clicked, as paint names the faces of an element.
-        let face = click.and_then(|at| {
-            let (x, y) = px(at);
-            o.image.as_ref().and_then(|i| i.face(x, y))
-        });
+        let face = click.and_then(|at| pick(&o.picker, at).map(|h| h.face).filter(|f| !f.is_empty()));
         match clicked {
             Some(found) if modify => self.pick_up(found.into_iter().collect(), click_modifiers(ui)),
             Some(Some(id)) if demolish => self.demolish(id),

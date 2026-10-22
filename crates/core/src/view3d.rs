@@ -18,6 +18,8 @@ use crate::stairs;
 use crate::texture::Sampler;
 use crate::walls::{self, Axis, Plane};
 
+pub mod gpu;
+
 /// Shared CPU rendering workers, bounded so background work leaves input and I/O capacity.
 fn render_pool() -> Option<&'static rayon::ThreadPool> {
     static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
@@ -922,23 +924,7 @@ impl Scene {
 
     /// Each level's head as `cam` sees it: see [`LevelHead`].
     pub fn level_heads(&self, cam: &Camera) -> Vec<LevelHead> {
-        let px = 1.0 / cam.scale.max(1e-9);
-        self.levels
-            .iter()
-            .map(|(id, name, c)| {
-                let near = nearest(cam, c);
-                let (far, sides) = (c[(near + 2) % 4], [c[(near + 1) % 4], c[(near + 3) % 4]]);
-                // The far edges' outer ends: the one further right.
-                let end = if cam.project(sides[0]).0 >= cam.project(sides[1]).0 { sides[0] } else { sides[1] };
-                let d = unit(sub(end, far));
-                let (w, h) =
-                    (f64::from(crate::font::width(name, HEAD_TEXT) + 2.0 * HEAD_PAD) * px, f64::from(HEAD_TEXT + 2.0 * HEAD_PAD) * px);
-                let foot = add(end, mul(d, 2.0 * f64::from(HEAD_PAD) * px));
-                let up = [0.0, 0.0, h];
-                let corners = [foot, add(foot, mul(d, w)), add(add(foot, mul(d, w)), up), add(foot, up)];
-                LevelHead { level: *id, name: name.clone(), corners }
-            })
-            .collect()
+        heads(&self.levels, cam)
     }
 
     /// The picture `cam` takes. Elements in `tints` show halfway to their tint, and their edges in it.
@@ -1356,37 +1342,22 @@ impl Scene {
         // Its head goes past the far edges' right end: its name lettered, all of it picking the level.
         if clip.is_none() {
             let slack = 1.5 / cam.scale.max(1e-9);
-            let heads = self.level_heads(cam);
-            for ((id, _, corners), head) in self.levels.iter().zip(&heads).filter(|((id, ..), _)| plain || look.shows(*id)) {
-                let c = tints.get(id).copied().unwrap_or_else(|| look.edge(*id, DATUM));
-                let slot = owners.len() as u32;
-                owners.push(*id);
+            let color = |id: Id| (plain || look.shows(id)).then(|| tints.get(&id).map_or((look.edge(id, DATUM), false), |c| (*c, true)));
+            for marks in level_marks(&self.levels, cam, &color) {
+                let (c, slot) = (marks.color, owners.len() as u32);
+                owners.push(marks.id);
                 let mut paint = |k: usize| {
                     if let (Some(px), Some(t)) = (rgba.get_mut(4 * k..4 * k + 3), hit.get_mut(k)) {
                         px.copy_from_slice(&[c.0, c.1, c.2]);
                         *t = slot;
                     }
                 };
-                let near = nearest(cam, corners);
-                for (i, (a, b)) in corners.iter().zip(corners.iter().cycle().skip(1)).enumerate() {
-                    if tints.contains_key(id) || (i != near && (i + 1) % 4 != near) {
-                        outline((cam.project(*a), cam.project(*b)), (w, h), 2, slack, &depth, &mut paint);
-                    }
-                }
-                let [foot, along, ..] = head.corners;
-                let (d, px) = (unit(sub(along, foot)), 1.0 / cam.scale.max(1e-9));
-                let height = f64::from(HEAD_TEXT + 2.0 * HEAD_PAD);
-                let to3 = |(x, y): (f32, f32)| add(add(foot, mul(d, f64::from(x) * px)), [0.0, 0.0, (height - f64::from(y)) * px]);
-                for stroke in crate::font::strokes(&head.name, HEAD_PAD, HEAD_PAD + HEAD_TEXT, HEAD_TEXT) {
-                    for seg in stroke.windows(2) {
-                        if let [a, b] = seg {
-                            outline((cam.project(to3(*a)), cam.project(to3(*b))), (w, h), 1, slack, &depth, &mut paint);
-                        }
-                    }
+                for ([a, b], wide) in &marks.lines {
+                    outline((cam.project(*a), cam.project(*b)), (w, h), *wide, slack, &depth, &mut paint);
                 }
                 // The rest of the head picks the level too, unpainted.
-                let ring: Vec<P2> = head.corners.iter().map(|p| cam.project(*p)).map(|(x, y, _)| P2(x, y)).collect();
-                let z = head.corners.iter().map(|p| cam.project(*p).2).sum::<f64>() / 4.0;
+                let ring: Vec<P2> = marks.head.iter().map(|p| cam.project(*p)).map(|(x, y, _)| P2(x, y)).collect();
+                let z = marks.head.iter().map(|p| cam.project(*p).2).sum::<f64>() / 4.0;
                 let (lo, hi) = ring.iter().fold((P2(f64::MAX, f64::MAX), P2(f64::MIN, f64::MIN)), |(lo, hi), q| {
                     (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1)))
                 });
@@ -1407,6 +1378,65 @@ impl Scene {
         }
         Image { width: w as u32, height: h as u32, rgba, hit, owners, faces: Arc::clone(&self.faces) }
     }
+}
+
+/// Each of `levels`' heads as `cam` sees it: see [`LevelHead`].
+fn heads(levels: &[(Id, String, [P3; 4])], cam: &Camera) -> Vec<LevelHead> {
+    let px = 1.0 / cam.scale.max(1e-9);
+    levels
+        .iter()
+        .map(|(id, name, c)| {
+            let near = nearest(cam, c);
+            let (far, sides) = (c[(near + 2) % 4], [c[(near + 1) % 4], c[(near + 3) % 4]]);
+            // The far edges' outer ends: the one further right.
+            let end = if cam.project(sides[0]).0 >= cam.project(sides[1]).0 { sides[0] } else { sides[1] };
+            let d = unit(sub(end, far));
+            let (w, h) = (f64::from(crate::font::width(name, HEAD_TEXT) + 2.0 * HEAD_PAD) * px, f64::from(HEAD_TEXT + 2.0 * HEAD_PAD) * px);
+            let foot = add(end, mul(d, 2.0 * f64::from(HEAD_PAD) * px));
+            let up = [0.0, 0.0, h];
+            let corners = [foot, add(foot, mul(d, w)), add(add(foot, mul(d, w)), up), add(foot, up)];
+            LevelHead { level: *id, name: name.clone(), corners }
+        })
+        .collect()
+}
+
+/// What a 3D picture draws over the surfaces for one level: its plane's edges and its head's lettering, as segments in `color`
+/// and how many pixels wide (1 or 2), and its head's corners, all of which picks the level.
+pub struct LevelMarks {
+    pub id: Id,
+    pub color: Rgb,
+    pub lines: Vec<([P3; 2], u8)>,
+    pub head: [P3; 4],
+}
+
+/// The marks of each of `levels` that `color` gives a colour (and whether it is selected: all four edges, not the far two).
+/// Unselected, the two edges nearer the camera are left out, as in Revit. The head goes past the far edges' right end:
+/// its name lettered.
+fn level_marks(levels: &[(Id, String, [P3; 4])], cam: &Camera, color: &dyn Fn(Id) -> Option<(Rgb, bool)>) -> Vec<LevelMarks> {
+    let mut marks = Vec::new();
+    for ((id, _, corners), head) in levels.iter().zip(heads(levels, cam)) {
+        let Some((color, selected)) = color(*id) else { continue };
+        let near = nearest(cam, corners);
+        let mut lines = Vec::new();
+        for (i, (a, b)) in corners.iter().zip(corners.iter().cycle().skip(1)).enumerate() {
+            if selected || (i != near && (i + 1) % 4 != near) {
+                lines.push(([*a, *b], 2));
+            }
+        }
+        let [foot, along, ..] = head.corners;
+        let (d, px) = (unit(sub(along, foot)), 1.0 / cam.scale.max(1e-9));
+        let height = f64::from(HEAD_TEXT + 2.0 * HEAD_PAD);
+        let to3 = |(x, y): (f32, f32)| add(add(foot, mul(d, f64::from(x) * px)), [0.0, 0.0, (height - f64::from(y)) * px]);
+        for stroke in crate::font::strokes(&head.name, HEAD_PAD, HEAD_PAD + HEAD_TEXT, HEAD_TEXT) {
+            for seg in stroke.windows(2) {
+                if let [a, b] = seg {
+                    lines.push(([to3(*a), to3(*b)], 1));
+                }
+            }
+        }
+        marks.push(LevelMarks { id: *id, color, lines, head: head.corners });
+    }
+    marks
 }
 
 /// Which of a level plane's `corners` is nearest the camera: the two edges from it are its near ones.

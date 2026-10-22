@@ -191,6 +191,12 @@ file with `bimcraft-cli run --highrise --save highrise.bimcraft`. The script is
 for reproducible core/UI measurements and the remaining optimization work. Private local IFC
 fixtures and their results belong in the ignored `test_model/` folder.
 
+The 3D view can be drawn on the graphics card: File > Settings > Performance > Draw the 3D view on the graphics card, off until you
+turn it on. On that tower at 1920 × 1080 a changed frame took 1.3 ms on an NVIDIA GeForce RTX 3060, against 108 ms on the processor,
+and what is under the cursor is found in a bounding volume hierarchy instead of read from the picture. The card draws what the processor
+draws, with the same lighting, textures, edges and level lines. Surfaces seen through, hidden line, wireframe, sections and sheets are
+still drawn on the processor, and so is everything when the card fails or the computer has none; the Performance page says which.
+
 ## Why BIMCraft
 
 - **The workflow you know.** Revit's ribbon, the green contextual Modify tab, the Options Bar, Properties with the Type
@@ -393,7 +399,7 @@ or an explicit Don't Save removes the current recovery copy, except a postponed 
 | Arrange the palettes | Drag Properties or the Project Browser by its title: strips along the edges of the view show where it lands, docked down the left or right side or along the bottom (one over another there, or side by side along the bottom), onto another palette's title as a tab of it, or anywhere else to float in a window of its own, which its title moves. Its Dock menu (beside its close button) does the same by name; closed, View > User Interface or PP brings it back where it was |
 | Float a view | Drag a view's tab off the tab bar, or right-click it and Float: it opens in a window of its own, the active view, and the tools work in it. The views behind stay drawn; a click on one makes it the active view. Drag the window's title back onto the tab bar, or press its Dock button, to make it a tab again. The last tab can't float |
 | More room | Double-click a ribbon tab (or press the arrow at the right of the tabs) and the ribbon folds to its tabs; a click on a tab then shows its tools over the view until one is picked. Double-click again to open it |
-| Settings | File > Settings (Ctrl+, or the cog on the Quick Access Toolbar): the theme, language, ribbon and palettes under User Interface; background autosave and its interval under Files; whether to look for updates. Performance and Graphics show settings still to come, greyed out. They're kept in `settings.json` beside the favorites, with where the palettes are |
+| Settings | File > Settings (Ctrl+, or the cog on the Quick Access Toolbar): the theme, language, ribbon and palettes under User Interface; background autosave and its interval under Files; whether to look for updates. Performance holds Draw the 3D view on the graphics card (off until you turn it on); the rest of Performance, and Graphics, show settings still to come, greyed out. They're kept in `settings.json` beside the favorites, with where the palettes are |
 | Units | Manage > Project Units (UN): millimetres, centimetres, metres, inches, feet, or feet and inches. Dimensions, spot elevations, room areas, schedules, Properties and the Options Bar follow; fields read what's typed in those units, or in the unit typed with it, and so do lengths typed while drawing |
 | Language | View > User Interface > Language: English, Português (Brasil) or Español; the window starts in the system's language (on Windows and macOS, its display language). Manage > Project Language: the language the project's drawings print, and that new levels, views, sheets and rooms are named in. A new project takes the window's |
 | Select by ID, IDs of Selection | Manage > Inquiry, as Revit's, and more. Select by ID takes as many IDs, GUIDs or IFC GlobalIds as you paste (from a schedule, a clash report, an IFC viewer), says as you type what it finds and what nothing has, adds to the selection or replaces it, and opens the plan they are in, zoomed to them. IDs of Selection lists each selected element's category, name, ID, GUID and IFC GlobalId, each selectable, and copies one row, a column (IDs, GUIDs, GlobalIds) or all of it, tab-separated for a spreadsheet |

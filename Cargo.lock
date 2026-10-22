@@ -479,6 +479,7 @@ dependencies = [
  "eframe",
  "egui",
  "egui_kittest",
+ "pollster 1.0.1",
  "rfd",
  "serde_json",
  "sys-locale",

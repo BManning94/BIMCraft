@@ -27,3 +27,18 @@ new drawing of what a view cuts sets `Part::Cut`; a hidden door's opening is dra
 (`graphics`, `scale`, `detail`, `visual_style` and `modify` refuse). Snaps, Tag All, the desktop's Select All
 Instances and the framing of sections and 3D views take what `Look` shows too. A level's ceiling plan is its plan's view;
 transparency shows in 3D only.
+
+The 3D view can be drawn on the graphics card (File > Settings > Performance; off until asked for: `BimApp::card`, `settings.json`'s
+`gpu_3d`). `view3d::gpu::Mesh` is the triangles a view shows as f32 vertices relative to the middle of what is drawn (millimetres far
+from the origin would overflow f32), each with its colour, normal, face normal, plane, element and texture; the textures' mip levels as
+words (`Skin`; `Mesh::lookups` gives the level a zoom looks up, as `Sampler::level_for` does); and a bounding volume hierarchy built on
+the first pick. `Mesh::new` refuses, with a reason, what the card doesn't draw (hidden line, wireframe, anything seen through, more than
+`MAX_TRIS`), and the processor draws those as before, and sections and sheets always. `Mesh::pick` is `Image::pick` without a picture: the
+same projection and barycentric test for triangles, and for levels the same `LevelMarks` that `Scene::picture` draws (`level_marks`: one
+definition of a level's lines and head). The desktop's `gpu.rs` and `gpu.wgsl` draw it in three passes into a texture egui shows like the
+processor's picture: the surfaces (lit as `picture` lights them, textured as `Sampler::at` looks up, tinted halfway), an edge wherever the
+plane changes between a pixel and the one to its right or below, and the levels' lines where nothing nearer hides them. A change to how
+the processor shades, draws an edge or marks a level goes in the shader too: `the_card_draws_what_the_processor_does` and the core's
+`picking_the_mesh_finds_what_the_cpu_picture_shows` compare them, and skip on a machine with no graphics adapter. The card is made the first time it is wanted (`Card::ready`: compiling its shaders is not a start's cost), and one that can't be made says why on the Performance page.
+A device error is caught
+in the card's own error scopes, never left to wgpu's handler (which ends the program), and hands the view to the processor for good.

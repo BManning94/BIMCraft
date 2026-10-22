@@ -140,6 +140,10 @@ fn main() -> ExitCode {
             format!("{} ({:?}, driver {} {})", info.name, info.backend, info.driver, info.driver_info)
         });
         startup::up(up_files.as_ref(), graphics, adapter.as_deref().unwrap_or("no wgpu adapter"));
+        // The 3D view may be drawn on the card egui draws on, if the user asks (Settings > Performance); it is made then.
+        if let Some(state) = cc.wgpu_render_state.as_ref() {
+            app.use_graphics_card(state);
+        }
         let ctx = cc.egui_ctx.clone();
         // The settings sit beside the favorites, in the folder the core finds for the user's own files.
         let prefs = bimcraft_core::favorites::default_path().map(|path| bimcraft_update::prefs::beside(&path));

@@ -2183,6 +2183,28 @@ const WORDS: &[[&str; 3]] = &[
     ["Smooth lines (anti-aliasing)", "Linhas suaves (anti-aliasing)", "Líneas suaves (antialiasing)"],
     ["Redraw views in the background", "Redesenhar as vistas em segundo plano", "Redibujar las vistas en segundo plano"],
     ["Draw the 3D view on the graphics card", "Desenhar a vista 3D na placa de vídeo", "Dibujar la vista 3D en la tarjeta gráfica"],
+    ["Graphics card", "Placa de vídeo", "Tarjeta gráfica"],
+    [
+        "Faster for large models. See-through surfaces, hidden line and wireframe are still drawn on the processor, and so is everything if the card fails",
+        "Mais rápido para modelos grandes. Superfícies transparentes, linhas ocultas e arame ainda são desenhados no processador, e tudo também se a placa falhar",
+        "Más rápido para modelos grandes. Las superficies transparentes, la línea oculta y el alambre se siguen dibujando en el procesador, y todo si la tarjeta falla",
+    ],
+    [
+        "This copy has no graphics card it can draw the 3D view on",
+        "Esta cópia não tem placa de vídeo em que possa desenhar a vista 3D",
+        "Esta copia no tiene una tarjeta gráfica en la que dibujar la vista 3D",
+    ],
+    ["Card: {}", "Placa: {}", "Tarjeta: {}"],
+    [
+        "The 3D view is drawn on the processor: {}",
+        "A vista 3D é desenhada no processador: {}",
+        "La vista 3D se dibuja en el procesador: {}",
+    ],
+    [
+        "The graphics card couldn't draw the 3D view ({}): it is drawn on the processor",
+        "A placa de vídeo não conseguiu desenhar a vista 3D ({}): ela é desenhada no processador",
+        "La tarjeta gráfica no pudo dibujar la vista 3D ({}): se dibuja en el procesador",
+    ],
     ["Selection colour", "Cor da seleção", "Color de la selección"],
     ["Highlight what's under the cursor", "Destacar o que está sob o cursor", "Resaltar lo que está bajo el cursor"],
     ["Background of the 3D view", "Fundo da vista 3D", "Fondo de la vista 3D"],

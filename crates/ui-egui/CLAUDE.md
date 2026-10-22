@@ -13,6 +13,9 @@ startup, tags) is [the desktop](../../docs/areas/desktop.md).
   fails for a label the table knows that the window forgot to translate. The core's messages stay English, because agents read them.
 - **A palette or a window** that docks or floats goes through `dock.rs`; settings the user keeps go in `settings.rs`
   (`settings.json`), never in a project.
+- **The 3D view has two painters**: the core's software picture and the card's (`gpu.rs`, `gpu.wgsl`; the design is in
+  [views and graphics](../../docs/areas/views-and-graphics.md)). `orbit.rs` picks one for each picture and picks through `Picker`, so a
+  change to what the 3D view shows or how it picks goes through both. A test gives the app a card with `gpu::headless()`.
 
 ## Testing
 

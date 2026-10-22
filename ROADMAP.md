@@ -158,7 +158,7 @@ The goal is that someone could run a real small project on it.
 
 | Item | Size |
 |---|---|
-| GPU renderer (wgpu) for 3D, and later plans: perspective cameras, a section box, walkthroughs, shadows and sun, silhouettes | XL |
+| GPU renderer (wgpu) for 3D: shaded views draw on the card since 0.7 (opt-in); still to come there are surfaces seen through, hidden line and wireframe, and then plans, perspective cameras, a section box, walkthroughs, shadows and sun, silhouettes | L |
 | A navigation gizmo, steering and orbit around the selection; tiled windows (views already float in windows of their own, and palettes dock and float). Not Revit's ViewCube, which is Autodesk's trademark and design: an original one in the manner of Blender's open-source navigation gizmo (axis balls to click to look along an axis, drag to orbit), drawn in code | M |
 | Editable keyboard shortcuts; project templates of BIMCraft's own on the start page | S |
 | Accessibility: keyboard reach for every dialog and screen-reader labels (egui's AccessKit) | M |
@@ -226,8 +226,8 @@ them sooner.
 
 ## 6. Risks and decisions
 
-- **Software 3D rendering** won't scale. A GPU renderer (wgpu) is the largest single technical bet. Prototype it early
-  (during 0.6) behind the existing `Scene` and `Drawing` abstractions, even though it ships in 1.0.
+- **Software 3D rendering** won't scale. A GPU renderer (wgpu) is the largest single technical bet. It started in 0.7 behind the
+  existing `Scene` abstraction, as an opt-in path with the processor as its reference and its fallback; see [performance](docs/performance.md).
 - **Whole-model rebuilds** after every command are simple and safe, but they set the ceiling on model size. The
   incremental work in 0.5 must keep the "validate in one place" rule: still one `check`, just scoped.
 - **DWG.** No permissively licensed DWG library exists. Decide between DXF only, an optional commercial SDK plug-in, and

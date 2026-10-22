@@ -5,6 +5,11 @@ Moved from the root `CLAUDE.md`, word for word: the root keeps the rules and the
 - Desktop: `cargo run -p bimcraft -- --sample` (it needs a display; egui 0.36 needs Rust 1.95). After a UI change, look at a
   screenshot of the window, in both themes (View > Dark Mode). Without a display, egui_kittest's `wgpu` feature renders a `Harness` to an image; with no GPU,
   `WGPU_BACKEND=gl` falls back to Mesa's software renderer.
+- The 3D view on the graphics card: `cargo test -p bimcraft-ui-egui --release gpu_speed -- --ignored --nocapture` times the tower's
+  frame on the card and on the processor and the first pick, and `the_card_draws_what_the_processor_does` compares the two pictures (set
+  `DUMP` to a folder for both as raw RGBA and the pixels that differ). To look at the window with the card's picture in it, render a
+  Harness as above, with `Gpu::new(&state)` given the same fresh `RenderState` the Harness's `WgpuTestRenderer` was made from, and
+  `app.card` set to `wanted`; look in both themes, and at File > Settings > Performance.
 - Updates: the banner, the File menu's items and the status notes are drawn by tests that give a `BimApp` an `Updater` on a
   `testing::Fake` network, made `.inline()` (its work on the calling thread) and `.target(Some(Target::Windows))` (a copy that can
   update itself), with `.handing_over(..)` standing in for the install; `tests::updates` in `crates/ui-egui`. The Installing box

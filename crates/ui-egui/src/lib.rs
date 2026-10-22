@@ -12,6 +12,7 @@ mod dock;
 mod editor;
 mod favorites;
 mod footer;
+mod gpu;
 mod graphics;
 mod inquiry;
 pub mod lang;
@@ -476,6 +477,8 @@ pub struct BimApp {
     open_units: bool,
     canvas: canvas::Canvas,
     orbit: orbit::Orbit,
+    /// The graphics card the 3D view may be drawn on (Settings > Performance).
+    card: gpu::Card,
     cut: section::Cut,
     paper: paper::Papers,
     /// The model as last opened or saved: any other is unsaved.
@@ -787,6 +790,7 @@ impl BimApp {
             open_units: false,
             canvas: canvas::Canvas::default(),
             orbit: orbit::Orbit::default(),
+            card: gpu::Card::default(),
             cut: section::Cut::default(),
             paper: paper::Papers::default(),
             edit: None,
@@ -1926,6 +1930,7 @@ impl BimApp {
         fresh.opens = std::mem::take(&mut self.opens);
         (fresh.recent, fresh.recent_path) = (std::mem::take(&mut self.recent), self.recent_path.take());
         fresh.autosave = std::mem::take(&mut self.autosave);
+        fresh.card = std::mem::take(&mut self.card);
         *self = fresh;
     }
 

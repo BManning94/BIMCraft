@@ -39,6 +39,8 @@ pub struct Settings {
     pub ribbon_minimized: bool,
     pub docking: Docking,
     pub autosave_minutes: u32,
+    /// Draw the 3D view on the graphics card, when there is one.
+    pub gpu_3d: bool,
 }
 
 impl Settings {
@@ -54,6 +56,7 @@ impl Settings {
             "ribbon_minimized": self.ribbon_minimized,
             "palettes": self.docking.to_json(),
             "autosave_minutes": self.autosave_minutes,
+            "gpu_3d": self.gpu_3d,
         })
     }
 
@@ -72,6 +75,7 @@ impl Settings {
             ribbon_minimized: v["ribbon_minimized"].as_bool().unwrap_or(base.ribbon_minimized),
             docking: if v["palettes"].is_object() { Docking::from_json(&v["palettes"]) } else { base.docking },
             autosave_minutes: v["autosave_minutes"].as_u64().filter(|n| *n <= 120).map_or(base.autosave_minutes, |n| n as u32),
+            gpu_3d: v["gpu_3d"].as_bool().unwrap_or(base.gpu_3d),
         }
     }
 }
@@ -131,8 +135,14 @@ impl BimApp {
         (self.lang, self.ribbon_min, self.docking) = (kept.language, kept.ribbon_minimized, kept.docking.clone());
         self.theme_wanted = Some(kept.theme);
         self.autosave.interval_minutes = kept.autosave_minutes;
+        self.card.wanted = kept.gpu_3d;
         self.settings_kept = Some(kept);
         self.settings_path = Some(path);
+    }
+
+    /// Lets the 3D view be drawn on the card `state` is the window's, when the user asks (Settings > Performance).
+    pub fn use_graphics_card(&mut self, state: &eframe::egui_wgpu::RenderState) {
+        self.card.state = Some(state.clone());
     }
 
     fn settings_now(&self, theme: ThemePreference) -> Settings {
@@ -142,6 +152,7 @@ impl BimApp {
             ribbon_minimized: self.ribbon_min,
             docking: self.docking.clone(),
             autosave_minutes: self.autosave.interval_minutes,
+            gpu_3d: self.card.wanted,
         }
     }
 
@@ -183,7 +194,7 @@ impl BimApp {
                 ui.vertical(|ui| {
                     ScrollArea::vertical().id_salt("settings-page").auto_shrink([false, false]).show(ui, |ui| match page {
                         Page::Interface => self.interface_page(ui, ctx),
-                        Page::Performance => performance_page(ui),
+                        Page::Performance => self.performance_page(ui),
                         Page::Graphics => graphics_page(ui),
                         Page::Files => self.files_page(ui),
                         Page::Updates => self.updates_page(ui),
@@ -249,23 +260,36 @@ impl BimApp {
     }
 }
 
-fn performance_page(ui: &mut Ui) {
-    later(ui, |ui| {
-        let (mut undo, mut quality, mut smooth, mut background, mut gpu) = (100, 0, true, false, false);
-        ui.horizontal(|ui| {
-            ui.label(t("Undo steps kept"));
-            ui.add(egui::DragValue::new(&mut undo).range(10..=1000));
+impl BimApp {
+    fn performance_page(&mut self, ui: &mut Ui) {
+        heading(ui, "Graphics card");
+        let found = self.card.available();
+        ui.add_enabled(found, egui::Checkbox::new(&mut self.card.wanted, t("Draw the 3D view on the graphics card"))).on_hover_text(t(
+            "Faster for large models. See-through surfaces, hidden line and wireframe are still drawn on the processor, and so is everything if the card fails",
+        ));
+        let muted = |ui: &mut Ui, text: String| ui.label(RichText::new(text).color(pal().muted));
+        let text = match (self.card.available(), &self.card.note) {
+            (_, Some(why)) => crate::lang::tf("The 3D view is drawn on the processor: {}", &[why]),
+            (false, None) => t("This copy has no graphics card it can draw the 3D view on").to_string(),
+            (true, None) => crate::lang::tf("Card: {}", &[&self.card.adapter().unwrap_or_default()]),
+        };
+        muted(ui, text);
+        later(ui, |ui| {
+            let (mut undo, mut quality, mut smooth, mut background) = (100, 0, true, false);
+            ui.horizontal(|ui| {
+                ui.label(t("Undo steps kept"));
+                ui.add(egui::DragValue::new(&mut undo).range(10..=1000));
+            });
+            ui.horizontal(|ui| {
+                ui.label(t("3D view resolution"));
+                ComboBox::from_id_salt("settings-3d")
+                    .selected_text(t("Full"))
+                    .show_index(ui, &mut quality, 2, |i| if i == 0 { t("Full") } else { t("Half") }.to_string());
+            });
+            ui.checkbox(&mut smooth, t("Smooth lines (anti-aliasing)"));
+            ui.checkbox(&mut background, t("Redraw views in the background"));
         });
-        ui.horizontal(|ui| {
-            ui.label(t("3D view resolution"));
-            ComboBox::from_id_salt("settings-3d")
-                .selected_text(t("Full"))
-                .show_index(ui, &mut quality, 2, |i| if i == 0 { t("Full") } else { t("Half") }.to_string());
-        });
-        ui.checkbox(&mut smooth, t("Smooth lines (anti-aliasing)"));
-        ui.checkbox(&mut background, t("Redraw views in the background"));
-        ui.checkbox(&mut gpu, t("Draw the 3D view on the graphics card"));
-    });
+    }
 }
 
 fn graphics_page(ui: &mut Ui) {
