@@ -373,7 +373,9 @@ fn a_long_report_scrolls_inside_the_window_and_leaves_its_close_button_on_screen
     r.h.run();
     r.h.run();
     let close = r.h.get_by_label("Close").rect();
-    assert!(close.bottom() <= r.h.ctx.content_rect().bottom(), "Close at {close:?} in a window {:?}", r.h.ctx.content_rect());
+    let window = r.h.ctx.content_rect();
+    // Centred and about two thirds as tall as the window: not the whole of it, and nothing of the window's own is lost under it.
+    assert!(close.bottom() < window.height() * 0.92 && close.bottom() > window.height() * 0.5, "Close at {close:?} in a window {window:?}");
     assert!(r.h.query_by_label_contains("Left out: 120").is_some());
 }
 

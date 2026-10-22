@@ -348,3 +348,35 @@ fn a_profile_of_more_lines_than_a_roof_may_have_points_is_left_out_with_that_sai
     assert!(roofs(&i).is_empty());
     assert!(i.skipped.iter().any(|s| s.starts_with("1 roof left out, its profile has 300 lines")), "{:?}", i.skipped);
 }
+
+#[test]
+fn a_profile_that_runs_east_to_west_in_the_file_is_read_west_to_east() {
+    // A gable along x in the plane y = 5: eaves at 12 ft at x = 0 and x = 20, the ridge at 20 ft, swept from y = 0 to y = 30.
+    let drop = 0.25 * (1.0f64 + 0.8 * 0.8).sqrt();
+    for reversed in [false, true] {
+        let mut p = with_roof_type(2024);
+        p.recs.push(Rec {
+            class_tag: crate::project_fixture::EXTRUSION_ROOF,
+            ..Rec::new(100, ROOFS).at([0.0, 0.0, 12.0 - drop, 20.0, 30.0, 20.0], &[10, 530, 100])
+        });
+        let lines: [((f64, f64), (f64, f64)); 2] = [((0.0, 12.0), (10.0, 20.0)), ((20.0, 12.0), (10.0, 20.0))];
+        for (n, (a, b)) in lines.into_iter().enumerate() {
+            let (dx, dz) = (b.0 - a.0, b.1 - a.1);
+            let len = dx.hypot(dz);
+            let mut r = Rec::new(200 + n as u32, crate::floors::OST_SKETCH_LINES)
+                .at([a.0.min(b.0), 5.0, a.1.min(b.1), a.0.max(b.0), 5.0, a.1.max(b.1)], &[1]);
+            r.refs2 = vec![30, 100];
+            p.recs.push(r);
+            let line = crate::project_fixture::line_bytes(0.0, len, [a.0, 5.0, a.1], [dx / len, 0.0, dz / len]);
+            p.data.push(crate::project_fixture::Block { id: 200 + n as u32, payload: line });
+        }
+        if reversed {
+            p.recs.reverse();
+        }
+        let i = import(&p);
+        let [r] = roofs(&i)[..] else { panic!("reversed {reversed}: {:?}", i.skipped) };
+        let x = r.extrusion.as_ref().unwrap();
+        assert_eq!(x.line, [P2(0.0, 1524.0), P2(6096.0, 1524.0)], "reversed {reversed}: west to east");
+        assert_eq!((x.from, x.to), (-1524.0, 7620.0), "to its left, which is north");
+    }
+}
