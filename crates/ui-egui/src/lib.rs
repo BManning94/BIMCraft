@@ -25,6 +25,7 @@ pub mod recent;
 pub mod revit;
 mod section;
 pub mod settings;
+mod start;
 mod structure;
 mod style;
 #[cfg(test)]
@@ -502,6 +503,8 @@ pub struct BimApp {
     /// The files File > Open Recent lists, and where they are kept (see [`BimApp::keep_recent_in`]; none until the app is told).
     recent: recent::Recent,
     recent_path: Option<std::path::PathBuf>,
+    /// The start page: up when the window opens on no project, and from the quick access bar's Home.
+    home: start::Home,
     parameters_dialog: Option<properties::ParametersDialog>,
     schedule_dialog: Option<properties::ScheduleDialog>,
     /// Visibility/Graphics, Filters and View Templates, while they're open.
@@ -805,6 +808,7 @@ impl BimApp {
             favorites_path: None,
             recent: recent::Recent::default(),
             recent_path: None,
+            home: start::Home::default(),
             paint_material: String::new(),
             parameters_dialog: None,
             schedule_dialog: None,
@@ -999,6 +1003,14 @@ impl BimApp {
         }
         if ctx.input(|i| i.viewport().close_requested()) && !self.dirty() && !self.installing() {
             self.retire_autosave();
+        }
+        if self.home.shown {
+            self.start_page(ui);
+            self.drag_and_drop(&ctx);
+            self.warning(&ctx);
+            self.dialogs(&ctx);
+            self.keep_settings(&ctx);
+            return;
         }
         let bar = Frame::new().fill(pal().bar).inner_margin(vec2(8.0, 4.0)).stroke(Stroke::new(1.0, pal().border));
         Panel::top("quick-access").frame(bar).show(ui, |ui| self.quick_access(ui, &view));
@@ -1937,6 +1949,7 @@ impl BimApp {
         (fresh.recent, fresh.recent_path) = (std::mem::take(&mut self.recent), self.recent_path.take());
         fresh.autosave = std::mem::take(&mut self.autosave);
         fresh.card = std::mem::take(&mut self.card);
+        fresh.home = self.home.put_away();
         *self = fresh;
     }
 
@@ -2008,6 +2021,9 @@ impl BimApp {
         let ctx = ui.ctx().clone();
         let row = ui
             .horizontal(|ui| {
+                if icon_button(ui, Icon::Home, "Home").clicked() {
+                    self.home.shown = true;
+                }
                 if icon_button(ui, Icon::Open, "Open").clicked() {
                     self.guard(Pending::Open, &ctx);
                 }
