@@ -405,6 +405,8 @@ pub struct BimApp {
     offset_copy: bool,
     /// Tags placed with a leader.
     tag_leader: bool,
+    /// The field the Tag tool's tags show; blank for the category's usual one.
+    tag_label: String,
     /// What the Text tool writes.
     note_text: String,
     /// The project units the Options Bar's lengths were last written in.
@@ -707,6 +709,7 @@ impl BimApp {
             offset: units.length(1000.0),
             offset_copy: true,
             tag_leader: false,
+            tag_label: String::new(),
             note_text: String::new(),
             units,
             lang: Language::English,
@@ -2173,7 +2176,7 @@ impl BimApp {
             )],
         );
         panel(ui, "Tag", |ui| {
-            let tip = "Tag by Category (TG): click a door or window to tag it with its mark";
+            let tip = "Tag by Category (TG): click an element to tag it with its type, a door's or window's mark, or the field in Label";
             if big_button(ui, Icon::Tag, "Tag by Category", self.tool == Tool::Tag, tip).clicked() {
                 self.set_tool(Tool::Tag);
             }
@@ -2674,6 +2677,9 @@ impl BimApp {
                 }
                 Tool::Tag => {
                     ui.checkbox(&mut self.tag_leader, t("Leader"));
+                    let l = ui.label(t("Label:"));
+                    ui.add(TextEdit::singleline(&mut self.tag_label).desired_width(160.0).hint_text(t("a field, such as Type or Height")))
+                        .labelled_by(l.id);
                 }
                 Tool::Text => {
                     let l = ui.label(t("Text:"));
@@ -2818,7 +2824,7 @@ impl BimApp {
             Tool::Dimension(_) => "Pick more references, or click away from them where the dimension line goes. Esc cancels.",
             Tool::Measure(None) => "Click the ruler's start: points snap as they do drawing.",
             Tool::Measure(Some(_)) => "Click its end: its length and angle read beside it. Esc cancels.",
-            Tool::Tag => "Click a door or window to tag it with its mark.",
+            Tool::Tag => "Click an element to tag it with its type, a door's or window's with its mark, or with the field in Label.",
             Tool::Angular(refs) if refs.len() < 2 => "Pick a wall, a grid or another line; then one that meets it.",
             Tool::Angular(_) => "Click where the arc goes: the angle on that side. Esc cancels.",
             Tool::Radial(None) => "Pick a round column.",

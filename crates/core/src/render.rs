@@ -1918,8 +1918,8 @@ fn aligned(d: &mut Drawing, m: &Model, dim: &Dimension) {
     }
 }
 
-/// A door's or window's tag: its mark in a box for a door, in a hexagon for a window, over a
-/// paper fill; with a leader, a line to the opening's centre.
+/// A tag: a door's mark in a box, a window's in a hexagon, over a paper fill; any other element's label as plain
+/// text over a paper fill; with a leader, a line to the point it names.
 fn tag(d: &mut Drawing, m: &Model, t: &Tag) {
     let Some(anchor) = m.anchor(t.host) else { return };
     let head = anchor + t.offset;
@@ -1936,7 +1936,10 @@ fn tag(d: &mut Drawing, m: &Model, t: &Tag) {
         vec![(x - w, y - h), (x + w, y - h), (x + w, y + h), (x - w, y + h)]
     };
     d.push(Prim::Fill { rings: vec![ring.clone()], color: PAPER });
-    d.push(Prim::Line { pts: ring, width: 1.0, color: INK, dash: None, closed: true });
+    // Openings' marks sit in a box or a hexagon; anything else's label is plain text.
+    if matches!(m.elements.get(&t.host), Some(Element::Door(_) | Element::Window(_))) {
+        d.push(Prim::Line { pts: ring, width: 1.0, color: INK, dash: None, closed: true });
+    }
     d.text(&text, (x, y), 10.0, INK);
     d.grow(from, (x, y));
 }
@@ -2250,6 +2253,36 @@ mod tests {
         let (a, b) = (at(7000.0, 2000.0), at(9000.0, 4000.0));
         assert_eq!(d.in_box(a, b, false), [8], "a window selects what is all inside");
         assert_eq!(d.in_box(b, a, true), [4, 8], "a crossing box also what it touches");
+    }
+
+    #[test]
+    fn a_tag_on_a_wall_or_a_room_draws_its_label_as_plain_text_over_the_plan() {
+        let mut s = house();
+        // The wall's type, and the room's area, each a little up and to the right of the point it names.
+        let first = |cat: &str| s.model.elements.iter().find(|(_, e)| e.category() == cat).map(|(id, _)| *id).unwrap();
+        let (wall_id, room_id) = (first("wall"), first("room"));
+        s.script(&format!("tag {{\"ids\": [{wall_id}], \"leader\": true}}\ntag {{\"ids\": [{room_id}], \"label\": \"Area\"}}")).unwrap();
+        let d = plan(&s.model, 1, 800, 600);
+        let png = png(&d).unwrap();
+        let tag_on = |host: Id| {
+            s.model.elements.iter().find_map(|(id, e)| match e {
+                Element::Tag(t) if t.host == host => Some((*id, s.model.anchor(host).unwrap() + t.offset)),
+                _ => None,
+            })
+        };
+        let (wall, room) = (tag_on(wall_id), tag_on(room_id));
+        let ((wall_tag, wall_head), (room_tag, room_head)) = (wall.unwrap(), room.unwrap());
+        assert_eq!((wall_head, room_head), (P2(4400.0, 400.0), P2(4400.0, 3400.0)));
+        // Picked where it is drawn, and no box round it: the paper fill stops short of a ring the way a door's box has.
+        assert_eq!(d.pick(d.view.px(wall_head), 2.0), Some(wall_tag));
+        assert_eq!(d.pick(d.view.px(room_head), 2.0), Some(room_tag));
+        let (x, y) = d.view.px(wall_head);
+        let (r, g, b) = pixel(&png, (x, y - 8.0));
+        assert!(r > 200 && g > 200 && b > 200, "no box above a plain label: {:?}", (r, g, b));
+        // Its leader runs from the wall's middle up to the label.
+        let (lx, ly) = d.view.px(P2(4200.0, 200.0));
+        let (r, g, b) = pixel(&png, (lx, ly));
+        assert!(r < 200 && g < 200 && b < 200, "the leader line");
     }
 
     #[test]

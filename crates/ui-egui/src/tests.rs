@@ -1520,10 +1520,25 @@ fn tag_by_category_tags_the_door_clicked_and_tag_all_the_rest() {
     click(&mut h, P2(2000.0, 0.0));
     let tags = ids(&h, "tag");
     assert_eq!((tags.len(), field(&h, tags[0], "text")), (1, json!("1")));
+    // Any element: a wall names its type, or the field the Options Bar asks for; one without it says so and makes no tag.
+    click(&mut h, P2(5000.0, 0.0));
+    let tags_now = ids(&h, "tag");
+    assert_eq!(tags_now.len(), 2);
+    let wall = find(&h, |e| matches!(e, Element::Wall(w) if w.start == P2(0.0, 0.0)));
+    assert_eq!(field(&h, tags_now[1], "text"), field(&h, wall, "type"));
+    type_into(&mut h, "Label:", "Height");
+    click(&mut h, P2(5000.0, 0.0));
+    let tags_now = ids(&h, "tag");
+    assert_eq!((tags_now.len(), field(&h, tags_now[2], "text"), field(&h, tags_now[2], "label")), (3, json!("3000"), json!("Height")));
+    type_into(&mut h, "Label:", "Colour");
+    click(&mut h, P2(5000.0, 0.0));
+    assert_eq!(ids(&h, "tag").len(), 3);
+    assert!(h.state().status.error && h.state().status.text.contains("Colour"), "{:?}", h.state().status);
+    type_into(&mut h, "Label:", "");
     // Tag All, back on the Annotate tab: the window too.
     press(&mut h, "Annotate");
     press(&mut h, "Tag All");
-    assert_eq!(ids(&h, "tag").len(), 2);
+    assert_eq!(ids(&h, "tag").len(), 4);
     // A tag drags like anything else; it sat outside, the door swinging in.
     key(&mut h, Key::Escape);
     drag(&mut h, P2(2000.0, -500.0), P2(3000.0, -500.0));

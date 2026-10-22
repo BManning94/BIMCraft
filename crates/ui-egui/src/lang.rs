@@ -215,9 +215,9 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["Tag by Category", "Identificar por categoria", "Etiquetar por categoría"],
     [
-        "Tag by Category (TG): click a door or window to tag it with its mark",
-        "Identificar por categoria (TG): clique numa porta ou janela para identificá-la com sua marca",
-        "Etiquetar por categoría (TG): haz clic en una puerta o ventana para etiquetarla con su marca",
+        "Tag by Category (TG): click an element to tag it with its type, a door's or window's mark, or the field in Label",
+        "Identificar por categoria (TG): clique num elemento para identificá-lo com seu tipo, a marca de uma porta ou janela, ou o campo em Rótulo",
+        "Etiquetar por categoría (TG): haz clic en un elemento para etiquetarlo con su tipo, la marca de una puerta o ventana, o el campo en Etiqueta",
     ],
     ["Tag All", "Identificar todos", "Etiquetar todo"],
     [
@@ -381,6 +381,8 @@ const WORDS: &[[&str; 3]] = &[
     ["Constrain", "Restringir", "Restringir"],
     ["Multiple", "Múltiplo", "Múltiple"],
     ["Leader", "Linha de chamada", "Directriz"],
+    ["Label:", "Rótulo:", "Etiqueta:"],
+    ["a field, such as Type or Height", "um campo, como Type ou Height", "un campo, como Type o Height"],
     ["Text:", "Texto:", "Texto:"],
     ["what the note says", "o que a nota diz", "lo que dice la nota"],
     ["Offset:", "Deslocamento:", "Desfase:"],
@@ -514,9 +516,9 @@ const WORDS: &[[&str; 3]] = &[
         "Elige más referencias, o haz clic lejos de ellas donde va la línea de cota. Esc cancela.",
     ],
     [
-        "Click a door or window to tag it with its mark.",
-        "Clique numa porta ou janela para identificá-la com sua marca.",
-        "Haz clic en una puerta o ventana para etiquetarla con su marca.",
+        "Click an element to tag it with its type, a door's or window's with its mark, or with the field in Label.",
+        "Clique num elemento para identificá-lo com seu tipo, o de uma porta ou janela com sua marca, ou com o campo em Rótulo.",
+        "Haz clic en un elemento para etiquetarlo con su tipo, el de una puerta o ventana con su marca, o con el campo en Etiqueta.",
     ],
     [
         "Pick a wall, a grid or another line; then one that meets it.",

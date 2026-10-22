@@ -398,8 +398,11 @@ pub static ALL: &[Command] = &[
         "tag",
         "Tag by Category",
         &["TG"],
-        "{ids?: [id,…], level?, offset?: [dx, dy], leader?} tags doors and windows with their marks, `offset` mm from their \
-         centres (beside the wall by default); without ids, every door and window on the level not tagged yet",
+        "{ids?: [id,…], label?, level?, category?, offset?: [dx, dy], leader?} tags elements with a field of theirs: a door's or \
+         window's mark, a room's name, else the type, or `label`, any field its category's schedule has (`Height`, `Area`, a \
+         project parameter); doors, windows, walls, columns, components, floors, ceilings, roofs, rooms, runs and stairs. `offset` \
+         mm from the point it names (beside the wall for a door or window, else up and right); without ids, every door and window \
+         on the level not tagged yet, or of `category`",
         tag,
     ),
     edit(
@@ -3033,9 +3036,12 @@ fn tag(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let offset = point_opt(c, p, "offset")?;
     let leader = flag(c, p, "leader")?;
+    let label = string(c, p, "label")?.filter(|l| !l.trim().is_empty());
     let hosts = if absent(p.get("ids")) && absent(p.get("id")) {
-        // Tag All: the level's doors and windows that have no tag.
+        // Tag All: the level's doors and windows, or its `category`, that have no tag.
         let level = level_param(c, m, p, "level")?;
+        let of = string(c, p, "category")?.map(|s| category(&s));
+        let kind = of.clone().unwrap_or_else(|| "door and window".into());
         let tagged: BTreeSet<Id> = m
             .elements
             .values()
@@ -3050,7 +3056,7 @@ fn tag(s: &mut Session, p: &Value) -> R {
             .elements
             .iter()
             .filter(|(id, e)| {
-                matches!(e, Element::Door(_) | Element::Window(_))
+                of.as_deref().map_or(matches!(e, Element::Door(_) | Element::Window(_)), |cat| e.category() == cat)
                     && !tagged.contains(id)
                     && m.level_of(e) == Some(level)
                     && look.shows(**id)
@@ -3058,13 +3064,16 @@ fn tag(s: &mut Session, p: &Value) -> R {
             .map(|(id, _)| *id)
             .collect();
         if open.is_empty() {
-            return Err(bad(c, format!("nothing to tag: {} has no door or window without a tag", level_name(m, level))));
+            return Err(bad(c, format!("nothing to tag: {} has no {kind} without a tag", level_name(m, level))));
         }
         open
     } else {
         ids_param(c, m, p)?
     };
-    let tags: Vec<Tag> = hosts.iter().map(|&host| Tag { host, offset: offset.unwrap_or_else(|| m.tag_offset(host)), leader }).collect();
+    let tags: Vec<Tag> = hosts
+        .iter()
+        .map(|&host| Tag { host, offset: offset.unwrap_or_else(|| m.tag_offset(host)), leader, label: label.clone() })
+        .collect();
     let m = s.model_mut();
     let ids: Vec<Id> = tags.into_iter().map(|t| m.insert(Element::Tag(t))).collect();
     Ok(json!({"ids": ids}))

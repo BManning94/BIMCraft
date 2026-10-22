@@ -628,6 +628,21 @@ pub struct Tag {
     /// A line from the tag to what it names.
     #[serde(default)]
     pub leader: bool,
+    /// The field of its host it shows, by the name a schedule of its category gives it (`Type`, `Height`, a project parameter's);
+    /// none for the category's usual one (`Tag::usual`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl Tag {
+    /// The field a tag of category `cat` shows unless it names one: a door's or window's mark, a room's name, else the type.
+    pub fn usual(cat: &str) -> &'static str {
+        match cat {
+            "door" | "window" => "Mark",
+            "room" => "Name",
+            _ => "Type",
+        }
+    }
 }
 
 /// A column standing on `level` at `at`, its width along `angle` degrees (counter-clockwise from
@@ -2097,10 +2112,7 @@ impl Model {
             Element::Railing(r) => r.host.and_then(|h| self.elements.get(&h)).and_then(|e| self.level_of(e)).or(Some(r.level)),
             Element::Roof(r) => Some(r.level),
             Element::Door(o) | Element::Window(o) => wall_level(o),
-            Element::Tag(t) => match self.elements.get(&t.host) {
-                Some(Element::Door(o) | Element::Window(o)) => wall_level(o),
-                _ => None,
-            },
+            Element::Tag(t) => self.elements.get(&t.host).filter(|h| !matches!(h, Element::Tag(_))).and_then(|h| self.level_of(h)),
             // Notes and spot elevations in a level's plan.
             Element::Text(Note { view, .. }) | Element::Spot(Spot { view, .. }) => self.level(*view).map(|_| *view),
             Element::Level(_)
@@ -2512,10 +2524,26 @@ impl Model {
         Some((base - u * half, base + u * half))
     }
 
-    /// A door's or window's centre, on its wall's centre line.
+    /// Where a tag points at element `id`: a door's or window's centre, on its wall's centre line; the middle of a wall's or a run's
+    /// centre line; a column's, a component's or a room's point; a floor's, ceiling's or roof's outline's centre; a stair's or
+    /// ramp's start. None for what has no place in a plan to point at.
     pub fn anchor(&self, id: Id) -> Option<P2> {
-        match self.elements.get(&id) {
-            Some(Element::Door(o) | Element::Window(o)) => self.wall(o.host).map(|w| walls::Axis::of(w).at(o.offset, 0.0)),
+        let middle = |a: P2, b: P2| Some((a + b) * 0.5);
+        match self.elements.get(&id)? {
+            Element::Door(o) | Element::Window(o) => self.wall(o.host).map(|w| walls::Axis::of(w).at(o.offset, 0.0)),
+            Element::Wall(w) => {
+                let axis = walls::Axis::of(w);
+                Some(axis.at(axis.length() / 2.0, 0.0))
+            }
+            Element::Column(c) | Element::StructuralColumn(c) | Element::Footing(c) => Some(c.at),
+            Element::Component(c) => Some(c.at),
+            Element::Room(r) => Some(r.point),
+            run_arm!(r) => middle(r.start, r.end),
+            Element::Stair(s) => Some(s.start),
+            Element::Ramp(r) => Some(r.start),
+            Element::Floor(Floor { boundary, .. }) | Element::Ceiling(Ceiling { boundary, .. }) | Element::Roof(Roof { boundary, .. }) => {
+                (!boundary.is_empty()).then(|| boundary.iter().fold(P2(0.0, 0.0), |sum, p| sum + *p) * (1.0 / boundary.len() as f64))
+            }
             _ => None,
         }
     }
@@ -2525,7 +2553,8 @@ impl Model {
     /// exterior, unless flipped).
     pub fn tag_offset(&self, host: Id) -> P2 {
         let (Some(e @ (Element::Door(o) | Element::Window(o))), Some(w)) = (self.elements.get(&host), self.wall_of(host)) else {
-            return P2(0.0, 0.0);
+            // Anything else: a little up and to the right of the point the tag names.
+            return if self.anchor(host).is_some() { P2(400.0, 400.0) } else { P2(0.0, 0.0) };
         };
         let (ext, int) = walls::faces(self, w);
         let outside = o.flip_facing == matches!(e, Element::Door(_));
@@ -2541,12 +2570,11 @@ impl Model {
         }
     }
 
-    /// What a tag shows: its door's or window's mark, `?` while that has none.
+    /// What a tag shows: the field of its host it names (as a schedule shows it, in the project's units), `?` while that has no
+    /// value (a door's mark before it has one).
     pub fn tag_text(&self, t: &Tag) -> String {
-        match self.elements.get(&t.host) {
-            Some(Element::Door(o) | Element::Window(o)) if !o.mark.trim().is_empty() => o.mark.clone(),
-            _ => "?".into(),
-        }
+        let field = t.label.clone().or_else(|| self.elements.get(&t.host).map(|e| Tag::usual(e.category()).to_string()));
+        field.and_then(|f| crate::schedule::field_text(self, t.host, &f)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "?".into())
     }
 
     /// The line `r` measures to, or why there is none. A straight wall's lines reach as far as its
@@ -3436,10 +3464,24 @@ impl Model {
                     }
                 }
                 Element::Tag(t) => {
-                    match self.elements.get(&t.host) {
-                        Some(Element::Door(_) | Element::Window(_)) => {}
-                        Some(h) => return Err(format!("{who}: tags name doors and windows, not {} {}", h.category(), t.host)),
-                        None => return Err(format!("{who}: element {} doesn't exist", t.host)),
+                    let Some(host) = self.elements.get(&t.host) else {
+                        return Err(format!("{who}: element {} doesn't exist", t.host));
+                    };
+                    // A door or window whose wall is gone is the wall's to complain of; anything else needs a place in a plan.
+                    if !matches!(host, Element::Door(_) | Element::Window(_)) && self.anchor(t.host).is_none() {
+                        return Err(format!(
+                            "{who}: tags name what has a place in a plan (doors, windows, walls, columns, floors, rooms and the like), not {} {}",
+                            host.category(),
+                            t.host
+                        ));
+                    }
+                    if let Some(label) = &t.label {
+                        let cat = host.category();
+                        let fields = crate::schedule::fields(self, cat);
+                        if !fields.iter().any(|(name, _)| name == label) {
+                            let names: Vec<String> = fields.into_iter().map(|(name, _)| name).collect();
+                            return Err(format!("{who}: {cat} {} has no field `{label}`; its fields are: {}", t.host, names.join(", ")));
+                        }
                     }
                     point(&format!("{who} offset"), t.offset)?;
                 }

@@ -482,6 +482,20 @@ pub fn fields(m: &Model, cat: &str) -> Vec<(String, Kind)> {
     out
 }
 
+/// Field `name` of element `id` as its category's schedule shows it (a length or an area in the project's units, a yes or no as
+/// `Yes` or `No`): what a tag shows. None where the element has no such field, or no value for it.
+pub fn field_text(m: &Model, id: Id, name: &str) -> Option<String> {
+    let e = m.elements.get(&id)?;
+    let cat = e.category();
+    let kind = fields(m, cat).into_iter().find(|(n, _)| n == name)?.1;
+    let formulas = BTreeMap::new();
+    let mut row = Row { m, e, cat, json: element_json(m, id), formulas: &formulas, done: BTreeMap::new() };
+    match row.get(name) {
+        Value::Null => None,
+        v => Some(shown(m.units, kind, &v)),
+    }
+}
+
 /// The fields a schedule of category `cat` shows unless it chooses.
 pub fn defaults(cat: &str) -> Vec<Field> {
     let (n, own) = own(cat);
