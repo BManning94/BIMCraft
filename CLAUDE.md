@@ -439,3 +439,12 @@ The tools are run by absolute path (`macos::Tools`), so tests point them at shel
 AppImage; the one test that hands a file to the real `hdiutil` is skipped on a Mac, where nobody has seen what that does). Nothing of the macOS side has run on a Mac, and the AppImage side has run only against scripts that stand in for one.
 None of the Windows side runs here: its sequencing is tested with shell scripts for
 msiexec and the app (`tests::unix`), and what can't be tested is UAC, the real upgrade and the Program Files check on a real install.
+
+Tags. A `Tag` names an element at a `host` by a `label`: the name of one of the fields its category's schedule has (`schedule::field_text` reads it
+as the schedule shows it, in the project's units), or, with none, the category's usual one (`Tag::usual`: a door's or window's `Mark`, a room's `Name`, else
+the `Type`), `?` while that has no value. The host is anything `Model::anchor` finds a point for (a door or window's centre, the middle of a wall's or a run's
+centre line, a column's, a component's or a room's point, the centre of a floor's, ceiling's or roof's outline, a stair's or ramp's start): a new kind of host is an arm there,
+and `Model::check` refuses a tag whose host has none, or whose `label` isn't a field of it, saying which fields there are. A tag sits `offset` mm from that point (`Model::tag_offset`),
+is drawn in plans only (a door's in a box, a window's in a hexagon, any other's as plain text, with a leader line when it has one), follows its host, and goes
+with it. The Tag tool picks whatever `anchor` finds a point for, and the Options Bar's Label field is the `label` the click passes on; Tag All (`tag` without `ids`)
+still takes doors and windows unless given a `category`.

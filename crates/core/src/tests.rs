@@ -579,7 +579,10 @@ fn tags_name_doors_and_windows_and_go_where_they_go() {
     assert_eq!(all.as_array().map(Vec::len), Some(1));
     assert_eq!(element(&mut s, all[0].as_u64().unwrap())["text"], "?");
     assert!(s.execute("tag", &json!({})).unwrap_err().contains("nothing to tag"));
-    assert!(s.execute("tag", &json!({"ids": [ids[0]]})).unwrap_err().contains("door"));
+    // What isn't in a plan to point at is no host: a grid has no place for a tag to name.
+    let grid = run(&mut s, "grid", json!({"start": [0, -2000], "end": [0, 8000]}))["id"].as_u64().unwrap();
+    let e = s.execute("tag", &json!({"ids": [grid]})).unwrap_err();
+    assert!(e.contains("grid") && e.contains("wall"), "{e}");
     // A tag goes with its door's wall, and on its own wherever it's moved.
     run(&mut s, "move", json!({"ids": [ids[0]], "by": [0, -1000]}));
     assert_eq!(element(&mut s, t)["at"], json!([2000.0, -1500.0]));
@@ -592,6 +595,46 @@ fn tags_name_doors_and_windows_and_go_where_they_go() {
     // Deleting a door takes its tags.
     run(&mut s, "delete", json!({"ids": [door]}));
     assert_eq!(count(&mut s, "tag"), 2);
+}
+
+#[test]
+fn a_tag_names_any_element_by_a_field_of_it() {
+    let mut s = Session::new();
+    let ids = house(&mut s);
+    // By default a wall's tag names its type, a little way from the middle of its centre line.
+    let t = run(&mut s, "tag", json!({"ids": [ids[0]]}))["ids"][0].as_u64().unwrap();
+    let kind = element(&mut s, ids[0])["type"].as_str().unwrap().to_string();
+    let tag = element(&mut s, t);
+    assert_eq!((tag["text"].clone(), tag["at"].clone(), tag["label"].clone()), (json!(kind), json!([4400.0, 400.0]), Value::Null));
+    // Any field its category's schedule has, as the schedule shows it: a length in the project's units.
+    let h = run(&mut s, "tag", json!({"ids": [ids[0]], "label": "Height"}))["ids"][0].as_u64().unwrap();
+    let height = s.model.units.length(3000.0);
+    assert_eq!((element(&mut s, h)["text"].clone(), element(&mut s, h)["label"].clone()), (json!(height), json!("Height")));
+    // A field its category hasn't is refused, naming the ones it has.
+    let e = s.execute("tag", &json!({"ids": [ids[0]], "label": "Colour"})).unwrap_err();
+    assert!(e.contains("Colour") && e.contains("Height") && e.contains("Type"), "{e}");
+    // A floor's is where its outline is centred; a room's, its name; a level or a grid isn't a host.
+    let floor = run(&mut s, "floor", json!({}))["id"].as_u64().unwrap();
+    let room = run(&mut s, "room", json!({"point": [4000, 3000], "name": "Living"}))["id"].as_u64().unwrap();
+    let both = run(&mut s, "tag", json!({"ids": [floor, room]}))["ids"].clone();
+    let [on_floor, on_room] = [0, 1].map(|i| element(&mut s, both[i].as_u64().unwrap()));
+    assert_eq!((on_floor["at"].clone(), on_room["text"].clone()), (json!([4400.0, 3400.0]), json!("Living")));
+    let level = s.model.levels()[0].0;
+    assert!(s.execute("tag", &json!({"ids": [level]})).unwrap_err().contains("level"));
+    // Tag All takes a category: its elements on the level not tagged yet (the first wall has two tags already).
+    let rest = run(&mut s, "tag", json!({"category": "wall"}))["ids"].clone();
+    assert_eq!(rest.as_array().map(Vec::len), Some(3));
+    assert!(s.execute("tag", &json!({"category": "wall"})).unwrap_err().contains("nothing to tag"));
+    // A tag goes with its host, and a label is its own to change.
+    run(&mut s, "move", json!({"ids": [ids[0]], "by": [0, -1000]}));
+    assert_eq!(element(&mut s, t)["at"], json!([4400.0, -600.0]));
+    run(&mut s, "modify", json!({"id": h, "label": "Thickness"}));
+    assert_eq!(element(&mut s, h)["text"], json!(s.model.units.length(200.0)));
+    assert!(s.execute("modify", &json!({"id": h, "label": "Colour"})).is_err());
+    // Deleting the host takes its tags.
+    let before = count(&mut s, "tag");
+    run(&mut s, "delete", json!({"ids": [ids[0]]}));
+    assert_eq!(count(&mut s, "tag"), before - 2);
 }
 
 #[test]

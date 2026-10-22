@@ -792,7 +792,7 @@ impl BimApp {
             }
             // What a spot elevation would read.
             Tool::Spot => model.spot_host(level, view.mm(q)),
-            Tool::Tag => d.pick(q, PICK).filter(|id| matches!(model.elements.get(id), Some(Element::Door(_) | Element::Window(_)))),
+            Tool::Tag => d.pick(q, PICK).filter(|id| model.anchor(*id).is_some()),
             Tool::Attach => {
                 d.pick_all(q, PICK).into_iter().find(|id| matches!(model.elements.get(id), Some(Element::Roof(_) | Element::Floor(_))))
             }
@@ -1243,7 +1243,8 @@ impl BimApp {
             }
             Tool::Tag => {
                 if let Some(id) = hovered {
-                    self.run("tag", json!({"ids": [id], "leader": self.tag_leader}));
+                    let label = self.tag_label.trim();
+                    self.run("tag", json!({"ids": [id], "leader": self.tag_leader, "label": (!label.is_empty()).then_some(label)}));
                 }
             }
             // The selected walls, onto the roof or floor picked; then Modify, the walls still selected.
@@ -2250,7 +2251,8 @@ impl BimApp {
             }
             Tool::Tag => {
                 if let Some(id) = hovered {
-                    sketched(&Element::Tag(Tag { host: id, offset: m.tag_offset(id), leader: self.tag_leader }));
+                    let label = Some(self.tag_label.trim().to_string()).filter(|l| !l.is_empty());
+                    sketched(&Element::Tag(Tag { host: id, offset: m.tag_offset(id), leader: self.tag_leader, label }));
                 }
                 return;
             }
