@@ -2280,7 +2280,7 @@ mod tests {
         let first = |cat: &str| s.model.elements.iter().find(|(_, e)| e.category() == cat).map(|(id, _)| *id).unwrap();
         let (wall_id, room_id) = (first("wall"), first("room"));
         s.script(&format!("tag {{\"ids\": [{wall_id}], \"leader\": true}}\ntag {{\"ids\": [{room_id}], \"label\": \"Area\"}}")).unwrap();
-        let d = plan(&s.model, 1, 800, 600);
+        let d = plan(&s.model, 100000, 800, 600);
         let png = png(&d).unwrap();
         let tag_on = |host: Id| {
             s.model.elements.iter().find_map(|(id, e)| match e {

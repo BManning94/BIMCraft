@@ -297,6 +297,8 @@ fn levels(cx: &mut Import, inv: &Inventory) {
 /// What breaks a rule is left out with the rule (a wall takes its doors and windows along), then the model is checked once more.
 fn finish(mut cx: Import, schema: String) -> Result<Imported, String> {
     cx.model.adopt_materials();
+    // What the import put in the library (types, materials) and its parts get their ids and GUIDs, as `Model::check` asks.
+    cx.model.sync_library();
     let m = &mut cx.model;
     let mut dropped: Vec<(Id, String)> = Vec::new();
     let mut checked = false;

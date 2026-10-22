@@ -2,7 +2,7 @@
 
 use crate::project_fixture::{Block, Lev, Mat, Project, Rec, TypeRec, arc_bytes, layers_bytes, line_bytes, name_bytes, orientation_bytes};
 use bimcraft_core::import::Imported;
-use bimcraft_core::model::{Element, Function, Id, Layer, Wall};
+use bimcraft_core::model::{Element, Function, Id, Wall};
 
 pub(super) const WALLS: i64 = -2_000_011;
 
@@ -68,13 +68,9 @@ fn a_straight_wall_comes_in_with_its_line_height_levels_type_and_layers() {
         let t = &i.model.types.wall[&w.type_name];
         assert_eq!(w.type_name, "Brick wall");
         assert_eq!(t.thickness, 228.6);
-        assert_eq!(
-            t.layers,
-            [
-                Layer { function: Function::Finish, material: "Brick".into(), thickness: 76.2, ..Layer::default() },
-                Layer { function: Function::Structure, material: "Concrete".into(), thickness: 152.4, ..Layer::default() },
-            ]
-        );
+        // The layers by what they are made of: the library gives each its own id and GUID once the project is made.
+        let layers: Vec<(Function, &str, f64)> = t.layers.iter().map(|l| (l.function, l.material.as_str(), l.thickness)).collect();
+        assert_eq!(layers, [(Function::Finish, "Brick", 76.2), (Function::Structure, "Concrete", 152.4)]);
         assert!(i.model.materials.contains_key("Brick") && i.model.materials.contains_key("Concrete"));
         assert_eq!(i.skipped, Vec::<String>::new(), "Revit {release}");
     }
