@@ -5453,3 +5453,21 @@ fn plan_cache_reuses_drawings_and_invalidates_geometry_view_and_ceiling() {
     let upper = cache.drawing(&s.model, other, view, false);
     assert!(!Arc::ptr_eq(&undone, &upper));
 }
+
+#[test]
+fn opening_a_file_with_fields_a_newer_version_added_says_they_are_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("newer.bimcraft");
+    let mut s = Session::new();
+    s.execute("wall", &json!({"points": [[0, 0], [4000, 0]]})).unwrap();
+    let mut v = serde_json::to_value(&*s.model).unwrap();
+    v["weather"] = json!("sunny");
+    v["elements"]["100002"]["finish_date"] = json!("2027-01-01");
+    std::fs::write(&project, v.to_string()).unwrap();
+    let mut h = app("");
+    assert!(h.state_mut().open_path(&project));
+    h.run();
+    assert_eq!(walls(&h).len(), 1);
+    let status = &h.state().status;
+    assert!(!status.error && status.text.contains("newer.bimcraft opened without 2 fields"), "{}", status.text);
+}
