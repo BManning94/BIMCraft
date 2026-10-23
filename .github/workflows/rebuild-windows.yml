@@ -1,7 +1,7 @@
 name: Rebuild patched Windows app
 on:
   push:
-    branches: [main]
+    branches: [main, "security/harden-untrusted-input"]
     paths: [bimcraft-security.patch, .github/workflows/rebuild-windows.yml]
   workflow_dispatch:
 permissions:
@@ -12,6 +12,14 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify previously tested source
+        run: |
+          $patch = git rev-parse HEAD:bimcraft-security.patch
+          if ($patch -ne '271c5c2215f253edb219ebc37f2db019c519b987') { throw 'Patch differs from the one validated in run 39988106892' }
+          git diff --exit-code 818967487278dca6ae68e8e1861fc4250e41727a HEAD -- Cargo.toml Cargo.lock apps crates
+          if ($LASTEXITCODE -ne 0) { throw 'Source differs from tested baseline' }
       - name: Apply reviewed security changes
         run: |
           git apply --check bimcraft-security.patch
@@ -24,10 +32,7 @@ jobs:
         run: cargo fmt --all
       - name: Check format
         run: cargo fmt --all --check
-      - name: Lint
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --locked --workspace
+      # Identical source passed lint and 1104 tests in run 39988106892.
       - name: Build
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
@@ -36,16 +41,19 @@ jobs:
         shell: pwsh
         run: |
           $bin = 'target/x86_64-pc-windows-msvc/release'
-          & "$bin/bimcraft.exe" --version
-          if ($LASTEXITCODE -ne 0) { throw 'Desktop smoke test failed' }
+          $desktop = Start-Process -FilePath (Resolve-Path "$bin/bimcraft.exe") -ArgumentList '--version' -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput desktop-version.txt
+          if ($desktop.ExitCode -ne 0) { throw "Desktop smoke test failed: $($desktop.ExitCode)" }
+          $versionText = (Get-Content desktop-version.txt -Raw).Trim()
+          if ($versionText -ne 'bimcraft 0.7.0') { throw "Unexpected desktop version: $versionText" }
           & "$bin/bimcraft-cli.exe" --version
           if ($LASTEXITCODE -ne 0) { throw 'CLI smoke test failed' }
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item "$bin/bimcraft.exe", "$bin/bimcraft-cli.exe" dist/
-          Copy-Item LICENSE-MIT, LICENSE-APACHE, bimcraft-security.patch dist/
+          Copy-Item LICENSE-MIT, LICENSE-APACHE, NOTICE, bimcraft-security.patch dist/
           Copy-Item crates/rvt/NOTICE dist/REVIT-READER-NOTICE.txt
           Copy-Item docs/security-local-review.md dist/SECURITY-REVIEW.md
           Set-Content dist/BUILD-COMMIT.txt $env:GITHUB_SHA
+          Set-Content dist/VALIDATION.txt 'Identical source passed formatting, clippy, and 1104 tests (one ignored) in https://github.com/BManning94/BIMCraft/actions/runs/39988106892 . Cargo audit completed in https://github.com/BManning94/BIMCraft/actions/runs/39989225814 with four unmaintained warnings and one yanked-package warning. Full GUI launch and fuzzing remain unverified. Automatic installation is disabled pending publisher authentication.'
           Get-ChildItem dist/*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
