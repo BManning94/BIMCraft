@@ -228,6 +228,7 @@ pub enum Icon {
     Materials,
     Component,
     LoadFamily,
+    Link,
     Parameters,
     Measure,
     Snaps,
@@ -841,6 +842,10 @@ pub fn paint(p: &Painter, icon: Icon, r: Rect, color: Color32) {
             line(&[(12.0, 2.0), (12.0, 16.0)]),
             line(&[(8.0, 12.0), (12.0, 16.0), (16.0, 12.0)]),
         ],
+        // Two links of a chain, each through the other.
+        Icon::Link => {
+            vec![ring(&[(2.0, 8.0), (14.0, 8.0), (14.0, 16.0), (2.0, 16.0)]), ring(&[(10.0, 8.0), (22.0, 8.0), (22.0, 16.0), (10.0, 16.0)])]
+        }
         // A gable's profile, swept back.
         Icon::ExtrusionRoof => {
             vec![line(&[(2.0, 16.0), (8.0, 9.0), (14.0, 16.0)]), line(&[(8.0, 9.0), (16.0, 4.0), (22.0, 11.0), (14.0, 16.0)])]

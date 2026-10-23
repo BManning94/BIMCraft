@@ -4732,6 +4732,7 @@ mod autosave;
 mod browser;
 mod dock;
 mod gpu;
+mod links;
 mod mep;
 mod planviews;
 mod purge;

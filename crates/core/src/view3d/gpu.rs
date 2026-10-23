@@ -267,7 +267,7 @@ impl Mesh {
                 hit = Some(Hit { id: marks.id, face: "" });
             }
         }
-        hit
+        hit.filter(|h| !crate::link::is_linked(h.id))
     }
 
     /// The nearest triangle covering the centre of a pixel, as the CPU's rasterizer finds it: how near, as an f32 as it keeps

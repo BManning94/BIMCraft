@@ -224,6 +224,27 @@ impl Drawing {
         self.owners.push(self.owner);
         self.parts.push(self.part);
     }
+    /// What a link builds, first, so what the project draws lies over it: each kept in the order it was drawn in.
+    pub(crate) fn linked_under(&mut self) {
+        let under = |o: &Option<Id>| o.is_some_and(crate::link::is_linked);
+        if !self.owners.iter().any(under) {
+            return;
+        }
+        let prims = std::mem::take(&mut self.prims);
+        let mut all: Vec<(Prim, Option<Id>, Part)> = prims
+            .into_iter()
+            .zip(std::mem::take(&mut self.owners))
+            .zip(std::mem::take(&mut self.parts))
+            .map(|((p, o), part)| (p, o, part))
+            .collect();
+        all.sort_by_key(|(_, o, _)| !under(o));
+        for (p, o, part) in all {
+            self.prims.push(p);
+            self.owners.push(o);
+            self.parts.push(part);
+        }
+    }
+
     /// `rings` filled, each turned the same way round, so where they overlap or meet they fill as one.
     pub(crate) fn fill(&mut self, rings: &[Vec<P2>], color: Rgb) {
         if rings.is_empty() {
@@ -324,7 +345,8 @@ impl Drawing {
         // Each element's nearest primitive: its distance, and how late it's drawn.
         let mut near: std::collections::BTreeMap<Id, (f64, usize)> = std::collections::BTreeMap::new();
         for (order, (prim, owner)) in self.prims.iter().zip(&self.owners).enumerate() {
-            let Some(id) = *owner else { continue };
+            // What a link builds is drawn and snapped to, never picked.
+            let Some(id) = owner.filter(|id| !crate::link::is_linked(*id)) else { continue };
             let d = match prim {
                 Prim::Fill { rings, .. } => {
                     let rings: Vec<Vec<P2>> = rings.iter().map(|r| ring(r)).collect();
@@ -357,7 +379,7 @@ impl Drawing {
         // Each element: whether all of it is inside, and whether any of it is.
         let mut seen: std::collections::BTreeMap<Id, (bool, bool)> = std::collections::BTreeMap::new();
         for (prim, owner) in self.prims.iter().zip(&self.owners) {
-            let Some(id) = *owner else { continue };
+            let Some(id) = owner.filter(|id| !crate::link::is_linked(*id)) else { continue };
             let corners;
             let (rings, closed): (Vec<&[(f32, f32)]>, bool) = match prim {
                 Prim::Fill { rings, .. } => (rings.iter().map(Vec::as_slice).collect(), true),
@@ -924,6 +946,7 @@ pub fn section_at(m: &Model, id: impl Key, view: View, k: f32) -> Drawing {
     }
     d.owner = None;
     look.dress(&mut d);
+    d.linked_under();
     let at = (24.0 + font::width(&v.name, 16.0) / 2.0, view.height as f32 - 26.0);
     d.text_turned(&v.name, at, 16.0, 0.0, INK);
     d
@@ -1072,9 +1095,13 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, titled: bo
         d.owner = Some(*id);
         d.line(o, 4.0, INK, true);
     }
-    d.owner = None;
-    for (color, rings) in cut_unions(&look, outlines.iter().map(|(id, o)| (*id, o.clone()))) {
-        d.fill(&rings, color);
+    // What a link builds is filled apart, for [`Drawing::linked_under`] to put under the project's.
+    let (under, own): (Vec<_>, Vec<_>) = outlines.iter().partition(|(id, _)| crate::link::is_linked(*id));
+    for (group, owner) in [(under, Some(crate::link::UNION)), (own, None)] {
+        d.owner = owner;
+        for (color, rings) in cut_unions(&look, group.into_iter().map(|(id, o)| (*id, o.clone()))) {
+            d.fill(&rings, color);
+        }
     }
     // One fill per wall or column: in one even-odd fill, overlapping walls would cancel out.
     for (id, o) in outlines {
@@ -1234,6 +1261,7 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, titled: bo
     }
     d.owner = None;
     look.dress(&mut d);
+    d.linked_under();
     if titled {
         let mut title = m.view_name(key).map_or_else(String::new, str::to_string);
         if up {

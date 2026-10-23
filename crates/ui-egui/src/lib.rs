@@ -16,6 +16,7 @@ mod gpu;
 mod graphics;
 mod inquiry;
 pub mod lang;
+mod links;
 mod mep;
 mod orbit;
 mod paper;
@@ -456,6 +457,10 @@ pub struct BimApp {
     /// What each view hides or reveals for now (not the project's), and the model it is drawn from.
     temporary: HashMap<Sheet, footer::Temp>,
     shadow: Option<footer::Shadow>,
+    /// The project, and what the views draw of it with its links built in: see [`BimApp::view_model`].
+    seen: Option<(Arc<Model>, Arc<Model>)>,
+    /// Link Model was asked for: its file dialog opens on the next frame, so a shortcut typed alone never waits on one.
+    link_dialog: bool,
     /// A selected element's temporary dimension being typed: the element, which of its dimensions (a wall has one, a
     /// door or window two: from its wall's start, from its end), the length so far.
     dim_edit: Option<(Id, usize, String)>,
@@ -784,6 +789,8 @@ impl BimApp {
             dim_edit: None,
             temporary: HashMap::new(),
             shadow: None,
+            seen: None,
+            link_dialog: false,
             tab_cycle: false,
             held: Vec::new(),
             show_shortcuts: false,
@@ -1314,6 +1321,10 @@ impl BimApp {
             // What the selection hides comes back; with nothing of it hidden, the list of what the view hides.
             "PU" => {
                 self.open_purge();
+                return true;
+            }
+            "LK" => {
+                self.link_dialog = true;
                 return true;
             }
             "DP" => {
@@ -2636,6 +2647,12 @@ impl BimApp {
                 }
             });
         });
+        panel(ui, "Links", |ui| {
+            let tip = "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to";
+            if big_button(ui, Icon::Link, "Link Model", false, tip).clicked() {
+                self.link_dialog = true;
+            }
+        });
         panel(ui, "Family Editor", |ui| {
             let tip = "New Family: start a family of your own, of a category, to edit its parameters, types and forms";
             let r = big_button(ui, Icon::FamilyEditor, "New Family", false, tip);
@@ -3376,6 +3393,9 @@ impl BimApp {
         self.phasing_window(ctx);
         self.options_window(ctx);
         self.purge_window(ctx);
+        if std::mem::take(&mut self.link_dialog) {
+            self.link_model_dialog();
+        }
         self.select_by_id_window(ctx);
         self.ids_of_selection_window(ctx);
         self.shortcuts_window(ctx);

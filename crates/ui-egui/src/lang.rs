@@ -100,6 +100,7 @@ pub fn category(category: &str, several: bool) -> String {
         "spot" => (["Spot Elevation", "Elevação de ponto", "Cota de nivel"], ["Spot Elevations", "Elevações de ponto", "Cotas de nivel"]),
         "schedule" => (["Schedule", "Tabela", "Tabla"], ["Schedules", "Tabelas", "Tablas"]),
         "view3d" => (["3D View", "Vista 3D", "Vista 3D"], ["3D Views", "Vistas 3D", "Vistas 3D"]),
+        "link" => (["Linked Model", "Modelo vinculado", "Modelo vinculado"], ["Linked Models", "Modelos vinculados", "Modelos vinculados"]),
         other => return other.to_string(),
     };
     get().of(if several { many } else { one }).to_string()
@@ -268,6 +269,19 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["Duplicate View: open a plan first", "Duplicar vista: abra uma planta primeiro", "Duplicar vista: abre un plano primero"],
     ["Parent View", "Vista principal", "Vista principal"],
+    ["Linked Models", "Modelos vinculados", "Modelos vinculados"],
+    ["{} (not loaded)", "{} (não carregado)", "{} (no cargado)"],
+    ["Reload", "Recarregar", "Recargar"],
+    ["Links", "Vínculos", "Vínculos"],
+    ["Link Model", "Vincular modelo", "Vincular modelo"],
+    [
+        "Link Model (LK): another project, a BIMCraft file or an IFC, shown in this one as a reference that can't be edited: halftone in the plans, the sections and the 3D view, and snapped to",
+        "Vincular modelo (LK): outro projeto, um arquivo BIMCraft ou um IFC, mostrado neste como referência que não se edita: em meio-tom nas plantas, nos cortes e na vista 3D, e com snap nele",
+        "Vincular modelo (LK): otro proyecto, un archivo BIMCraft o un IFC, mostrado en este como referencia que no se edita: en medio tono en las plantas, los cortes y la vista 3D, y con snap a él",
+    ],
+    ["Reload All", "Recarregar todos", "Recargar todos"],
+    ["Origin", "Origem", "Origen"],
+    ["Loaded", "Carregado", "Cargado"],
     ["Purge Unused", "Limpar não usados", "Purgar no usados"],
     [
         "Purge Unused (PU): take out the types, families and the rest nothing in the project uses; each category keeps a type",
