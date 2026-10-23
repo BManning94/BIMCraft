@@ -1,0 +1,655 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 5ee2302..3cca855 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -103,3 +103,14 @@ jobs:
+           echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint.tar.gz" | sha256sum -c -
+           tar xzf actionlint.tar.gz actionlint
+           ./actionlint -color
++
++  dependency-security:
++    name: Rust dependency advisories
++    runs-on: ubuntu-24.04
++    timeout-minutes: 15
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install audit tool
++        run: cargo install cargo-audit --locked
++      - name: Audit committed lockfile
++        run: cargo audit
+diff --git a/.github/workflows/patched-windows.yml b/.github/workflows/patched-windows.yml
+new file mode 100644
+index 0000000..7aa2352
+--- /dev/null
++++ b/.github/workflows/patched-windows.yml
+@@ -0,0 +1,52 @@
++name: Patched Windows build
++on:
++  push:
++    branches: ["security/harden-untrusted-input"]
++  workflow_dispatch:
++permissions:
++  contents: read
++jobs:
++  windows:
++    runs-on: windows-latest
++    timeout-minutes: 90
++    env:
++      CARGO_TERM_COLOR: always
++    steps:
++      - uses: actions/checkout@v4
++      - name: Rust tools
++        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
++      - name: Format source
++        run: cargo fmt --all
++      - name: Check formatting
++        run: cargo fmt --all --check
++      - name: Lint
++        run: cargo clippy --locked --workspace --all-targets -- -D warnings
++      - name: Regression tests
++        run: cargo test --locked --workspace
++      - name: Build Windows programs
++        env:
++          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
++        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p bimcraft -p bimcraft-cli
++      - name: Check programs and package
++        shell: pwsh
++        run: |
++          $bin = 'target/x86_64-pc-windows-msvc/release'
++          & "$bin/bimcraft.exe" --version
++          if ($LASTEXITCODE -ne 0) { throw 'Desktop version check failed' }
++          & "$bin/bimcraft-cli.exe" --version
++          if ($LASTEXITCODE -ne 0) { throw 'CLI version check failed' }
++          New-Item -ItemType Directory -Force dist | Out-Null
++          Copy-Item "$bin/bimcraft.exe", "$bin/bimcraft-cli.exe" dist/
++          Copy-Item LICENSE-MIT, LICENSE-APACHE dist/
++          Copy-Item crates/rvt/NOTICE dist/REVIT-READER-NOTICE.txt
++          Copy-Item docs/security-local-review.md dist/SECURITY-REVIEW.md
++          Set-Content dist/BUILD-COMMIT.txt $env:GITHUB_SHA
++          Get-ChildItem dist/*.exe | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content dist/SHA256SUMS.txt
++          git diff --output=dist/formatting.patch
++      - name: Downloadable Windows app
++        uses: actions/upload-artifact@v4
++        with:
++          name: BIMCraft-patched-Windows-x64
++          path: dist/
++          if-no-files-found: error
++          retention-days: 14
+diff --git a/Cargo.lock b/Cargo.lock
+index 0912fc1..39feac5 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2903,9 +2903,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "rustls-webpki"
+-version = "0.103.15"
++version = "0.103.16"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
++checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+ dependencies = [
+  "ring",
+  "rustls-pki-types",
+@@ -3851,9 +3851,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "webpki-roots"
+-version = "1.0.9"
++version = "1.0.10"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
++checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
+ dependencies = [
+  "rustls-pki-types",
+ ]
+diff --git a/apps/bimcraft-cli/src/mcp.rs b/apps/bimcraft-cli/src/mcp.rs
+index fe75d88..06e852f 100644
+--- a/apps/bimcraft-cli/src/mcp.rs
++++ b/apps/bimcraft-cli/src/mcp.rs
+@@ -9,6 +9,18 @@ use serde_json::{Value, json};
+ pub const PROTOCOL_VERSION: &str = "2025-06-18";
+ const SUPPORTED: &[&str] = &[PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
+ 
++const MAX_MESSAGE: usize = 1 << 20;
++const MAX_BATCH: usize = 64;
++const MAX_SCRIPT_LINES: usize = 256;
++
++// Resolve aliases before checking. New commands require a deliberate access review.
++fn permitted(command: &str, params: &Value) -> bool {
++    bimcraft_core::engine::find(command).is_some_and(|c| !(c.id == "schedule" && params.get("path").is_some()) && matches!(c.id,
++        "new" | "wall" | "door" | "window" | "room" | "floor" | "roof" |
++        "column" | "stair" | "ramp" | "dimension" | "tag" | "level" |
++        "undo" | "redo" | "inspect" | "elements" | "schedule" | "delete"))
++}
++
+ const PARSE_ERROR: i64 = -32700;
+ const INVALID_REQUEST: i64 = -32600;
+ const METHOD_NOT_FOUND: i64 = -32601;
+@@ -26,7 +38,7 @@ dimension {refs: [[0, 3000], [8000, 3000]], at: [4000, -1000]} (between the wall
+ window); or send several at once with script, one `command {json}` per line. list_commands shows every command and its \
+ parameters. Check your work with inspect_model and query_elements, look at it with render (a PNG of a level's plan, with \
+ ceiling: true its reflected ceiling plan, of a section or elevation by name, or of the 3D view with view \"{3D}\"), and save \
+-to .bimcraft or .ifc.";
++in memory. MCP runs with restricted commands and cannot read or write files.";
+ 
+ pub struct Server {
+     session: Session,
+@@ -83,9 +95,16 @@ impl Server {
+     }
+ 
+     /// Serve until `input` closes. Logs go to stderr: stdout carries only protocol messages.
+-    pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+-        for line in input.lines() {
+-            if let Some(reply) = self.handle_line(&line?) {
++    pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
++        loop {
++            let mut bytes = Vec::new();
++            let n = std::io::Read::take(&mut input, (MAX_MESSAGE + 1) as u64).read_until(b'\n', &mut bytes)?;
++            if n == 0 { break; }
++            if bytes.len() > MAX_MESSAGE {
++                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "MCP message exceeds size limit"));
++            }
++            let line = std::str::from_utf8(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
++            if let Some(reply) = self.handle_line(line) {
+                 writeln!(output, "{reply}")?;
+                 output.flush()?;
+             }
+@@ -94,12 +113,16 @@ impl Server {
+     }
+ 
+     pub fn handle_line(&mut self, line: &str) -> Option<String> {
++        if line.len() > MAX_MESSAGE {
++            return Some(error(Value::Null, INVALID_REQUEST, "MCP message exceeds size limit").to_string());
++        }
+         let line = line.trim();
+         if line.is_empty() {
+             return None;
+         }
+         let reply = match serde_json::from_str::<Value>(line) {
+             Ok(Value::Array(batch)) if batch.is_empty() => Some(error(Value::Null, INVALID_REQUEST, "empty batch")),
++            Ok(Value::Array(batch)) if batch.len() > MAX_BATCH => Some(error(Value::Null, INVALID_REQUEST, "MCP batch exceeds size limit")),
+             Ok(Value::Array(batch)) => {
+                 let replies: Vec<Value> = batch.into_iter().filter_map(|m| self.handle(m)).collect();
+                 (!replies.is_empty()).then_some(Value::Array(replies))
+@@ -142,7 +165,13 @@ impl Server {
+                 }))
+             }
+             "ping" => Ok(json!({})),
+-            "tools/list" => Ok(json!({ "tools": tools() })),
++            "tools/list" => {
++                let mut available = tools();
++                if let Some(list) = available.as_array_mut() {
++                    list.retain(|tool| tool["name"] != "open" && tool["name"] != "save");
++                }
++                Ok(json!({ "tools": available }))
++            }
+             "tools/call" => {
+                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
+                 self.call(name, params.get("arguments").unwrap_or(&Value::Null))
+@@ -169,6 +198,29 @@ impl Server {
+                 return Err((INVALID_PARAMS, format!("`{name}` needs `{key}`")));
+             }
+         }
++        // File operations are unavailable, including indirect command and script routes.
++        let denied = match name {
++            "open" | "save" => true,
++            "execute" => !permitted(args["command"].as_str().unwrap_or_default(), &args["params"]),
++            "schedule" => args.get("path").is_some(),
++            "script" => {
++                let text = args["text"].as_str().unwrap_or_default();
++                text.lines().count() > MAX_SCRIPT_LINES || text.lines().any(|line| {
++                    let line = line.trim();
++                    if line.is_empty() || line.starts_with('#') { return false; }
++                    let (command, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
++                    let params = if rest.trim().is_empty() { json!({}) } else {
++                        match serde_json::from_str::<Value>(rest) {
++                            Ok(params) => params,
++                            Err(_) => return true,
++                        }
++                    };
++                    !permitted(command, &params)
++                })
++            }
++            _ => false,
++        };
++        if denied { return Ok(tool_error("command unavailable in restricted MCP mode")); }
+         let s = &mut self.session;
+         let result = match name {
+             "execute" => {
+@@ -296,35 +348,43 @@ mod tests {
+         assert_eq!((img["type"].as_str(), img["mimeType"].as_str()), (Some("image"), Some("image/png")));
+         let r = call(&mut s, 10, "tools/call", json!({"name": "render", "arguments": {"view": "{3D}", "azimuth": 135, "elevation": 20}}));
+         assert_eq!(r["result"]["content"][1]["text"], "3D view from 135° round, 20° up, 1600 x 1000 px");
+-        let path = std::env::temp_dir().join(format!("bimcraft-mcp-{}.ifc", std::process::id()));
+-        tool(&mut s, "save", json!({ "path": path }));
+-        assert!(std::fs::read_to_string(&path).unwrap().contains("IFCSPACE("));
+-        let _ = std::fs::remove_file(path);
++        let denied = call(&mut s, 20, "tools/call", json!({"name": "save", "arguments": {"path": "outside.ifc"}}));
++        assert_eq!(denied["result"]["isError"], true);
+     }
+ 
+-    #[cfg(feature = "rvt")]
+     #[test]
+-    fn open_imports_a_revit_file_through_the_same_importer_as_the_command_line() {
+-        let path = crate::revit::tests::house("mcp.rvt");
++    fn filesystem_access_is_denied_through_every_mcp_route() {
+         let mut s = Server::new();
+-        let reply = tool(&mut s, "open", json!({ "path": path }));
+-        assert_eq!((reply["format"].as_str(), reply["elements"].clone()), (Some("Revit 2024"), json!({"level": 2, "wall": 1})));
+-        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"], json!({"level": 2, "wall": 1}));
+-        // A file that is not Revit's is a tool error that names it, and the model stays as it was.
+-        let fake = std::env::temp_dir().join(format!("bimcraft-mcp-{}-fake.rvt", std::process::id()));
+-        std::fs::write(&fake, b"not a Revit file").unwrap();
+-        let r = call(&mut s, 11, "tools/call", json!({"name": "open", "arguments": {"path": fake}}));
+-        assert!(r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().unwrap().contains("fake.rvt"), "{r}");
+-        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"], json!({"level": 2, "wall": 1}));
+-        let _ = std::fs::remove_file(fake);
++        for (name, arguments) in [
++            ("open", json!({"path": "secret.rvt"})),
++            ("save", json!({"path": "outside.ifc"})),
++            ("schedule", json!({"category": "rooms", "path": "outside.csv"})),
++            ("execute", json!({"command": "schedule", "params": {"category": "rooms", "path": "outside.csv"}})),
++            ("script", json!({"text": "schedule {\"category\": \"rooms\", \"path\": \"outside.csv\"}"})),
++            ("execute", json!({"command": "OPEN", "params": {"path": "secret.bimcraft"}})),
++            ("execute", json!({"command": "save"})),
++            ("execute", json!({"command": "link", "params": {"path": "secret.bimcraft"}})),
++            ("script", json!({"text": "level {\"elevation\": 6000}\nopen {\"path\": \"secret.bimcraft\"}"})),
++        ] {
++            let reply = call(&mut s, 1, "tools/call", json!({"name": name, "arguments": arguments}));
++            assert_eq!(reply["result"]["isError"], true, "{reply}");
++        }
++        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"]["level"], 2);
++        assert!(permitted("WA", &json!({})));
++        assert!(!permitted("future-file-command", &json!({})));
+     }
+ 
+-    #[cfg(not(feature = "rvt"))]
+     #[test]
+-    fn open_of_a_revit_file_in_a_build_without_revit_support_is_a_tool_error_that_says_so() {
++    fn oversized_transport_and_batches_are_rejected() {
+         let mut s = Server::new();
+-        let r = call(&mut s, 1, "tools/call", json!({"name": "open", "arguments": {"path": "x.rvt"}}));
+-        assert!(r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().unwrap().contains("without Revit support"));
++        let oversized = "x".repeat(MAX_MESSAGE + 1);
++        assert!(s.handle_line(&oversized).unwrap().contains("size limit"));
++        assert!(s.serve(oversized.as_bytes(), Vec::new()).is_err());
++        let batch = serde_json::to_string(&vec![json!({"id": 1, "method": "ping"}); MAX_BATCH + 1]).unwrap();
++        assert!(s.handle_line(&batch).unwrap().contains("batch exceeds"));
++        let script = "inspect\n".repeat(MAX_SCRIPT_LINES + 1);
++        let reply = call(&mut s, 1, "tools/call", json!({"name": "script", "arguments": {"text": script}}));
++        assert_eq!(reply["result"]["isError"], true);
+     }
+ 
+     #[test]
+@@ -351,7 +411,7 @@ mod tests {
+             json!({"name": "script", "arguments": {"text": "level {\"elevation\": 6000}\nnope", "atomic": true}}),
+         );
+         assert_eq!(r["result"]["isError"], true);
+-        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("line 2"));
++        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("restricted MCP mode"));
+         assert_eq!(levels(&mut s), 2, "the first line is taken back");
+         tool(&mut s, "script", json!({"text": "level {\"elevation\": 6000}\nlevel {\"elevation\": 9000}", "atomic": true}));
+         assert_eq!(levels(&mut s), 4);
+diff --git a/crates/core/src/commands.rs b/crates/core/src/commands.rs
+index 7800635..2df9e14 100644
+--- a/crates/core/src/commands.rs
++++ b/crates/core/src/commands.rs
+@@ -1459,13 +1459,9 @@ fn with_links(s: &mut Session, mut reply: Value) -> Value {
+ fn open_file(s: &mut Session, p: &Value) -> R {
+     let c = "open";
+     let path = PathBuf::from(string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?);
+-    let size = std::fs::metadata(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
+-    if size >= MAX_FILE {
+-        return Err(bad(c, format!("{} is too large ({size} bytes)", path.display())));
+-    }
++    let bytes = crate::input::read_file(&path, MAX_FILE).map_err(|e| bad(c, e))?;
+     // IFC comes in as a new project: saving it asks where.
+     if ext(&path) == "ifc" {
+-        let bytes = std::fs::read(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+         let stem = path.file_stem().map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
+         let i = crate::import::ifc(&bytes, &stem).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+@@ -1477,7 +1473,7 @@ fn open_file(s: &mut Session, p: &Value) -> R {
+         s.reset(i.model, None);
+         return Ok(reply);
+     }
+-    let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
++    let text = String::from_utf8(bytes).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+     let (mut m, left_out) = Model::read(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
+     m.adopt_materials();
+     // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
+diff --git a/crates/core/src/import.rs b/crates/core/src/import.rs
+index e20bf80..e83c6c8 100644
+--- a/crates/core/src/import.rs
++++ b/crates/core/src/import.rs
+@@ -1214,6 +1214,7 @@ const COLUMNS: &[&str] = &["IFCCOLUMN", "IFCCOLUMNSTANDARDCASE"];
+ 
+ /// Reads IFC text into a model, named after the project (or `name`).
+ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
++    if bytes.len() >= 256 << 20 { return Err("IFC exceeds file size limit".into()); }
+     let file = step::parse(bytes)?;
+     if !file.schema.starts_with("IFC") {
+         let schema = if file.schema.is_empty() { "no schema" } else { &file.schema };
+diff --git a/crates/core/src/input.rs b/crates/core/src/input.rs
+new file mode 100644
+index 0000000..f19d603
+--- /dev/null
++++ b/crates/core/src/input.rs
+@@ -0,0 +1,28 @@
++//! Bounded reads of untrusted files, including files that grow after opening.
++use std::io::Read;
++use std::path::Path;
++
++pub fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
++    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
++    let metadata = file.metadata().map_err(|e| e.to_string())?;
++    if !metadata.is_file() { return Err("input must be a regular file".into()); }
++    read_bounded(file, limit)
++}
++
++fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, String> {
++    let mut bytes = Vec::new();
++    reader.take(limit).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
++    if bytes.len() as u64 >= limit { return Err("input exceeds file size limit".into()); }
++    Ok(bytes)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn streaming_limit_does_not_depend_on_metadata() {
++        assert_eq!(read_bounded(&b"abc"[..], 4).unwrap(), b"abc");
++        assert!(read_bounded(&b"abcd"[..], 4).is_err());
++        assert!(read_bounded(std::io::repeat(0), 1024).is_err());
++    }
++}
+diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs
+index af8a8d4..ee5b7ff 100644
+--- a/crates/core/src/lib.rs
++++ b/crates/core/src/lib.rs
+@@ -19,6 +19,7 @@ pub mod graphics;
+ pub mod ids;
+ pub mod ifc;
+ pub mod import;
++pub mod input;
+ pub mod inquiry;
+ pub mod insert;
+ pub mod language;
+diff --git a/crates/core/src/model.rs b/crates/core/src/model.rs
+index bfff6d5..69280f0 100644
+--- a/crates/core/src/model.rs
++++ b/crates/core/src/model.rs
+@@ -1986,6 +1986,7 @@ impl Model {
+     /// misspelled one. The fields left out come back as JSON pointers into the file (`/elements/100004/finish`). A file
+     /// of a newer format is refused whole, since what changed may be more than a field.
+     pub fn read(text: &str) -> Result<(Model, Vec<String>), String> {
++        if text.len() >= 256 << 20 { return Err("project exceeds file size limit".into()); }
+         use crate::lenient;
+         use serde_json::Value;
+         let mut v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+diff --git a/crates/update/src/install.rs b/crates/update/src/install.rs
+index 7e1bf53..f32b7ca 100644
+--- a/crates/update/src/install.rs
++++ b/crates/update/src/install.rs
+@@ -93,6 +93,9 @@ pub fn start(msi: &Path, sha256: &[u8; 32], project: Option<&Path>) -> Result<()
+ 
+ /// [`start`] for the program at `exe`: copied beside the installer, in the folder of its own, and started.
+ pub fn start_with(exe: &Path, msi: &Path, sha256: &[u8; 32], project: Option<&Path>) -> Result<(), String> {
++    if !crate::publisher_trust_configured() {
++        return Err("Windows update handoff is disabled until publisher authentication is configured".into());
++    }
+     let copy = msi.with_file_name(format!("bimcraft-update{}", std::env::consts::EXE_SUFFIX));
+     fs::copy(exe, &copy).map_err(|e| format!("{}: {e}", copy.display()))?;
+     let mut child = Command::new(&copy)
+@@ -131,7 +134,8 @@ pub fn run(finish: &Finish) -> ExitCode {
+ /// [`run`] on this `parent` (its end is the app exiting) and Windows' own folders: nothing at all happens unless `finish` is
+ /// [`plausible`]. Whether the installer ran.
+ pub fn run_with(finish: &Finish, parent: &mut dyn Read, program_files: Option<&str>, system_root: Option<OsString>) -> bool {
+-    plausible(finish, program_files) && finish_with(finish, parent, &msiexec_path(system_root))
++    crate::publisher_trust_configured() && program_files.is_some() && system_root.as_ref().is_some_and(|p| Path::new(p).is_absolute())
++        && plausible(finish, program_files) && finish_with(finish, parent, &msiexec_path(system_root))
+ }
+ 
+ /// Windows Installer's program by its full path, given Windows' folder: the copy runs from a folder that anything running as the
+@@ -150,7 +154,7 @@ pub fn finish_with(finish: &Finish, parent: &mut dyn Read, installer: &Path) ->
+ /// [`finish_with`], told the exit code that means the installer couldn't open the file it was given (a stand-in for the installer
+ /// in a test can't exit with 1620, which a shell cuts to eight bits).
+ pub fn finish_after(finish: &Finish, parent: &mut dyn Read, installer: &Path, unopenable: i32) -> bool {
+-    let _ = io::copy(parent, &mut io::sink());
++    if io::copy(parent, &mut io::sink()).is_err() { return false; }
+     let ran = run_checked(finish, installer, unopenable);
+     let _ = fs::remove_file(&finish.msi);
+     let _ = Command::new(&finish.exe).args(&finish.project).spawn();
+@@ -169,9 +173,8 @@ fn hold(path: &Path) -> io::Result<File> {
+ 
+ /// Runs `installer` on the file if it is still the one that was checked, and says whether it did. The file is held open while it
+ /// runs, so nothing can swap it between that check and the installer reading it (the time you take over the permission prompt
+-/// included). Should Windows Installer refuse a file held so (it exits with `unopenable`), the hold is let go, the file is
+-/// checked once more and run without it.
+-fn run_checked(finish: &Finish, installer: &Path, unopenable: i32) -> bool {
++/// included). A refusal fails closed; the handle is never released for an unlocked retry.
++fn run_checked(finish: &Finish, installer: &Path, _unopenable: i32) -> bool {
+     let Ok(mut held) = hold(&finish.msi) else { return false };
+     if !crate::sha256_of(&mut held).is_ok_and(|digest| digest == finish.sha256) {
+         return false;
+@@ -183,13 +186,9 @@ fn run_checked(finish: &Finish, installer: &Path, unopenable: i32) -> bool {
+         command.arg("/i").arg(&finish.msi).args(["/passive", "/norestart", "/l*v"]).arg(&log).stdin(Stdio::null());
+         command.status().ok().and_then(|status| status.code())
+     };
+-    if install() == Some(unopenable) {
+-        drop(held);
+-        if crate::sha256_file(&finish.msi).is_ok_and(|digest| digest == finish.sha256) {
+-            install();
+-        }
+-    }
+-    true
++    // Keep the deny-write/delete handle until Windows Installer exits. Never retry
++    // without it: rehashing before an unlocked launch leaves a replacement race.
++    matches!(install(), Some(0 | 1641 | 3010))
+ }
+ 
+ /// Removes what earlier updates left in `parent`: their folders, which hold the copy of the app that couldn't remove itself.
+diff --git a/crates/update/src/lib.rs b/crates/update/src/lib.rs
+index 23f47a5..0d36817 100644
+--- a/crates/update/src/lib.rs
++++ b/crates/update/src/lib.rs
+@@ -375,3 +375,15 @@ pub fn sha256_of(reader: &mut impl Read) -> io::Result<[u8; 32]> {
+         }
+     }
+ }
++
++/// No independently authenticated publisher key has been provisioned.
++/// Do not replace this with an environment variable or a key from release metadata.
++pub fn publisher_trust_configured() -> bool { false }
++
++#[cfg(test)]
++mod trust_tests {
++    #[test]
++    fn unsigned_release_installation_is_disabled() {
++        assert!(!super::publisher_trust_configured());
++    }
++}
+diff --git a/crates/update/src/tests.rs b/crates/update/src/tests.rs
+index 1fc890e..d764a79 100644
+--- a/crates/update/src/tests.rs
++++ b/crates/update/src/tests.rs
+@@ -733,7 +733,7 @@ mod unix {
+     }
+ 
+     #[test]
+-    fn an_installer_windows_will_not_open_held_is_run_again_unheld() {
++    fn an_installer_windows_will_not_open_held_is_never_retried_unlocked() {
+         let _one = serial();
+         let rig = rig(0);
+         let marker = rig.dir.0.join("second");
+@@ -741,8 +741,8 @@ mod unix {
+             format!("echo installer >> {0}\nif [ -f {1} ]; then exit 0; fi\ntouch {1}\nexit 84", rig.log.display(), marker.display());
+         let installer = script(&rig.dir.0, "msiexec-picky", &body);
+         let ran = install::finish_after(&finish(&rig, b"installer bytes", None), &mut std::io::empty(), &installer, 84);
+-        assert!(ran);
+-        assert_eq!(log(&rig.log, 3), ["installer", "installer", "app"], "refused once, then run");
++        assert!(!ran);
++        assert_eq!(log(&rig.log, 2), ["installer", "app"], "refusal is never retried unlocked");
+     }
+ 
+     #[test]
+@@ -782,8 +782,8 @@ mod unix {
+         assert!(!trace.exists() && odd.msi.exists() && misplaced.msi.exists(), "nothing happened");
+         // What an update makes runs Windows' own installer, from where Windows says its folder is.
+         let real = made(folder.join("bimcraft-0.5.0-windows-x64.msi"));
+-        assert!(install::run_with(&real, &mut std::io::empty(), None, root));
+-        assert_eq!(log(&trace, 2), ["installer", "app"]);
++        assert!(!install::run_with(&real, &mut std::io::empty(), None, root));
++        assert!(!trace.exists(), "unsigned helper arguments must not launch anything");
+     }
+ 
+     #[test]
+@@ -819,18 +819,9 @@ mod unix {
+         let log = dir.0.join("log");
+         // The stand-in for the app notes its arguments, then reads its input to the end, as the helper does, and notes that too.
+         let exe = script(&dir.0, "bimcraft", &format!("echo \"$@\" >> {0}\ncat > /dev/null\necho eof >> {0}", log.display()));
+-        install::start_with(&exe, &msi, &sha(b"installer bytes"), Some(Path::new("/w/house.bimcraft"))).unwrap();
+-        let copy = folder.join(format!("bimcraft-update{}", std::env::consts::EXE_SUFFIX));
+-        assert!(copy.exists(), "a copy that no installer replaces, beside the installer");
+-        let args = log_args(&log);
+-        let finish = install::parse(args).unwrap();
+-        assert_eq!(finish, Finish { msi, sha256: sha(b"installer bytes"), exe, project: Some("/w/house.bimcraft".into()) });
+-        std::thread::sleep(Duration::from_millis(200));
+-        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1, "the copy's input stays open as long as this process lives");
+-    }
+-
+-    fn log_args(path: &Path) -> Vec<OsString> {
+-        log(path, 1).iter().flat_map(|l| l.split(' ').map(OsString::from).collect::<Vec<_>>()).collect()
++        assert!(install::start_with(&exe, &msi, &sha(b"installer bytes"), Some(Path::new("/w/house.bimcraft"))).is_err());
++        assert!(!folder.join(format!("bimcraft-update{}", std::env::consts::EXE_SUFFIX)).exists());
++        assert!(!log.exists());
+     }
+ 
+     #[test]
+diff --git a/crates/update/src/updater.rs b/crates/update/src/updater.rs
+index d0dfd09..7f27b07 100644
+--- a/crates/update/src/updater.rs
++++ b/crates/update/src/updater.rs
+@@ -136,7 +136,12 @@ impl Updater {
+             return None;
+         }
+         let current = Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+-        Some(Updater::new(Arc::new(Ureq::new()), current, prefs_path, wake))
++        let mut updater = Updater::new(Arc::new(Ureq::new()), current, prefs_path, wake);
++        if !crate::publisher_trust_configured() {
++            updater.target = None;
++            updater.install = None;
++        }
++        Some(updater)
+     }
+ 
+     /// For tests: does its work on the thread that asks, so a result is there to poll at once.
+diff --git a/docs/security-local-review.md b/docs/security-local-review.md
+new file mode 100644
+index 0000000..ca7e8cd
+--- /dev/null
++++ b/docs/security-local-review.md
+@@ -0,0 +1,33 @@
++# BIMCraft security changes — local review draft
++
++Base: IPedrax/BIMCraft commit 818967487278dca6ae68e8e1861fc4250e41727a.
++Branch: security/harden-untrusted-input. No remote push or upstream modification.
++
++## Implemented
++
++- Desktop updater is notification-only while publisher_trust_configured() is false. No publisher key is invented or fetched from the potentially compromised release source. A release hash and SHA256SUMS from the same source are integrity checks, not independent publisher authentication. This is containment, not a completed signature-verification system.
++- Windows --finish-update entry and helper-copy launch fail closed without publisher trust. The entry also requires configured Windows paths. Removed the retry that released the MSI deny-write/delete handle; installer launch failure and unsuccessful MSI exit codes now report failure. Parent-pipe read errors abort processing. Low-level installer routines remain for tests; they are not an authenticated updater API.
++- MCP stdio frames capped at 1 MiB before unbounded line allocation, including newline; oversized streams close with InvalidData. Direct handle_line calls enforce the same cap before parsing. Batches capped at 64 requests and scripts at 256 physical lines.
++- MCP denies open/save and allows only explicitly reviewed in-memory command IDs; engine aliases resolve before authorization. Scripts are preflighted in full before executing any command, including parsing schedule parameters to deny CSV path exports through every route. Unknown future commands fail closed. File import/export tools are removed from discovery and denied on direct calls. This deliberately removes MCP file operations rather than implementing a race-prone path-prefix sandbox. Local CLI and desktop retain file access.
++- Native project and IFC open use a regular-file handle and a bounded streaming reader, so growth after metadata inspection cannot cause an unbounded read. Direct Model::read and IFC parser inputs have the same 256 MiB ceiling. Other loaders are not comprehensively hardened by this change.
++- Cargo.lock updates rustls-webpki 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and webpki-roots 1.0.9 -> 1.0.10 (RUSTSEC-2026-0381). Registry checksums and unchanged non-development dependency requirements were obtained from crates.io. Cargo did not regenerate or validate the lockfile; build compatibility remains unverified.
++- Added MCP denial/limit regression tests, bounded-reader regression test, publisher-trust default test, updated Windows helper expectations, and cargo-fuzz scaffolding for project JSON, IFC, CFB containers and gzip inflation. Existing CI now includes cargo audit.
++
++## Validation actually completed
++
++- Repository cloned and targeted review of updater, MCP, core project/IFC entry points, Revit limit/decompression design, lockfile and CI performed. This is not a complete review of all repository code.
++- git diff --check passes for the local patch.
++- Queried OSV querybatch for all 451 registry package/version entries. Initial scan returned two TLS security advisories and four unmaintained-package advisories. A second live scan after the lock changes returned only the four maintenance advisories listed below. Results are saved beside this report. OSV is supplementary and does not substitute for cargo audit or reachability analysis.
++- cargo fmt --check, cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings, and cargo audit were all attempted. Every command failed to launch with Access is denied (os error 5). Direct toolchain invocation failed too. No Rust compilation, tests, lint, formatting check, cargo audit or fuzz run succeeded. Changes must be validated on a functioning Rust host before use.
++
++## Remaining and unverifiable
++
++1. Implement independent publisher signing and verification: provision a maintainer-controlled public key through a trusted channel; sign a canonical version/target/size/digest manifest; verify before downloading/installing; test wrong keys, corruption, substitution, rollback and key rotation. Only then consider enabling installation. Windows helper launch still needs an authenticated, race-resistant handoff and OS-derived trusted paths; environment paths alone are not sufficient. It remains disabled.
++2. Maintenance advisories remain: ttf-parser 0.25.1 (RUSTSEC-2026-0192), zbus_names 4.3.4 (RUSTSEC-2026-0371), zvariant 5.15.0 (RUSTSEC-2026-0370), zvariant_derive 5.15.0 (RUSTSEC-2026-0372). No fixed versions are listed in those advisories. Trace and migrate their parent dependencies, then test on all platforms. They are not suppressed in CI.
++3. Run the full CI matrix and fuzz targets. Verify lockfile resolution, manually format any failures, exercise actual Windows MSI locking and cancellation, and test actual packaged desktop updates remaining notification-only.
++4. Input byte limits do not bound total model size, render output, CPU cost, recursion in all importers, cumulative decompression, or process lifetime. Full import fuzzing, corpus regression testing and OS resource isolation remain necessary. Existing Revit per-file/per-stream/inflate limits were inspected; no global memory-safety or denial-of-service certification is claimed.
++5. The referenced prior audit could not be recovered: read_thread returned message-reference placeholders, not the audit body. Findings were reconstructed from the stated priorities and current source, so an exact reconciliation with every earlier finding is impossible.
++
++A dedicated patched-windows.yml workflow now runs formatting, linting, full tests, release compilation and version smoke checks before uploading portable Windows executables. It has not run yet; GitHub sign-in/fork creation is pending.
++
++This patch is an uncompiled local review draft, not a complete security certification or a claim that all security issues are fixed.
+diff --git a/fuzz/Cargo.toml b/fuzz/Cargo.toml
+new file mode 100644
+index 0000000..4d0111f
+--- /dev/null
++++ b/fuzz/Cargo.toml
+@@ -0,0 +1,23 @@
++[package]
++name = "bimcraft-security-fuzz"
++version = "0.0.0"
++publish = false
++edition = "2024"
++
++[package.metadata]
++cargo-fuzz = true
++
++[dependencies]
++libfuzzer-sys = "0.4"
++bimcraft-core = { path = "../crates/core" }
++bimcraft-rvt = { path = "../crates/rvt" }
++
++[workspace]
++members = ["."]
++
++[[bin]]
++name = "hostile_files"
++path = "fuzz_targets/hostile_files.rs"
++test = false
++doc = false
++bench = false
+diff --git a/fuzz/README.md b/fuzz/README.md
+new file mode 100644
+index 0000000..f94919a
+--- /dev/null
++++ b/fuzz/README.md
+@@ -0,0 +1,9 @@
++# Hostile file fuzzing
++
++Install cargo-fuzz and a nightly Rust toolchain, then run from this folder:
++
++```sh
++cargo +nightly fuzz run hostile_files -- -max_len=1048576 -timeout=10 -rss_limit_mb=2048
++```
++
++Seed corpus with synthetic BIMCraft JSON, IFC STEP and CFB headers. Never commit proprietary Revit files. This target covers project/IFC decoding and Revit container construction and gzip member inflation, not full Revit import or every parser path. Run in an isolated worker with CPU/memory/time limits; size limits alone do not bound algorithmic complexity. Preserve minimized crashes as regression fixtures.
+diff --git a/fuzz/fuzz_targets/hostile_files.rs b/fuzz/fuzz_targets/hostile_files.rs
+new file mode 100644
+index 0000000..443eda4
+--- /dev/null
++++ b/fuzz/fuzz_targets/hostile_files.rs
+@@ -0,0 +1,18 @@
++#![no_main]
++use libfuzzer_sys::fuzz_target;
++
++fuzz_target!(|data: &[u8]| {
++    if data.len() > 1 << 20 { return; }
++    // Do not catch panics here: a panic is a fuzz finding.
++    if let Ok(text) = std::str::from_utf8(data) {
++        let _ = bimcraft_core::model::Model::read(text);
++    }
++    let _ = bimcraft_core::import::ifc(data, "fuzz");
++    let _ = bimcraft_rvt::gzip::inflate_first(data, 1 << 20);
++    let _ = bimcraft_rvt::gzip::inflate_members(data, 1 << 20);
++    let limits = bimcraft_rvt::Limits {
++        max_file: 1 << 20, max_streams: 32,
++        max_stream: 1 << 20, max_inflated: 1 << 20,
++    };
++    let _ = bimcraft_rvt::Revit::from_bytes(data.to_vec(), limits);
++});
