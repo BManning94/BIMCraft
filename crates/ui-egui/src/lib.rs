@@ -21,6 +21,7 @@ mod orbit;
 mod paper;
 mod phasing;
 mod properties;
+mod purge;
 pub mod recent;
 pub mod revit;
 mod section;
@@ -515,6 +516,7 @@ pub struct BimApp {
     /// elements are made in: none is the main model.
     phasing_dialog: Option<phasing::PhasingDialog>,
     options_dialog: Option<phasing::OptionsDialog>,
+    purge_dialog: Option<purge::PurgeDialog>,
     /// Manage > Select by ID and IDs of Selection, while open.
     select_by_id: Option<inquiry::SelectById>,
     ids_of_selection: Option<inquiry::IdsOfSelection>,
@@ -817,6 +819,7 @@ impl BimApp {
             templates_dialog: None,
             phasing_dialog: None,
             options_dialog: None,
+            purge_dialog: None,
             select_by_id: None,
             ids_of_selection: None,
             copied: None,
@@ -1141,6 +1144,7 @@ impl BimApp {
             || self.templates_dialog.is_some()
             || self.phasing_dialog.is_some()
             || self.options_dialog.is_some()
+            || self.purge_dialog.is_some()
             || self.select_by_id.is_some()
             || self.ids_of_selection.is_some()
             || self.settings_page.is_some()
@@ -1308,6 +1312,10 @@ impl BimApp {
                 return true;
             }
             // What the selection hides comes back; with nothing of it hidden, the list of what the view hides.
+            "PU" => {
+                self.open_purge();
+                return true;
+            }
             "DP" => {
                 self.duplicate_plan("duplicate");
                 return true;
@@ -2594,6 +2602,11 @@ impl BimApp {
             if big_button(ui, Icon::Parameters, "Project Parameters", self.parameters_dialog.is_some(), tip).clicked() {
                 self.parameters_dialog = Some(properties::ParametersDialog::new(&self.session.model));
             }
+            let tip =
+                "Purge Unused (PU): take out the types, families and the rest nothing in the project uses; each category keeps a type";
+            if big_button(ui, Icon::Delete, "Purge Unused", self.purge_dialog.is_some(), tip).clicked() {
+                self.open_purge();
+            }
             let tip = "Snaps: what a picked point sticks to (ends, middles, crossings, centres, perpendiculars), and the angles it steps by; SE, SM, SI, SC, SP and SN take one alone for the next point, SO none";
             if big_button(ui, Icon::Snaps, "Snaps", self.show_snaps, tip).clicked() {
                 self.show_snaps = true;
@@ -3362,6 +3375,7 @@ impl BimApp {
         self.templates_window(ctx);
         self.phasing_window(ctx);
         self.options_window(ctx);
+        self.purge_window(ctx);
         self.select_by_id_window(ctx);
         self.ids_of_selection_window(ctx);
         self.shortcuts_window(ctx);

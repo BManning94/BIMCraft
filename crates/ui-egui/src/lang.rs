@@ -268,6 +268,21 @@ const WORDS: &[[&str; 3]] = &[
     ],
     ["Duplicate View: open a plan first", "Duplicar vista: abra uma planta primeiro", "Duplicar vista: abre un plano primero"],
     ["Parent View", "Vista principal", "Vista principal"],
+    ["Purge Unused", "Limpar não usados", "Purgar no usados"],
+    [
+        "Purge Unused (PU): take out the types, families and the rest nothing in the project uses; each category keeps a type",
+        "Limpar não usados (PU): tira os tipos, famílias e o mais que nada no projeto usa; cada categoria mantém um tipo",
+        "Purgar no usados (PU): quita los tipos, familias y lo demás que nada en el proyecto usa; cada categoría conserva un tipo",
+    ],
+    [
+        "Takes out what nothing in the project uses. Each category keeps a type; Undo brings it back.",
+        "Tira o que nada no projeto usa. Cada categoria mantém um tipo; Desfazer traz de volta.",
+        "Quita lo que nada en el proyecto usa. Cada categoría conserva un tipo; Deshacer lo trae de vuelta.",
+    ],
+    ["View Filters", "Filtros de vista", "Filtros de vista"],
+    ["Nothing is unused.", "Nada está sem uso.", "Nada está sin usar."],
+    ["Purge {}", "Limpar {}", "Purgar {}"],
+    ["Purged {} unused.", "{} não usados foram limpos.", "Se purgaron {} no usados."],
     [
         "Crop View: show only the crop region; drag its edges by their grips",
         "Recortar vista: mostrar só a região de recorte; arraste suas bordas pelas alças",

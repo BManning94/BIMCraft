@@ -683,6 +683,25 @@ pub static ALL: &[Command] = &[
         delete,
     ),
     edit(
+        "delete_type",
+        "Delete Type",
+        &[],
+        "{category?: wall|floor|door|window|column|roof|ceiling|railing|…, family?, type?} deletes a type of a category \
+         (`category` and `type`), a family (`family`) or one of a family's types (`family` and `type`), as Revit's Delete on one \
+         in the Project Browser does; refused while an element uses it (it says how many), and for the last type of a \
+         category or of a family",
+        delete_type,
+    ),
+    edit(
+        "purge",
+        "Purge Unused",
+        &["PU"],
+        "{kinds?: [type|family|material|picture|filter|template, …], dry_run?} takes out what nothing uses, again for what that \
+         leaves unused: types and families unless `kinds` says; a category keeps a type and a family a type; with `dry_run` it \
+         lists what would go and changes nothing",
+        purge,
+    ),
+    edit(
         "units",
         "Project Units",
         &["UN"],
@@ -5666,6 +5685,104 @@ fn split(s: &mut Session, p: &Value) -> R {
         }
     }
     Ok(json!({"ids": [id, new]}))
+}
+
+/// How an entry reads in a message: `wall type`, `family`, `family type`; and the library entry it is.
+fn entry_of(c: &str, m: &Model, p: &Value) -> Result<(LibKind, String), String> {
+    let (cat, family, ty) = (string(c, p, "category")?, string(c, p, "family")?, string(c, p, "type")?);
+    match (cat, family, ty) {
+        (Some(cat), None, Some(ty)) => {
+            let cat = category(&cat);
+            let names = m.type_names(&cat);
+            if !names.contains(&ty.as_str()) {
+                return Err(bad(c, format!("there is no {cat} type `{ty}`{}", known_names(&names))));
+            }
+            Ok((LibKind::Type(cat), ty))
+        }
+        (None, Some(f), None) => {
+            if !m.families.contains_key(&f) {
+                let names: Vec<&str> = m.families.keys().map(String::as_str).collect();
+                return Err(bad(c, format!("there is no family `{f}`{}", known_names(&names))));
+            }
+            Ok((LibKind::Family, f))
+        }
+        (None, Some(f), Some(ty)) => {
+            let fam = m.families.get(&f).ok_or_else(|| bad(c, format!("there is no family `{f}`")))?;
+            if !fam.types.contains_key(&ty) {
+                let names: Vec<&str> = fam.types.keys().map(String::as_str).collect();
+                return Err(bad(c, format!("family `{f}` has no type `{ty}`{}", known_names(&names))));
+            }
+            Ok((LibKind::FamilyType, format!("{f}: {ty}")))
+        }
+        _ => Err(bad(c, "give `category` and `type`, or `family`, or `family` and `type`")),
+    }
+}
+
+fn delete_type(s: &mut Session, p: &Value) -> R {
+    let c = "delete_type";
+    let m = &s.model;
+    let (kind, name) = entry_of(c, m, p)?;
+    let label = kind.label();
+    let used = m.library_uses().get(&(kind.clone(), name.clone())).copied().unwrap_or(0);
+    if used > 0 {
+        return Err(bad(
+            c,
+            format!("{label} `{name}` is used {used} time{}: change or delete what uses it first", if used == 1 { "" } else { "s" }),
+        ));
+    }
+    match &kind {
+        LibKind::Type(cat) if m.type_names(cat).len() <= 1 => {
+            return Err(bad(c, format!("`{name}` is the last {label}: a {cat} needs one; make another first")));
+        }
+        LibKind::FamilyType if name.split_once(": ").and_then(|(f, _)| m.families.get(f)).is_some_and(|f| f.types.len() <= 1) => {
+            return Err(bad(c, format!("`{name}` is its family's last type: delete the family")));
+        }
+        _ => {}
+    }
+    s.model_mut().remove_entry(&kind, &name);
+    Ok(json!({"deleted": {"kind": label, "name": name}}))
+}
+
+/// How many passes Purge Unused makes at most: what a pass takes out may leave more unused (a family's material), a few deep.
+const PURGE_PASSES: usize = 16;
+
+fn purge(s: &mut Session, p: &Value) -> R {
+    let c = "purge";
+    let kinds: Vec<String> = match p.get("kinds") {
+        v if absent(v) => vec!["type".into(), "family".into()],
+        Some(Value::Array(a)) => a
+            .iter()
+            .map(|k| {
+                k.as_str()
+                    .filter(|k| crate::library::PURGE_KINDS.contains(k))
+                    .map(String::from)
+                    .ok_or_else(|| bad(c, format!("`kinds` holds {}, not {k}", crate::library::PURGE_KINDS.join(", "))))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(v) => return Err(bad(c, format!("`kinds` is a list of what to purge, not {v}"))),
+        None => vec!["type".into(), "family".into()],
+    };
+    let dry_run = flag(c, p, "dry_run")?;
+    let kinds: Vec<&str> = kinds.iter().map(String::as_str).collect();
+    // On a copy, pass by pass: the list of a dry run is what the run would take out.
+    let mut model = (*s.model).clone();
+    let mut removed: Vec<(LibKind, String)> = Vec::new();
+    for _ in 0..PURGE_PASSES {
+        let pass = model.unused_entries(&kinds);
+        if pass.is_empty() {
+            break;
+        }
+        for (kind, name) in pass {
+            if model.remove_entry(&kind, &name) {
+                removed.push((kind, name));
+            }
+        }
+    }
+    if !dry_run && !removed.is_empty() {
+        *s.model_mut() = model;
+    }
+    let listed: Vec<Value> = removed.iter().map(|(k, n)| json!({"kind": k.label(), "name": n})).collect();
+    Ok(json!({"removed": listed, "count": listed.len(), "dry_run": dry_run}))
 }
 
 fn delete(s: &mut Session, p: &Value) -> R {

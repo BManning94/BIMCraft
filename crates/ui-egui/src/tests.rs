@@ -4734,6 +4734,7 @@ mod dock;
 mod gpu;
 mod mep;
 mod planviews;
+mod purge;
 mod revit;
 mod start;
 
