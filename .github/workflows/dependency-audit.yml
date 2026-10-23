@@ -1,0 +1,20 @@
+name: Audit patched dependencies
+on:
+  push:
+    branches: [main]
+    paths: [bimcraft-security.patch, .github/workflows/dependency-audit.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply security patch
+        run: git apply --check bimcraft-security.patch && git apply bimcraft-security.patch
+      - name: Install Cargo Audit
+        run: cargo install cargo-audit --locked
+      - name: Audit patched lockfile
+        run: cargo audit
