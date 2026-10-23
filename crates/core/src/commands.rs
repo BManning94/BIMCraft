@@ -18,9 +18,9 @@ use crate::massing;
 use crate::model::{
     CEILING_HEIGHT, Ceiling, CeilingType, Column, ColumnType, Component, DEFAULT_HEIGHT, DimKind, Dimension, Element, Extrusion, Face,
     Facing, Floor, FloorType, Grid, Guid, Id, Key, Landing, Layer, Level, Line, Location, MAX_COORD, MAX_POINTS, MAX_SLOPE, MAX_TEXT, Mass,
-    Model, NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, ProjectParameter, RAMP_SLOPE, RAMP_WIDTH,
-    RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side, Spot, Stair,
-    TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
+    Model, NOTE_SIZE, Note, Opening, OpeningType, PARAMETER_CATEGORIES, ParameterKind, Pattern, PlanView, ProjectParameter, RAMP_SLOPE,
+    RAMP_WIDTH, RISER, Railing, RailingType, Ramp, Reference, Roof, RoofType, Room, STAIR_WIDTH, Schedule, Section, Shaft, Sheet, Side,
+    Spot, Stair, TOL, TREAD, Tag, View3D, Viewport, Wall, WallType, heading, paper,
 };
 use crate::paint;
 use crate::phasing;
@@ -472,6 +472,19 @@ pub static ALL: &[Command] = &[
          its line then runs between them, and the notes in it stay put); null uncrops it; without a region, it crops to \
          what the view shows now",
         crop,
+    ),
+    edit(
+        "duplicate_view",
+        "Duplicate View",
+        &["DP"],
+        "{view, mode?: duplicate|detailing|dependent, name?} a new plan view of a plan's level (a level's own plan, or a plan \
+         view; sections, elevations, schedules, sheets and the 3D view aren't duplicated yet): `duplicate` (the default) has \
+         the same view range, crop and graphics and no annotation of its own; `detailing` copies the dimensions, tags, notes \
+         and spot elevations in it too, as its own; `dependent` follows its parent's view range, graphics, scale and detail \
+         (change those in the parent), has a crop of its own and shows its parent's annotation as well as its own. Named \
+         `name`, else `<view> Copy 1` (`<view> Dependent 1`). Commands that take a level or a view take it by name or id, \
+         and what is drawn, dimensioned, tagged or noted there is in it",
+        duplicate_view,
     ),
     edit(
         "scale",
@@ -975,31 +988,41 @@ fn count_opt(c: &str, p: &Value, key: &str, default: usize) -> Result<usize, Str
     }
 }
 
-/// `level` by name, id or GUID, as its GUID; the lowest level when not given.
+/// `level` by name, id or GUID, as its GUID; the lowest level when not given. A plan view of a level names the level too.
 fn level_param(c: &str, m: &Model, p: &Value, key: &str) -> Result<Guid, String> {
+    plan_param(c, m, p, key).map(|(level, _)| level)
+}
+
+/// The plan `key` names, by name, id or GUID: a level's own plan (the lowest level's when not given), or a plan view of one. It
+/// gives the level's GUID, and the plan view's when it is one: what an annotation says it is in.
+fn plan_param(c: &str, m: &Model, p: &Value, key: &str) -> Result<(Guid, Option<Guid>), String> {
     let levels = m.levels();
     let id = match p.get(key) {
         v if absent(v) => levels.first().map(|(id, _)| *id).ok_or_else(|| bad(c, "the model has no levels"))?,
-        Some(Value::String(n)) if Guid::parse(n).is_none() => {
-            levels.iter().find(|(_, l)| l.name == *n).map(|(id, _)| *id).ok_or_else(|| {
+        Some(Value::String(n)) if Guid::parse(n).is_none() => levels
+            .iter()
+            .find(|(_, l)| l.name == *n)
+            .map(|(id, _)| *id)
+            .or_else(|| m.elements.iter().find_map(|(id, e)| matches!(e, Element::PlanView(v) if v.name == *n).then_some(*id)))
+            .ok_or_else(|| {
                 let names: Vec<&str> = levels.iter().map(|(_, l)| l.name.as_str()).collect();
-                bad(c, format!("no level named `{n}` (there are: {})", names.join(", ")))
-            })?
-        }
+                bad(c, format!("no level or plan view named `{n}` (the levels are: {})", names.join(", ")))
+            })?,
         Some(v) => serde_json::from_value::<Guid>(v.clone())
             .ok()
             .and_then(|g| m.elements.id(g))
-            .filter(|&id| m.level(id).is_some())
-            .ok_or_else(|| bad(c, format!("`{key}`: {v} is not a level")))?,
+            .filter(|&id| m.plan_level(id).is_some())
+            .ok_or_else(|| bad(c, format!("`{key}`: {v} is not a level or a plan view")))?,
         None => return Err(bad(c, "the model has no levels")),
     };
-    Ok(m.guid(id))
+    let level = m.plan_level(id).map(|l| m.guid(l)).unwrap_or_default();
+    Ok((level, m.plan_view(id).map(|_| m.guid(id))))
 }
 
 /// `view` by name, id or GUID: a level's plan, a section, an elevation, a schedule or a 3D view, or with `sheets` a sheet
 /// by its number; when not given, the plan of `level` (the lowest by default).
 fn view_param(c: &str, m: &Model, p: &Value, sheets: bool) -> Result<Id, String> {
-    let plan = || level_param(c, m, p, "level").map(|g| m.elements.id(g).unwrap_or_default());
+    let plan = || plan_param(c, m, p, "level").map(|(level, view)| m.elements.id(view.unwrap_or(level)).unwrap_or_default());
     match p.get("view") {
         v if absent(v) => plan(),
         Some(Value::String(n)) if Guid::parse(n).is_none() => m
@@ -1328,7 +1351,7 @@ pub fn element_json(m: &Model, id: Id) -> Value {
             extra.insert("elevation".into(), json!(m.spot_value(sp).map(hundredth)));
             extra.insert("level".into(), json!(m.level_of(e)));
         }
-        Element::Level(_) | Element::Grid(_) | Element::Schedule(_) | Element::View3D(_) => {}
+        Element::Level(_) | Element::Grid(_) | Element::Schedule(_) | Element::View3D(_) | Element::PlanView(_) => {}
     }
     let mut v = serde_json::to_value(e).unwrap_or_default();
     if let Some(o) = v.as_object_mut() {
@@ -2004,6 +2027,11 @@ fn view_graphics(s: &mut Session, p: &Value) -> R {
     };
     let mut g = was.clone();
     edit_graphics(c, m, p, &mut g, false)?;
+    if g != was
+        && let Some(v) = view
+    {
+        not_dependent(c, m, v, "graphics")?;
+    }
     if g != was {
         // ponytail: checked here too so a refusal names the command, and `Model::check` the rest.
         g.check(&s.model).map_err(|e| bad(c, e))?;
@@ -2111,7 +2139,7 @@ fn view_template(s: &mut Session, p: &Value) -> R {
             ..Graphics::default()
         };
         t.view_range = match m.elements.get(view) {
-            Some(Element::Level(_)) => Some(m.view_range_of(view)),
+            Some(Element::Level(_) | Element::PlanView(_)) => Some(m.view_range_of(view)),
             _ => None,
         };
     }
@@ -3222,7 +3250,7 @@ fn arc_near(m: &Model, level: impl Key, p: P2) -> Option<Reference> {
 fn dimension(s: &mut Session, p: &Value) -> R {
     let c = "dimension";
     let m = &s.model;
-    let level = level_param(c, m, p, "level")?;
+    let (level, view) = plan_param(c, m, p, "level")?;
     let at = point_req(c, p, "at")?;
     let kind = match string(c, p, "kind")? {
         None => DimKind::Aligned,
@@ -3249,7 +3277,7 @@ fn dimension(s: &mut Session, p: &Value) -> R {
         };
         refs.push(r);
     }
-    let d = Dimension { level, kind, refs, at };
+    let d = Dimension { level, view, kind, refs, at };
     let values: Vec<f64> = m.dimension_values(&d).into_iter().map(hundredth).collect();
     let id = s.model_mut().insert(Element::Dimension(d));
     Ok(json!({"id": id, "values": values}))
@@ -3261,16 +3289,17 @@ fn tag(s: &mut Session, p: &Value) -> R {
     let offset = point_opt(c, p, "offset")?;
     let leader = flag(c, p, "leader")?;
     let label = string(c, p, "label")?.filter(|l| !l.trim().is_empty());
+    let (level, view) = plan_param(c, m, p, "level")?;
     let hosts = if absent(p.get("ids")) && absent(p.get("id")) {
-        // Tag All: the level's doors and windows, or its `category`, that have no tag.
-        let level = level_param(c, m, p, "level")?;
+        // Tag All: the plan's doors and windows, or its `category`, that have no tag in it.
         let of = string(c, p, "category")?.map(|s| category(&s));
         let kind = of.clone().unwrap_or_else(|| "door and window".into());
+        let plan = view.unwrap_or(level);
         let tagged: BTreeSet<Guid> = m
             .elements
             .values()
             .filter_map(|e| match e {
-                Element::Tag(t) => Some(t.host),
+                Element::Tag(t) if m.annotation_in(e, plan) => Some(t.host),
                 _ => None,
             })
             .collect();
@@ -3296,7 +3325,7 @@ fn tag(s: &mut Session, p: &Value) -> R {
     };
     let tags: Vec<Tag> = hosts
         .iter()
-        .map(|&host| Tag { host: m.guid(host), offset: offset.unwrap_or_else(|| m.tag_offset(host)), leader, label: label.clone() })
+        .map(|&host| Tag { host: m.guid(host), view, offset: offset.unwrap_or_else(|| m.tag_offset(host)), leader, label: label.clone() })
         .collect();
     let m = s.model_mut();
     let ids: Vec<Id> = tags.into_iter().map(|t| m.insert(Element::Tag(t))).collect();
@@ -3326,10 +3355,10 @@ fn spot(s: &mut Session, p: &Value) -> R {
     let m = &s.model;
     let at = point_req(c, p, "at")?;
     let view = view_param(c, m, p, false)?;
-    let host = match (id_opt(c, p, "host")?, m.level(view)) {
+    let host = match (id_opt(c, p, "host")?, m.plan_level(view)) {
         (Some(h), _) => Some(h),
-        (None, Some(_)) => Some(m.guid(m.spot_host(view, at).ok_or_else(|| {
-            let place = format!("[{}, {}] on {}", at.0, at.1, level_name(m, view));
+        (None, Some(level)) => Some(m.guid(m.spot_host(level, at).ok_or_else(|| {
+            let place = format!("[{}, {}] on {}", at.0, at.1, level_name(m, level));
             bad(c, format!("nothing to read at {place}; place it on a floor, a roof, a stair, a wall or a column"))
         })?)),
         (None, None) => None,
@@ -3917,19 +3946,22 @@ fn crop(s: &mut Session, p: &Value) -> R {
         },
     };
     match m.elements.get(view) {
-        Some(Element::Level(l)) => {
+        Some(Element::Level(_) | Element::PlanView(_)) => {
+            let name = m.view_name(view).unwrap_or_default();
             let crop = match region {
                 Some(r) => r,
                 None => {
                     let pts = render::plan_shows(m, view);
-                    let first = *pts.first().ok_or_else(|| bad(c, format!("{} shows nothing to crop to", l.name)))?;
+                    let first = *pts.first().ok_or_else(|| bad(c, format!("{name} shows nothing to crop to")))?;
                     let (lo, hi) =
                         pts.iter().fold((first, first), |(lo, hi), q| (P2(lo.0.min(q.0), lo.1.min(q.1)), P2(hi.0.max(q.0), hi.1.max(q.1))));
                     Some([micron(lo - P2(1000.0, 1000.0)), micron(hi + P2(1000.0, 1000.0))])
                 }
             };
-            if let Some(Element::Level(l)) = s.model_mut().elements.get_mut(view) {
-                l.crop = crop;
+            if let Some(Element::Level(Level { crop: slot, .. }) | Element::PlanView(PlanView { crop: slot, .. })) =
+                s.model_mut().elements.get_mut(view)
+            {
+                *slot = crop;
             }
             Ok(json!({"view": view, "crop": crop}))
         }
@@ -3981,7 +4013,7 @@ fn crop(s: &mut Session, p: &Value) -> R {
 fn scaled_view(c: &str, m: &Model, p: &Value) -> Result<Id, String> {
     let view = view_param(c, m, p, false)?;
     match m.elements.get(view) {
-        Some(Element::Level(_) | Element::Section(_) | Element::Elevation(_)) => Ok(view),
+        Some(Element::Level(_) | Element::PlanView(_) | Element::Section(_) | Element::Elevation(_)) => Ok(view),
         _ => Err(bad(c, format!("{} isn't a plan, a section or an elevation; only those have one", view_title(m, view)))),
     }
 }
@@ -4037,10 +4069,93 @@ fn style_param(c: &str, p: &Value, key: &str) -> Result<Option<graphics::VisualS
 
 /// An error unless view `view` may set what `group` holds: its template, if it controls that, sets it.
 fn own_to_set(c: &str, m: &Model, view: impl Key, group: Group, what: &str) -> Result<(), String> {
+    not_dependent(c, m, view, what)?;
     match graphics::graphics_of(m, view).and_then(|g| g.controlled_by(m, group)) {
         Some(t) => {
             Err(bad(c, format!("its {what} follow view template `{t}`; change the template, or `template: null` to stop following it")))
         }
+        None => Ok(()),
+    }
+}
+
+/// Revit's Duplicate View, of a plan: a new plan view of the same level (see the catalog entry).
+fn duplicate_view(s: &mut Session, p: &Value) -> R {
+    let c = "duplicate_view";
+    let m = &s.model;
+    let view = view_param(c, m, p, false)?;
+    let Some(level) = m.plan_level(view).map(|l| m.guid(l)) else {
+        return Err(bad(
+            c,
+            format!(
+                "{} isn't a plan: plans are duplicated, sections, elevations, schedules, sheets and the 3D view not yet",
+                view_title(m, view)
+            ),
+        ));
+    };
+    let source = m.guid(view);
+    let mode = string(c, p, "mode")?.unwrap_or_else(|| "duplicate".into());
+    if !matches!(mode.as_str(), "duplicate" | "detailing" | "dependent") {
+        return Err(bad(c, format!("`mode` is duplicate, detailing or dependent, not `{mode}`")));
+    }
+    let from = m.plan_view(view);
+    if mode == "dependent" && from.is_some_and(|v| v.parent.is_some()) {
+        return Err(bad(c, format!("{} is a dependent view, which has none of its own: make it of its parent", view_title(m, view))));
+    }
+    let name = match string(c, p, "name")? {
+        Some(n) => n,
+        None => {
+            let word = m.language.word(if mode == "dependent" { "Dependent" } else { "Copy" });
+            m.free_view_name(&format!("{} {word}", view_title(m, view)), true)
+        }
+    };
+    // What it starts as: the settings the source is drawn with, a dependent's being its parent's.
+    let held = m.elements.get(m.plan_source(view));
+    let (view_range, graphics) = match held {
+        Some(Element::Level(l)) => (l.view_range, l.graphics.clone()),
+        Some(Element::PlanView(v)) => (v.view_range, v.graphics.clone()),
+        _ => Default::default(),
+    };
+    let dependent = mode == "dependent";
+    let new = PlanView {
+        level,
+        name: name.clone(),
+        view_range: if dependent { Default::default() } else { view_range },
+        crop: m.crop_of(view),
+        graphics: if dependent { Graphics::default() } else { graphics },
+        parent: dependent.then_some(source),
+    };
+    // With detailing, what is annotated in the source itself (not in its parent) is copied into the new view.
+    let notes: Vec<Element> =
+        m.elements.values().filter(|e| mode == "detailing" && m.annotation_plan(e) == Some(source)).cloned().collect();
+    let m = s.model_mut();
+    let id = m.insert(Element::PlanView(new));
+    let guid = m.guid(id);
+    let copied = notes.len();
+    for mut e in notes {
+        match &mut e {
+            Element::Dimension(d) => d.view = Some(guid),
+            Element::Tag(t) => t.view = Some(guid),
+            Element::Text(n) => n.view = guid,
+            Element::Spot(sp) => sp.view = guid,
+            _ => {}
+        }
+        m.insert(e);
+    }
+    Ok(json!({"id": id, "name": name, "level": m.elements.id(level), "annotations": copied}))
+}
+
+/// An error unless view `view` is no dependent view: it follows its parent in its view range and graphics (`what` it was
+/// asked to change among them).
+fn not_dependent(c: &str, m: &Model, view: impl Key, what: &str) -> Result<(), String> {
+    match m.plan_view(view).and_then(|v| v.parent) {
+        Some(p) => Err(bad(
+            c,
+            format!(
+                "{} is a dependent view: it follows its parent, `{}`, in its {what}; change them there",
+                view_title(m, view),
+                view_title(m, p)
+            ),
+        )),
         None => Ok(()),
     }
 }
@@ -5029,7 +5144,7 @@ fn transformed(c: &str, m: &Model, id: Id, mo: &Motion, with: &BTreeSet<Id>) -> 
     match &mut e {
         Element::Level(_) => return Err(bad(c, format!("level {id} has no place in plan; change its elevation, or add a level"))),
         Element::Sheet(_) => return Err(bad(c, format!("sheet {id} has no place in plan; move the views on it"))),
-        Element::Schedule(_) | Element::View3D(_) => {
+        Element::Schedule(_) | Element::View3D(_) | Element::PlanView(_) => {
             return Err(bad(c, format!("{category} {id} has no place in plan; move its viewport on its sheet")));
         }
         Element::Text(n) => {
@@ -5568,7 +5683,10 @@ fn delete(s: &mut Session, p: &Value) -> R {
                     && match e {
                         Element::Door(o) | Element::Window(o) => gone.contains(&o.host),
                         Element::Railing(r) => r.host.is_some_and(|h| gone.contains(&h)),
-                        Element::Tag(t) => gone.contains(&t.host),
+                        // A plan view goes with its level and its parent; what is annotated in a view goes with it.
+                        Element::PlanView(v) => gone.contains(&v.level) || v.parent.is_some_and(|p| gone.contains(&p)),
+                        Element::Tag(t) => gone.contains(&t.host) || t.view.is_some_and(|v| gone.contains(&v)),
+                        Element::Dimension(d) => d.view.is_some_and(|v| gone.contains(&v)),
                         Element::Viewport(v) => gone.contains(&v.sheet) || gone.contains(&v.view),
                         // Notes and spot elevations go with their view, spots with what they read.
                         Element::Text(n) => gone.contains(&n.view),

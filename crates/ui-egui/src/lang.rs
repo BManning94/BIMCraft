@@ -257,6 +257,17 @@ const WORDS: &[[&str; 3]] = &[
         "Modo oscuro: la ventana y las vistas, claras sobre oscuro; los planos siguen siendo papel. Empieza con el tema del sistema",
     ],
     ["Crop View", "Recortar vista", "Recortar vista"],
+    ["Duplicate View", "Duplicar vista", "Duplicar vista"],
+    ["Duplicate", "Duplicar", "Duplicar"],
+    ["Duplicate with Detailing", "Duplicar com detalhamento", "Duplicar con detalles"],
+    ["Duplicate as Dependent", "Duplicar como dependente", "Duplicar como dependiente"],
+    [
+        "Duplicate View (DP): a new plan of this level with its own annotation; with detailing, it starts with this plan's; as a dependent, it follows this plan's range and graphics",
+        "Duplicar vista (DP): uma nova planta deste nível com anotações próprias; com detalhamento, ela começa com as desta planta; como dependente, segue o intervalo e os gráficos desta planta",
+        "Duplicar vista (DP): un plano nuevo de este nivel con anotaciones propias; con detalles, empieza con las de este plano; como dependiente, sigue el rango y los gráficos de este plano",
+    ],
+    ["Duplicate View: open a plan first", "Duplicar vista: abra uma planta primeiro", "Duplicar vista: abre un plano primero"],
+    ["Parent View", "Vista principal", "Vista principal"],
     [
         "Crop View: show only the crop region; drag its edges by their grips",
         "Recortar vista: mostrar só a região de recorte; arraste suas bordas pelas alças",

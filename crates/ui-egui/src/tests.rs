@@ -4733,6 +4733,7 @@ mod browser;
 mod dock;
 mod gpu;
 mod mep;
+mod planviews;
 mod revit;
 mod start;
 

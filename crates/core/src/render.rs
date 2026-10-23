@@ -458,7 +458,7 @@ pub fn plan(m: &Model, level: impl Key, width: u32, height: u32) -> Drawing {
 /// What a plan of `level` takes on paper: all it shows, or cropped, its crop region and the grids'
 /// ends at its edges.
 pub(crate) fn plan_extent(m: &Model, level: impl Key) -> Vec<P2> {
-    match m.level(level).and_then(|l| l.crop) {
+    match m.crop_of(level) {
         None => plan_shows(m, level),
         Some([lo, hi]) => {
             let grids = m.elements.values().filter_map(|e| match e {
@@ -472,10 +472,12 @@ pub(crate) fn plan_extent(m: &Model, level: impl Key) -> Vec<P2> {
 
 /// Everything a plan of `level` shows, uncropped: its walls, floors, rooms, dimensions, tags,
 /// notes and spot elevations, the grids, and the marks of the sections and elevations.
-pub(crate) fn plan_shows(m: &Model, level: impl Key) -> Vec<P2> {
-    let level = m.guid(level);
-    let r = m.plan_range(level);
-    let look = Look::of(m, level);
+pub(crate) fn plan_shows(m: &Model, plan: impl Key) -> Vec<P2> {
+    // The plan's own guid says what it is: its graphics, range and annotation; its level is what it shows of the model.
+    let key = m.guid(plan);
+    let level = m.plan_level(key).map_or(key, |l| m.guid(l));
+    let r = m.plan_range(key);
+    let look = Look::of(m, key);
     let index = walls::Index::new(m);
     let mut extent: Vec<P2> = cut_outlines(m, r.cut, &look, &index).into_iter().flat_map(|(_, o)| o).collect();
     extent.extend(seen_below(m, &r, &look, &index).into_iter().flat_map(|(_, o, _)| o));
@@ -492,9 +494,9 @@ pub(crate) fn plan_shows(m: &Model, level: impl Key) -> Vec<P2> {
             Element::Mass(ms) if m.mass_cut_by(ms, r.cut) => extent.extend(m.mass_outline(ms, r.cut)),
             Element::Component(c) if c.level == level => extent.extend(m.component_pieces(c).into_iter().flat_map(|p| p.outline)),
             Element::Grid(g) => extent.extend([g.start, g.end]),
-            Element::Dimension(dm) if dm.level == level => extent.push(dm.at),
+            Element::Dimension(dm) if m.annotation_in(e, key) => extent.push(dm.at),
             Element::Section(v) | Element::Elevation(v) => extent.extend([v.start, v.end]),
-            Element::Tag(t) if m.level_of(e) == Some(level) => extent.extend(m.anchor(t.host).map(|a| a + t.offset)),
+            Element::Tag(t) if m.annotation_in(e, key) => extent.extend(m.anchor(t.host).map(|a| a + t.offset)),
             Element::Stair(Stair { level: l, top_level: t, .. }) | Element::Ramp(Ramp { level: l, top_level: t, .. })
                 if *l == level || *t == Some(level) =>
             {
@@ -507,8 +509,8 @@ pub(crate) fn plan_shows(m: &Model, level: impl Key) -> Vec<P2> {
                 extent.extend(m.run_geom(e).map(|g| g.footprint()).unwrap_or_default())
             }
             Element::Roof(r) if r.level == level || m.level_above(level) == Some(r.level) => extent.extend(m.roof_outline(r)),
-            Element::Text(n) if n.view == level => extent.extend([Some(n.at), n.leader].into_iter().flatten()),
-            Element::Spot(sp) if sp.view == level => extent.push(sp.at),
+            Element::Text(n) if m.annotation_in(e, key) => extent.extend([Some(n.at), n.leader].into_iter().flatten()),
+            Element::Spot(sp) if m.annotation_in(e, key) => extent.push(sp.at),
             _ => {}
         }
     }
@@ -521,14 +523,7 @@ pub fn sketch(m: &Model, view: View, id: Id, e: &Element) -> Drawing {
     let mut d = Drawing::new(view);
     d.owner = Some(id);
     // Annotation as big as the view it will be in draws it.
-    let on = match e {
-        Element::Dimension(dm) => Some(dm.level),
-        Element::Text(n) => Some(n.view),
-        Element::Spot(sp) => Some(sp.view),
-        Element::Tag(_) => m.level_of(e),
-        _ => None,
-    };
-    d.k = on.map_or(1.0, |v| annotation(m, v, view));
+    d.k = m.annotation_plan(e).map_or(1.0, |v| annotation(m, v, view));
     match e {
         Element::Dimension(dm) => dimension(&mut d, m, dm),
         Element::Tag(t) => tag(&mut d, m, t),
@@ -579,6 +574,7 @@ fn heights(m: &Model, look: &Look) -> (f64, f64) {
 pub fn crop_region(m: &Model, id: impl Key) -> Option<[P2; 2]> {
     match m.elements.get(id)? {
         Element::Level(l) => l.crop,
+        Element::PlanView(v) => v.crop,
         Element::Section(v) | Element::Elevation(v) => v.crop.map(|[bottom, top]| [P2(0.0, bottom), P2(v.start.dist(v.end), top)]),
         _ => None,
     }
@@ -989,14 +985,16 @@ pub fn draw_at(m: &Model, level: impl Key, view: View, k: f32) -> Drawing {
 }
 
 /// A floor plan of `level`, or `up`, its reflected ceiling plan.
-fn draw_plan(m: &Model, level: impl Key, view: View, up: bool, k: f32) -> Drawing {
-    let level = m.guid(level);
+fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32) -> Drawing {
+    // The plan's own guid says what it is: its graphics, range, crop and annotation; its level is what it shows of the model.
+    let key = m.guid(plan);
+    let level = m.plan_level(key).map_or(key, |l| m.guid(l));
     let index = walls::Index::new(m);
     let mut d = Drawing::new(view);
-    (d.k, d.detail) = (k, detail_of(m, level));
-    let look = Look::of(m, level);
+    (d.k, d.detail) = (k, detail_of(m, key));
+    let look = Look::of(m, key);
     let shown = |id: Id| look.shows(id);
-    let mut range = m.plan_range(level);
+    let mut range = m.plan_range(key);
     if up {
         range.cut = m.elevation(level) + CEILING_CUT;
         range.top = range.top.max(range.cut);
@@ -1117,7 +1115,7 @@ fn draw_plan(m: &Model, level: impl Key, view: View, up: bool, k: f32) -> Drawin
     }
     d.part(Part::Projection);
     // A ceiling plan isn't cropped: the crop region is the floor plan's.
-    let crop = m.level(level).and_then(|l| l.crop).filter(|_| !up);
+    let crop = m.crop_of(key).filter(|_| !up);
     // Cropped, annotation shows whole while its anchor is inside the crop, and not at all outside it.
     let inside = |p: P2| crop.is_none_or(|[lo, hi]| (lo.0..=hi.0).contains(&p.0) && (lo.1..=hi.1).contains(&p.1));
     for (&id, e) in m.elements.iter().filter(|(id, _)| shown(**id)) {
@@ -1197,16 +1195,16 @@ fn draw_plan(m: &Model, level: impl Key, view: View, up: bool, k: f32) -> Drawin
         d.owner = Some(id);
         match e {
             Element::Dimension(_) | Element::Tag(_) | Element::Text(_) | Element::Spot(_) if up => {}
-            Element::Dimension(dm) if dm.level == level && inside(dm.at) => dimension(&mut d, m, dm),
+            Element::Dimension(dm) if m.annotation_in(e, key) && inside(dm.at) => dimension(&mut d, m, dm),
             Element::Tag(t)
-                if m.level_of(e) == Some(level)
+                if m.annotation_in(e, key)
                     && m.elements.id(t.host).is_some_and(shown)
                     && m.anchor(t.host).is_some_and(|a| inside(a + t.offset)) =>
             {
                 tag(&mut d, m, t)
             }
-            Element::Text(n) if n.view == level && inside(n.at) => note(&mut d, n),
-            Element::Spot(sp) if sp.view == level && inside(sp.at) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp), m.units),
+            Element::Text(n) if m.annotation_in(e, key) && inside(n.at) => note(&mut d, n),
+            Element::Spot(sp) if m.annotation_in(e, key) && inside(sp.at) => spot_mark(&mut d, view.px(sp.at), m.spot_value(sp), m.units),
             // A section's line is cropped as a line is.
             Element::Section(v) => section_mark(&mut d, v),
             Element::Elevation(v) if inside(v.start + (v.end - v.start) * 0.5) => elevation_mark(&mut d, v),
@@ -1233,7 +1231,7 @@ fn draw_plan(m: &Model, level: impl Key, view: View, up: bool, k: f32) -> Drawin
     }
     d.owner = None;
     look.dress(&mut d);
-    let mut title = m.level(level).map_or_else(String::new, |l| l.name.clone());
+    let mut title = m.view_name(key).map_or_else(String::new, str::to_string);
     if up {
         title = format!("{title} ({})", m.language.word("Ceiling Plan"));
     }

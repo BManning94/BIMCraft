@@ -90,7 +90,11 @@ const REVEALED: &str = "#FF00FF";
 /// `base` with the graphics of the view `sheet` changed as `temp` says.
 fn shadowed(base: &Arc<Model>, sheet: Sheet, temp: &Temp) -> Result<Arc<Model>, String> {
     let (view, id) = match sheet {
-        Sheet::Plan(l) | Sheet::Ceiling(l) => (json!(l), Some(l)),
+        // A dependent view hides what its parent does.
+        Sheet::Plan(l) | Sheet::Ceiling(l) => {
+            let source = base.elements.id(base.plan_source(l)).unwrap_or(l);
+            (json!(source), Some(source))
+        }
         Sheet::Section(s) => (json!(s), Some(s)),
         Sheet::View3D => (json!("{3D}"), base.default_3d()),
         Sheet::Paper(_) | Sheet::Schedule(_) | Sheet::Table(_) => return Ok(Arc::clone(base)),

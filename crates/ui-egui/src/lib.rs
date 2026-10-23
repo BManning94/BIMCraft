@@ -935,9 +935,7 @@ impl BimApp {
 
     fn view_name(&self, sheet: Sheet) -> String {
         match sheet {
-            Sheet::Plan(level) | Sheet::Ceiling(level) => {
-                self.session.model.level(level).map_or_else(|| "Floor Plan".into(), |l| l.name.clone())
-            }
+            Sheet::Plan(key) | Sheet::Ceiling(key) => self.session.model.view_name(key).map_or_else(|| "Floor Plan".into(), String::from),
             Sheet::View3D => "{3D}".into(),
             Sheet::Section(id) => self.session.model.section(id).map_or_else(|| "Section".into(), |v| v.name.clone()),
             Sheet::Paper(id) => self.session.model.sheet(id).map_or_else(|| "Sheet".into(), |s| format!("{} - {}", s.number, s.name)),
@@ -1051,7 +1049,7 @@ impl BimApp {
         // The plan sets the cursor each frame it shows.
         self.canvas.cursor = None;
         match self.sheet {
-            Sheet::Plan(level) | Sheet::Ceiling(level) if self.session.model.level(level).is_some() => self.canvas(ui, level),
+            Sheet::Plan(key) | Sheet::Ceiling(key) if self.session.model.plan_level(key).is_some() => self.canvas(ui, key),
             Sheet::Plan(_) | Sheet::Ceiling(_) => {
                 ui.centered_and_justified(|ui| ui.label(t("This project has no levels. Add one with the Level tool.")));
             }
@@ -1098,7 +1096,7 @@ impl BimApp {
         self.selection.retain(|id| m.elements.contains_key(id));
         self.active_option = self.active_option.take().filter(|o| bimcraft_core::phasing::option_exists(m, o));
         let exists = |s: &Sheet| match s {
-            Sheet::Plan(level) | Sheet::Ceiling(level) => m.level(*level).is_some(),
+            Sheet::Plan(key) | Sheet::Ceiling(key) => m.plan_level(*key).is_some(),
             Sheet::Section(id) => m.section(*id).is_some(),
             Sheet::Paper(id) => m.sheet(*id).is_some(),
             Sheet::View3D | Sheet::Schedule(_) => true,
@@ -1310,6 +1308,10 @@ impl BimApp {
                 return true;
             }
             // What the selection hides comes back; with nothing of it hidden, the list of what the view hides.
+            "DP" => {
+                self.duplicate_plan("duplicate");
+                return true;
+            }
             "EU" => {
                 if self.hidden_selection().0.is_empty() {
                     self.open_graphics(3);
@@ -1671,10 +1673,15 @@ impl BimApp {
         }
     }
 
-    /// The level of the plan on screen, a floor plan or a ceiling plan.
+    /// The level of the plan on screen, a floor plan or a ceiling plan (of a plan view, its level's).
     pub(crate) fn plan_level(&self) -> Option<Id> {
+        self.plan_key().and_then(|key| self.session.model.plan_level(key))
+    }
+
+    /// The key of the plan on screen: its level's, or a plan view's.
+    pub(crate) fn plan_key(&self) -> Option<Id> {
         match self.sheet {
-            Sheet::Plan(level) | Sheet::Ceiling(level) => Some(level),
+            Sheet::Plan(key) | Sheet::Ceiling(key) => Some(key),
             _ => None,
         }
     }
@@ -1797,7 +1804,10 @@ impl BimApp {
                 _ => None,
             })
             .collect();
-        let plans = m.levels().into_iter().map(|(id, l)| (json!(id), tf("Floor Plan: {}", &[&l.name]), l.name.as_str()));
+        let plans = m.levels().into_iter().flat_map(|(id, l)| {
+            let own = std::iter::once((json!(id), tf("Floor Plan: {}", &[&l.name]), l.name.as_str()));
+            own.chain(m.plan_views(id).into_iter().map(|(v, pv)| (json!(v), tf("Floor Plan: {}", &[&pv.name]), pv.name.as_str())))
+        });
         let cuts = m.elements.iter().filter_map(|(id, e)| match e {
             Element::Section(v) => Some((json!(id), tf("Section: {}", &[&v.name]), v.name.as_str())),
             Element::Elevation(v) => Some((json!(id), tf("Elevation: {}", &[&v.name]), v.name.as_str())),
@@ -2403,6 +2413,22 @@ impl BimApp {
         });
     }
 
+    /// Duplicate View (DP): a new plan view of the plan on screen (`mode` as the command says), opened as the kind of plan it
+    /// was made from.
+    pub(crate) fn duplicate_plan(&mut self, mode: &'static str) {
+        match self.plan_key() {
+            Some(key) => self.duplicate_view_of(key, mode),
+            None => self.status = Status { text: t("Duplicate View: open a plan first").into(), error: true },
+        }
+    }
+
+    /// A duplicate of plan `key`, opened as the kind of plan (floor or ceiling) on screen.
+    pub(crate) fn duplicate_view_of(&mut self, key: Id, mode: &'static str) {
+        if let Some(id) = self.run("duplicate_view", json!({"view": key, "mode": mode})).and_then(|r| r["id"].as_u64()) {
+            self.open_sheet(if matches!(self.sheet, Sheet::Ceiling(_)) { Sheet::Ceiling(id) } else { Sheet::Plan(id) });
+        }
+    }
+
     /// Tag All: the doors and windows of the plan's level that have no tag yet.
     fn tag_all(&mut self) {
         if let Sheet::Plan(level) = self.sheet {
@@ -2443,7 +2469,7 @@ impl BimApp {
                 _ => None,
             };
             let cropped = view.is_some_and(|id| match self.session.model.elements.get(id) {
-                Some(Element::Level(l)) => l.crop.is_some(),
+                Some(Element::Level(_) | Element::PlanView(_)) => self.session.model.crop_of(id).is_some(),
                 Some(Element::Section(v) | Element::Elevation(v)) => v.crop.is_some(),
                 _ => false,
             });
@@ -2458,6 +2484,17 @@ impl BimApp {
             if big_button(ui, Icon::View3D, "3D View", self.sheet == Sheet::View3D, "Open the default 3D view").clicked() {
                 self.open_sheet(Sheet::View3D);
             }
+            let tip = "Duplicate View (DP): a new plan of this level with its own annotation; with detailing, it starts with this plan's; as a dependent, it follows this plan's range and graphics";
+            let r = ui.add_enabled_ui(self.plan_key().is_some(), |ui| big_button(ui, Icon::Copy, "Duplicate View", false, tip)).inner;
+            Popup::menu(&r).show(|ui| {
+                for (label, mode) in
+                    [("Duplicate", "duplicate"), ("Duplicate with Detailing", "detailing"), ("Duplicate as Dependent", "dependent")]
+                {
+                    if ui.button(t(label)).clicked() {
+                        self.duplicate_plan(mode);
+                    }
+                }
+            });
             let tip = "Section (CR): click its start, then its end; it looks to the left of the line";
             if big_button(ui, Icon::Section, "Section", matches!(self.tool, Tool::Section(_)), tip).clicked() {
                 self.set_tool(Tool::Section(None));

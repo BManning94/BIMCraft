@@ -68,6 +68,10 @@ enum Act {
     Open(Sheet),
     /// A family's type: the Component tool places it.
     Place(String, String),
+    /// A plan's right-click menu: a duplicate of it, in a mode of the command's.
+    Duplicate(Id, &'static str),
+    /// A right-click menu's Delete: the elements it names go, as Delete takes them.
+    Delete(Vec<Id>),
 }
 
 /// An entry of the tree, or a group of them.
@@ -80,15 +84,22 @@ struct Node {
     /// A group starts open.
     open: bool,
     kids: Vec<Node>,
+    /// Its right-click menu: each item's label and what it does.
+    menu: Vec<(&'static str, Act)>,
 }
 
 impl Node {
     fn group(label: &str, open: bool, kids: Vec<Node>) -> Node {
-        Node { label: label.to_string(), act: Act::Group, on: false, open, kids }
+        Node { label: label.to_string(), act: Act::Group, on: false, open, kids, menu: Vec::new() }
     }
 
     fn leaf(label: &str, act: Act, on: bool) -> Node {
-        Node { label: label.to_string(), act, on, open: false, kids: Vec::new() }
+        Node { label: label.to_string(), act, on, open: false, kids: Vec::new(), menu: Vec::new() }
+    }
+
+    fn with_menu(mut self, menu: Vec<(&'static str, Act)>) -> Node {
+        self.menu = menu;
+        self
     }
 
     /// Whether it shows for the words still to match (those its groups didn't): it matches all of them, or, a group,
@@ -271,6 +282,10 @@ impl BimApp {
                 self.component = Some((family, ty));
                 self.set_tool(Tool::Component);
             }
+            Some(Act::Duplicate(view, mode)) => self.duplicate_view_of(view, mode),
+            Some(Act::Delete(ids)) => {
+                self.run("delete", serde_json::json!({"ids": ids}));
+            }
             _ => {}
         }
     }
@@ -280,8 +295,19 @@ impl BimApp {
         let left: Vec<String> = words.iter().filter(|w| spans(&node.label, w).is_none()).cloned().collect();
         let text = marked(ui, &node.label, words);
         if node.act != Act::Group {
-            if ui.selectable_label(node.on, text).clicked() {
+            let r = ui.selectable_label(node.on, text);
+            if r.clicked() {
                 *act = Some(node.act.clone());
+            }
+            if !node.menu.is_empty() {
+                r.context_menu(|ui| {
+                    for (label, item) in &node.menu {
+                        if ui.button(t(label)).clicked() {
+                            *act = Some(item.clone());
+                            ui.close();
+                        }
+                    }
+                });
             }
             return;
         }
@@ -341,8 +367,27 @@ impl BimApp {
             v.sort_by(|a, b| a.1.cmp(&b.1));
             v
         };
-        let plans = levels.iter().map(|(id, name)| self.view_leaf(name, Sheet::Plan(*id))).collect();
-        let ceilings = levels.iter().map(|(id, name)| self.view_leaf(name, Sheet::Ceiling(*id))).collect();
+        // Each level's own plan, then its plan views, which also have a right-click Delete.
+        let keyed: Vec<(Id, String, bool)> = levels
+            .iter()
+            .flat_map(|(id, name)| {
+                let views = m.plan_views(*id).into_iter().map(|(v, pv)| (v, pv.name.clone(), true));
+                std::iter::once((*id, name.clone(), false)).chain(views)
+            })
+            .collect();
+        let plan_leaf = |id: Id, name: &str, view: bool, sheet: Sheet| {
+            let mut menu = vec![
+                ("Duplicate", Act::Duplicate(id, "duplicate")),
+                ("Duplicate with Detailing", Act::Duplicate(id, "detailing")),
+                ("Duplicate as Dependent", Act::Duplicate(id, "dependent")),
+            ];
+            if view {
+                menu.push(("Delete", Act::Delete(vec![id])));
+            }
+            self.view_leaf(name, sheet).with_menu(menu)
+        };
+        let plans = keyed.iter().map(|(id, name, view)| plan_leaf(*id, name, *view, Sheet::Plan(*id))).collect();
+        let ceilings = keyed.iter().map(|(id, name, view)| plan_leaf(*id, name, *view, Sheet::Ceiling(*id))).collect();
         let mut kids = vec![
             Node::group(t("Floor Plans"), true, plans),
             Node::group(t("Ceiling Plans"), true, ceilings),
