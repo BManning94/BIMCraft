@@ -124,3 +124,16 @@ fn a_plan_views_properties_name_its_level_and_a_dependents_name_its_parent() {
     let vg = h.get_by_label("Visibility/Graphics");
     assert!(vg.accesskit_node().is_disabled());
 }
+
+#[test]
+fn a_plan_in_the_window_carries_no_title_of_its_own_as_the_tab_names_it() {
+    let s = app(HOUSE);
+    let model = Arc::clone(&s.state().session.model);
+    let level = model.levels()[0].0;
+    let view = bimcraft_core::render::plan(&model, level, 800, 600).view;
+    let mut cache = crate::canvas::PlanCache::default();
+    for ceiling in [false, true] {
+        let d = cache.drawing(&model, level, view, ceiling);
+        assert_ne!(d.owners.last(), Some(&None), "nothing is lettered at its bottom left (ceiling: {ceiling})");
+    }
+}

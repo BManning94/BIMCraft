@@ -450,9 +450,10 @@ fn cut_unions(look: &Look, outlines: impl Iterator<Item = (Id, Vec<P2>)>) -> Vec
     unions
 }
 
-/// The plan of `level` fitted into `width` x `height` px.
+/// The plan of `level` fitted into `width` x `height` px, as an image of it is made: with its name lettered at its bottom left.
 pub fn plan(m: &Model, level: impl Key, width: u32, height: u32) -> Drawing {
-    draw(m, level, fit(&plan_extent(m, level), width, height, scale_of(m, level)))
+    let view = fit(&plan_extent(m, level), width, height, scale_of(m, level));
+    draw_plan(m, level, view, false, annotation(m, level, view), true)
 }
 
 /// What a plan of `level` takes on paper: all it shows, or cropped, its crop region and the grids'
@@ -939,19 +940,20 @@ pub fn section_png(m: &Model, id: impl Key, view: View) -> Result<Vec<u8>, Strin
 
 /// The plan of `level` as `view` shows it: what a canvas that pans and zooms draws.
 pub fn draw(m: &Model, level: impl Key, view: View) -> Drawing {
-    draw_plan(m, level, view, false, annotation(m, level, view))
+    draw_plan(m, level, view, false, annotation(m, level, view), false)
 }
 
 /// The reflected ceiling plan of `level` fitted into `width` x `height` px.
 pub fn ceiling_plan(m: &Model, level: impl Key, width: u32, height: u32) -> Drawing {
-    draw_ceiling(m, level, fit(&plan_shows(m, level), width, height, scale_of(m, level)))
+    let view = fit(&plan_shows(m, level), width, height, scale_of(m, level));
+    draw_plan(m, level, view, true, annotation(m, level, view), true)
 }
 
 /// The reflected ceiling plan of `level` as `view` shows it: cut [`CEILING_CUT`] above the level
 /// (over the doors) and looking up, at the ceilings up to the level above, as a floor plan lies
 /// (not mirrored). Its grids and its sections' marks; no annotation of the floor plan's.
 pub fn draw_ceiling(m: &Model, level: impl Key, view: View) -> Drawing {
-    draw_plan(m, level, view, true, annotation(m, level, view))
+    draw_plan(m, level, view, true, annotation(m, level, view), false)
 }
 
 /// How big the annotation of view `id` is drawn through `view`, times the size it is laid out at. A view with a scale
@@ -981,11 +983,12 @@ fn detail_of(m: &Model, id: impl Key) -> Detail {
 
 /// Plan `level` as `draw` draws it, its annotation `k` times the size it is laid out at: a sheet's, at paper size.
 pub fn draw_at(m: &Model, level: impl Key, view: View, k: f32) -> Drawing {
-    draw_plan(m, level, view, false, k)
+    draw_plan(m, level, view, false, k, false)
 }
 
-/// A floor plan of `level`, or `up`, its reflected ceiling plan.
-fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32) -> Drawing {
+/// A floor plan of `level`, or `up`, its reflected ceiling plan; `titled`, with its name lettered at its bottom left (an image of
+/// it has it; a window shows the name in the view's tab, and a sheet under its viewport).
+fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32, titled: bool) -> Drawing {
     // The plan's own guid says what it is: its graphics, range, crop and annotation; its level is what it shows of the model.
     let key = m.guid(plan);
     let level = m.plan_level(key).map_or(key, |l| m.guid(l));
@@ -1231,12 +1234,14 @@ fn draw_plan(m: &Model, plan: impl Key, view: View, up: bool, k: f32) -> Drawing
     }
     d.owner = None;
     look.dress(&mut d);
-    let mut title = m.view_name(key).map_or_else(String::new, str::to_string);
-    if up {
-        title = format!("{title} ({})", m.language.word("Ceiling Plan"));
+    if titled {
+        let mut title = m.view_name(key).map_or_else(String::new, str::to_string);
+        if up {
+            title = format!("{title} ({})", m.language.word("Ceiling Plan"));
+        }
+        let at = (24.0 + font::width(&title, 16.0) / 2.0, view.height as f32 - 26.0);
+        d.text_turned(&title, at, 16.0, 0.0, INK);
     }
-    let at = (24.0 + font::width(&title, 16.0) / 2.0, view.height as f32 - 26.0);
-    d.text_turned(&title, at, 16.0, 0.0, INK);
     d
 }
 
@@ -2232,13 +2237,29 @@ mod tests {
     fn a_plan_drawn_at_a_given_view_maps_the_model_through_it() {
         let s = house();
         let fitted = plan(&s.model, 100000, 800, 600);
-        assert_eq!(draw(&s.model, 100000, fitted.view).prims.len(), fitted.prims.len(), "the same display list");
+        let window = draw(&s.model, 100000, fitted.view);
+        let n = window.prims.len();
+        assert!(n < fitted.prims.len() && fitted.owners[..n] == window.owners[..], "the same display list, with an image's title after it");
+        assert!(fitted.owners[n..].iter().all(Option::is_none));
         // Zoomed in twice on the house's top right corner: the corner lands mid-image.
         let view = View { scale: fitted.view.scale * 2.0, cx: 8000.0, cy: 6000.0, ..fitted.view };
         let png = png(&draw(&s.model, 100000, view)).unwrap();
         assert_eq!(pixel(&png, (400.0, 300.0)), (POCHE.0, POCHE.1, POCHE.2));
         let back = view.mm(view.px(P2(1234.0, -567.0)));
         assert!(back.dist(P2(1234.0, -567.0)) < 0.01, "{back:?}");
+    }
+
+    #[test]
+    fn an_image_of_a_plan_letters_its_name_and_the_window_and_a_sheet_do_not() {
+        let s = house();
+        // The lettering is lines of no element's, drawn last.
+        let title = |d: &Drawing| d.owners.last() == Some(&None);
+        let fitted = plan(&s.model, 100000, 800, 600);
+        assert!(title(&fitted), "an image names its view at its bottom left");
+        assert!(title(&ceiling_plan(&s.model, 100000, 800, 600)));
+        assert!(!title(&draw(&s.model, 100000, fitted.view)), "the tab names it in the window");
+        assert!(!title(&draw_ceiling(&s.model, 100000, fitted.view)));
+        assert!(!title(&draw_at(&s.model, 100000, fitted.view, 1.0)), "and the viewport under it on a sheet");
     }
 
     #[test]

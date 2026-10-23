@@ -53,6 +53,6 @@ and annotation. Annotation says which view it is in: a note or a spot elevation 
 plan view too (`plan_param`): what is built stands on its level, what is dimensioned or tagged is in the view. A dependent view (`parent`) follows
 its parent's view range and graphics (`plan_source`; `graphics`, `scale`, `detail` and `visual_style` refuse it, naming the parent), has a crop
 of its own and draws its parent's annotation as well as its own. Deleting a view deletes what is annotated in it and its dependents; a level
-takes its plan views with it. A project that has none writes the same file as before. The desktop: View > Duplicate View, DP, and the Project
+takes its plan views with it. A project that has none writes the same file as before. A plan's own name, lettered at its bottom left, is in the drawings that make an image (`plan`, `ceiling_plan`: `titled`), not in the window's (`draw`, `draw_ceiling`) or a sheet's (`draw_at`), where the tab and the viewport's title say it. The desktop: View > Duplicate View, DP, and the Project
 Browser's right-click, which also has Delete for a plan view; `Sheet::Plan` and `Sheet::Ceiling` hold the key.
 
