@@ -1914,11 +1914,10 @@ impl BimApp {
         if reply["format"].is_string() {
             self.status = Status { text: import_note(&name, &reply), error: false };
         } else if let Some(left_out) = reply["left_out"].as_array() {
+            let count = reply["left_out_count"].as_u64().map_or(left_out.len(), |n| n as usize);
             // A newer BIMCraft's fields: what this one doesn't know, it can't keep.
-            let text = tf(
-                "{} opened without {} fields this version doesn't know; saving it leaves them out.",
-                &[&name, &left_out.len().to_string()],
-            );
+            let text =
+                tf("{} opened without {} fields this version doesn't know; saving it leaves them out.", &[&name, &count.to_string()]);
             self.status = Status { text, error: false };
         }
         true

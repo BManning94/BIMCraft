@@ -4826,6 +4826,22 @@ fn a_file_with_fields_this_bimcraft_does_not_know_opens_without_them_and_says_wh
 }
 
 #[test]
+fn a_file_with_a_great_many_unknown_fields_lists_the_first_hundred_and_counts_them_all() {
+    let mut s = Session::new();
+    s.execute("wall", &json!({"points": [[0, 0], [4000, 0]]})).unwrap();
+    let mut v = serde_json::to_value(&*s.model).unwrap();
+    for i in 0..500 {
+        v[format!("made_later_{i}")] = json!(i);
+    }
+    let path = std::env::temp_dir().join(format!("bimcraft-many-fields-{}.bimcraft", std::process::id()));
+    std::fs::write(&path, v.to_string()).unwrap();
+    let r = Session::new().execute("open", &json!({"path": path.to_str().unwrap()}));
+    let _ = std::fs::remove_file(&path);
+    let r = r.unwrap();
+    assert_eq!((r["left_out"].as_array().map(Vec::len), r["left_out_count"].as_u64()), (Some(100), Some(500)));
+}
+
+#[test]
 fn a_project_as_written_reads_back_with_nothing_left_out() {
     let mut s = Session::new();
     s.script(crate::sample::SAMPLE).unwrap();

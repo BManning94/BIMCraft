@@ -1373,6 +1373,9 @@ fn language(s: &mut Session, p: &Value) -> R {
     Ok(json!({"language": s.model.language.code()}))
 }
 
+/// The most fields `open` names as left out of a file; it says how many there were in all.
+const MAX_LEFT_OUT: usize = 100;
+
 fn open(s: &mut Session, p: &Value) -> R {
     let c = "open";
     let path = PathBuf::from(string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?);
@@ -1423,7 +1426,9 @@ fn open(s: &mut Session, p: &Value) -> R {
         reply["renamed"] = json!(renamed);
     }
     if !left_out.is_empty() {
-        reply["left_out"] = json!(left_out);
+        // A hostile file may name a million keys: the reply lists the first few and counts them all.
+        reply["left_out"] = json!(left_out.iter().take(MAX_LEFT_OUT).collect::<Vec<_>>());
+        reply["left_out_count"] = json!(left_out.len());
     }
     Ok(reply)
 }
