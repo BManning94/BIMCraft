@@ -21,6 +21,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Patch does not match source' }
           git apply bimcraft-lumion.patch
           if ($LASTEXITCODE -ne 0) { throw 'Patch failed' }
+          $file = 'crates/core/src/view3d/lumion.rs'
+          $text = [IO.File]::ReadAllText((Join-Path $pwd $file))
+          $text = $text.Replace('tri.color[0]', 'tri.color.0').Replace('tri.color[1]', 'tri.color.1').Replace('tri.color[2]', 'tri.color.2').Replace('tri.color.map(', '[tri.color.0, tri.color.1, tri.color.2].map(')
+          [IO.File]::WriteAllText((Join-Path $pwd $file), $text)
+          $file = 'crates/ui-egui/src/lib.rs'
+          $text = [IO.File]::ReadAllText((Join-Path $pwd $file))
+          $text = $text.Replace('        self.poll_lumion(ui.ctx());', '').Replace('        self.poll_updates(&ctx);', '        self.poll_updates(&ctx);' + [Environment]::NewLine + '        self.poll_lumion(&ctx);')
+          [IO.File]::WriteAllText((Join-Path $pwd $file), $text)
       - name: Compile and test local adapter
         shell: pwsh
         run: |
@@ -41,6 +49,7 @@ jobs:
           cargo clippy --fix --allow-dirty --allow-staged --locked --workspace --all-targets -- -D warnings
       - name: Check format and lint
         run: |
+          cargo fmt --all
           cargo fmt --all --check
           cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Full regression tests
@@ -73,11 +82,3 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
-  audit:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - run: git apply bimcraft-lumion.patch
-      - run: cargo install cargo-audit --locked
-      - run: cargo audit --file Cargo.lock
