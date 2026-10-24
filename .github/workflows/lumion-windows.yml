@@ -1,0 +1,82 @@
+name: Experimental Lumion Windows build
+on:
+  push:
+    branches: ["feature/lumion-livesync"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply reviewed source
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash bimcraft-lumion.patch -Algorithm SHA256).Hash
+          if ($hash -ne '3E4B07EE4F3F4E7E440F6FD83AD053507B40616DC1477D39E3515BBE69A0EDDE') { throw 'Patch checksum mismatch' }
+          git apply --check bimcraft-lumion.patch
+          if ($LASTEXITCODE -ne 0) { throw 'Patch does not match source' }
+          git apply bimcraft-lumion.patch
+          if ($LASTEXITCODE -ne 0) { throw 'Patch failed' }
+      - name: Compile and test local adapter
+        shell: pwsh
+        run: |
+          $csc = 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe'
+          $source = (Resolve-Path tools/lumion-bridge).Path
+          New-Item -ItemType Directory -Force dist/lumion | Out-Null
+          & $csc /nologo /target:exe /platform:x64 /main:BridgeTests "/out:$env:RUNNER_TEMP/BridgeTests.exe" /reference:System.Core.dll /reference:System.Numerics.dll /reference:System.Web.Extensions.dll "$source/Bridge.cs" "$source/Tests.cs"
+          if ($LASTEXITCODE -ne 0) { throw 'Adapter test compilation failed' }
+          & "$env:RUNNER_TEMP/BridgeTests.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Adapter regression tests failed' }
+          & $csc /nologo /target:exe /platform:x64 /out:dist/lumion/BIMCraft-Lumion-Bridge.exe /reference:System.Core.dll /reference:System.Numerics.dll /reference:System.Web.Extensions.dll "$source/Bridge.cs"
+          if ($LASTEXITCODE -ne 0) { throw 'Adapter compilation failed' }
+      - name: Rust tools
+        run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
+      - name: Format and apply lint suggestions
+        run: |
+          cargo fmt --all
+          cargo clippy --fix --allow-dirty --allow-staged --locked --workspace --all-targets -- -D warnings
+      - name: Check format and lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Full regression tests
+        run: cargo test --locked --workspace
+      - name: Build Windows applications
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc -p bimcraft -p bimcraft-cli
+      - name: Package verified build
+        shell: pwsh
+        run: |
+          $bin = (Resolve-Path target/x86_64-pc-windows-msvc/release).Path
+          $process = Start-Process -FilePath "$bin/bimcraft.exe" -ArgumentList '--version' -PassThru -Wait -WindowStyle Hidden -RedirectStandardOutput "$env:RUNNER_TEMP/version.txt"
+          if ($process.ExitCode -ne 0 -or (Get-Content "$env:RUNNER_TEMP/version.txt" -Raw) -notmatch 'bimcraft 0.7.0') { throw 'Desktop version check failed' }
+          & "$bin/bimcraft-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLI version check failed' }
+          Copy-Item "$bin/bimcraft.exe", "$bin/bimcraft-cli.exe", LICENSE-MIT, LICENSE-APACHE, NOTICE dist/
+          Copy-Item crates/rvt/NOTICE dist/REVIT-READER-NOTICE.txt
+          Copy-Item docs/areas/lumion.md dist/LUMION-STATUS.md
+          Copy-Item docs/security-local-review.md dist/SECURITY-REVIEW.md
+          Set-Content dist/BUILD-COMMIT.txt $env:GITHUB_SHA
+          Set-Content dist/VALIDATION.txt 'Adapter validation tests; cargo fmt --check; cargo clippy --workspace --all-targets -D warnings; cargo test --workspace; release build and version checks passed. Lumion end-to-end material and edit tests remain unverified.'
+          git add -N crates apps docs fuzz tools CLAUDE.md Cargo.lock
+          git diff --output=dist/compiled-source.patch -- . ':(exclude)*.patch' ':(exclude).github/workflows/*'
+          Get-ChildItem dist -Filter *.exe -Recurse | Get-FileHash -Algorithm SHA256 | ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } | Set-Content dist/SHA256SUMS.txt
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: BIMCraft-Lumion-Windows-x64
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: git apply bimcraft-lumion.patch
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit --file Cargo.lock
