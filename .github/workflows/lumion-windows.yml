@@ -27,11 +27,11 @@ jobs:
           $csc = 'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe'
           $source = (Resolve-Path tools/lumion-bridge).Path
           New-Item -ItemType Directory -Force dist/lumion | Out-Null
-          & $csc /nologo /target:exe /platform:x64 /main:BridgeTests "/out:$env:RUNNER_TEMP/BridgeTests.exe" /reference:System.Core.dll /reference:System.Numerics.dll /reference:System.Web.Extensions.dll "$source/Bridge.cs" "$source/Tests.cs"
+          & $csc /nologo /target:exe /platform:x64 /main:BridgeTests "/out:$env:RUNNER_TEMP\BridgeTests.exe" /reference:System.Core.dll /reference:System.Numerics.dll /reference:System.Web.Extensions.dll "$source\Bridge.cs" "$source\Tests.cs"
           if ($LASTEXITCODE -ne 0) { throw 'Adapter test compilation failed' }
-          & "$env:RUNNER_TEMP/BridgeTests.exe"
+          & "$env:RUNNER_TEMP\BridgeTests.exe"
           if ($LASTEXITCODE -ne 0) { throw 'Adapter regression tests failed' }
-          & $csc /nologo /target:exe /platform:x64 /out:dist/lumion/BIMCraft-Lumion-Bridge.exe /reference:System.Core.dll /reference:System.Numerics.dll /reference:System.Web.Extensions.dll "$source/Bridge.cs"
+          & $csc /nologo /target:exe /platform:x64 /out:dist/lumion/BIMCraft-Lumion-Bridge.exe /reference:System.Core.dll /reference:System.Numerics.dll /reference:System.Web.Extensions.dll "$source\Bridge.cs"
           if ($LASTEXITCODE -ne 0) { throw 'Adapter compilation failed' }
       - name: Rust tools
         run: rustup update stable && rustup default stable && rustup component add rustfmt clippy
