@@ -1,0 +1,1327 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 5ee2302..3cca855 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -103,3 +103,14 @@ jobs:
+           echo "023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757  actionlint.tar.gz" | sha256sum -c -
+           tar xzf actionlint.tar.gz actionlint
+           ./actionlint -color
++
++  dependency-security:
++    name: Rust dependency advisories
++    runs-on: ubuntu-24.04
++    timeout-minutes: 15
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install audit tool
++        run: cargo install cargo-audit --locked
++      - name: Audit committed lockfile
++        run: cargo audit
+diff --git a/CLAUDE.md b/CLAUDE.md
+index 3029665..d38d246 100644
+--- a/CLAUDE.md
++++ b/CLAUDE.md
+@@ -126,3 +126,5 @@ One line per module: what it owns. Read the module's file and, for the areas it
+ ## Keep the agent docs layered
+ 
+ This file holds the rules, the checks, the conventions and the map, and stays under 3,000 words (the `agent_docs` test in `crates/core` fails past that). The detail of a feature goes in `docs/areas/<area>.md`, or in the nearest crate's `CLAUDE.md` when it concerns the whole crate, and the map names it. A new feature adds its paragraph there, never here; a new module adds a line to the map; an area's write-up moves with the code it describes. Move text, never delete what is still true.
++
++Optional local Lumion integration: [Lumion LiveSync](docs/areas/lumion.md); the scene snapshot is view3d/lumion.rs, desktop lifecycle lumion.rs, adapter tools/lumion-bridge.
+diff --git a/Cargo.lock b/Cargo.lock
+index 0912fc1..39feac5 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2903,9 +2903,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "rustls-webpki"
+-version = "0.103.15"
++version = "0.103.16"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
++checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+ dependencies = [
+  "ring",
+  "rustls-pki-types",
+@@ -3851,9 +3851,9 @@ dependencies = [
+ 
+ [[package]]
+ name = "webpki-roots"
+-version = "1.0.9"
++version = "1.0.10"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
++checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
+ dependencies = [
+  "rustls-pki-types",
+ ]
+diff --git a/apps/bimcraft-cli/src/mcp.rs b/apps/bimcraft-cli/src/mcp.rs
+index fe75d88..06e852f 100644
+--- a/apps/bimcraft-cli/src/mcp.rs
++++ b/apps/bimcraft-cli/src/mcp.rs
+@@ -9,6 +9,18 @@ use serde_json::{Value, json};
+ pub const PROTOCOL_VERSION: &str = "2025-06-18";
+ const SUPPORTED: &[&str] = &[PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
+ 
++const MAX_MESSAGE: usize = 1 << 20;
++const MAX_BATCH: usize = 64;
++const MAX_SCRIPT_LINES: usize = 256;
++
++// Resolve aliases before checking. New commands require a deliberate access review.
++fn permitted(command: &str, params: &Value) -> bool {
++    bimcraft_core::engine::find(command).is_some_and(|c| !(c.id == "schedule" && params.get("path").is_some()) && matches!(c.id,
++        "new" | "wall" | "door" | "window" | "room" | "floor" | "roof" |
++        "column" | "stair" | "ramp" | "dimension" | "tag" | "level" |
++        "undo" | "redo" | "inspect" | "elements" | "schedule" | "delete"))
++}
++
+ const PARSE_ERROR: i64 = -32700;
+ const INVALID_REQUEST: i64 = -32600;
+ const METHOD_NOT_FOUND: i64 = -32601;
+@@ -26,7 +38,7 @@ dimension {refs: [[0, 3000], [8000, 3000]], at: [4000, -1000]} (between the wall
+ window); or send several at once with script, one `command {json}` per line. list_commands shows every command and its \
+ parameters. Check your work with inspect_model and query_elements, look at it with render (a PNG of a level's plan, with \
+ ceiling: true its reflected ceiling plan, of a section or elevation by name, or of the 3D view with view \"{3D}\"), and save \
+-to .bimcraft or .ifc.";
++in memory. MCP runs with restricted commands and cannot read or write files.";
+ 
+ pub struct Server {
+     session: Session,
+@@ -83,9 +95,16 @@ impl Server {
+     }
+ 
+     /// Serve until `input` closes. Logs go to stderr: stdout carries only protocol messages.
+-    pub fn serve(&mut self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+-        for line in input.lines() {
+-            if let Some(reply) = self.handle_line(&line?) {
++    pub fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
++        loop {
++            let mut bytes = Vec::new();
++            let n = std::io::Read::take(&mut input, (MAX_MESSAGE + 1) as u64).read_until(b'\n', &mut bytes)?;
++            if n == 0 { break; }
++            if bytes.len() > MAX_MESSAGE {
++                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "MCP message exceeds size limit"));
++            }
++            let line = std::str::from_utf8(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
++            if let Some(reply) = self.handle_line(line) {
+                 writeln!(output, "{reply}")?;
+                 output.flush()?;
+             }
+@@ -94,12 +113,16 @@ impl Server {
+     }
+ 
+     pub fn handle_line(&mut self, line: &str) -> Option<String> {
++        if line.len() > MAX_MESSAGE {
++            return Some(error(Value::Null, INVALID_REQUEST, "MCP message exceeds size limit").to_string());
++        }
+         let line = line.trim();
+         if line.is_empty() {
+             return None;
+         }
+         let reply = match serde_json::from_str::<Value>(line) {
+             Ok(Value::Array(batch)) if batch.is_empty() => Some(error(Value::Null, INVALID_REQUEST, "empty batch")),
++            Ok(Value::Array(batch)) if batch.len() > MAX_BATCH => Some(error(Value::Null, INVALID_REQUEST, "MCP batch exceeds size limit")),
+             Ok(Value::Array(batch)) => {
+                 let replies: Vec<Value> = batch.into_iter().filter_map(|m| self.handle(m)).collect();
+                 (!replies.is_empty()).then_some(Value::Array(replies))
+@@ -142,7 +165,13 @@ impl Server {
+                 }))
+             }
+             "ping" => Ok(json!({})),
+-            "tools/list" => Ok(json!({ "tools": tools() })),
++            "tools/list" => {
++                let mut available = tools();
++                if let Some(list) = available.as_array_mut() {
++                    list.retain(|tool| tool["name"] != "open" && tool["name"] != "save");
++                }
++                Ok(json!({ "tools": available }))
++            }
+             "tools/call" => {
+                 let name = params.get("name").and_then(Value::as_str).ok_or((INVALID_PARAMS, "missing tool `name`".to_string()))?;
+                 self.call(name, params.get("arguments").unwrap_or(&Value::Null))
+@@ -169,6 +198,29 @@ impl Server {
+                 return Err((INVALID_PARAMS, format!("`{name}` needs `{key}`")));
+             }
+         }
++        // File operations are unavailable, including indirect command and script routes.
++        let denied = match name {
++            "open" | "save" => true,
++            "execute" => !permitted(args["command"].as_str().unwrap_or_default(), &args["params"]),
++            "schedule" => args.get("path").is_some(),
++            "script" => {
++                let text = args["text"].as_str().unwrap_or_default();
++                text.lines().count() > MAX_SCRIPT_LINES || text.lines().any(|line| {
++                    let line = line.trim();
++                    if line.is_empty() || line.starts_with('#') { return false; }
++                    let (command, rest) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
++                    let params = if rest.trim().is_empty() { json!({}) } else {
++                        match serde_json::from_str::<Value>(rest) {
++                            Ok(params) => params,
++                            Err(_) => return true,
++                        }
++                    };
++                    !permitted(command, &params)
++                })
++            }
++            _ => false,
++        };
++        if denied { return Ok(tool_error("command unavailable in restricted MCP mode")); }
+         let s = &mut self.session;
+         let result = match name {
+             "execute" => {
+@@ -296,35 +348,43 @@ mod tests {
+         assert_eq!((img["type"].as_str(), img["mimeType"].as_str()), (Some("image"), Some("image/png")));
+         let r = call(&mut s, 10, "tools/call", json!({"name": "render", "arguments": {"view": "{3D}", "azimuth": 135, "elevation": 20}}));
+         assert_eq!(r["result"]["content"][1]["text"], "3D view from 135° round, 20° up, 1600 x 1000 px");
+-        let path = std::env::temp_dir().join(format!("bimcraft-mcp-{}.ifc", std::process::id()));
+-        tool(&mut s, "save", json!({ "path": path }));
+-        assert!(std::fs::read_to_string(&path).unwrap().contains("IFCSPACE("));
+-        let _ = std::fs::remove_file(path);
++        let denied = call(&mut s, 20, "tools/call", json!({"name": "save", "arguments": {"path": "outside.ifc"}}));
++        assert_eq!(denied["result"]["isError"], true);
+     }
+ 
+-    #[cfg(feature = "rvt")]
+     #[test]
+-    fn open_imports_a_revit_file_through_the_same_importer_as_the_command_line() {
+-        let path = crate::revit::tests::house("mcp.rvt");
++    fn filesystem_access_is_denied_through_every_mcp_route() {
+         let mut s = Server::new();
+-        let reply = tool(&mut s, "open", json!({ "path": path }));
+-        assert_eq!((reply["format"].as_str(), reply["elements"].clone()), (Some("Revit 2024"), json!({"level": 2, "wall": 1})));
+-        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"], json!({"level": 2, "wall": 1}));
+-        // A file that is not Revit's is a tool error that names it, and the model stays as it was.
+-        let fake = std::env::temp_dir().join(format!("bimcraft-mcp-{}-fake.rvt", std::process::id()));
+-        std::fs::write(&fake, b"not a Revit file").unwrap();
+-        let r = call(&mut s, 11, "tools/call", json!({"name": "open", "arguments": {"path": fake}}));
+-        assert!(r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().unwrap().contains("fake.rvt"), "{r}");
+-        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"], json!({"level": 2, "wall": 1}));
+-        let _ = std::fs::remove_file(fake);
++        for (name, arguments) in [
++            ("open", json!({"path": "secret.rvt"})),
++            ("save", json!({"path": "outside.ifc"})),
++            ("schedule", json!({"category": "rooms", "path": "outside.csv"})),
++            ("execute", json!({"command": "schedule", "params": {"category": "rooms", "path": "outside.csv"}})),
++            ("script", json!({"text": "schedule {\"category\": \"rooms\", \"path\": \"outside.csv\"}"})),
++            ("execute", json!({"command": "OPEN", "params": {"path": "secret.bimcraft"}})),
++            ("execute", json!({"command": "save"})),
++            ("execute", json!({"command": "link", "params": {"path": "secret.bimcraft"}})),
++            ("script", json!({"text": "level {\"elevation\": 6000}\nopen {\"path\": \"secret.bimcraft\"}"})),
++        ] {
++            let reply = call(&mut s, 1, "tools/call", json!({"name": name, "arguments": arguments}));
++            assert_eq!(reply["result"]["isError"], true, "{reply}");
++        }
++        assert_eq!(tool(&mut s, "inspect_model", json!({}))["counts"]["level"], 2);
++        assert!(permitted("WA", &json!({})));
++        assert!(!permitted("future-file-command", &json!({})));
+     }
+ 
+-    #[cfg(not(feature = "rvt"))]
+     #[test]
+-    fn open_of_a_revit_file_in_a_build_without_revit_support_is_a_tool_error_that_says_so() {
++    fn oversized_transport_and_batches_are_rejected() {
+         let mut s = Server::new();
+-        let r = call(&mut s, 1, "tools/call", json!({"name": "open", "arguments": {"path": "x.rvt"}}));
+-        assert!(r["result"]["isError"] == true && r["result"]["content"][0]["text"].as_str().unwrap().contains("without Revit support"));
++        let oversized = "x".repeat(MAX_MESSAGE + 1);
++        assert!(s.handle_line(&oversized).unwrap().contains("size limit"));
++        assert!(s.serve(oversized.as_bytes(), Vec::new()).is_err());
++        let batch = serde_json::to_string(&vec![json!({"id": 1, "method": "ping"}); MAX_BATCH + 1]).unwrap();
++        assert!(s.handle_line(&batch).unwrap().contains("batch exceeds"));
++        let script = "inspect\n".repeat(MAX_SCRIPT_LINES + 1);
++        let reply = call(&mut s, 1, "tools/call", json!({"name": "script", "arguments": {"text": script}}));
++        assert_eq!(reply["result"]["isError"], true);
+     }
+ 
+     #[test]
+@@ -351,7 +411,7 @@ mod tests {
+             json!({"name": "script", "arguments": {"text": "level {\"elevation\": 6000}\nnope", "atomic": true}}),
+         );
+         assert_eq!(r["result"]["isError"], true);
+-        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("line 2"));
++        assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("restricted MCP mode"));
+         assert_eq!(levels(&mut s), 2, "the first line is taken back");
+         tool(&mut s, "script", json!({"text": "level {\"elevation\": 6000}\nlevel {\"elevation\": 9000}", "atomic": true}));
+         assert_eq!(levels(&mut s), 4);
+diff --git a/crates/core/src/commands.rs b/crates/core/src/commands.rs
+index 7800635..2df9e14 100644
+--- a/crates/core/src/commands.rs
++++ b/crates/core/src/commands.rs
+@@ -1459,13 +1459,9 @@ fn with_links(s: &mut Session, mut reply: Value) -> Value {
+ fn open_file(s: &mut Session, p: &Value) -> R {
+     let c = "open";
+     let path = PathBuf::from(string(c, p, "path")?.ok_or_else(|| bad(c, "`path` is required"))?);
+-    let size = std::fs::metadata(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?.len();
+-    if size >= MAX_FILE {
+-        return Err(bad(c, format!("{} is too large ({size} bytes)", path.display())));
+-    }
++    let bytes = crate::input::read_file(&path, MAX_FILE).map_err(|e| bad(c, e))?;
+     // IFC comes in as a new project: saving it asks where.
+     if ext(&path) == "ifc" {
+-        let bytes = std::fs::read(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+         let stem = path.file_stem().map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
+         let i = crate::import::ifc(&bytes, &stem).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+         let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+@@ -1477,7 +1473,7 @@ fn open_file(s: &mut Session, p: &Value) -> R {
+         s.reset(i.model, None);
+         return Ok(reply);
+     }
+-    let text = std::fs::read_to_string(&path).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
++    let text = String::from_utf8(bytes).map_err(|e| bad(c, format!("{}: {e}", path.display())))?;
+     let (mut m, left_out) = Model::read(&text).map_err(|e| bad(c, format!("{} is not a BIMCraft project: {e}", path.display())))?;
+     m.adopt_materials();
+     // A project parameter named as a phase or a design option is held under is from before they were: it keeps its values, renamed.
+diff --git a/crates/core/src/import.rs b/crates/core/src/import.rs
+index e20bf80..e83c6c8 100644
+--- a/crates/core/src/import.rs
++++ b/crates/core/src/import.rs
+@@ -1214,6 +1214,7 @@ const COLUMNS: &[&str] = &["IFCCOLUMN", "IFCCOLUMNSTANDARDCASE"];
+ 
+ /// Reads IFC text into a model, named after the project (or `name`).
+ pub fn ifc(bytes: &[u8], name: &str) -> Result<Imported, String> {
++    if bytes.len() >= 256 << 20 { return Err("IFC exceeds file size limit".into()); }
+     let file = step::parse(bytes)?;
+     if !file.schema.starts_with("IFC") {
+         let schema = if file.schema.is_empty() { "no schema" } else { &file.schema };
+diff --git a/crates/core/src/input.rs b/crates/core/src/input.rs
+new file mode 100644
+index 0000000..f19d603
+--- /dev/null
++++ b/crates/core/src/input.rs
+@@ -0,0 +1,28 @@
++//! Bounded reads of untrusted files, including files that grow after opening.
++use std::io::Read;
++use std::path::Path;
++
++pub fn read_file(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
++    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
++    let metadata = file.metadata().map_err(|e| e.to_string())?;
++    if !metadata.is_file() { return Err("input must be a regular file".into()); }
++    read_bounded(file, limit)
++}
++
++fn read_bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>, String> {
++    let mut bytes = Vec::new();
++    reader.take(limit).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
++    if bytes.len() as u64 >= limit { return Err("input exceeds file size limit".into()); }
++    Ok(bytes)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn streaming_limit_does_not_depend_on_metadata() {
++        assert_eq!(read_bounded(&b"abc"[..], 4).unwrap(), b"abc");
++        assert!(read_bounded(&b"abcd"[..], 4).is_err());
++        assert!(read_bounded(std::io::repeat(0), 1024).is_err());
++    }
++}
+diff --git a/crates/core/src/lib.rs b/crates/core/src/lib.rs
+index af8a8d4..ee5b7ff 100644
+--- a/crates/core/src/lib.rs
++++ b/crates/core/src/lib.rs
+@@ -19,6 +19,7 @@ pub mod graphics;
+ pub mod ids;
+ pub mod ifc;
+ pub mod import;
++pub mod input;
+ pub mod inquiry;
+ pub mod insert;
+ pub mod language;
+diff --git a/crates/core/src/model.rs b/crates/core/src/model.rs
+index bfff6d5..69280f0 100644
+--- a/crates/core/src/model.rs
++++ b/crates/core/src/model.rs
+@@ -1986,6 +1986,7 @@ impl Model {
+     /// misspelled one. The fields left out come back as JSON pointers into the file (`/elements/100004/finish`). A file
+     /// of a newer format is refused whole, since what changed may be more than a field.
+     pub fn read(text: &str) -> Result<(Model, Vec<String>), String> {
++        if text.len() >= 256 << 20 { return Err("project exceeds file size limit".into()); }
+         use crate::lenient;
+         use serde_json::Value;
+         let mut v: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+diff --git a/crates/core/src/view3d.rs b/crates/core/src/view3d.rs
+index 15aedc5..2da2374 100644
+--- a/crates/core/src/view3d.rs
++++ b/crates/core/src/view3d.rs
+@@ -19,6 +19,7 @@ use crate::texture::Sampler;
+ use crate::walls::{self, Axis, Plane};
+ 
+ pub mod gpu;
++pub mod lumion;
+ 
+ /// Shared CPU rendering workers, bounded so background work leaves input and I/O capacity.
+ fn render_pool() -> Option<&'static rayon::ThreadPool> {
+diff --git a/crates/core/src/view3d/lumion.rs b/crates/core/src/view3d/lumion.rs
+new file mode 100644
+index 0000000..cdb4544
+--- /dev/null
++++ b/crates/core/src/view3d/lumion.rs
+@@ -0,0 +1,141 @@
++//! Bounded scene snapshots for the optional local Lumion bridge.
++//! Coordinates are metres, Y up; stable element GUIDs keep edited objects identifiable.
++use std::collections::BTreeMap;
++use std::io::{self, Write};
++
++use serde::Serialize;
++
++use super::{Model, P3, Scene, cross, sub, unit};
++
++pub const MAX_TRIANGLES: usize = 150_000;
++pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
++
++#[derive(Serialize)]
++pub struct Frame {
++    pub version: u32,
++    pub meshes: Vec<Mesh>,
++    pub materials: Vec<Material>,
++}
++
++#[derive(Serialize)]
++pub struct Mesh {
++    pub key: String,
++    pub material: String,
++    pub positions: Vec<f32>,
++    pub normals: Vec<f32>,
++}
++
++#[derive(Serialize)]
++pub struct Material {
++    pub key: String,
++    pub color: [f32; 3],
++}
++
++/// Build only tessellated model solids. An empty snapshot deliberately removes old geometry.
++/// Textures, lights, cameras, annotations and point clouds are not exported by this version.
++pub fn snapshot(model: &Model) -> Result<Frame, String> {
++    let scene = Scene::new(model);
++    if scene.tris.len() > MAX_TRIANGLES {
++        return Err(format!("Lumion sync is limited to {MAX_TRIANGLES} triangles."));
++    }
++    let mut meshes = BTreeMap::<String, Mesh>::new();
++    let mut materials = BTreeMap::new();
++    for (i, tri) in scene.tris.iter().enumerate() {
++        let material = format!("BIMCraft-{:02x}{:02x}{:02x}", tri.color[0], tri.color[1], tri.color[2]);
++        materials.entry(material.clone()).or_insert_with(|| Material {
++            key: material.clone(),
++            color: tri.color.map(|v| f32::from(v) / 255.0),
++        });
++        let guid = model.guid(tri.owner);
++        // Linked display objects have synthetic owners, outside the root model.
++        let owner = if guid.is_nil() { format!("linked-{}", tri.owner) } else { guid.to_string() };
++        let key = format!("{owner}/{material}");
++        let mesh = meshes.entry(key.clone()).or_insert_with(|| Mesh {
++            key,
++            material,
++            positions: Vec::new(),
++            normals: Vec::new(),
++        });
++        let flat = unit(cross(sub(tri.p[1], tri.p[0]), sub(tri.p[2], tri.p[0])));
++        for (corner, point) in tri.p.iter().enumerate() {
++            mesh.positions.extend(position(*point)?);
++            let normal = scene.smooth[i].as_ref().map_or(flat, |normals| normals[corner]);
++            mesh.normals.extend(direction(normal)?);
++        }
++    }
++    Ok(Frame { version: 1, meshes: meshes.into_values().collect(), materials: materials.into_values().collect() })
++}
++
++fn position(p: P3) -> Result<[f32; 3], String> {
++    if !p.iter().all(|v| v.is_finite() && v.abs() <= 1e9) {
++        return Err("Lumion geometry contains an invalid coordinate.".into());
++    }
++    Ok([p[0] as f32 / 1000.0, p[2] as f32 / 1000.0, -p[1] as f32 / 1000.0])
++}
++
++fn direction(p: P3) -> Result<[f32; 3], String> {
++    if !p.iter().all(|v| v.is_finite() && v.abs() <= 1.001) {
++        return Err("Lumion geometry contains an invalid normal.".into());
++    }
++    Ok([p[0] as f32, p[2] as f32, -p[1] as f32])
++}
++
++/// Stop serialization before an oversized model can allocate an unbounded outgoing frame.
++pub fn encode(frame: &Frame) -> Result<Vec<u8>, String> {
++    struct Bounded(Vec<u8>);
++    impl Write for Bounded {
++        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
++            if data.len() > MAX_FRAME_BYTES.saturating_sub(self.0.len()) {
++                return Err(io::Error::other("Lumion snapshot exceeds 64 MiB."));
++            }
++            self.0.extend_from_slice(data);
++            Ok(data.len())
++        }
++        fn flush(&mut self) -> io::Result<()> { Ok(()) }
++    }
++    let mut out = Bounded(Vec::new());
++    serde_json::to_writer(&mut out, frame).map_err(|e| e.to_string())?;
++    Ok(out.0)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::engine::Session;
++    use serde_json::json;
++
++    #[test]
++    fn coordinates_are_metres_y_up_and_reject_nonfinite_values() {
++        assert_eq!(position([1000.0, 2000.0, 3000.0]).unwrap(), [1.0, 3.0, -2.0]);
++        assert!(position([f64::NAN, 0.0, 0.0]).is_err());
++        assert!(position([f64::INFINITY, 0.0, 0.0]).is_err());
++        assert!(position([1e10, 0.0, 0.0]).is_err());
++    }
++
++    #[test]
++    fn wall_identity_survives_an_edit_and_delete_empties_the_snapshot() {
++        let mut s = Session::new();
++        let made = s.execute("wall", &json!({"points":[[0,0],[4000,0]]})).unwrap();
++        let first = snapshot(&s.model).unwrap();
++        assert!(!first.meshes.is_empty());
++        assert!(first.meshes.iter().all(|m| m.positions.len() == m.normals.len() && m.positions.len() % 9 == 0));
++        let keys: Vec<_> = first.meshes.iter().map(|m| &m.key).collect();
++        s.execute("move", &json!({"ids":made["ids"],"by":[1000,2000]})).unwrap();
++        let second = snapshot(&s.model).unwrap();
++        assert_eq!(keys, second.meshes.iter().map(|m| &m.key).collect::<Vec<_>>());
++        s.execute("undo", &json!({})).unwrap();
++        assert_eq!(encode(&first).unwrap(), encode(&snapshot(&s.model).unwrap()).unwrap());
++        s.execute("undo", &json!({})).unwrap();
++        assert!(snapshot(&s.model).unwrap().meshes.is_empty());
++        s.execute("redo", &json!({})).unwrap();
++        assert_eq!(encode(&first).unwrap(), encode(&snapshot(&s.model).unwrap()).unwrap());
++    }
++
++    #[test]
++    fn empty_frame_has_an_explicit_protocol_version() {
++        let frame = snapshot(&Session::new().model).unwrap();
++        let json: serde_json::Value = serde_json::from_slice(&encode(&frame).unwrap()).unwrap();
++        assert_eq!(json["version"], 1);
++        assert_eq!(json["meshes"], json!([]));
++    }
++}
+diff --git a/crates/ui-egui/src/lang.rs b/crates/ui-egui/src/lang.rs
+index d65a150..a3621c5 100644
+--- a/crates/ui-egui/src/lang.rs
++++ b/crates/ui-egui/src/lang.rs
+@@ -109,6 +109,11 @@ pub fn category(category: &str, several: bool) -> String {
+ /// The interface's words in English, Brazilian Portuguese and Spanish; the core's words (schedule
+ /// names and headings) besides.
+ const WORDS: &[[&str; 3]] = &[
++    ["Start Lumion LiveSync", "Iniciar Lumion LiveSync", "Iniciar Lumion LiveSync"],
++    ["Stop Lumion LiveSync", "Parar Lumion LiveSync", "Detener Lumion LiveSync"],
++    ["Lumion LiveSync stopped.", "Lumion LiveSync parado.", "Lumion LiveSync detenido."],
++    ["Starting Lumion LiveSync…", "Iniciando Lumion LiveSync…", "Iniciando Lumion LiveSync…"],
++    ["Lumion LiveSync: {}", "Lumion LiveSync: {}", "Lumion LiveSync: {}"],
+     ["Autosave", "Salvamento automático", "Guardado automático"],
+     ["Autosave in the background", "Salvar automaticamente em segundo plano", "Guardar automáticamente en segundo plano"],
+     ["Recover Autosave…", "Recuperar salvamento automático…", "Recuperar guardado automático…"],
+diff --git a/crates/ui-egui/src/lib.rs b/crates/ui-egui/src/lib.rs
+index 67e2041..c8c9102 100644
+--- a/crates/ui-egui/src/lib.rs
++++ b/crates/ui-egui/src/lib.rs
+@@ -18,6 +18,7 @@ pub mod icons;
+ mod inquiry;
+ pub mod lang;
+ mod links;
++mod lumion;
+ mod mep;
+ mod orbit;
+ mod paper;
+@@ -334,6 +335,7 @@ fn import_note(file: &str, reply: &Value) -> String {
+ }
+ 
+ pub struct BimApp {
++    lumion: Option<lumion::LiveSync>,
+     pub session: Session,
+     /// The system's requests since the last frame, read once a frame. None where it sends none.
+     pub os_events: Option<Box<dyn FnMut() -> Vec<OsEvent>>>,
+@@ -845,6 +847,7 @@ impl BimApp {
+             title: String::new(),
+             styled: false,
+             updates: None,
++            lumion: None,
+             revit: None,
+             revit_job: None,
+             opens: Vec::new(),
+@@ -2232,6 +2235,7 @@ impl BimApp {
+         });
+         self.report_menu(ui);
+         self.update_menu(ui);
++        self.lumion_menu(ui);
+         ui.separator();
+         if item(ui, "Settings…", Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Comma))) {
+             self.settings_page = Some(settings::Page::Interface);
+@@ -3459,6 +3463,7 @@ impl BimApp {
+ 
+ impl eframe::App for BimApp {
+     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
++        self.poll_lumion(ui.ctx());
+         self.show(ui);
+     }
+ 
+diff --git a/crates/ui-egui/src/lumion.rs b/crates/ui-egui/src/lumion.rs
+new file mode 100644
+index 0000000..feadede
+--- /dev/null
++++ b/crates/ui-egui/src/lumion.rs
+@@ -0,0 +1,178 @@
++//! User-started local IPC only. No network listener, shell, script or automatic startup.
++use std::io::{BufRead, BufReader, Read, Write};
++use std::process::{Child, Command, Stdio};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Condvar, Mutex, mpsc};
++use std::time::Duration;
++
++use bimcraft_core::model::Model;
++use bimcraft_core::view3d::lumion::{encode, snapshot};
++use egui::{Context, Ui};
++
++use crate::lang::{t, tf};
++use crate::{BimApp, Status};
++
++struct Pending {
++    model: Mutex<Option<Arc<Model>>>,
++    wake: Condvar,
++    stopped: AtomicBool,
++}
++
++pub(crate) struct LiveSync {
++    pending: Arc<Pending>,
++    child: Arc<Mutex<Child>>,
++    messages: mpsc::Receiver<(String, bool)>,
++    last: Arc<Model>,
++}
++
++fn start(model: &Arc<Model>) -> Result<LiveSync, String> {
++    if !cfg!(windows) {
++        return Err("Lumion LiveSync requires Windows.".into());
++    }
++    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
++    let folder = exe.parent().ok_or("Could not locate the application folder.")?.join("lumion");
++    let bridge = folder.join("BIMCraft-Lumion-Bridge.exe");
++    if !bridge.is_file() {
++        return Err("The optional Lumion bridge is missing from the application's lumion folder.".into());
++    }
++    let mut command = Command::new(bridge);
++    command.current_dir(folder).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
++    #[cfg(windows)]
++    {
++        use std::os::windows::process::CommandExt;
++        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
++    }
++    let mut child = command.spawn().map_err(|e| format!("Could not start the Lumion bridge: {e}"))?;
++    let input = child.stdin.take();
++    let output = child.stdout.take();
++    let (Some(mut input), Some(output)) = (input, output) else {
++        let _ = child.kill();
++        let _ = child.wait();
++        return Err("Could not create the Lumion bridge pipes.".into());
++    };
++    let child = Arc::new(Mutex::new(child));
++    let pending = Arc::new(Pending { model: Mutex::new(Some(Arc::clone(model))), wake: Condvar::new(), stopped: AtomicBool::new(false) });
++    let (sender, messages) = mpsc::sync_channel(32);
++    let worker = Arc::clone(&pending);
++    let errors = sender.clone();
++    std::thread::spawn(move || {
++        while !worker.stopped.load(Ordering::Relaxed) {
++            let model = {
++                let Ok(mut slot) = worker.model.lock() else { break };
++                if slot.is_none() {
++                    let Ok((next, _)) = worker.wake.wait_timeout(slot, Duration::from_millis(500)) else { break };
++                    slot = next;
++                }
++                slot.take()
++            };
++            let Some(model) = model else { continue };
++            let result = snapshot(&model).and_then(|frame| encode(&frame)).and_then(|data| {
++                let length = u32::try_from(data.len()).map_err(|e| e.to_string())?;
++                input.write_all(&length.to_le_bytes()).and_then(|()| input.write_all(&data)).and_then(|()| input.flush())
++                    .map_err(|e| format!("Lumion bridge disconnected: {e}"))
++            });
++            if let Err(error) = result {
++                let _ = errors.try_send((error, true));
++                worker.stopped.store(true, Ordering::Relaxed);
++            }
++            // Coalesce edits while a snapshot is being constructed; never queue old scenes.
++            std::thread::sleep(Duration::from_millis(350));
++        }
++        // Closing the pipe asks the bridge to delete only its own LiveSync document.
++    });
++    let reader_stop = Arc::clone(&pending);
++    std::thread::spawn(move || {
++        let mut reader = BufReader::new(output);
++        loop {
++            let mut line = Vec::new();
++            let result = Read::by_ref(&mut reader).take(8193).read_until(b'\n', &mut line);
++            match result {
++                Ok(0) => break,
++                Ok(_) if line.len() <= 8192 => {
++                    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&line) {
++                        if let (Some(status), Some(message)) = (value["status"].as_str(), value["message"].as_str()) {
++                            let _ = sender.try_send((message.to_owned(), status == "error"));
++                        }
++                    }
++                }
++                _ => {
++                    let _ = sender.try_send(("Invalid response from the Lumion bridge.".into(), true));
++                    break;
++                }
++            }
++        }
++        if !reader_stop.stopped.swap(true, Ordering::Relaxed) {
++            let _ = sender.try_send(("The Lumion bridge has stopped.".into(), true));
++        }
++        reader_stop.wake.notify_one();
++    });
++    Ok(LiveSync { pending, child, messages, last: Arc::clone(model) })
++}
++
++impl LiveSync {
++    fn changed(&mut self, model: &Arc<Model>) {
++        if self.pending.stopped.load(Ordering::Relaxed) || Arc::ptr_eq(model, &self.last) {
++            return;
++        }
++        if let Ok(mut slot) = self.pending.model.lock() {
++            *slot = Some(Arc::clone(model));
++            self.last = Arc::clone(model);
++            self.pending.wake.notify_one();
++        }
++    }
++}
++
++impl Drop for LiveSync {
++    fn drop(&mut self) {
++        self.pending.stopped.store(true, Ordering::Relaxed);
++        self.pending.wake.notify_one();
++        let child = Arc::clone(&self.child);
++        std::thread::spawn(move || {
++            // Permit EOF cleanup, then terminate a stalled bridge without holding the desktop.
++            std::thread::sleep(Duration::from_secs(2));
++            if let Ok(mut child) = child.lock() {
++                if !matches!(child.try_wait(), Ok(Some(_))) {
++                    let _ = child.kill();
++                }
++                let _ = child.wait();
++            }
++        });
++    }
++}
++
++impl BimApp {
++    pub(crate) fn lumion_menu(&mut self, ui: &mut Ui) {
++        if self.lumion.is_some() {
++            if ui.button(t("Stop Lumion LiveSync")).clicked() {
++                self.lumion = None;
++                self.status = Status { text: t("Lumion LiveSync stopped.").into(), error: false };
++            }
++        } else if ui.add_enabled(cfg!(windows), egui::Button::new(t("Start Lumion LiveSync"))).clicked() {
++            match start(&self.session.model) {
++                Ok(sync) => {
++                    self.lumion = Some(sync);
++                    self.status = Status { text: t("Starting Lumion LiveSync…").into(), error: false };
++                }
++                Err(error) => self.status = Status { text: tf("Lumion LiveSync: {}", &[&error]), error: true },
++            }
++        }
++    }
++
++    pub(crate) fn poll_lumion(&mut self, ctx: &Context) {
++        let Some(sync) = self.lumion.as_mut() else { return };
++        sync.changed(&self.session.model);
++        for (message, error) in sync.messages.try_iter() {
++            self.status = Status { text: tf("Lumion LiveSync: {}", &[&message]), error };
++        }
++        ctx.request_repaint_after(Duration::from_millis(500));
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn live_sync_is_opt_in_and_does_not_start_with_the_desktop() {
++        let app = super::BimApp::new(bimcraft_core::engine::Session::new());
++        assert!(app.lumion.is_none());
++    }
++}
+diff --git a/crates/update/src/install.rs b/crates/update/src/install.rs
+index 7e1bf53..f32b7ca 100644
+--- a/crates/update/src/install.rs
++++ b/crates/update/src/install.rs
+@@ -93,6 +93,9 @@ pub fn start(msi: &Path, sha256: &[u8; 32], project: Option<&Path>) -> Result<()
+ 
+ /// [`start`] for the program at `exe`: copied beside the installer, in the folder of its own, and started.
+ pub fn start_with(exe: &Path, msi: &Path, sha256: &[u8; 32], project: Option<&Path>) -> Result<(), String> {
++    if !crate::publisher_trust_configured() {
++        return Err("Windows update handoff is disabled until publisher authentication is configured".into());
++    }
+     let copy = msi.with_file_name(format!("bimcraft-update{}", std::env::consts::EXE_SUFFIX));
+     fs::copy(exe, &copy).map_err(|e| format!("{}: {e}", copy.display()))?;
+     let mut child = Command::new(&copy)
+@@ -131,7 +134,8 @@ pub fn run(finish: &Finish) -> ExitCode {
+ /// [`run`] on this `parent` (its end is the app exiting) and Windows' own folders: nothing at all happens unless `finish` is
+ /// [`plausible`]. Whether the installer ran.
+ pub fn run_with(finish: &Finish, parent: &mut dyn Read, program_files: Option<&str>, system_root: Option<OsString>) -> bool {
+-    plausible(finish, program_files) && finish_with(finish, parent, &msiexec_path(system_root))
++    crate::publisher_trust_configured() && program_files.is_some() && system_root.as_ref().is_some_and(|p| Path::new(p).is_absolute())
++        && plausible(finish, program_files) && finish_with(finish, parent, &msiexec_path(system_root))
+ }
+ 
+ /// Windows Installer's program by its full path, given Windows' folder: the copy runs from a folder that anything running as the
+@@ -150,7 +154,7 @@ pub fn finish_with(finish: &Finish, parent: &mut dyn Read, installer: &Path) ->
+ /// [`finish_with`], told the exit code that means the installer couldn't open the file it was given (a stand-in for the installer
+ /// in a test can't exit with 1620, which a shell cuts to eight bits).
+ pub fn finish_after(finish: &Finish, parent: &mut dyn Read, installer: &Path, unopenable: i32) -> bool {
+-    let _ = io::copy(parent, &mut io::sink());
++    if io::copy(parent, &mut io::sink()).is_err() { return false; }
+     let ran = run_checked(finish, installer, unopenable);
+     let _ = fs::remove_file(&finish.msi);
+     let _ = Command::new(&finish.exe).args(&finish.project).spawn();
+@@ -169,9 +173,8 @@ fn hold(path: &Path) -> io::Result<File> {
+ 
+ /// Runs `installer` on the file if it is still the one that was checked, and says whether it did. The file is held open while it
+ /// runs, so nothing can swap it between that check and the installer reading it (the time you take over the permission prompt
+-/// included). Should Windows Installer refuse a file held so (it exits with `unopenable`), the hold is let go, the file is
+-/// checked once more and run without it.
+-fn run_checked(finish: &Finish, installer: &Path, unopenable: i32) -> bool {
++/// included). A refusal fails closed; the handle is never released for an unlocked retry.
++fn run_checked(finish: &Finish, installer: &Path, _unopenable: i32) -> bool {
+     let Ok(mut held) = hold(&finish.msi) else { return false };
+     if !crate::sha256_of(&mut held).is_ok_and(|digest| digest == finish.sha256) {
+         return false;
+@@ -183,13 +186,9 @@ fn run_checked(finish: &Finish, installer: &Path, unopenable: i32) -> bool {
+         command.arg("/i").arg(&finish.msi).args(["/passive", "/norestart", "/l*v"]).arg(&log).stdin(Stdio::null());
+         command.status().ok().and_then(|status| status.code())
+     };
+-    if install() == Some(unopenable) {
+-        drop(held);
+-        if crate::sha256_file(&finish.msi).is_ok_and(|digest| digest == finish.sha256) {
+-            install();
+-        }
+-    }
+-    true
++    // Keep the deny-write/delete handle until Windows Installer exits. Never retry
++    // without it: rehashing before an unlocked launch leaves a replacement race.
++    matches!(install(), Some(0 | 1641 | 3010))
+ }
+ 
+ /// Removes what earlier updates left in `parent`: their folders, which hold the copy of the app that couldn't remove itself.
+diff --git a/crates/update/src/lib.rs b/crates/update/src/lib.rs
+index 23f47a5..0d36817 100644
+--- a/crates/update/src/lib.rs
++++ b/crates/update/src/lib.rs
+@@ -375,3 +375,15 @@ pub fn sha256_of(reader: &mut impl Read) -> io::Result<[u8; 32]> {
+         }
+     }
+ }
++
++/// No independently authenticated publisher key has been provisioned.
++/// Do not replace this with an environment variable or a key from release metadata.
++pub fn publisher_trust_configured() -> bool { false }
++
++#[cfg(test)]
++mod trust_tests {
++    #[test]
++    fn unsigned_release_installation_is_disabled() {
++        assert!(!super::publisher_trust_configured());
++    }
++}
+diff --git a/crates/update/src/tests.rs b/crates/update/src/tests.rs
+index 1fc890e..d764a79 100644
+--- a/crates/update/src/tests.rs
++++ b/crates/update/src/tests.rs
+@@ -733,7 +733,7 @@ mod unix {
+     }
+ 
+     #[test]
+-    fn an_installer_windows_will_not_open_held_is_run_again_unheld() {
++    fn an_installer_windows_will_not_open_held_is_never_retried_unlocked() {
+         let _one = serial();
+         let rig = rig(0);
+         let marker = rig.dir.0.join("second");
+@@ -741,8 +741,8 @@ mod unix {
+             format!("echo installer >> {0}\nif [ -f {1} ]; then exit 0; fi\ntouch {1}\nexit 84", rig.log.display(), marker.display());
+         let installer = script(&rig.dir.0, "msiexec-picky", &body);
+         let ran = install::finish_after(&finish(&rig, b"installer bytes", None), &mut std::io::empty(), &installer, 84);
+-        assert!(ran);
+-        assert_eq!(log(&rig.log, 3), ["installer", "installer", "app"], "refused once, then run");
++        assert!(!ran);
++        assert_eq!(log(&rig.log, 2), ["installer", "app"], "refusal is never retried unlocked");
+     }
+ 
+     #[test]
+@@ -782,8 +782,8 @@ mod unix {
+         assert!(!trace.exists() && odd.msi.exists() && misplaced.msi.exists(), "nothing happened");
+         // What an update makes runs Windows' own installer, from where Windows says its folder is.
+         let real = made(folder.join("bimcraft-0.5.0-windows-x64.msi"));
+-        assert!(install::run_with(&real, &mut std::io::empty(), None, root));
+-        assert_eq!(log(&trace, 2), ["installer", "app"]);
++        assert!(!install::run_with(&real, &mut std::io::empty(), None, root));
++        assert!(!trace.exists(), "unsigned helper arguments must not launch anything");
+     }
+ 
+     #[test]
+@@ -819,18 +819,9 @@ mod unix {
+         let log = dir.0.join("log");
+         // The stand-in for the app notes its arguments, then reads its input to the end, as the helper does, and notes that too.
+         let exe = script(&dir.0, "bimcraft", &format!("echo \"$@\" >> {0}\ncat > /dev/null\necho eof >> {0}", log.display()));
+-        install::start_with(&exe, &msi, &sha(b"installer bytes"), Some(Path::new("/w/house.bimcraft"))).unwrap();
+-        let copy = folder.join(format!("bimcraft-update{}", std::env::consts::EXE_SUFFIX));
+-        assert!(copy.exists(), "a copy that no installer replaces, beside the installer");
+-        let args = log_args(&log);
+-        let finish = install::parse(args).unwrap();
+-        assert_eq!(finish, Finish { msi, sha256: sha(b"installer bytes"), exe, project: Some("/w/house.bimcraft".into()) });
+-        std::thread::sleep(Duration::from_millis(200));
+-        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1, "the copy's input stays open as long as this process lives");
+-    }
+-
+-    fn log_args(path: &Path) -> Vec<OsString> {
+-        log(path, 1).iter().flat_map(|l| l.split(' ').map(OsString::from).collect::<Vec<_>>()).collect()
++        assert!(install::start_with(&exe, &msi, &sha(b"installer bytes"), Some(Path::new("/w/house.bimcraft"))).is_err());
++        assert!(!folder.join(format!("bimcraft-update{}", std::env::consts::EXE_SUFFIX)).exists());
++        assert!(!log.exists());
+     }
+ 
+     #[test]
+diff --git a/crates/update/src/updater.rs b/crates/update/src/updater.rs
+index d0dfd09..7f27b07 100644
+--- a/crates/update/src/updater.rs
++++ b/crates/update/src/updater.rs
+@@ -136,7 +136,12 @@ impl Updater {
+             return None;
+         }
+         let current = Version::parse(env!("CARGO_PKG_VERSION")).ok()?;
+-        Some(Updater::new(Arc::new(Ureq::new()), current, prefs_path, wake))
++        let mut updater = Updater::new(Arc::new(Ureq::new()), current, prefs_path, wake);
++        if !crate::publisher_trust_configured() {
++            updater.target = None;
++            updater.install = None;
++        }
++        Some(updater)
+     }
+ 
+     /// For tests: does its work on the thread that asks, so a result is there to poll at once.
+diff --git a/docs/areas/lumion.md b/docs/areas/lumion.md
+new file mode 100644
+index 0000000..7e865b4
+--- /dev/null
++++ b/docs/areas/lumion.md
+@@ -0,0 +1,32 @@
++# Experimental Lumion LiveSync
++
++File > Start Lumion LiveSync publishes the model's tessellated solids and RGB surface colors to a separate local adapter.
++Open Lumion first. Stop through File > Stop Lumion LiveSync before closing Lumion. No network listener or automatic startup is added.
++Model snapshots follow edits, undo, redo and project replacement; pending snapshots are coalesced. Export is limited to 150,000 triangles
++and 64 MiB per JSON frame. Coordinates convert from BIMCraft millimetres/Z up to metres/Y up. Root model meshes are keyed by persistent
++element GUID and surface color; linked display geometry currently uses its synthetic display owner id. Material names are keyed by color.
++Color changes replace that color group, so Lumion material overrides are not guaranteed to survive recoloring.
++
++This adapter does not transfer image/procedural textures, UVs, transparency, BIM properties, cameras, lights, annotations or point clouds.
++It publishes the full tessellated model, not a selected view's visibility settings. The first version rebuilds mesh data on edits.
++Status says published rather than claiming reception. Lumion remains the receiver; it is never launched or terminated by BIMCraft.
++
++## Private local engine files
++
++The public repository contains only original adapter source, not Act-3D binaries. Compile Bridge.cs with the 64-bit .NET Framework C# compiler,
++referencing System.Core.dll, System.Numerics.dll and System.Web.Extensions.dll. Tests.cs can be compiled with Bridge.cs using /main:BridgeTests.
++Place the resulting BIMCraft-Lumion-Bridge.exe in a lumion subfolder next to bimcraft.exe, together with LiveSyncEngineNET.dll and
++LiveSyncCoreNET.dll from the user's LiveSync 26.1.8 installer. The adapter checks pinned SHA-256 hashes before loading either DLL.
++It refuses other versions. Do not redistribute vendor DLLs without establishing the applicable rights.
++
++The adapter has no general file or command endpoint: it accepts only length-prefixed geometry snapshots on standard input.
++It validates frame lengths, schema version, counts, key lengths, duplicate keys, material references and finite numeric ranges.
++It removes stale geometry, keeps writer identities on edits, and deletes its own LiveSync document at EOF. A stalled adapter is terminated
++after a two-second shutdown grace period. Native engine crashes are isolated from BIMCraft.
++
++## Verification status
++
++A user-run connection test on Lumion 2026.1.5 displayed a white box on 23 October 2026. Geometry reception is confirmed by that observation.
++The original probe did not separately publish its material. The adapter now publishes material elements, but material color, continuous model
++updates, deletion, scene replacement and large-model performance still require end-to-end verification in Lumion.
++Local compilation does not establish runtime compatibility or complete security certification.
+diff --git a/docs/security-local-review.md b/docs/security-local-review.md
+new file mode 100644
+index 0000000..ca7e8cd
+--- /dev/null
++++ b/docs/security-local-review.md
+@@ -0,0 +1,33 @@
++# BIMCraft security changes — local review draft
++
++Base: IPedrax/BIMCraft commit 818967487278dca6ae68e8e1861fc4250e41727a.
++Branch: security/harden-untrusted-input. No remote push or upstream modification.
++
++## Implemented
++
++- Desktop updater is notification-only while publisher_trust_configured() is false. No publisher key is invented or fetched from the potentially compromised release source. A release hash and SHA256SUMS from the same source are integrity checks, not independent publisher authentication. This is containment, not a completed signature-verification system.
++- Windows --finish-update entry and helper-copy launch fail closed without publisher trust. The entry also requires configured Windows paths. Removed the retry that released the MSI deny-write/delete handle; installer launch failure and unsuccessful MSI exit codes now report failure. Parent-pipe read errors abort processing. Low-level installer routines remain for tests; they are not an authenticated updater API.
++- MCP stdio frames capped at 1 MiB before unbounded line allocation, including newline; oversized streams close with InvalidData. Direct handle_line calls enforce the same cap before parsing. Batches capped at 64 requests and scripts at 256 physical lines.
++- MCP denies open/save and allows only explicitly reviewed in-memory command IDs; engine aliases resolve before authorization. Scripts are preflighted in full before executing any command, including parsing schedule parameters to deny CSV path exports through every route. Unknown future commands fail closed. File import/export tools are removed from discovery and denied on direct calls. This deliberately removes MCP file operations rather than implementing a race-prone path-prefix sandbox. Local CLI and desktop retain file access.
++- Native project and IFC open use a regular-file handle and a bounded streaming reader, so growth after metadata inspection cannot cause an unbounded read. Direct Model::read and IFC parser inputs have the same 256 MiB ceiling. Other loaders are not comprehensively hardened by this change.
++- Cargo.lock updates rustls-webpki 0.103.15 -> 0.103.16 (RUSTSEC-2026-0382) and webpki-roots 1.0.9 -> 1.0.10 (RUSTSEC-2026-0381). Registry checksums and unchanged non-development dependency requirements were obtained from crates.io. Cargo did not regenerate or validate the lockfile; build compatibility remains unverified.
++- Added MCP denial/limit regression tests, bounded-reader regression test, publisher-trust default test, updated Windows helper expectations, and cargo-fuzz scaffolding for project JSON, IFC, CFB containers and gzip inflation. Existing CI now includes cargo audit.
++
++## Validation actually completed
++
++- Repository cloned and targeted review of updater, MCP, core project/IFC entry points, Revit limit/decompression design, lockfile and CI performed. This is not a complete review of all repository code.
++- git diff --check passes for the local patch.
++- Queried OSV querybatch for all 451 registry package/version entries. Initial scan returned two TLS security advisories and four unmaintained-package advisories. A second live scan after the lock changes returned only the four maintenance advisories listed below. Results are saved beside this report. OSV is supplementary and does not substitute for cargo audit or reachability analysis.
++- cargo fmt --check, cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings, and cargo audit were all attempted. Every command failed to launch with Access is denied (os error 5). Direct toolchain invocation failed too. No Rust compilation, tests, lint, formatting check, cargo audit or fuzz run succeeded. Changes must be validated on a functioning Rust host before use.
++
++## Remaining and unverifiable
++
++1. Implement independent publisher signing and verification: provision a maintainer-controlled public key through a trusted channel; sign a canonical version/target/size/digest manifest; verify before downloading/installing; test wrong keys, corruption, substitution, rollback and key rotation. Only then consider enabling installation. Windows helper launch still needs an authenticated, race-resistant handoff and OS-derived trusted paths; environment paths alone are not sufficient. It remains disabled.
++2. Maintenance advisories remain: ttf-parser 0.25.1 (RUSTSEC-2026-0192), zbus_names 4.3.4 (RUSTSEC-2026-0371), zvariant 5.15.0 (RUSTSEC-2026-0370), zvariant_derive 5.15.0 (RUSTSEC-2026-0372). No fixed versions are listed in those advisories. Trace and migrate their parent dependencies, then test on all platforms. They are not suppressed in CI.
++3. Run the full CI matrix and fuzz targets. Verify lockfile resolution, manually format any failures, exercise actual Windows MSI locking and cancellation, and test actual packaged desktop updates remaining notification-only.
++4. Input byte limits do not bound total model size, render output, CPU cost, recursion in all importers, cumulative decompression, or process lifetime. Full import fuzzing, corpus regression testing and OS resource isolation remain necessary. Existing Revit per-file/per-stream/inflate limits were inspected; no global memory-safety or denial-of-service certification is claimed.
++5. The referenced prior audit could not be recovered: read_thread returned message-reference placeholders, not the audit body. Findings were reconstructed from the stated priorities and current source, so an exact reconciliation with every earlier finding is impossible.
++
++A dedicated patched-windows.yml workflow now runs formatting, linting, full tests, release compilation and version smoke checks before uploading portable Windows executables. It has not run yet; GitHub sign-in/fork creation is pending.
++
++This patch is an uncompiled local review draft, not a complete security certification or a claim that all security issues are fixed.
+diff --git a/fuzz/Cargo.toml b/fuzz/Cargo.toml
+new file mode 100644
+index 0000000..4d0111f
+--- /dev/null
++++ b/fuzz/Cargo.toml
+@@ -0,0 +1,23 @@
++[package]
++name = "bimcraft-security-fuzz"
++version = "0.0.0"
++publish = false
++edition = "2024"
++
++[package.metadata]
++cargo-fuzz = true
++
++[dependencies]
++libfuzzer-sys = "0.4"
++bimcraft-core = { path = "../crates/core" }
++bimcraft-rvt = { path = "../crates/rvt" }
++
++[workspace]
++members = ["."]
++
++[[bin]]
++name = "hostile_files"
++path = "fuzz_targets/hostile_files.rs"
++test = false
++doc = false
++bench = false
+diff --git a/fuzz/README.md b/fuzz/README.md
+new file mode 100644
+index 0000000..f94919a
+--- /dev/null
++++ b/fuzz/README.md
+@@ -0,0 +1,9 @@
++# Hostile file fuzzing
++
++Install cargo-fuzz and a nightly Rust toolchain, then run from this folder:
++
++```sh
++cargo +nightly fuzz run hostile_files -- -max_len=1048576 -timeout=10 -rss_limit_mb=2048
++```
++
++Seed corpus with synthetic BIMCraft JSON, IFC STEP and CFB headers. Never commit proprietary Revit files. This target covers project/IFC decoding and Revit container construction and gzip member inflation, not full Revit import or every parser path. Run in an isolated worker with CPU/memory/time limits; size limits alone do not bound algorithmic complexity. Preserve minimized crashes as regression fixtures.
+diff --git a/fuzz/fuzz_targets/hostile_files.rs b/fuzz/fuzz_targets/hostile_files.rs
+new file mode 100644
+index 0000000..443eda4
+--- /dev/null
++++ b/fuzz/fuzz_targets/hostile_files.rs
+@@ -0,0 +1,18 @@
++#![no_main]
++use libfuzzer_sys::fuzz_target;
++
++fuzz_target!(|data: &[u8]| {
++    if data.len() > 1 << 20 { return; }
++    // Do not catch panics here: a panic is a fuzz finding.
++    if let Ok(text) = std::str::from_utf8(data) {
++        let _ = bimcraft_core::model::Model::read(text);
++    }
++    let _ = bimcraft_core::import::ifc(data, "fuzz");
++    let _ = bimcraft_rvt::gzip::inflate_first(data, 1 << 20);
++    let _ = bimcraft_rvt::gzip::inflate_members(data, 1 << 20);
++    let limits = bimcraft_rvt::Limits {
++        max_file: 1 << 20, max_streams: 32,
++        max_stream: 1 << 20, max_inflated: 1 << 20,
++    };
++    let _ = bimcraft_rvt::Revit::from_bytes(data.to_vec(), limits);
++});
+diff --git a/tools/lumion-bridge/Bridge.cs b/tools/lumion-bridge/Bridge.cs
+new file mode 100644
+index 0000000..96b22cb
+--- /dev/null
++++ b/tools/lumion-bridge/Bridge.cs
+@@ -0,0 +1,228 @@
++// Optional local adapter. No vendor binaries or Revit host code are included in this repository.
++using System;
++using System.Collections;
++using System.Collections.Generic;
++using System.IO;
++using System.Linq;
++using System.Reflection;
++using System.Security.Cryptography;
++using System.Web.Script.Serialization;
++
++sealed class Frame {
++    public int version { get; set; }
++    public Mesh[] meshes { get; set; }
++    public Material[] materials { get; set; }
++}
++sealed class Mesh {
++    public string key { get; set; }
++    public string material { get; set; }
++    public float[] positions { get; set; }
++    public float[] normals { get; set; }
++}
++sealed class Material {
++    public string key { get; set; }
++    public float[] color { get; set; }
++}
++sealed class Entry {
++    public object Writer;
++    public object Asset;
++    public ulong Node;
++}
++static class Bridge {
++    const int MaxFrame = 64 * 1024 * 1024;
++    const int MaxTriangles = 150000;
++    static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = MaxFrame, RecursionLimit = 32 };
++    static Assembly Engine;
++    static object Document;
++    static readonly Dictionary<string, Entry> Meshes = new Dictionary<string, Entry>();
++    static readonly Dictionary<string, Entry> Materials = new Dictionary<string, Entry>();
++    static ulong NextNode = 1;
++    static bool Initialized;
++
++    static int Main(string[] args) {
++        try {
++            if (args.Length != 0) throw new InvalidDataException("This bridge only accepts framed snapshots on standard input.");
++            LoadEngine();
++            if (Call(T("ActApp"), "GetNewestActiveLumion") == null)
++                throw new InvalidOperationException("Open Lumion to a scene before starting LiveSync.");
++            Document = Call(T("DocumentCreator"), "CreateDocument", "BIMCraft", E("DocumentType", "LiveSync"), E("ActAppType", "Lumion"));
++            if (Document == null) throw new InvalidOperationException("Could not create the LiveSync document.");
++            Call(Document, "SetMetadata", "{\"application\":\"BIMCraft\",\"units\":\"metres\",\"up\":\"Y\"}");
++            Report("ready", "LiveSync document created; reception is not yet confirmed.");
++            using (Stream input = Console.OpenStandardInput()) {
++                byte[] data;
++                while ((data = ReadFrame(input)) != null) {
++                    Frame frame = Json.Deserialize<Frame>(new System.Text.UTF8Encoding(false, true).GetString(data));
++                    Validate(frame);
++                    Publish(frame);
++                }
++            }
++            return 0;
++        } catch (Exception ex) {
++            while (ex is TargetInvocationException && ex.InnerException != null) ex = ex.InnerException;
++            Report("error", ex.Message);
++            return 1;
++        } finally {
++            if (Document != null) {
++                try { Call(T("DocumentCreator"), "DeleteDocument", Get(Document, "DocumentId")); } catch { }
++                Dispose(Document);
++            }
++            foreach (Entry entry in Materials.Values) Dispose(entry.Asset);
++        }
++    }
++
++    static void LoadEngine() {
++        string folder = AppDomain.CurrentDomain.BaseDirectory;
++        Check(Path.Combine(folder, "LiveSyncEngineNET.dll"), "0B39DDAEF0AF9F4AF8BE2F7A0CB6AB8190D3E5559FFDCECF4F894374A1F63A48");
++        Check(Path.Combine(folder, "LiveSyncCoreNET.dll"), "7020CF8A6D93FC935BB06324989C52F891534621D78E0C827D658E71ECB48991");
++        Assembly.LoadFrom(Path.Combine(folder, "LiveSyncCoreNET.dll"));
++        Engine = Assembly.LoadFrom(Path.Combine(folder, "LiveSyncEngineNET.dll"));
++    }
++    static void Check(string file, string expected) {
++        using (var sha = SHA256.Create())
++        using (var stream = File.OpenRead(file)) {
++            if (BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "") != expected)
++                throw new InvalidDataException("Unsupported or modified LiveSync DLL: " + Path.GetFileName(file));
++        }
++    }
++    internal static byte[] ReadFrame(Stream stream) {
++        byte[] header = new byte[4];
++        int first = stream.ReadByte();
++        if (first < 0) return null;
++        header[0] = (byte)first;
++        ReadExact(stream, header, 1, 3);
++        uint size = (uint)header[0] | ((uint)header[1] << 8) | ((uint)header[2] << 16) | ((uint)header[3] << 24);
++        if (size == 0 || size > MaxFrame) throw new InvalidDataException("Invalid LiveSync frame length.");
++        byte[] data = new byte[(int)size];
++        ReadExact(stream, data, 0, data.Length);
++        return data;
++    }
++    static void ReadExact(Stream stream, byte[] data, int offset, int count) {
++        while (count > 0) {
++            int got = stream.Read(data, offset, count);
++            if (got == 0) throw new EndOfStreamException("Truncated LiveSync frame.");
++            offset += got; count -= got;
++        }
++    }
++    internal static void Validate(Frame frame) {
++        if (frame == null || frame.version != 1 || frame.meshes == null || frame.materials == null ||
++            frame.meshes.Length > 50000 || frame.materials.Length > 50000)
++            throw new InvalidDataException("Unsupported LiveSync snapshot.");
++        var keys = new HashSet<string>();
++        foreach (Material mat in frame.materials) {
++            if (mat == null || !Key(mat.key) || !keys.Add(mat.key) || mat.color == null || mat.color.Length != 3 ||
++                mat.color.Any(x => !Finite(x) || x < 0 || x > 1))
++                throw new InvalidDataException("Invalid LiveSync material.");
++        }
++        var meshKeys = new HashSet<string>();
++        long triangles = 0;
++        foreach (Mesh mesh in frame.meshes) {
++            if (mesh == null || !Key(mesh.key) || !meshKeys.Add(mesh.key) || !Key(mesh.material) || !keys.Contains(mesh.material) ||
++                mesh.positions == null || mesh.normals == null || mesh.positions.Length == 0 || mesh.positions.Length % 9 != 0 ||
++                mesh.positions.Length != mesh.normals.Length ||
++                mesh.positions.Any(x => !Finite(x) || Math.Abs(x) > 1000000) ||
++                mesh.normals.Any(x => !Finite(x) || Math.Abs(x) > 1.001))
++                throw new InvalidDataException("Invalid LiveSync mesh.");
++            triangles += mesh.positions.Length / 9;
++            if (triangles > MaxTriangles) throw new InvalidDataException("LiveSync triangle limit exceeded.");
++        }
++    }
++    static bool Finite(float x) { return !float.IsNaN(x) && !float.IsInfinity(x); }
++    static bool Key(string x) { return x != null && x.Length > 0 && x.Length <= 512 && !x.Any(char.IsControl); }
++
++    static void Publish(Frame frame) {
++        var materialKeys = new HashSet<string>();
++        foreach (Material mat in frame.materials) {
++            materialKeys.Add(mat.key);
++            Entry entry;
++            if (!Materials.TryGetValue(mat.key, out entry)) {
++                entry = new Entry { Writer = Call(Document, "CreateMaterialElement"), Asset = Call(T("MaterialAsset"), "Create") };
++                Materials.Add(mat.key, entry);
++            }
++            Set(entry.Asset, "Name", mat.key);
++            Call(entry.Asset, "SetPropertyColor", Static("MaterialAsset", "AlbedoColor"), mat.color[0], mat.color[1], mat.color[2], 1f);
++            Call(entry.Writer, "SetName", mat.key);
++            Call(entry.Writer, "SetMaterial", entry.Asset);
++        }
++        var seen = new HashSet<string>();
++        IList nodes = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(T("HierarchyNode")));
++        foreach (Mesh mesh in frame.meshes) {
++            seen.Add(mesh.key);
++            Entry entry;
++            if (!Meshes.TryGetValue(mesh.key, out entry)) {
++                entry = new Entry { Writer = Call(Document, "CreateMeshElement"), Node = NextNode++ };
++                Meshes.Add(mesh.key, entry);
++            }
++            int vertices = mesh.positions.Length / 3;
++            ulong semantics = Convert.ToUInt64(E("VertexSemantic", "Positions")) | Convert.ToUInt64(E("VertexSemantic", "Normals"));
++            object asset = Call(T("MeshAsset"), "Create", (ulong)vertices, (ulong)vertices,
++                Enum.ToObject(T("VertexSemantic"), semantics), E("PolygonSize", "Triangle"));
++            try {
++                Call(asset, "InsertVertices", E("VertexSemantic", "Positions"), mesh.positions, 0UL, false);
++                Call(asset, "InsertVertices", E("VertexSemantic", "Normals"), mesh.normals, 0UL, false);
++                int[] indices = Enumerable.Range(0, vertices).ToArray();
++                Call(asset, "InsertIndices", indices, 0UL);
++                Call(asset, "SetMaterial", Materials[mesh.material].Asset);
++                Call(entry.Writer, "SetName", mesh.key);
++                Call(entry.Writer, "SetMesh", asset);
++                Call(entry.Writer, "SetInstances", new List<ulong> { entry.Node });
++            } finally { Dispose(asset); }
++            object node = Activator.CreateInstance(T("HierarchyNode"));
++            Set(node, "Id", entry.Node);
++            Set(node, "ParentId", Static("HierarchyNode", "InvalidNodeId"));
++            Set(node, "Type", E("HierarchyNodeType", "Mesh"));
++            Set(node, "Name", mesh.key);
++            Set(node, "Visibility", true);
++            Set(node, "LocalTransform", System.Numerics.Matrix4x4.Identity);
++            Set(node, "GeometryTransform", System.Numerics.Matrix4x4.Identity);
++            Set(node, "GlobalTransform", System.Numerics.Matrix4x4.Identity);
++            Set(node, "DataAsGuid", Get(entry.Writer, "ElementId"));
++            Call(node, "ComputeHash");
++            nodes.Add(node);
++        }
++        foreach (string key in Meshes.Keys.Where(k => !seen.Contains(k)).ToArray()) {
++            Call(Document, "DeleteElement", Get(Meshes[key].Writer, "ElementId"));
++            Dispose(Meshes[key].Writer); Meshes.Remove(key);
++        }
++        foreach (string key in Materials.Keys.Where(k => !materialKeys.Contains(k)).ToArray()) {
++            Call(Document, "DeleteElement", Get(Materials[key].Writer, "ElementId"));
++            Dispose(Materials[key].Writer); Dispose(Materials[key].Asset); Materials.Remove(key);
++        }
++        try {
++            Call(Call(Document, "GetSceneHierarchyElement"), "SetNodes", nodes);
++            if (!Initialized) { Call(Document, "InitComplete"); Initialized = true; }
++            Call(Document, "Push");
++            int notified = (int)Call(T("ActApp"), "PostAppNotify", E("ActAppType", "Lumion"), E("Notification", "OneShot"), 0UL);
++            Report("published", frame.meshes.Length + " meshes published; Lumion notification recipients: " + notified + ".");
++        } finally { foreach (object node in nodes) Dispose(node); }
++    }
++
++    static Type T(string name) {
++        Type type = Engine.GetType("LiveSyncNET." + name, true);
++        return type;
++    }
++    static object E(string type, string name) { return Enum.Parse(T(type), name); }
++    static object Static(string type, string property) { return T(type).GetProperty(property).GetValue(null, null); }
++    static object Get(object target, string property) { return target.GetType().GetProperty(property).GetValue(target, null); }
++    static void Set(object target, string property, object value) { target.GetType().GetProperty(property).SetValue(target, value, null); }
++    static object Call(object target, string name, params object[] args) {
++        bool isStatic = target is Type;
++        Type type = isStatic ? (Type)target : target.GetType();
++        var candidates = type.GetMethods(BindingFlags.Public | (isStatic ? BindingFlags.Static : BindingFlags.Instance));
++        foreach (MethodInfo method in candidates.Where(m => m.Name == name)) {
++            ParameterInfo[] pars = method.GetParameters();
++            if (pars.Length != args.Length) continue;
++            bool matches = true;
++            for (int i = 0; i < args.Length; i++)
++                if (args[i] != null && !pars[i].ParameterType.IsInstanceOfType(args[i])) { matches = false; break; }
++            if (matches) return method.Invoke(isStatic ? null : target, args);
++        }
++        throw new MissingMethodException(type.FullName, name);
++    }
++    static void Dispose(object value) { var item = value as IDisposable; if (item != null) item.Dispose(); }
++    static void Report(string status, string message) {
++        if (message.Length > 3000) message = message.Substring(0, 3000);
++        Console.Out.WriteLine(Json.Serialize(new { status = status, message = message }));
++        Console.Out.Flush();
++    }
++}
+diff --git a/tools/lumion-bridge/Tests.cs b/tools/lumion-bridge/Tests.cs
+new file mode 100644
+index 0000000..d0af26d
+--- /dev/null
++++ b/tools/lumion-bridge/Tests.cs
+@@ -0,0 +1,39 @@
++using System;
++using System.IO;
++
++static class BridgeTests {
++    static int Main() {
++        RejectFrame(new byte[] { 0, 0, 0, 0 });
++        RejectFrame(new byte[] { 1, 0, 0, 4 }); // 64 MiB + 1, rejected before allocation.
++        RejectFrame(new byte[] { 3, 0 });
++        RejectFrame(new byte[] { 3, 0, 0, 0, 123 });
++        if (Bridge.ReadFrame(new MemoryStream(new byte[0])) != null) throw new Exception("EOF must stop.");
++        var valid = new byte[] { 2, 0, 0, 0, 123, 125 };
++        if (Bridge.ReadFrame(new MemoryStream(valid)).Length != 2) throw new Exception("Frame read failed.");
++        Bridge.Validate(new Frame {version=1, meshes=new Mesh[0], materials=new Material[0]});
++        Reject(new Frame {version=2, meshes=new Mesh[0], materials=new Material[0]});
++        var mat = new Material {key="a",color=new float[]{1,0,0}};
++        var mesh = new Mesh {key="one",material="a",positions=new float[9],normals=new float[9]};
++        var frame = new Frame {version=1,meshes=new Mesh[]{mesh},materials=new Material[]{mat}};
++        Bridge.Validate(frame);
++        mesh.positions[0] = float.NaN; Reject(frame); mesh.positions[0] = 0;
++        mesh.normals[0] = float.PositiveInfinity; Reject(frame); mesh.normals[0] = 0;
++        mesh.material = "missing"; Reject(frame); mesh.material = "a";
++        frame.meshes = new Mesh[]{mesh,mesh}; Reject(frame);
++        frame.meshes = new Mesh[]{mesh}; frame.materials = new Material[]{mat,mat}; Reject(frame);
++        frame.materials = new Material[]{mat}; mesh.key = new string('a',513); Reject(frame);
++        Console.WriteLine("LiveSync adapter validation tests passed.");
++        return 0;
++    }
++    static void RejectFrame(byte[] bytes) {
++        try { Bridge.ReadFrame(new MemoryStream(bytes)); }
++        catch (InvalidDataException) { return; }
++        catch (EndOfStreamException) { return; }
++        throw new Exception("Invalid frame accepted.");
++    }
++    static void Reject(Frame frame) {
++        try { Bridge.Validate(frame); }
++        catch (InvalidDataException) { return; }
++        throw new Exception("Invalid snapshot accepted.");
++    }
++}
