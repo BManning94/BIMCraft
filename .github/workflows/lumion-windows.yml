@@ -14,6 +14,7 @@ jobs:
       - name: Apply reviewed source
         shell: pwsh
         run: |
+          git -c core.autocrlf=false checkout-index -f -- bimcraft-lumion.patch
           $hash = (Get-FileHash bimcraft-lumion.patch -Algorithm SHA256).Hash
           if ($hash -ne '3E4B07EE4F3F4E7E440F6FD83AD053507B40616DC1477D39E3515BBE69A0EDDE') { throw 'Patch checksum mismatch' }
           git apply --check bimcraft-lumion.patch
